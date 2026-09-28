@@ -44,6 +44,7 @@ from control_plane.workflows.preview_resource_destroy import (
     destroy_dokploy_preview_resource,
 )
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
+from control_plane import runtime_platform_credentials
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy.api import JsonObject, JsonValue
@@ -560,6 +561,11 @@ def _configure_application(
     application_id = str(application.get("applicationId") or "").strip()
     if not application_id:
         raise click.ClickException("Preview application payload is missing applicationId.")
+    dokploy_api.refuse_app_runtime_env_write(
+        env_text=env_text,
+        current_env_text=str(application.get("env") or ""),
+        target=f"preview application {application_id}",
+    )
     dokploy_api.dokploy_request(
         host=host,
         token=token,
@@ -964,6 +970,17 @@ def _render_preview_env_text(
         value = template_env.get(key, "")
         if value:
             updates[key] = value
+    preview_target = f"{profile.product} preview"
+    runtime_platform_credentials.refuse_platform_credentials(
+        updates,
+        target=preview_target,
+        source="the template application env (preview copied_env_keys)",
+    )
+    runtime_platform_credentials.refuse_platform_credentials(
+        profile.preview.override_env,
+        target=preview_target,
+        source="the product profile preview override_env",
+    )
     updates.update(profile.preview.override_env)
     for key in profile.preview.preview_url_env_keys:
         updates[key] = preview_url

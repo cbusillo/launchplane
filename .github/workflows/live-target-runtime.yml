@@ -133,7 +133,6 @@ jobs:
               | "- Context: \($result.context)/\($result.instance)",
                 "- Target: \($result.tracked_target.target_name) (\($result.tracked_target.target_type))",
                 "- Changed keys: \(($result.runtime_environment.changed_keys // []) | join(", "))",
-                "- Runtime key-safety: \($result.runtime_key_safety.status)",
                 "- Env updated: \($result.apply.env_updated)",
                 "- Deploy triggered: \($result.deploy.triggered)"
             ' "$RESPONSE_FILE"

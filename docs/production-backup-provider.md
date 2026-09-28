@@ -58,9 +58,9 @@ the lock does not resolve different IP/name aliases into physical identity.
 
 ## Host and credential prerequisites
 
-The exact production instance needs managed runtime secret bindings for
-`PRODUCTION_BACKUP_SSH_PRIVATE_KEY` and `PRODUCTION_BACKUP_SSH_KNOWN_HOSTS` under
-the runtime key-safety policy. The worker ignores workstation keys and ambient
+The exact production instance needs `PRODUCTION_BACKUP_SSH_PRIVATE_KEY` and
+`PRODUCTION_BACKUP_SSH_KNOWN_HOSTS` stored in the `launchplane_worker` store with
+`context_instance` scope for that lane. The worker ignores workstation keys and ambient
 SSH configuration. The Linux worker keeps key material in anonymous memory-backed
 files with mode 0600, exposes them to SSH through its own procfs descriptors, and
 closes them on completion. It never writes the material to disk. A runtime

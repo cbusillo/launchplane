@@ -22,7 +22,6 @@ from control_plane.contracts.promotion_record import (
     RollbackExecutionEvidence,
 )
 from control_plane.workflows.ship import utc_now_timestamp
-from control_plane.workflows.worker_runtime_key_safety import enforce_worker_runtime_key_safety
 from control_plane.workflows.verireel_rollout import (
     DEFAULT_ROLLOUT_INTERVAL_SECONDS,
     DEFAULT_ROLLOUT_TIMEOUT_SECONDS,
@@ -116,6 +115,9 @@ class VeriReelProdRollbackResult(BaseModel):
 
 
 WORKER_COMMAND_ENV_VAR = "LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND"
+WORKER_SSH_KEYS = frozenset(
+    {"VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY", "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS"}
+)
 WORKER_RUNTIME_ENV_KEYS = (
     WORKER_COMMAND_ENV_VAR,
     "VERIREEL_PROD_PROXMOX_HOST",
@@ -322,7 +324,11 @@ def _resolve_worker_runtime_environment(
         )
     except click.ClickException:
         resolved_values = {}
-    # Keys still stored in the lane's runtime environment are read until they move (#2538).
+    # Worker settings come from the lane's runtime environment; its SSH keys only from the
+    # worker store, never an inherited runtime secret.
+    resolved_values = {
+        key: value for key, value in resolved_values.items() if key not in WORKER_SSH_KEYS
+    }
     resolved_values.update(
         control_plane_secrets.resolve_lane_worker_secret_values(
             context_name=request.context,
@@ -341,12 +347,6 @@ def _worker_environment(
     control_plane_root: Path,
     request: VeriReelProdRollbackWorkerRequest,
 ) -> dict[str, str]:
-    enforce_worker_runtime_key_safety(
-        context_name=request.context,
-        instance_name=request.instance,
-        allowed_worker_keys=WORKER_RUNTIME_ENV_KEYS,
-        operation_name="VeriReel prod rollback worker",
-    )
     environment = {
         key: value for key, value in os.environ.items() if key not in WORKER_RUNTIME_ENV_KEYS
     }

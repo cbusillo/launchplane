@@ -101,10 +101,7 @@ class ProductionPromotionBackupTests(unittest.TestCase):
         )
         with (
             patch(
-                "control_plane.workflows.production_backup_gate.enforce_worker_runtime_key_safety"
-            ),
-            patch(
-                "control_plane.workflows.production_backup_gate.runtime_environments.resolve_runtime_environment_values",
+                "control_plane.workflows.production_backup_gate.control_plane_secrets.resolve_lane_worker_secret_values",
                 return_value={
                     "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "synthetic",
                     "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": "synthetic",

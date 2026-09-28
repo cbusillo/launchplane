@@ -456,6 +456,28 @@ def resolve_secret_values_for_integration_from_store(
     instance_name: str = "",
     scopes: frozenset[SecretScope] | None = None,
 ) -> dict[str, str]:
+    return {
+        binding_key: value
+        for binding_key, (value, _scope) in resolve_scoped_secret_values_for_integration_from_store(
+            record_store=record_store,
+            integration=integration,
+            context_name=context_name,
+            instance_name=instance_name,
+            scopes=scopes,
+        ).items()
+    }
+
+
+def resolve_scoped_secret_values_for_integration_from_store(
+    *,
+    record_store: SecretReadStore,
+    integration: str,
+    context_name: str = "",
+    instance_name: str = "",
+    scopes: frozenset[SecretScope] | None = None,
+) -> dict[str, tuple[str, SecretScope]]:
+    """Return each effective binding value with the scope of the record that supplied it."""
+
     candidate_records = [
         record
         for record in record_store.list_secret_records(integration=integration)
@@ -466,7 +488,7 @@ def resolve_secret_values_for_integration_from_store(
     candidate_records.sort(
         key=lambda record: (_scope_rank(record.scope), record.updated_at, record.secret_id)
     )
-    resolved_values: dict[str, str] = {}
+    resolved_values: dict[str, tuple[str, SecretScope]] = {}
     for record in candidate_records:
         binding = _binding_for_secret(
             record_store,
@@ -478,8 +500,9 @@ def resolve_secret_values_for_integration_from_store(
         if binding is None:
             continue
         version = record_store.read_secret_version(record.current_version_id)
-        resolved_values[binding.binding_key] = _decrypt_secret_value(
-            version.ciphertext, version.key_id
+        resolved_values[binding.binding_key] = (
+            _decrypt_secret_value(version.ciphertext, version.key_id),
+            record.scope,
         )
     return resolved_values
 

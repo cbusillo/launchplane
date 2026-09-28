@@ -7,6 +7,7 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane import runtime_platform_credentials
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_key_safety_policy import (
@@ -134,6 +135,92 @@ def validate_provider_key_retirement(*, retired_keys: set[str], application_keys
         )
 
 
+def provider_env_platform_credential_report(
+    *, live_env_map: dict[str, str], retired_keys: set[str] | frozenset[str]
+) -> dict[str, object]:
+    """Report platform credentials already in a lane's provider env; names only.
+
+    A sync preserves provider-only keys, so a credential written before the
+    refusal existed stays until an operator retires it. This report finds those
+    keys; removal stays with product-config retired_provider_keys.
+    """
+
+    findings = runtime_platform_credentials.find_platform_credentials(live_env_map)
+    keys = [finding.key for finding in findings]
+    return {
+        "status": "found" if keys else "clear",
+        "keys": keys,
+        "retiring_keys": [key for key in keys if key in retired_keys],
+        "unretired_keys": [key for key in keys if key not in retired_keys],
+    }
+
+
+def report_lane_provider_env_platform_credentials(
+    *,
+    control_plane_root: Path,
+    database_url: str | None = None,
+    context_name: str = "",
+    instance_name: str = "",
+) -> dict[str, object]:
+    """Read-only: list platform credentials in each tracked lane's provider env.
+
+    Reads tracked targets and provider env; writes nothing. Output holds key
+    names and lane coordinates only, never values.
+    """
+
+    source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
+        control_plane_root=control_plane_root,
+        database_url=database_url,
+    )
+    host, token = dokploy_source.read_dokploy_config(
+        control_plane_root=control_plane_root,
+        database_url=database_url,
+    )
+    lanes: list[dict[str, object]] = []
+    for target in source_of_truth.targets:
+        if context_name and target.context != context_name:
+            continue
+        if instance_name and target.instance != instance_name:
+            continue
+        lane: dict[str, object] = {
+            "context": target.context,
+            "instance": target.instance,
+            "target_type": target.target_type,
+            "target_name": target.target_name,
+        }
+        try:
+            target_payload = dokploy_api.fetch_dokploy_target_payload(
+                host=host,
+                token=token,
+                target_type=target.target_type,
+                target_id=target.target_id,
+            )
+            retired_keys = control_plane_runtime_environments.retired_provider_keys_for_lane(
+                context_name=target.context,
+                instance_name=target.instance,
+                database_url=database_url,
+            )
+        except click.ClickException as error:
+            lane["status"] = "unavailable"
+            lane["error"] = str(error)
+            lanes.append(lane)
+            continue
+        lane.update(
+            provider_env_platform_credential_report(
+                live_env_map=dokploy_api.parse_dokploy_env_text(
+                    str(target_payload.get("env") or "")
+                ),
+                retired_keys=retired_keys,
+            )
+        )
+        lanes.append(lane)
+    return {
+        "status": "ok",
+        "flagged_lane_count": sum(1 for lane in lanes if lane.get("status") == "found"),
+        "lanes": lanes,
+    }
+
+
 def runtime_env_live_target_delta(
     *,
     desired_env_map: dict[str, str],
@@ -242,10 +329,6 @@ def evaluate_runtime_key_safety_for_live_target_sync(
     return summary
 
 
-def skipped_runtime_key_safety_summary() -> dict[str, object]:
-    return {"required": False, "status": "skipped", "checked_binding_keys": []}
-
-
 def require_product_profile_runtime_keys(
     *,
     record_store: LiveTargetRuntimeProfileStore,
@@ -304,6 +387,58 @@ def _declared_runtime_keys(
         ):
             allowed_keys.add(secret_requirement.binding_key)
     return allowed_keys
+
+
+class ProductProfileListStore(Protocol):
+    def list_product_profile_records(
+        self, *, driver_id: str = ""
+    ) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
+
+
+def declared_runtime_keys(
+    *, profile: LaunchplaneProductProfileRecord, context_name: str, instance_name: str
+) -> set[str]:
+    """Runtime keys one product declares for a lane (settings and managed secrets)."""
+
+    return _declared_runtime_keys(
+        profile=profile, context_name=context_name, instance_name=instance_name
+    )
+
+
+def declared_runtime_keys_for_lane(
+    *, record_store: ProductProfileListStore, context_name: str, instance_name: str
+) -> set[str]:
+    """Runtime keys any product declares for this lane (settings and managed secrets)."""
+
+    declared_keys: set[str] = set()
+    for profile in record_store.list_product_profile_records():
+        if any(
+            lane.context == context_name and lane.instance == instance_name
+            for lane in profile.lanes
+        ):
+            declared_keys |= _declared_runtime_keys(
+                profile=profile, context_name=context_name, instance_name=instance_name
+            )
+    return declared_keys
+
+
+def require_declared_runtime_keys_present(
+    *, declared_keys: set[str], available_keys: set[str], target: str
+) -> None:
+    """Fail closed when a declared runtime key would be missing from what the app gets."""
+
+    # A declared platform-credential name can never reach the app (it is withheld
+    # or refused), so it is not a missing application key.
+    missing_keys = sorted(
+        declared_keys - available_keys - runtime_platform_credentials.PLATFORM_CREDENTIAL_KEYS
+    )
+    if missing_keys:
+        raise click.ClickException(
+            f"{target} would run without declared runtime key(s): "
+            + ", ".join(missing_keys)
+            + ". The site environment does not hold them (global values are not "
+            "delivered); store them for this site first."
+        )
 
 
 def _require_product_profile_runtime_secret_keys(
@@ -458,17 +593,22 @@ def apply_live_target_runtime_environment(
             instance_name=instance_name,
             database_url=database_url,
         )
+    except runtime_platform_credentials.PlatformCredentialRefusedError as error:
+        raise LiveTargetRuntimeError(error.message, code=error.code) from error
     except click.ClickException as error:
         raise LiveTargetRuntimeError(str(error), code="runtime_environment_unavailable") from error
     desired_env_map = site_environment.values
+    retired_keys = set(site_environment.retired_keys)
     if not desired_env_map:
         raise LiveTargetRuntimeError(
             f"No Launchplane runtime environment values resolved for {context_name}/{instance_name}.",
             code="runtime_environment_empty",
         )
 
+    # Protected driver and identity keys are never retirable, with or without
+    # product scoping; the product branch below also checks application keys.
+    validate_provider_key_retirement(retired_keys=retired_keys, application_keys=set())
     database_url = resolve_database_url(database_url)
-    retired_keys: set[str] = set()
     if product_name.strip():
         if database_url is None:
             raise LiveTargetRuntimeError(
@@ -484,14 +624,12 @@ def apply_live_target_runtime_environment(
                 context_name=context_name,
                 instance_name=instance_name,
             )
-            retired_keys = control_plane_runtime_environments.retired_provider_keys_from_store(
-                record_store=postgres_store,
-                context_name=context_name,
-                instance_name=instance_name,
-            )
             validate_provider_key_retirement(
                 retired_keys=retired_keys,
-                application_keys=set(desired_env_map) | declared_keys,
+                application_keys=control_plane_runtime_environments.site_application_keys(
+                    site_environment.site_keys
+                )
+                | declared_keys,
             )
             declared_secret_keys = _require_product_profile_runtime_secret_keys(
                 record_store=postgres_store,
@@ -520,6 +658,9 @@ def apply_live_target_runtime_environment(
     except click.ClickException as error:
         raise LiveTargetRuntimeError(str(error), code="dokploy_target_read_failed") from error
     live_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+    provider_env_platform_credentials = provider_env_platform_credential_report(
+        live_env_map=live_env_map, retired_keys=retired_keys
+    )
     initial_delta = runtime_env_live_target_delta(
         desired_env_map=desired_env_map,
         live_env_map=live_env_map,
@@ -527,36 +668,19 @@ def apply_live_target_runtime_environment(
     )
     changed_keys = initial_delta["changed_keys"]
     changed_key_count = len(changed_keys) if isinstance(changed_keys, list) else 0
-    runtime_key_safety = skipped_runtime_key_safety_summary()
     deploy_result: dict[str, str] | None = None
     verification: dict[str, object] = {
         "status": "skipped",
         "reason": "dry_run" if not apply_changes else "no_runtime_env_changes",
     }
 
-    if apply_changes and database_url is None:
-        raise LiveTargetRuntimeError(
-            "Live target runtime apply requires LAUNCHPLANE_DATABASE_URL for DB-backed "
-            "runtime key-safety evaluation.",
-            code="runtime_key_safety_unavailable",
-        )
-    if database_url is not None and (not apply_changes or changed_key_count or deploy):
-        postgres_store = PostgresRecordStore(database_url=database_url)
-        try:
-            postgres_store.ensure_schema()
-            runtime_key_safety = evaluate_runtime_key_safety_for_live_target_sync(
-                record_store=postgres_store,
-                context_name=context_name,
-                instance_name=instance_name,
-                require_policy=apply_changes,
-                required_binding_keys=tuple(sorted(site_environment.secret_keys)),
-            )
-        finally:
-            postgres_store.close()
-
     if apply_changes and changed_key_count:
         if retired_keys:
-            assert database_url is not None  # Required by the product-scoped read above.
+            if database_url is None:
+                raise LiveTargetRuntimeError(
+                    "Provider key retirement requires LAUNCHPLANE_DATABASE_URL.",
+                    code="runtime_environment_unavailable",
+                )
             postgres_store = PostgresRecordStore(database_url=database_url)
             try:
                 current_retired_keys = (
@@ -571,23 +695,24 @@ def apply_live_target_runtime_environment(
                         "Provider key retirement changed during execution; review current configuration.",
                         code="runtime_retirement_changed",
                     )
-                validate_provider_key_retirement(
-                    retired_keys=retired_keys,
-                    application_keys=set(
-                        control_plane_runtime_environments.resolve_site_runtime_environment(
-                            control_plane_root=control_plane_root,
+                if product_name.strip():
+                    validate_provider_key_retirement(
+                        retired_keys=retired_keys,
+                        application_keys=control_plane_runtime_environments.site_application_keys(
+                            control_plane_runtime_environments.resolve_site_runtime_environment(
+                                control_plane_root=control_plane_root,
+                                context_name=context_name,
+                                instance_name=instance_name,
+                                database_url=database_url,
+                            ).site_keys
+                        )
+                        | _product_lane_declared_keys(
+                            record_store=postgres_store,
+                            product_name=product_name.strip(),
                             context_name=context_name,
                             instance_name=instance_name,
-                            database_url=database_url,
-                        ).values
+                        ),
                     )
-                    | _product_lane_declared_keys(
-                        record_store=postgres_store,
-                        product_name=product_name.strip(),
-                        context_name=context_name,
-                        instance_name=instance_name,
-                    ),
-                )
             finally:
                 postgres_store.close()
         try:
@@ -600,10 +725,11 @@ def apply_live_target_runtime_environment(
             refreshed_env_map = dokploy_api.parse_dokploy_env_text(
                 str(refreshed_payload.get("env") or "")
             )
-            updated_env_map = {
-                key: value for key, value in refreshed_env_map.items() if key not in retired_keys
-            }
-            updated_env_map.update(desired_env_map)
+            updated_env_map = control_plane_runtime_environments.merge_provider_environment(
+                current_env_map=refreshed_env_map,
+                desired_env_map=desired_env_map,
+                retired_keys=retired_keys,
+            )
             dokploy_api.update_dokploy_target_env(
                 host=host,
                 token=token,
@@ -670,7 +796,7 @@ def apply_live_target_runtime_environment(
             "target_name": target_definition.target_name,
         },
         "runtime_environment": initial_delta,
-        "runtime_key_safety": runtime_key_safety,
+        "provider_env_platform_credentials": provider_env_platform_credentials,
         "apply": {
             "applied": apply_changes,
             "env_updated": bool(apply_changes and changed_key_count),

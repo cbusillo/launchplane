@@ -16,7 +16,6 @@ from click.testing import CliRunner
 
 from control_plane.cli import main
 from control_plane import live_target_runtime as control_plane_live_target_runtime
-from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
 from control_plane.notifications import public_discord_url_error, public_url_error
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -46,7 +45,6 @@ from control_plane.contracts.authz_policy_write_transition import (
     AuthzPolicySchemaV3TransitionDeniedError,
 )
 from control_plane.contracts.driver_descriptor import DriverActionDescriptor, DriverDescriptor
-from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy
 from control_plane.contracts.merge_train_policy import parse_merge_train_policy_toml
@@ -6934,10 +6932,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
             result["runtime_environment"]["missing_keys"],
             ["CONTEXT_API_TOKEN", "GOOGLE_ANALYTICS_MEASUREMENT_ID"],
         )
-        self.assertEqual(
-            result["runtime_key_safety"]["checked_binding_keys"], ["CONTEXT_API_TOKEN"]
-        )
-        self.assertEqual(result["runtime_key_safety"]["status"], "pass")
         self.assertNotIn("ODOO_DB_PASSWORD", result["runtime_environment"]["changed_keys"])
         self.assertNotIn("G-9KRMER45KG", json.dumps(payload))
         self.assertNotIn("must-not-sync", json.dumps(payload))
@@ -7493,74 +7487,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             result["deploy"]["result"]["deployment_result"], "deployment=after status=done"
         )
 
-    def test_live_target_runtime_apply_requires_database_for_key_safety(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            with (
-                patch.dict(
-                    os.environ,
-                    {
-                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"
-                    },
-                    clear=True,
-                ),
-                patch(
-                    "control_plane.dokploy.source.read_control_plane_dokploy_source_of_truth",
-                    return_value=DokploySourceOfTruth(
-                        schema_version=1,
-                        targets=(
-                            DokployTargetDefinition(
-                                context="sellyouroutboard",
-                                instance="prod",
-                                target_type="application",
-                                target_name="syo-prod-app",
-                                target_id="application-syo-prod",
-                            ),
-                        ),
-                    ),
-                ),
-                patch(
-                    "control_plane.runtime_environments.resolve_site_runtime_environment",
-                    return_value=control_plane_runtime_environments.SiteRuntimeEnvironment(
-                        values={"GOOGLE_ANALYTICS_MEASUREMENT_ID": "G-9KRMER45KG"},
-                        secret_keys=frozenset(),
-                    ),
-                ),
-                patch(
-                    "control_plane.dokploy.source.read_dokploy_config",
-                    return_value=("https://dokploy.example.com", "dokploy-token"),
-                ),
-                patch(
-                    "control_plane.dokploy.api.fetch_dokploy_target_payload",
-                    return_value={
-                        "applicationId": "application-syo-prod",
-                        "name": "syo-prod-app",
-                        "env": "CONTACT_EMAIL_MODE=resend\n",
-                    },
-                ),
-                patch("control_plane.dokploy.api.update_dokploy_target_env") as update_env,
-            ):
-                with self.assertRaisesRegex(
-                    control_plane_live_target_runtime.LiveTargetRuntimeError,
-                    "LAUNCHPLANE_DATABASE_URL",
-                ) as context:
-                    control_plane_live_target_runtime.apply_live_target_runtime_environment(
-                        control_plane_root=root,
-                        context_name="sellyouroutboard",
-                        instance_name="prod",
-                        apply_changes=True,
-                        deploy=False,
-                        no_cache=False,
-                        deploy_timeout_seconds=None,
-                        deploy_trigger=(
-                            control_plane_live_target_runtime.trigger_and_wait_for_dokploy_target_deploy
-                        ),
-                    )
-
-        self.assertEqual(context.exception.code, "runtime_key_safety_unavailable")
-        update_env.assert_not_called()
-
-    def test_live_target_runtime_api_maps_runtime_key_safety_database_error(self) -> None:
+    def test_live_target_runtime_api_maps_unavailable_runtime_environment(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
@@ -7598,8 +7525,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
             with patch(
                 "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment",
                 side_effect=control_plane_live_target_runtime.LiveTargetRuntimeError(
-                    "Live target runtime apply requires LAUNCHPLANE_DATABASE_URL for DB-backed runtime key-safety evaluation.",
-                    code="runtime_key_safety_unavailable",
+                    "Live target runtime product scoping requires LAUNCHPLANE_DATABASE_URL.",
+                    code="runtime_environment_unavailable",
                 ),
             ):
                 status_code, payload = _invoke_app(
@@ -7617,7 +7544,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 )
 
         self.assertEqual(status_code, 503)
-        self.assertEqual(payload["error"]["code"], "runtime_key_safety_unavailable")
+        self.assertEqual(payload["error"]["code"], "runtime_environment_unavailable")
         self.assertIn("LAUNCHPLANE_DATABASE_URL", payload["error"]["message"])
 
     def test_live_target_runtime_api_apply_requires_apply_authorization(self) -> None:

@@ -353,8 +353,8 @@ decryption key state denies the reveal or resolution.
   deployed runtime resolves DB-backed target authority and records sanitized
   audit evidence.
 - Live target runtime sync uses `POST /v1/live-target-runtime/apply` or the
-  `live-target-runtime.yml` workflow wrapper. Dry-run and apply both evaluate
-  runtime key-safety policy before returning sanitized key/count evidence.
+  `live-target-runtime.yml` workflow wrapper. Dry-run and apply both return
+  sanitized key/count evidence.
 - Live target runtime sync delivers the site's own environment for the lane:
   the site's context and lane settings, the tracked target's settings, secrets
   stored for exactly that lane, and, for testing and prod lanes only, secrets
@@ -412,18 +412,9 @@ decryption key state denies the reveal or resolution.
   `BETTER_AUTH_SECRET`, `VERIREEL_SECRETS_MASTER_KEY`,
   `VERIREEL_CRON_SECRET`, and `VERIREEL_SMOKE_MAINTENANCE_SECRET`, are not
   copied template secrets.
-- Delegated worker workflows that overlay managed runtime secrets into
-  subprocess environments, such as VeriReel prod backup and rollback workers,
-  must evaluate the managed bindings for the worker target before the worker
-  process starts. The worker receives plaintext only after the metadata gate has
-  confirmed the active policy allows those bindings for that runtime class.
-- Worker gates must evaluate every effective managed binding scope accepted by
-  runtime secret resolution: global, context, and context-instance. A narrower
-  binding query must not let an inherited managed secret bypass classification.
-- A denied worker gate may report non-secret binding keys plus the active policy
-  record id and policy digest so operators can repair the classification without
-  exposing secret values. Validate the repaired metadata with a read-only target
-  dry run or scoped write-intent preflight before retrying the side effect.
+- Delegated backup and rollback workers read their SSH credentials from the
+  `launchplane_worker` store for exactly their lane. That store is never part of
+  an app's environment, so no policy gate is needed before the worker starts.
 - Product-specific workflows that sync resolved runtime environment values into
   live Dokploy targets, such as Odoo prod rollback target env updates, must
   evaluate managed runtime secret bindings before writing the live env payload.
