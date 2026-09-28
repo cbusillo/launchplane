@@ -69,6 +69,7 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
         browser_dependency_names = {
             "read_browser_mutation_identity",
             "read_github_human_browser_mutation_identity",
+            "read_owner_review_browser_mutation_identity",
             "read_browser_work_graph_rank_identity",
         }
         expected_bearer_only_routes = {

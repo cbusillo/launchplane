@@ -1192,6 +1192,7 @@ class GitHubOAuthLoginClient(Protocol):
         code: str,
         code_verifier: str,
         authz_policy: LaunchplaneAuthzPolicy,
+        is_product_owner: Callable[[int], bool] | None = None,
     ) -> GitHubHumanIdentity: ...
 
 
@@ -1339,7 +1340,7 @@ class GitHubHumanIdentityResponse(BaseModel):
     email: str
     organizations: tuple[str, ...]
     teams: tuple[str, ...]
-    role: Literal["read_only", "admin"]
+    role: Literal["read_only", "admin", "owner"]
 
 
 class AuthSessionResponse(BaseModel):
@@ -4135,13 +4136,41 @@ def create_launchplane_fastapi_app(
             raise RuntimeError("Launchplane record store is not initialized.")
         return shared_record_store
 
+    def github_id_owns_active_product(github_id: int) -> bool:
+        if github_id <= 0:
+            return False
+        try:
+            record_store = get_record_store()
+            profiles = record_store.list_product_profile_records()  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 - an unreadable profile store admits no Owner
+            _LOGGER.exception("Owner sign-in could not read product profiles")
+            return False
+        return any(
+            profile.lifecycle_state == "active"
+            and profile.owner.is_set
+            and profile.owner.github_id == str(github_id)
+            for profile in profiles
+        )
+
+    def resolve_owner_session_role(
+        session: LaunchplaneHumanSession, *, allow_owner: bool
+    ) -> LaunchplaneHumanSession | None:
+        # An Owner session stays valid only while that person is still the named
+        # Owner of an active product, whatever the revalidation setting.
+        if session.identity.role != "owner":
+            return session
+        if allow_owner and github_id_owns_active_product(session.identity.github_id):
+            return session
+        return None
+
     def read_human_session(
         *,
         cookie_header: str,
+        allow_owner: bool = False,
     ) -> tuple[LaunchplaneHumanSession, bool] | None:
         if human_session_manager is None:
             return None
-        session = human_session_manager.read_cookie(cookie_header)
+        session = human_session_manager.read_cookie(cookie_header, allow_owner=allow_owner)
         if session is None:
             return None
         if enforce_human_policy_revalidation:
@@ -4153,9 +4182,11 @@ def create_launchplane_fastapi_app(
                 authz_policy=resolved_authz_policy_runtime.policy,
             )
             if current_role == "admin":
-                resolved_role: Literal["read_only", "admin"] = "admin"
+                resolved_role: Literal["read_only", "admin", "owner"] = "admin"
             elif current_role == "read_only":
                 resolved_role = "read_only"
+            elif allow_owner and github_id_owns_active_product(session.identity.github_id):
+                resolved_role = "owner"
             else:
                 return None
             if resolved_role != session.identity.role:
@@ -4163,6 +4194,11 @@ def create_launchplane_fastapi_app(
                     session,
                     identity=replace(session.identity, role=resolved_role),
                 )
+        else:
+            owner_checked = resolve_owner_session_role(session, allow_owner=allow_owner)
+            if owner_checked is None:
+                return None
+            session = owner_checked
         renewed_session = human_session_manager.renew_if_needed(session)
         if renewed_session is None:
             return None
@@ -4173,8 +4209,9 @@ def create_launchplane_fastapi_app(
         cookie_header: str,
         request: Request,
         response: Response,
+        allow_owner: bool = False,
     ) -> GitHubHumanIdentity | None:
-        session_result = read_human_session(cookie_header=cookie_header)
+        session_result = read_human_session(cookie_header=cookie_header, allow_owner=allow_owner)
         if session_result is None:
             return None
         session, was_renewed = session_result
@@ -4204,7 +4241,7 @@ def create_launchplane_fastapi_app(
         )
         if current_role not in {"admin", "read_only"}:
             return None
-        resolved_role: Literal["read_only", "admin"] = current_role
+        resolved_role: Literal["read_only", "admin", "owner"] = current_role
         if resolved_role == session.identity.role:
             return session
         return replace(
@@ -4284,7 +4321,7 @@ def create_launchplane_fastapi_app(
         cookie: Annotated[str, Header(alias="Cookie")] = "",
     ) -> AuthSessionResponse | JSONResponse:
         trace_id = next_trace_id()
-        session_result = read_human_session(cookie_header=cookie)
+        session_result = read_human_session(cookie_header=cookie, allow_owner=True)
         if session_result is None:
             payload = AuthSessionRequiredResponse(
                 trace_id=trace_id,
@@ -4378,6 +4415,7 @@ def create_launchplane_fastapi_app(
                 code=callback_code,
                 code_verifier=login_state.code_verifier,
                 authz_policy=resolved_authz_policy_runtime.policy,
+                is_product_owner=github_id_owns_active_product,
             )
         except PermissionError:
             return JSONResponse(
@@ -4443,7 +4481,7 @@ def create_launchplane_fastapi_app(
     ) -> AuthLogoutResponse:
         trace_id = next_trace_id()
         if human_session_manager is not None:
-            session_result = read_human_session(cookie_header=cookie)
+            session_result = read_human_session(cookie_header=cookie, allow_owner=True)
             if session_result is not None:
                 session, _was_renewed = session_result
                 consume_browser_mutation_request(request=request, session=session)
@@ -4454,11 +4492,13 @@ def create_launchplane_fastapi_app(
         response.headers.append("Set-Cookie", clear_cookie)
         return AuthLogoutResponse(trace_id=trace_id)
 
-    def read_identity(
+    def resolve_request_identity(
+        *,
         request: Request,
         response: Response,
-        authorization: Annotated[str, Header(alias="Authorization")] = "",
-        cookie: Annotated[str, Header(alias="Cookie")] = "",
+        authorization: str,
+        cookie: str,
+        allow_owner: bool,
     ) -> LaunchplaneIdentity:
         bearer_identity = resolve_bearer_identity(authorization)
         if bearer_identity is not None:
@@ -4467,10 +4507,41 @@ def create_launchplane_fastapi_app(
             cookie_header=cookie,
             request=request,
             response=response,
+            allow_owner=allow_owner,
         )
         if human_identity is not None:
             return human_identity
         raise _authentication_required_error("Authorization header is required.")
+
+    def read_identity(
+        request: Request,
+        response: Response,
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> LaunchplaneIdentity:
+        return resolve_request_identity(
+            request=request,
+            response=response,
+            authorization=authorization,
+            cookie=cookie,
+            allow_owner=False,
+        )
+
+    # Only the Owner review routes accept a product Owner's session; each route
+    # still checks that the viewer is the named Owner of the requested product.
+    def read_owner_review_identity(
+        request: Request,
+        response: Response,
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> LaunchplaneIdentity:
+        return resolve_request_identity(
+            request=request,
+            response=response,
+            authorization=authorization,
+            cookie=cookie,
+            allow_owner=True,
+        )
 
     def resolve_bearer_identity(authorization: str) -> LaunchplaneIdentity | None:
         header = authorization.strip()
@@ -4501,17 +4572,20 @@ def create_launchplane_fastapi_app(
             return identity
         raise _authentication_required_error("Authorization header is required.")
 
-    def read_browser_mutation_identity(
+    def resolve_browser_mutation_identity(
+        *,
         request: Request,
         response: Response,
-        authorization: Annotated[str, Header(alias="Authorization")] = "",
-        cookie: Annotated[str, Header(alias="Cookie")] = "",
+        authorization: str,
+        cookie: str,
+        allow_owner: bool,
     ) -> LaunchplaneIdentity:
-        identity = read_identity(
+        identity = resolve_request_identity(
             request=request,
             response=response,
             authorization=authorization,
             cookie=cookie,
+            allow_owner=allow_owner,
         )
         if not isinstance(identity, GitHubHumanIdentity):
             return identity
@@ -4520,6 +4594,36 @@ def create_launchplane_fastapi_app(
             reject_browser_mutation()
         consume_browser_mutation_request(request=request, session=session)
         return identity
+
+    def read_browser_mutation_identity(
+        request: Request,
+        response: Response,
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> LaunchplaneIdentity:
+        return resolve_browser_mutation_identity(
+            request=request,
+            response=response,
+            authorization=authorization,
+            cookie=cookie,
+            allow_owner=False,
+        )
+
+    def read_owner_review_browser_mutation_identity(
+        request: Request,
+        response: Response,
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> GitHubHumanIdentity:
+        return require_github_human_identity(
+            resolve_browser_mutation_identity(
+                request=request,
+                response=response,
+                authorization=authorization,
+                cookie=cookie,
+                allow_owner=True,
+            )
+        )
 
     def require_github_human_identity(identity: LaunchplaneIdentity) -> GitHubHumanIdentity:
         if not isinstance(identity, GitHubHumanIdentity):
@@ -24004,11 +24108,16 @@ def create_launchplane_fastapi_app(
         },
     )
 
+    owner_review_route_dependencies = replace(
+        read_route_dependencies, read_identity=read_owner_review_identity
+    )
     register_release_review_routes(
         app,
         dependencies=ReleaseReviewRouteDependencies(
-            common=read_route_dependencies,
-            read_github_human_browser_mutation_identity=read_github_human_browser_mutation_identity,
+            common=owner_review_route_dependencies,
+            read_github_human_browser_mutation_identity=(
+                read_owner_review_browser_mutation_identity
+            ),
             current_review=lambda store, profile: current_release_review(
                 control_plane_root=resolved_control_plane_root,
                 record_store=store,
@@ -24025,16 +24134,16 @@ def create_launchplane_fastapi_app(
     register_owner_secret_input_routes(
         app,
         dependencies=OwnerSecretInputDependencies(
-            common=read_route_dependencies,
-            read_human_mutation_identity=read_github_human_browser_mutation_identity,
+            common=owner_review_route_dependencies,
+            read_human_mutation_identity=read_owner_review_browser_mutation_identity,
         ),
     )
     register_product_review_routes(
         app,
         dependencies=ProductReviewRouteDependencies(
-            common=read_route_dependencies,
+            common=owner_review_route_dependencies,
             read_github_human_browser_mutation_identity=(
-                read_github_human_browser_mutation_identity
+                read_owner_review_browser_mutation_identity
             ),
             publish_owner_review_status=lambda store, profile, pull_request_number: (
                 resolved_owner_review_status_publisher.publish(

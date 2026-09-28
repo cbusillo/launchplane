@@ -9905,7 +9905,8 @@
           "role": {
             "enum": [
               "read_only",
-              "admin"
+              "admin",
+              "owner"
             ],
             "title": "Role",
             "type": "string"

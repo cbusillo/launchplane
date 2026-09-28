@@ -5,7 +5,7 @@ import hmac
 import json
 import os
 import unittest
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Literal, cast
@@ -210,6 +210,7 @@ class _StubGitHubOAuthClient:
         code: str,
         code_verifier: str,
         authz_policy: LaunchplaneAuthzPolicy,
+        is_product_owner: Callable[[int], bool] | None = None,
     ) -> GitHubHumanIdentity:
         self.code_verifier = code_verifier
         if code != "github-code":

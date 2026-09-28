@@ -60,7 +60,9 @@ class GitHubHumanIdentity:
     email: str
     organizations: frozenset[str]
     teams: frozenset[str]
-    role: Literal["read_only", "admin"]
+    # "owner" is a signed-in product Owner with no policy role. It may use only
+    # the Owner review routes and never satisfies an authorization policy rule.
+    role: Literal["read_only", "admin", "owner"]
 
 
 @dataclass(frozen=True)
@@ -661,8 +663,12 @@ class GitHubHumanPolicyRule(ScopedAuthzPolicyRule):
         login: str,
         organizations: frozenset[str],
         teams: frozenset[str],
-        role: Literal["read_only", "admin"],
+        role: Literal["read_only", "admin", "owner"],
     ) -> bool:
+        # An Owner session never satisfies a policy rule, even one without a
+        # role restriction.
+        if role == "owner":
+            return False
         if self.github_ids and github_id not in self.github_ids:
             return False
         if self.logins and not self._matches_any(login, self.logins):
@@ -848,12 +854,12 @@ def agent_consumer_subject(
             subject=identity.login,
             display_label=identity.login,
             access_profile=("human_admin" if identity.role == "admin" else "limited_remote_user"),
-            role=identity.role,
+            role="admin" if identity.role == "admin" else "read_only",
             product=product,
             context=context,
             action=action,
             action_safety=safety,
-            read_only_context=identity.role == "read_only",
+            read_only_context=identity.role != "admin",
             approval_capable=identity.role == "admin",
         )
     if isinstance(identity, TerminalAgentIdentity):
@@ -1082,7 +1088,9 @@ class LaunchplaneAuthzPolicy(BaseModel):
                 record_context=record_context,
             )
         if isinstance(identity, GitHubHumanIdentity):
-            if identity.role == "read_only" and not limited_remote_user_action_allowed(action):
+            if identity.role == "owner" or (
+                identity.role == "read_only" and not limited_remote_user_action_allowed(action)
+            ):
                 return _record_authz_evaluation(
                     identity=identity,
                     action=action,
@@ -1325,6 +1333,8 @@ def matching_github_human_policy_rules(
     managed_only: bool = False,
 ) -> tuple[GitHubHumanPolicyRule, ...]:
     resolved_target = target or AuthorizationTarget(scope="context")
+    if identity.role == "owner":
+        return ()
     if identity.role == "read_only" and not limited_remote_user_action_allowed(action):
         return ()
     return tuple(

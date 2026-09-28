@@ -4707,6 +4707,7 @@ class _StubFastApiGitHubOAuthClient:
         code: str,
         code_verifier: str,
         authz_policy: LaunchplaneAuthzPolicy,
+        is_product_owner: Callable[[int], bool] | None = None,
     ) -> GitHubHumanIdentity:
         del authz_policy
         self.code_verifier = code_verifier

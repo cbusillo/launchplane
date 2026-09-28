@@ -250,6 +250,7 @@ class GitHubOAuthClient:
         code: str,
         code_verifier: str,
         authz_policy: LaunchplaneAuthzPolicy,
+        is_product_owner: Callable[[int], bool] | None = None,
     ) -> GitHubHumanIdentity:
         client = self._new_session(
             client_id=self._config.client_id,
@@ -278,7 +279,7 @@ class GitHubOAuthClient:
             if isinstance(org, dict) and str(org.get("login", "")).strip()
         )
         teams = frozenset(_team_names(team_payload))
-        role = authz_policy.human_role_for(
+        role: Literal["read_only", "admin", "owner"] | None = authz_policy.human_role_for(
             github_id=github_id,
             login=login,
             organizations=organizations,
@@ -292,6 +293,10 @@ class GitHubOAuthClient:
             )
             if bootstrap_admin_email:
                 role = "admin"
+        # A product's named Owner may sign in without a policy role; the session
+        # can reach only the Owner review routes (see read_cookie).
+        if role is None and is_product_owner is not None and is_product_owner(github_id):
+            role = "owner"
         if role is None:
             raise PermissionError("GitHub user is not authorized for Launchplane.")
         return GitHubHumanIdentity(
@@ -308,6 +313,14 @@ class GitHubOAuthClient:
             teams=teams,
             role=role,
         )
+
+
+def _owner_session_filter(
+    session: LaunchplaneHumanSession | None, *, allow_owner: bool
+) -> LaunchplaneHumanSession | None:
+    if session is not None and session.identity.role == "owner" and not allow_owner:
+        return None
+    return session
 
 
 def _split_env_values(raw_value: str) -> tuple[str, ...]:
@@ -415,16 +428,24 @@ class HumanSessionManager:
         self._session_store.write_session(session)
         return session
 
-    def read_cookie(self, cookie_header: str) -> LaunchplaneHumanSession | None:
+    # Owner sessions are refused unless the caller explicitly accepts them, so
+    # every existing session reader stays closed to Owners by default.
+    def read_cookie(
+        self, cookie_header: str, *, allow_owner: bool = False
+    ) -> LaunchplaneHumanSession | None:
         signed_session_id = _cookie_value(cookie_header, SESSION_COOKIE_NAME)
         if not signed_session_id:
             return None
         session_id = self._verify_cookie_value(signed_session_id)
         if not session_id:
             return None
-        return self._session_store.read_session(session_id)
+        return _owner_session_filter(
+            self._session_store.read_session(session_id), allow_owner=allow_owner
+        )
 
-    def read_cookie_without_renewal(self, cookie_header: str) -> LaunchplaneHumanSession | None:
+    def read_cookie_without_renewal(
+        self, cookie_header: str, *, allow_owner: bool = False
+    ) -> LaunchplaneHumanSession | None:
         signed_session_id = _cookie_value(cookie_header, SESSION_COOKIE_NAME)
         if not signed_session_id:
             return None
@@ -434,7 +455,7 @@ class HumanSessionManager:
         session = self._session_store.read_session_without_cleanup(session_id)
         if session is None or session.expires_at <= self._now():
             return None
-        return session
+        return _owner_session_filter(session, allow_owner=allow_owner)
 
     def authorization_claims_are_current(self, session: LaunchplaneHumanSession) -> bool:
         now = self._now()

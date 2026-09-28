@@ -533,7 +533,7 @@ def durable_operation_caller_identity(
             github_id=identity.github_id,
             organizations=tuple(sorted(identity.organizations)),
             teams=tuple(sorted(identity.teams)),
-            role=identity.role,
+            role="" if identity.role == "owner" else identity.role,
         )
     if isinstance(identity, TerminalAgentIdentity):
         return DurableOperationCallerIdentity(
