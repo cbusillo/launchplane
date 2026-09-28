@@ -8,6 +8,7 @@ import click
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.verireel_prod_promotion import (
     VeriReelProdPromotionRequest,
@@ -86,6 +87,14 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                     context="verireel",
                     instance="prod",
                     source_git_ref="abcdef1234567890",
+                    runtime_identity=RuntimeIdentity(
+                        product="verireel",
+                        context="verireel",
+                        instance="prod",
+                        deployment_record_id="deployment-verireel-prod-run-12345-attempt-1",
+                        artifact_id="ghcr.io/every/verireel-app:sha-abcdef1234567890",
+                        source_git_ref="abcdef1234567890",
+                    ),
                     resolved_target=ResolvedTargetEvidence(
                         target_type="application",
                         target_id="prod-app-123",
@@ -200,6 +209,13 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                 promotion.destination_health.urls,
                 ("https://ver-prod.shinycomputers.com/api/health",),
             )
+            inventory = store.read_environment_inventory(
+                context_name="verireel", instance_name="prod"
+            )
+            self.assertEqual(inventory.promotion_record_id, promotion.record_id)
+            self.assertEqual(inventory.deployment_record_id, promotion.deployment_record_id)
+            assert inventory.runtime_identity is not None
+            self.assertEqual(inventory.runtime_identity.source_git_ref, "abcdef1234567890")
 
     def test_execute_preserves_fresh_provider_metadata_from_deploy_result(
         self,
@@ -509,6 +525,8 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(promotion.post_deploy_update.status, "pass")
             self.assertEqual(promotion.destination_health.status, "fail")
+            with self.assertRaises(FileNotFoundError):
+                store.read_environment_inventory(context_name="verireel", instance_name="prod")
 
     def test_execute_writes_failed_rollout_status_when_rollout_verification_fails(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
