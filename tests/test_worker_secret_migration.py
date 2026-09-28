@@ -259,6 +259,51 @@ class WorkerSecretMigrationTests(unittest.TestCase):
             "global-token",
         )
 
+    def test_a_secret_also_bound_under_another_key_stays_in_place(self) -> None:
+        self.write_shared(
+            integration=RUNTIME,
+            key="GITHUB_TOKEN",
+            value="app-token",
+            scope="context",
+            context="site",
+        )
+        binding = next(
+            binding
+            for binding in self.store.list_secret_bindings(integration=RUNTIME, limit=None)
+            if binding.binding_key == "GITHUB_TOKEN"
+        )
+        control_plane_secrets.relabel_secret_binding(
+            record_store=self.store, binding_id=binding.binding_id, binding_key="APP_GITHUB_TOKEN"
+        )
+
+        moved = self.move_service(
+            source=RUNTIME_ENVIRONMENT_INTEGRATION, destination=LAUNCHPLANE_SERVICE_INTEGRATION
+        )
+
+        self.assertEqual(moved, 0)
+        self.assertEqual(
+            runtime_environments.resolve_runtime_context_values(
+                control_plane_root=self.root, context_name="site"
+            )["APP_GITHUB_TOKEN"],
+            "app-token",
+        )
+
+    def test_an_existing_service_credential_is_kept_and_the_move_does_not_fail(self) -> None:
+        self.write_shared(integration=RUNTIME, key="GITHUB_TOKEN", value="legacy", scope="global")
+        self.write_shared(
+            integration=LAUNCHPLANE_SERVICE_INTEGRATION,
+            key="GITHUB_TOKEN",
+            value="provisioned",
+            scope="global",
+        )
+
+        moved = self.move_service(
+            source=RUNTIME_ENVIRONMENT_INTEGRATION, destination=LAUNCHPLANE_SERVICE_INTEGRATION
+        )
+
+        self.assertEqual(moved, 0)
+        self.assertEqual(self.github_token("site"), "provisioned")
+
     def test_misspelled_integration_records_are_disabled(self) -> None:
         written = self.write_shared(
             integration=MISSPELLED_RUNTIME_ENVIRONMENT_INTEGRATION,

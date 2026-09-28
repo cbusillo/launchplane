@@ -28,6 +28,9 @@ _SECRETS = sa.table(
     sa.column("secret_id", sa.String),
     sa.column("scope", sa.String),
     sa.column("integration", sa.String),
+    sa.column("name", sa.String),
+    sa.column("context", sa.String),
+    sa.column("instance", sa.String),
     sa.column("status", sa.String),
     sa.column("payload", sa.JSON),
 )
@@ -99,24 +102,67 @@ def move_secrets(
     binding_keys: tuple[str, ...],
     scopes: tuple[str, ...],
 ) -> int:
-    """Move secrets with these binding keys and scopes between stores; returns records moved."""
-    bindings = connection.execute(
-        sa.select(_BINDINGS.c.binding_id, _BINDINGS.c.secret_id, _BINDINGS.c.payload).where(
-            _BINDINGS.c.integration == source,
-            _BINDINGS.c.binding_key.in_(binding_keys),
-        )
-    ).all()
-    moved_secret_ids = {
+    """Move secrets with these binding keys and scopes between stores; returns records moved.
+
+    A record moves only when every configured binding on it is one of ``binding_keys``,
+    so a secret also bound under another key stays resolvable where it is. A record whose
+    identity already exists in the destination stays too, rather than failing the move.
+    """
+    candidate_ids = {
         row.secret_id
         for row in connection.execute(
-            sa.select(_SECRETS.c.secret_id).where(
-                _SECRETS.c.secret_id.in_({binding.secret_id for binding in bindings}),
-                _SECRETS.c.integration == source,
-                _SECRETS.c.scope.in_(scopes),
+            sa.select(_BINDINGS.c.secret_id).where(
+                _BINDINGS.c.integration == source,
+                _BINDINGS.c.binding_key.in_(binding_keys),
+                _BINDINGS.c.status == "configured",
             )
         )
     }
-    for binding in bindings:
+    if not candidate_ids:
+        return 0
+    all_bindings = connection.execute(
+        sa.select(
+            _BINDINGS.c.binding_id,
+            _BINDINGS.c.secret_id,
+            _BINDINGS.c.binding_key,
+            _BINDINGS.c.status,
+            _BINDINGS.c.payload,
+        ).where(_BINDINGS.c.secret_id.in_(candidate_ids))
+    ).all()
+    bound_elsewhere = {
+        binding.secret_id
+        for binding in all_bindings
+        if binding.status == "configured" and binding.binding_key not in binding_keys
+    }
+    destination_identities = {
+        (row.scope, row.name, row.context, row.instance)
+        for row in connection.execute(
+            sa.select(
+                _SECRETS.c.scope, _SECRETS.c.name, _SECRETS.c.context, _SECRETS.c.instance
+            ).where(_SECRETS.c.integration == destination)
+        )
+    }
+    secrets = [
+        secret
+        for secret in connection.execute(
+            sa.select(
+                _SECRETS.c.secret_id,
+                _SECRETS.c.scope,
+                _SECRETS.c.name,
+                _SECRETS.c.context,
+                _SECRETS.c.instance,
+                _SECRETS.c.payload,
+            ).where(
+                _SECRETS.c.secret_id.in_(candidate_ids - bound_elsewhere),
+                _SECRETS.c.integration == source,
+                _SECRETS.c.scope.in_(scopes),
+            )
+        ).all()
+        if (secret.scope, secret.name, secret.context, secret.instance)
+        not in destination_identities
+    ]
+    moved_secret_ids = {secret.secret_id for secret in secrets}
+    for binding in all_bindings:
         if binding.secret_id not in moved_secret_ids:
             continue
         connection.execute(
@@ -127,11 +173,7 @@ def move_secrets(
                 payload={**binding.payload, "integration": destination},
             )
         )
-    for secret in connection.execute(
-        sa.select(_SECRETS.c.secret_id, _SECRETS.c.payload).where(
-            _SECRETS.c.secret_id.in_(moved_secret_ids)
-        )
-    ).all():
+    for secret in secrets:
         connection.execute(
             _SECRETS.update()
             .where(_SECRETS.c.secret_id == secret.secret_id)
