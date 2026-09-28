@@ -4173,7 +4173,15 @@ def create_launchplane_fastapi_app(
         session = human_session_manager.read_cookie(cookie_header, allow_owner=allow_owner)
         if session is None:
             return None
-        if enforce_human_policy_revalidation:
+        if session.identity.role == "owner":
+            # An Owner session stays confined: it is re-checked only for current
+            # ownership and never picks up a policy role mid-session. A later
+            # grant takes effect at the next sign-in.
+            owner_checked = resolve_owner_session_role(session, allow_owner=allow_owner)
+            if owner_checked is None:
+                return None
+            session = owner_checked
+        elif enforce_human_policy_revalidation:
             if not human_session_manager.authorization_claims_are_current(session):
                 human_session_manager.revoke(session)
                 return None
@@ -4185,8 +4193,6 @@ def create_launchplane_fastapi_app(
                 resolved_role: Literal["read_only", "admin", "owner"] = "admin"
             elif current_role == "read_only":
                 resolved_role = "read_only"
-            elif allow_owner and github_id_owns_active_product(session.identity.github_id):
-                resolved_role = "owner"
             else:
                 return None
             if resolved_role != session.identity.role:
@@ -4194,11 +4200,6 @@ def create_launchplane_fastapi_app(
                     session,
                     identity=replace(session.identity, role=resolved_role),
                 )
-        else:
-            owner_checked = resolve_owner_session_role(session, allow_owner=allow_owner)
-            if owner_checked is None:
-                return None
-            session = owner_checked
         renewed_session = human_session_manager.renew_if_needed(session)
         if renewed_session is None:
             return None

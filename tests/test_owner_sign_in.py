@@ -229,6 +229,23 @@ class OwnerSessionHttpTests(unittest.IsolatedAsyncioTestCase):
                 response = await _asgi_get(self.app, path, headers=headers)
                 self.assertEqual(response.status_code, 401, response.text)
 
+    async def test_owner_session_does_not_pick_up_a_later_policy_grant(self) -> None:
+        headers = self.cookie()
+        granted = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            record_store_factory=lambda: self.store,
+            human_session_manager=self.sessions,
+            authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                {"github_humans": [{"github_ids": [OWNER_ID], "roles": ["admin"]}]}
+            ),
+        )
+
+        status = await _asgi_get(granted, "/v1/auth/session", headers=headers)
+        products = await _asgi_get(granted, "/v1/products", headers=headers)
+
+        self.assertEqual(status.json()["identity"]["role"], "owner", status.text)
+        self.assertEqual(products.status_code, 401, products.text)
+
     async def test_owner_role_for_someone_who_owns_nothing_is_refused(self) -> None:
         response = await _asgi_get(
             self.app, "/v1/release-review?product=example-site", headers=self.cookie(9002)
