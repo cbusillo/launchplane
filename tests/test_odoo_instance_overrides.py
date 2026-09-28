@@ -293,7 +293,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             payload.required_container_environment_keys,
             ("ODOO_OVERRIDE_SECRET__ADDON__OPENAI__API_KEY",),
         )
-        self.assertEqual(payload.override_count, 2)
+        self.assertEqual(payload.override_count, 3)
         self.assertEqual(
             payload.to_wire_dict(),
             {
@@ -311,6 +311,11 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                 ],
                 "addon_settings": [
                     {
+                        "addon": "shopify",
+                        "setting": "action",
+                        "value": {"source": "literal", "value": "clear"},
+                    },
+                    {
                         "addon": "openai",
                         "setting": "api-key",
                         "value": {
@@ -318,7 +323,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                             "secret_binding_id": "secret-opw-openai",
                             "environment_variable": "ODOO_OVERRIDE_SECRET__ADDON__OPENAI__API_KEY",
                         },
-                    }
+                    },
                 ],
             },
         )
@@ -389,9 +394,20 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             environment.inline_environment[LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY],
             "true",
         )
-        self.assertNotIn(
-            LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,
-            environment.inline_environment,
+        # A non-production lane without Shopify settings still sends an explicit clear.
+        self.assertEqual(
+            decoded_payload["addon_settings"],
+            [
+                {
+                    "addon": "shopify",
+                    "setting": "action",
+                    "value": {"source": "literal", "value": "clear"},
+                }
+            ],
+        )
+        self.assertEqual(
+            environment.inline_environment[LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY],
+            "true",
         )
 
     def test_preview_website_bootstrap_environment_inherits_only_deploy_bootstrap(self) -> None:

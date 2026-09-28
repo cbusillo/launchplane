@@ -152,7 +152,16 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
 
         wire_payload = payload.to_wire_dict()
         self.assertEqual(wire_payload["config_parameters"], [])
-        self.assertEqual(wire_payload["addon_settings"], [])
+        self.assertEqual(
+            wire_payload["addon_settings"],
+            [
+                {
+                    "addon": "shopify",
+                    "setting": "action",
+                    "value": {"source": "literal", "value": "clear"},
+                }
+            ],
+        )
         website_bootstrap = cast("dict[str, object]", wire_payload["website_bootstrap"])
         routes = cast("list[dict[str, object]]", website_bootstrap["routes"])
         self.assertEqual(website_bootstrap["name"], "Example Site")
