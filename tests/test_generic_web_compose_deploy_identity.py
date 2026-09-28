@@ -9,7 +9,7 @@ unknown.
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 import unittest
 from unittest.mock import patch
 
@@ -40,6 +40,7 @@ from tests import test_generic_web_deploy as generic_web_deploy_tests
 from tests.test_generic_web_deploy import (
     _FakeGenericWebDeployProvider,
     _GenericWebDeployStore,
+    _LegacyFakeGenericWebDeployProvider,
     _profile,
 )
 
@@ -418,7 +419,7 @@ class DurableOperationOutcomeTests(unittest.TestCase):
             self._apply(_UntitledComposeProvider(_runtime(target=_OTHER_ARTIFACT)))
 
 
-class _ComposeLegacyProvider(generic_web_deploy_tests._LegacyFakeGenericWebDeployProvider):
+class _ComposeLegacyProvider(_LegacyFakeGenericWebDeployProvider):
     """A compose target whose deployment is matched only by time, with runtime state."""
 
     def __init__(self, runtime: GenericWebRuntimeArtifactObservation) -> None:
@@ -553,7 +554,7 @@ class RuntimeDeploymentRecordReadTests(unittest.TestCase):
                     "LAUNCHPLANE_DEPLOYMENT_RECORD_ID=deployment-ours",
                 ],
                 "c2": ["MARIADB_ROOT_PASSWORD=secret-value"],
-            }[str(query["containerId"])]
+            }[cast(str, query["containerId"])]
             return {"Config": {"Image": _ARTIFACT, "Env": env}, "State": {"Running": True}}
 
         with patch("control_plane.dokploy.api.dokploy_request", fake_request):
