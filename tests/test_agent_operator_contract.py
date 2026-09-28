@@ -58,6 +58,7 @@ class AgentOperatorContractTests(unittest.TestCase):
             ("GET", "/v1/agent/context"): "read_agent_context",
             ("POST", "/v1/agent/write-intents/evaluate"): "evaluate_agent_write_intent",
             ("POST", "/v1/product-config/apply"): "apply_product_config",
+            ("POST", "/v1/product-config/odoo-addon-settings/apply"): "apply_odoo_addon_settings",
             (
                 "POST",
                 "/v1/work-graph/merge-train/controller/run-once",
@@ -87,6 +88,7 @@ class AgentOperatorContractTests(unittest.TestCase):
             "read_agent_context": ["read_identity"],
             "evaluate_agent_write_intent": ["read_browser_mutation_identity"],
             "apply_product_config": ["read_browser_mutation_identity"],
+            "apply_odoo_addon_settings": ["read_write_identity"],
             "write_merge_train_controller_run_once": ["read_write_identity"],
             "remediate_preview_pr_feedback": ["read_write_identity"],
             "execute_product_retirement": ["read_write_identity"],
