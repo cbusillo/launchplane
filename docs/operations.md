@@ -440,8 +440,12 @@ mutation_in_progress`; a completed effect replays; a different request
   that appears during settling, are ambiguous and still time out. That untitled
   deployment counts as this operation only after the same runtime checks as
   recovery close-out pass: the target is configured for exactly the original
-  immutable image, and the running service containers run it with no other
-  reference of that repository. Otherwise the outcome stays unknown and the
+  immutable image, the running service containers run it with no other
+  reference of that repository, and each of those containers carries this
+  operation's `LAUNCHPLANE_DEPLOYMENT_RECORD_ID` (only that environment value is
+  read), so an earlier or unrelated deploy of the same image cannot stand in for
+  this one. A compose file that does not pass that variable to its containers
+  cannot be proven this way. Otherwise the outcome stays unknown and the
   reservation stays `reconcile_required`. Reconciliation's time-window
   correlation applies the same runtime proof to compose targets, so a retry
   cannot adopt what the initial wait could not prove. Application targets keep

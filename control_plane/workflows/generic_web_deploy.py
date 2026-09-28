@@ -532,6 +532,7 @@ def execute_generic_web_deploy(
                 deploy_provider=resolved_deploy_provider,
                 resolved_deploy_target=prepared_deploy_target,
                 observation=untitled_deployment_observation,
+                deployment_record_id=record_id,
             )
         elif normalized_provider_operation_title:
             provider_deployment_observation = resolved_deploy_provider.observe_artifact_deploy(
@@ -821,12 +822,15 @@ def _prove_untitled_deployment_effect(
     deploy_provider: GenericWebDeployProvider,
     resolved_deploy_target: GenericWebResolvedDeployTarget,
     observation: GenericWebProviderDeploymentObservation,
+    deployment_record_id: str,
 ) -> GenericWebProviderDeploymentObservation:
     """Accept an untitled provider deployment only when its effect is proven.
 
-    The deployment must have succeeded, and the target must be configured for
-    and running exactly the original immutable image, using the same runtime
-    checks as recovery close-out. Anything less keeps the outcome unknown.
+    The deployment must have succeeded, the target must be configured for and
+    running exactly the original immutable image (the recovery close-out
+    checks), and those containers must carry this operation's deployment record
+    id, so an earlier or unrelated deploy of the same image cannot stand in for
+    this one. Anything less keeps the outcome unknown.
     """
 
     if observation.outcome != "present" or not generic_web_provider_deployment_succeeded(
@@ -846,6 +850,7 @@ def _prove_untitled_deployment_effect(
                 resolved_deploy_target=resolved_deploy_target,
             ),
             expected_artifact_reference=resolved_deploy_target.ship_request.artifact_id,
+            expected_deployment_record_id=deployment_record_id,
         )
     except (FileNotFoundError, ValueError) as error:
         raise click.ClickException(

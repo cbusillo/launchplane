@@ -244,7 +244,13 @@ class GenericWebDeployProviderMutationAdapter:
                 if (
                     resolved_target is not None
                     and resolved_target.resolved_target.target_type == "compose"
-                    and self._runtime_close_out_evidence(resolved_target) is None
+                    and self._runtime_close_out_evidence(
+                        resolved_target,
+                        expected_deployment_record_id=self._deployment_record_id(
+                            provider_operation_key
+                        ),
+                    )
+                    is None
                 ):
                     # A compose deployment matched only by time and target is
                     # adopted only when the original image provably runs, the
@@ -363,6 +369,8 @@ class GenericWebDeployProviderMutationAdapter:
     def _runtime_close_out_evidence(
         self,
         resolved_deploy_target: GenericWebResolvedDeployTarget,
+        *,
+        expected_deployment_record_id: str = "",
     ) -> GenericWebRuntimeCloseOutEvidence | None:
         if not isinstance(self._deploy_provider, GenericWebDeployRuntimeArtifactProvider):
             return None
@@ -374,6 +382,7 @@ class GenericWebDeployProviderMutationAdapter:
             return evaluate_generic_web_runtime_close_out(
                 observation=observation,
                 expected_artifact_reference=resolved_deploy_target.ship_request.artifact_id,
+                expected_deployment_record_id=expected_deployment_record_id,
             )
         except (FileNotFoundError, ValueError, click.ClickException):
             return None

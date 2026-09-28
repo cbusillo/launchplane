@@ -19,6 +19,7 @@ from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import runtime_evidence as dokploy_runtime_evidence
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
     ProviderMutationUnknownError,
@@ -271,14 +272,39 @@ class _UntitledComposeProvider(_FakeGenericWebDeployProvider):
         self.runtime_calls += 1
         if isinstance(self.runtime, Exception):
             raise self.runtime
-        return self.runtime
+        return _as_operation(self.runtime, self.runtime_identities[-1].deployment_record_id)
+
+
+_OURS = "<this operation's deployment record id>"
 
 
 def _runtime(
-    *, target: str = _ARTIFACT, running: tuple[str, ...] = (_ARTIFACT, "mariadb:13.0")
+    *,
+    target: str = _ARTIFACT,
+    running: tuple[str, ...] = (_ARTIFACT, "mariadb:13.0"),
+    record_ids: tuple[str, ...] | None = None,
 ) -> GenericWebRuntimeArtifactObservation:
+    """Runtime state; by default every container was created by this operation."""
+
     return GenericWebRuntimeArtifactObservation(
-        target_artifact_reference=target, running_container_images=running
+        target_artifact_reference=target,
+        running_container_images=running,
+        running_container_deployment_record_ids=(
+            record_ids if record_ids is not None else tuple(_OURS for _ in running)
+        ),
+    )
+
+
+def _as_operation(
+    runtime: GenericWebRuntimeArtifactObservation, record_id: str
+) -> GenericWebRuntimeArtifactObservation:
+    return runtime.model_copy(
+        update={
+            "running_container_deployment_record_ids": tuple(
+                record_id if value == _OURS else value
+                for value in runtime.running_container_deployment_record_ids
+            )
+        }
     )
 
 
@@ -316,6 +342,10 @@ class UntitledDeploymentProofTests(unittest.TestCase):
             "target configured for another image": _runtime(target=_OTHER_ARTIFACT),
             "another image still running": _runtime(running=(_ARTIFACT, _OTHER_ARTIFACT)),
             "original image not running": _runtime(running=("mariadb:13.0",)),
+            "same image from an earlier deploy": _runtime(
+                record_ids=("deployment-earlier", "deployment-earlier")
+            ),
+            "container record ids unavailable": _runtime(record_ids=()),
             "runtime read fails": click.ClickException("read failed"),
         }
         for name, runtime in cases.items():
@@ -409,7 +439,9 @@ class _ComposeLegacyProvider(generic_web_deploy_tests._LegacyFakeGenericWebDeplo
 
     def observe_runtime_artifact(self, **_kwargs: object) -> GenericWebRuntimeArtifactObservation:
         self.runtime_calls += 1
-        return self.runtime
+        return _as_operation(self.runtime, self.operation_record_id)
+
+    operation_record_id = ""
 
 
 class ComposeReconciliationProofTests(unittest.TestCase):
@@ -424,6 +456,9 @@ class ComposeReconciliationProofTests(unittest.TestCase):
             provider=provider,
             deploy_request=_request(),
         )
+        provider.operation_record_id = adapter._deployment_record_id(
+            "provider-operation:compose-retry"
+        )
         return adapter.observe_with_effect_started_at(
             "provider-operation:compose-retry",
             "deploy_trigger",
@@ -436,6 +471,13 @@ class ComposeReconciliationProofTests(unittest.TestCase):
 
         self.assertEqual(self._observe(provider), "present")
         self.assertEqual(provider.runtime_calls, 1)
+
+    def test_time_matched_compose_deployment_is_held_when_an_earlier_deploy_runs(self) -> None:
+        provider = _ComposeLegacyProvider(
+            _runtime(record_ids=("deployment-earlier", "deployment-earlier"))
+        )
+
+        self.assertEqual(self._observe(provider), "unknown")
 
     def test_time_matched_compose_deployment_is_held_when_another_image_runs(self) -> None:
         provider = _ComposeLegacyProvider(_runtime(running=(_ARTIFACT, _OTHER_ARTIFACT)))
@@ -495,6 +537,32 @@ class DokployProviderIdentityTests(unittest.TestCase):
 
         with self.assertRaises(click.ClickException):
             self._execute("compose", incomplete)
+
+
+class RuntimeDeploymentRecordReadTests(unittest.TestCase):
+    def test_reads_only_the_deployment_record_id_from_container_env(self) -> None:
+        def fake_request(*, path: str, query: dict[str, object], **_kwargs: object) -> object:
+            if path == "/api/docker.getContainersByAppNameMatch":
+                return [
+                    {"containerId": "c1", "name": "app-x1-sync-1", "state": "running"},
+                    {"containerId": "c2", "name": "app-x1-db-1", "state": "running"},
+                ]
+            env = {
+                "c1": [
+                    "REPAIRSHOPR_TOKEN=secret-value",
+                    "LAUNCHPLANE_DEPLOYMENT_RECORD_ID=deployment-ours",
+                ],
+                "c2": ["MARIADB_ROOT_PASSWORD=secret-value"],
+            }[str(query["containerId"])]
+            return {"Config": {"Image": _ARTIFACT, "Env": env}, "State": {"Running": True}}
+
+        with patch("control_plane.dokploy.api.dokploy_request", fake_request):
+            containers = dokploy_runtime_evidence.fetch_compose_running_container_runtime(
+                host="https://dokploy.example", token="token", app_name="app-x1"
+            )
+
+        self.assertEqual(containers, ((_ARTIFACT, "deployment-ours"), (_ARTIFACT, "")))
+        self.assertNotIn("secret-value", repr(containers))
 
 
 if __name__ == "__main__":
