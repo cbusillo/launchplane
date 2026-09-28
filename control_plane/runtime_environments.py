@@ -171,11 +171,13 @@ def resolve_app_runtime_environment(
         # Without attribution nothing can be withheld as Launchplane's own, so
         # every finding refuses.
         sources = {}
-    app_values, withheld_keys = _apply_platform_credential_policy(
+    app_values, withheld = _apply_platform_credential_policy(
         values=values, sources=sources, target=f"{context_name}/{instance_name}"
     )
     return AppRuntimeEnvironment(
-        values=app_values, retired_keys=retired_keys, withheld_launchplane_keys=withheld_keys
+        values=app_values,
+        retired_keys=retired_keys,
+        withheld_launchplane_keys=withheld,
     )
 
 
