@@ -224,8 +224,9 @@ revision, and intent to the reusable generic-web promotion workflow, with the
 intent also used as the raw live request's `Idempotency-Key`. The raw driver
 validates those values against current testing and production evidence, so
 evidence or target changes after browser review fail closed instead of
-promoting a different artifact. Intent-less raw live automation requires the
-separate `generic_web_prod_promotion.execute_unreviewed` grant.
+promoting a different artifact. Intent-less raw live automation needs either a
+recorded approval of the current release checklist or the separate
+`generic_web_prod_promotion.execute_unreviewed` grant.
 
 The `prod_rollback_plan` action routes to
 `POST /v1/drivers/generic-web/prod-rollback-plan`. It is a safe-write planner:
