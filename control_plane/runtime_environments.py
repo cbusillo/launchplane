@@ -11,6 +11,7 @@ from control_plane.contracts.runtime_environment_record import RuntimeEnvironmen
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.dokploy import source as dokploy_source
+from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 
 DEFAULT_RUNTIME_ENVIRONMENTS_FILE = "config/runtime-environments.toml"
 
@@ -110,6 +111,56 @@ def resolve_runtime_environment_values(
         instance_name=instance_name,
         database_url=database_url,
     )
+
+
+@dataclass(frozen=True)
+class SiteRuntimeEnvironment:
+    values: dict[str, str]
+    secret_keys: frozenset[str]
+
+
+def resolve_site_runtime_environment(
+    *,
+    control_plane_root: Path,
+    context_name: str,
+    instance_name: str,
+    database_url: str | None = None,
+) -> SiteRuntimeEnvironment:
+    """The environment a site's lane runs with: its own values and nothing else.
+
+    Values shared by every product and Launchplane's own credentials are left out. Secrets
+    shared across the site reach its testing and prod lanes, never a preview.
+    """
+    definition = load_runtime_environment_definition(
+        control_plane_root=control_plane_root,
+        database_url=database_url,
+    )
+    context_definition = definition.contexts.get(context_name)
+    if context_definition is None:
+        raise MissingRuntimeContextDefinitionError(
+            f"Runtime environments file has no context definition for {context_name!r}."
+        )
+    values = _normalize_scalar_map(context_definition.shared_env)
+    instance_definition = context_definition.instances.get(instance_name)
+    if instance_definition is not None:
+        values.update(_normalize_scalar_map(instance_definition.env))
+    values.update(
+        resolve_tracked_target_environment_values(
+            control_plane_root=control_plane_root,
+            context_name=context_name,
+            instance_name=instance_name,
+            database_url=database_url,
+        )
+    )
+    secret_values = control_plane_secrets.resolve_site_secret_values(
+        context_name=context_name,
+        instance_name=instance_name,
+        include_site_shared=runtime_key_safety_environment_class(instance_name)
+        in {"prod", "testing"},
+        database_url=database_url,
+    )
+    values.update(secret_values)
+    return SiteRuntimeEnvironment(values=values, secret_keys=frozenset(secret_values))
 
 
 def resolve_values_from_definition(
