@@ -40,6 +40,7 @@ from control_plane.workflows.verireel_billing_recovery_schedule import (
     restore_verireel_billing_recovery_schedule,
 )
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
+from control_plane import runtime_platform_credentials
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
@@ -705,6 +706,11 @@ def _configure_application(
     application_id = str(application.get("applicationId") or "").strip()
     if not application_id:
         raise click.ClickException("Preview application payload is missing applicationId.")
+    dokploy_api.refuse_app_runtime_env_write(
+        env_text=env_text,
+        current_env_text=str(application.get("env") or ""),
+        target=f"preview application {application_id}",
+    )
     endpoint_spec = template_application.get("endpointSpecSwarm") or {"Mode": "dnsrr"}
     dokploy_api.dokploy_request(
         host=host,
@@ -1211,6 +1217,16 @@ def execute_verireel_preview_refresh(
         raise VeriReelPreviewRefreshConfigError(
             "VeriReel testing template application is missing DATABASE_URL."
         )
+    try:
+        # The preview copies the whole template env, so a platform credential
+        # there would reach unmerged pull-request code.
+        runtime_platform_credentials.refuse_platform_credentials(
+            template_env_map,
+            target=f"VeriReel preview {request.preview_slug}",
+            source=f"the {template_target.context}/{template_target.instance} template application env",
+        )
+    except runtime_platform_credentials.PlatformCredentialRefusedError as exc:
+        raise VeriReelPreviewRefreshConfigError(str(exc.message)) from exc
     _enforce_verireel_preview_runtime_key_safety(
         record_store=record_store,
         template_target=template_target,

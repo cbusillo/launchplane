@@ -10,6 +10,7 @@ from pydantic import Field, model_validator
 
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane import runtime_platform_credentials
 from control_plane.contracts.artifact_dependency_provenance import (
     normalize_artifact_git_commit,
     normalize_artifact_sha256_digest,
@@ -897,11 +898,21 @@ def _odoo_preview_service_environment_values(
         return {}
     preview_profile = profile.preview
     template_instance = preview_profile.template_instance.strip()
-    environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
-        control_plane_root=control_plane_root_path,
-        context_name=preview_profile.context,
-        instance_name=template_instance,
-        database_url=database_url,
+    # The preview runs unmerged code, so it gets only what the template lane's
+    # app runtime may hold: Launchplane's own context credentials (such as the
+    # preview PR-comment token) are withheld and other platform credentials refused.
+    environment_values = dict(
+        control_plane_runtime_environments.resolve_app_runtime_environment(
+            control_plane_root=control_plane_root_path,
+            context_name=preview_profile.context,
+            instance_name=template_instance,
+            database_url=database_url,
+        ).values
+    )
+    runtime_platform_credentials.refuse_platform_credentials(
+        preview_profile.override_env,
+        target=f"{profile.product} preview {plan.compose_name}",
+        source="the product profile preview override_env",
     )
     environment_values.update(preview_profile.override_env)
     try:

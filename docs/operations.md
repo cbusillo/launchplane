@@ -2225,6 +2225,28 @@ return a typed blocked result rather than guessing a domain.
   restore removed values; recovery requires a separately reviewed application
   configuration or managed secret update. Do not roll the service back to a
   version that cannot read nonempty version-2 runtime records.
+- Platform credentials never reach an app runtime. Every path that renders or
+  writes an app runtime environment (live-target runtime sync, ship and
+  promotion, Odoo stable bootstrap and target replacement, backup restore, and
+  Odoo, generic-web and VeriReel previews) refuses `GITHUB_TOKEN`, `GH_TOKEN`,
+  `DOKPLOY_TOKEN`, `DOKPLOY_HOST`, Launchplane's own service and operator
+  tokens, and any value shaped like a GitHub token (`ghp_`, `gho_`, `ghs_`,
+  `github_pat_` and similar). The error names the key and its source, never
+  the value. The one exception is global- and context-scope records, where
+  Launchplane keeps its own operating credentials such as the preview
+  PR-comment token: those named keys are withheld from the app instead of
+  refused. Record-driven writers resolve through one shared function, so they
+  also drop the lane's `retired_provider_keys`. The Dokploy env write itself
+  refuses any platform credential it would add or change; an unchanged legacy
+  value is preserved until retired. Launchplane's own service target is the
+  only exempt target.
+- To find legacy platform credentials already in provider env, read the
+  `provider_env_platform_credentials` block of a live-target runtime dry-run
+  (key names only), or run the host-only, read-only
+  `launchplane environments platform-credential-report [--context C]
+  [--instance I]` across tracked lanes. Remove what it lists through
+  `retired_provider_keys` and a live-target runtime sync; the report deletes
+  nothing.
 - `POST /v1/secrets/reencrypt` is a legacy migration boundary, not a shared or
   production root-rotation path. It always refuses `mode: "dry-run"` with
   `privileged_operation_planning_required` and `mode: "apply"` with

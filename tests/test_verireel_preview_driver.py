@@ -19,6 +19,7 @@ from control_plane.contracts.secret_record import SecretBinding
 from control_plane.dokploy import DokployTargetDefinition
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewDestroyRequest
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshRequest
+from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshConfigError
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshTransportError
 from control_plane.workflows.verireel_preview_driver import _build_preview_runtime_identity
 from control_plane.workflows.verireel_preview_driver import _build_preview_database_command
@@ -643,6 +644,38 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                     record_store=None,
                 )
 
+        run_command.assert_not_called()
+
+    def test_preview_refresh_refuses_template_platform_credential(self) -> None:
+        with (
+            patch(
+                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._template_application_payload",
+                return_value=(
+                    _template_target(),
+                    {
+                        "applicationId": "app-template",
+                        "env": "DATABASE_URL=postgresql://user:pass@db.example/verireel_testing\nGITHUB_TOKEN=template-token-value\n",
+                    },
+                ),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._run_application_command"
+            ) as run_command,
+        ):
+            with self.assertRaises(VeriReelPreviewRefreshConfigError) as refusal:
+                execute_verireel_preview_refresh(
+                    control_plane_root=Path("."),
+                    request=_refresh_request(),
+                    record_store=None,
+                )
+
+        self.assertIn("GITHUB_TOKEN", refusal.exception.message)
+        self.assertIn("template application env", refusal.exception.message)
+        self.assertNotIn("template-token-value", refusal.exception.message)
         run_command.assert_not_called()
 
     def test_preview_refresh_maps_source_of_truth_backend_failure_to_transport(self) -> None:
