@@ -297,6 +297,7 @@ def execute_launchplane_self_deploy(
             target_id=request.target_id,
             target_payload=target_payload,
             env_text=updated_env_text,
+            launchplane_service_target=True,
         )
     dokploy_api.trigger_deployment(
         host=host,

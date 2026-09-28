@@ -11,6 +11,8 @@ from urllib.request import Request, urlopen
 
 import click
 
+from control_plane import runtime_platform_credentials
+
 
 DEFAULT_DOKPLOY_LOG_LINE_COUNT = 200
 MAX_DOKPLOY_LOG_LINE_COUNT = 1000
@@ -769,6 +771,16 @@ def serialize_dokploy_env_text(env_map: dict[str, str]) -> str:
     return "\n".join(rendered_lines)
 
 
+def refuse_app_runtime_env_write(*, env_text: str, current_env_text: str, target: str) -> None:
+    """Refuse an app runtime env write that adds or changes a platform credential."""
+
+    runtime_platform_credentials.refuse_introduced_platform_credentials(
+        env_map=parse_dokploy_env_text(env_text),
+        current_env_map=parse_dokploy_env_text(current_env_text),
+        target=target,
+    )
+
+
 def update_dokploy_target_env(
     *,
     host: str,
@@ -777,7 +789,21 @@ def update_dokploy_target_env(
     target_id: str,
     target_payload: JsonObject,
     env_text: str,
+    launchplane_service_target: bool = False,
 ) -> None:
+    """Write a target's provider env.
+
+    App runtime targets refuse any platform credential the write adds or
+    changes. ``launchplane_service_target`` is only for Launchplane's own
+    service target, whose env holds Launchplane's bootstrap credentials.
+    """
+
+    if not launchplane_service_target:
+        refuse_app_runtime_env_write(
+            env_text=env_text,
+            current_env_text=str(target_payload.get("env") or ""),
+            target=f"Dokploy {target_type} {target_id}",
+        )
     if target_type == "compose":
         dokploy_request(
             host=host,

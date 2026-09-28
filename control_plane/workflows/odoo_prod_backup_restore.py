@@ -702,8 +702,15 @@ def execute_odoo_prod_backup_restore_apply(
                 if key in {"required", "status", "policy_record_id", "policy_sha256"}
             }
         )
-        desired_env = dict(current_env)
-        desired_env.update(runtime_values)
+        desired_env = control_plane_runtime_environments.merge_provider_environment(
+            current_env_map=current_env,
+            desired_env_map=runtime_values,
+            retired_keys=control_plane_runtime_environments.retired_provider_keys_from_store(
+                record_store=record_store,
+                context_name=plan.context,
+                instance_name=plan.instance,
+            ),
+        )
         desired_env["ODOO_DATA_VOLUME"] = plan.data_volume
         desired_env["ODOO_LOG_VOLUME"] = plan.log_volume
         desired_env["ODOO_DB_VOLUME"] = plan.new_db_volume
@@ -1339,13 +1346,23 @@ def _runtime_values_from_store(
         raise click.ClickException(
             "Odoo production backup restore requires DB-backed runtime environment records."
         )
-    values = control_plane_runtime_environments.resolve_values_from_definition(
+    # Keep the existing refusal for a lane without runtime-environment records.
+    control_plane_runtime_environments.resolve_values_from_definition(
         definition=definition,
         context_name=context,
         instance_name=instance,
     )
-    values.update(target_record.env)
-    return {key: str(value) for key, value in values.items()}
+    return control_plane_runtime_environments.resolve_app_values_from_definition(
+        definition=definition,
+        context_name=context,
+        instance_name=instance,
+        target_env={key: str(value) for key, value in target_record.env.items()},
+        retired_keys=control_plane_runtime_environments.retired_provider_keys_from_store(
+            record_store=record_store,
+            context_name=context,
+            instance_name=instance,
+        ),
+    )
 
 
 def _normalized_absolute_path(

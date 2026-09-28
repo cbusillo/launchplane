@@ -7,6 +7,7 @@ import time
 
 import click
 
+from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.cli_shared import (
     DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS,
@@ -409,6 +410,24 @@ def environments_show_live_target(context_name: str, instance_name: str) -> None
     payload = callbacks.build_live_target_runtime_contract_payload(
         context_name=context_name,
         instance_name=instance_name,
+    )
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@environments.command("platform-credential-report")
+@click.option("--context", "context_name", default="")
+@click.option("--instance", "instance_name", default="")
+def environments_platform_credential_report(context_name: str, instance_name: str) -> None:
+    """List platform credentials already in tracked lanes' provider env (read-only).
+
+    Names only. Removal stays with product-config retired_provider_keys and a
+    live-target-runtime sync.
+    """
+
+    payload = control_plane_live_target_runtime.report_lane_provider_env_platform_credentials(
+        control_plane_root=_runtime_environment_callbacks().control_plane_root(),
+        context_name=context_name.strip(),
+        instance_name=instance_name.strip(),
     )
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
