@@ -5753,6 +5753,16 @@ def _human_session_payload(session: LaunchplaneHumanSession) -> PayloadDict:
     }
 
 
+def _human_session_role(value: object) -> Literal["read_only", "admin", "owner"]:
+    # Keep "owner" distinct: widening it to read_only would admit an Owner
+    # session to general routes.
+    if value == "admin":
+        return "admin"
+    if value == "owner":
+        return "owner"
+    return "read_only"
+
+
 def _human_session_from_payload(payload: PayloadDict) -> LaunchplaneHumanSession:
     identity_payload = payload.get("identity")
     if not isinstance(identity_payload, dict):
@@ -5778,7 +5788,7 @@ def _human_session_from_payload(payload: PayloadDict) -> LaunchplaneHumanSession
                 str(value) for value in identity_payload.get("organizations", [])
             ),
             teams=frozenset(str(value) for value in identity_payload.get("teams", [])),
-            role="admin" if identity_payload.get("role") == "admin" else "read_only",
+            role=_human_session_role(identity_payload.get("role")),
         ),
     )
 

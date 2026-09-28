@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +42,7 @@ class _DeterministicGitHubOAuthLoginClient:
         code: str,
         code_verifier: str,
         authz_policy: LaunchplaneAuthzPolicy,
+        is_product_owner: Callable[[int], bool] | None = None,
     ) -> GitHubHumanIdentity:
         return GitHubHumanIdentity(
             login="launchplane-docs",

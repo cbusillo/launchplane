@@ -160,6 +160,7 @@ export function App() {
   useEffect(() => {
     if (
       authState.status !== "signed_in" ||
+      authState.identity?.role === "owner" ||
       route.kind === "engineering" ||
       route.kind === "owner-review" || route.kind === "owner-secrets"
     ) {
@@ -286,6 +287,27 @@ export function App() {
         theme={theme}
       >
         {route.kind === "owner-secrets" ? <OwnerSecretInputsRoute fixtureMode={fixtureMode} /> : <OwnerProductReviewRoute fixtureMode={fixtureMode} />}
+      </OwnerReviewShell>
+    );
+  }
+
+  // A product Owner's session opens only the Owner review pages.
+  if (authState.identity.role === "owner") {
+    return (
+      <OwnerReviewShell
+        title="Product review"
+        identity={authState.identity}
+        notice={sessionNotice}
+        onDismissNotice={() => setSessionNotice("")}
+        onLogout={() => void signOut()}
+        onThemeChange={setTheme}
+        signingOut={signingOut}
+        theme={theme}
+      >
+        <p className="owner-review-note">
+          You are signed in as a product Owner. Open the review link you were sent to
+          review a release.
+        </p>
       </OwnerReviewShell>
     );
   }

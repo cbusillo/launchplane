@@ -6,7 +6,16 @@ title: Owner Review and Retired Acceptance History
 
 The Owner named on the product profile reviews a preview at `/ui/owner-review`.
 The signed-in GitHub user's immutable id must equal `owner.github_id` before
-Launchplane accepts a product-review decision. A decision merges and deploys
+Launchplane accepts a product-review decision.
+
+An Owner does not need an authorization policy role to sign in. When GitHub
+sign-in finds no policy role but the user is the named Owner of an active
+product, Launchplane issues an `owner` session. That session is accepted only by
+session status, sign-out, product review, release review, and Owner secret
+entry; every other route refuses it, and it never satisfies a policy rule. Each
+of those routes still checks that the viewer is the named Owner of the requested
+product. The session ends when the person stops being the named Owner of any
+active product. A decision merges and deploys
 nothing. The release checklist is a separate decision bound to the testing
 candidate and its change list. See [release-review.md](release-review.md) and the
 Product Review API in [service-boundary.md](service-boundary.md).

@@ -601,7 +601,7 @@ export type GitHubHumanIdentityResponse = {
     name: string;
     organizations: Array<string>;
     provider: 'github';
-    role: 'read_only' | 'admin';
+    role: 'read_only' | 'admin' | 'owner';
     teams: Array<string>;
 };
 

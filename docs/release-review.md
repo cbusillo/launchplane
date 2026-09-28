@@ -29,7 +29,9 @@ release and backup checks.
 `GET /v1/release-review?product=<product>` serves the same checklist to the Owner
 and to callers already permitted to read the product or promote it. Decisions
 use `POST /v1/release-review/decisions` and the existing GitHub human session and
-CSRF protection. An automation token cannot submit an Owner decision. Identity
+CSRF protection. The named Owner signs in without any policy role; see
+[Owner review](owner-acceptance.md). An automation token cannot submit an Owner
+decision. Identity
 comes from the session, never from the request body. The product record's
 immutable Owner GitHub ID decides who can accept or request changes; separate
 Owner policies and grants are not used.
