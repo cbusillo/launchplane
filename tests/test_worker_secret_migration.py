@@ -57,7 +57,9 @@ class WorkerSecretMigrationTests(unittest.TestCase):
         ):
             self.store.write_runtime_environment_record(record)
 
-    def write(self, *, integration: str, key: str, value: str, instance: str = "prod"):
+    def write(
+        self, *, integration: str, key: str, value: str, instance: str = "prod"
+    ) -> dict[str, str]:
         return control_plane_secrets.write_secret_value(
             record_store=self.store,
             scope="context_instance" if instance else "context",
