@@ -13,6 +13,7 @@ import click
 from pydantic import ValidationError
 
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane import secrets as control_plane_secrets
 from control_plane import release_tuples as control_plane_release_tuples
 from control_plane.contracts.github_pull_request_event import (
     GitHubPullRequestEvent,
@@ -1297,6 +1298,12 @@ def _resolve_companion_sources(
 
 def resolve_launchplane_github_token(*, control_plane_root: Path, context_name: str) -> str:
     try:
+        token = control_plane_secrets.resolve_launchplane_service_secret(
+            context_name=context_name, binding_key=LAUNCHPLANE_GITHUB_TOKEN_ENV_KEY
+        )
+        if token:
+            return token
+        # A token kept as a plain context setting stays readable until it moves.
         context_values = control_plane_runtime_environments.resolve_runtime_context_values(
             control_plane_root=control_plane_root,
             context_name=context_name,

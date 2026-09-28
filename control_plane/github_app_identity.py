@@ -15,6 +15,7 @@ import jwt
 import click
 
 from control_plane import runtime_environments
+from control_plane import secrets as control_plane_secrets
 from control_plane.github_payload import json_object, required_positive_int, required_string_text
 from control_plane.workflows.launchplane import github_api_request
 
@@ -152,14 +153,18 @@ def resolve_advisory_github_app_identity(*, control_plane_root: Path) -> GitHubA
             control_plane_root=control_plane_root,
             context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
         )
+        private_key = (
+            control_plane_secrets.resolve_launchplane_service_secret(
+                context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
+                binding_key=ADVISORY_GITHUB_APP_PRIVATE_KEY_ENV_KEY,
+            )
+            or values.get(ADVISORY_GITHUB_APP_PRIVATE_KEY_ENV_KEY, "").strip()
+        ).replace("\\n", "\n")
     except click.ClickException as error:
         raise GitHubAppIdentityError(
             "Launchplane advisory GitHub App identity is unavailable."
         ) from error
     raw_app_id = values.get(ADVISORY_GITHUB_APP_ID_ENV_KEY, "").strip()
-    private_key = (
-        values.get(ADVISORY_GITHUB_APP_PRIVATE_KEY_ENV_KEY, "").strip().replace("\\n", "\n")
-    )
     if not raw_app_id.isdecimal() or int(raw_app_id) < 1 or not private_key:
         raise GitHubAppIdentityError("Launchplane advisory GitHub App identity is unavailable.")
     return GitHubAppIdentity(app_id=int(raw_app_id), private_key=private_key)
