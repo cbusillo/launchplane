@@ -9,7 +9,11 @@ commit range at `/ui/owner-review?product=<product>`. No GitHub interaction is
 required to read the checklist, accept it, or request changes.
 
 The review leads with the product, the viewer's Owner or operator role, the
-testing-site link, and the changes to check. A collapsed **Technical details**
+testing-site link, and **What to test**. Pull requests with identical Owner test
+notes appear as one check listing each change it covers, and a change missing
+notes appears as its own check. Changes whose notes begin with
+`Nothing for the owner to test` collapse into one expandable count. This grouping
+is display only: the checklist, its digest, and blockers remain per pull request. A collapsed **Technical details**
 section identifies the **Current production version** and **Proposed production
 version** (currently in testing). Accepting records approval for that proposed
 version to become production; requesting changes replaces earlier approval or

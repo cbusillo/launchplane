@@ -190,13 +190,43 @@
   padding-inline-start: 1.5rem;
 }
 
-.release-review-checklist li {
+.release-review-checklist > li {
   margin-block: 0.75rem;
   overflow-wrap: anywhere;
 }
 
 .release-review-notes {
+  margin-block-end: 0.4rem;
   white-space: pre-wrap;
+}
+
+.release-review-changes,
+.release-review-untested ul {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0;
+  padding-inline-start: 1.25rem;
+  color: var(--muted);
+}
+
+.release-review-changes span,
+.release-review-untested li span {
+  display: block;
+  font-size: 0.9em;
+}
+
+.release-review-untested {
+  margin-block: 1rem;
+  overflow-wrap: anywhere;
+}
+
+.release-review-untested summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.release-review-untested ul {
+  margin-block-start: 0.75rem;
 }
 
 .owner-review-latest {

@@ -15,7 +15,13 @@ test("Owner reviews the complete release and can request changes after accepting
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
   await expect(page.getByRole("heading", { name: "Review this release" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Open the testing site" })).toHaveAttribute("href", "https://testing.example.invalid/");
-  await expect(page.getByText("On a phone, confirm the booking button is visible.", { exact: false })).toBeVisible();
+  const checks = page.locator(".release-review-checklist > li");
+  await expect(checks).toHaveCount(1);
+  await expect(checks.getByText("On a phone, confirm the booking button is visible.", { exact: false })).toBeVisible();
+  await expect(checks.locator(".release-review-changes > li")).toHaveCount(2);
+  const untested = page.locator(".release-review-untested");
+  await expect(untested.getByText("2 changes need nothing from you")).toBeVisible();
+  await expect(untested.getByText("Speed up CI")).toBeHidden();
   await expect(page.getByRole("button", { name: "Request changes" })).toBeDisabled();
   const versions = page.locator(".release-review-technical");
   await expect(versions.locator("dl")).toBeHidden();

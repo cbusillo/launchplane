@@ -3198,7 +3198,10 @@ export function releaseReviewForFixture(mode: string): import("./generated/opena
         candidate: { artifact_id: "testing-image", source_commit: "b".repeat(40), shared_addons_digest: "" },
         untracked_commits: [],
         additional_changes: additionalChanges,
-        items: [{ pull_request_number: 42, title: "Make the repair options easier to find", url: "https://github.com/example/site/pull/42", head_sha: "c".repeat(40), merge_commit: "b".repeat(40), owner_test_notes: "Open Services and confirm each repair option has a clear price.\nOn a phone, confirm the booking button is visible.", already_reviewed: true }],
+        items: [{ pull_request_number: 42, title: "Make the repair options easier to find", url: "https://github.com/example/site/pull/42", head_sha: "c".repeat(40), merge_commit: "b".repeat(40), owner_test_notes: "Open Services and confirm each repair option has a clear price.\nOn a phone, confirm the booking button is visible.", already_reviewed: true },
+          { pull_request_number: 44, title: "Bump the app-dependencies group", url: "https://github.com/example/site/pull/44", head_sha: "d".repeat(40), merge_commit: "b".repeat(40), owner_test_notes: "Nothing for the owner to test. Automated dependency update, covered by CI.", already_reviewed: false },
+          { pull_request_number: 45, title: "Tighten the repair price layout", url: "https://github.com/example/site/pull/45", head_sha: "e".repeat(40), merge_commit: "b".repeat(40), owner_test_notes: "Open Services and confirm each repair option has a clear price.\nOn a phone, confirm the booking button is visible.", already_reviewed: false },
+          { pull_request_number: 46, title: "Speed up CI", url: "https://github.com/example/site/pull/46", head_sha: "f".repeat(40), merge_commit: "b".repeat(40), owner_test_notes: "Nothing for the owner to test. CI only.", already_reviewed: false }],
       },
     },
   };

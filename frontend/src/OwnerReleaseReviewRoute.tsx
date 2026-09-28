@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { readReleaseReview, writeReleaseReviewDecision } from "./api";
 import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
 import type { ReleaseReviewDecisionEnvelope, ReleaseReviewResponse } from "./generated/openapi.ts";
+import { groupReleaseItems, untestedReason } from "./release-review-model";
 import { safeExternalUrl } from "./url";
 
 export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: string; fixtureMode: DevFixtureMode }) {
@@ -52,6 +53,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
 
   const checklist = response?.review.checklist;
   const latestDecision = response?.review.latest_decision;
+  const grouped = checklist ? groupReleaseItems(checklist.items) : null;
   const testingUrl = checklist ? safeExternalUrl(checklist.testing_url) : null;
   const incomplete = !checklist || !checklist.owner_github_id || !testingUrl || checklist.untracked_commits.length > 0 || checklist.additional_changes.length > 0 || checklist.items.some(item => !item.owner_test_notes.trim());
   return <section className="owner-review-page">
@@ -73,13 +75,22 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
         {latestDecision.reason ? <blockquote>{latestDecision.reason}</blockquote> : null}
         {!latestDecision.release_issue_url ? <p role="alert" className="owner-review-alert">Decision saved, but its release record has not been published. Approval cannot be used for deployment yet. Retry the same decision to publish its record.</p> : null}
       </section> : null}
-      {checklist ? <>
-        <h3>Changes to review</h3>
-        {checklist.items.length ? <ol className="release-review-checklist">{checklist.items.map(item => <li key={item.pull_request_number}>
-          <h3>{item.title}</h3>
-          <p>{item.already_reviewed ? `${response.viewer_is_owner ? "You" : "The Owner"} accepted this change in its preview. Check it again as part of this release.` : "Not previously accepted in preview."}</p>
-          <p className="release-review-notes">{item.owner_test_notes || "Owner test notes are missing for this change."}</p>
-        </li>)}</ol> : <p>No merged pull request changes between these versions.</p>}
+      {checklist && grouped ? <>
+        <h3>What to test</h3>
+        {grouped.checks.length ? <ol className="release-review-checklist">{grouped.checks.map(check => <li key={check.items[0].pull_request_number}>
+          <p className="release-review-notes">{check.notes || "Owner test notes are missing for this change."}</p>
+          <ul className="release-review-changes">{check.items.map(item => <li key={item.pull_request_number}>
+            {item.title}
+            {item.already_reviewed ? <span>{`${response.viewer_is_owner ? "You" : "The Owner"} accepted this change in its preview. Check it again as part of this release.`}</span> : null}
+          </li>)}</ul>
+        </li>)}</ol> : <p>{checklist.items.length ? "Nothing in this release needs you to test it." : "No merged pull request changes between these versions."}</p>}
+        {grouped.nothingToTest.length ? <details className="release-review-untested">
+          <summary>{grouped.nothingToTest.length === 1 ? "1 change needs nothing from you" : `${grouped.nothingToTest.length} changes need nothing from you`}</summary>
+          <ul>{grouped.nothingToTest.map(item => <li key={item.pull_request_number}>
+            {item.title}
+            {untestedReason(item.owner_test_notes) ? <span>{untestedReason(item.owner_test_notes)}</span> : null}
+          </li>)}</ul>
+        </details> : null}
       </> : null}
       {response.review.blockers.length ? <ul>{response.review.blockers.map(blocker => <li key={blocker}>{blocker}</li>)}</ul> : null}
       {checklist && response.viewer_is_owner ? <section className="owner-review-action" aria-label="Owner release decision">
