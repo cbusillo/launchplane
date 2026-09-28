@@ -129,8 +129,11 @@ def _runtime_configuration_blockers(
     resolved_runtime_values: dict[str, str],
     application_runtime_keys: set[str],
     data_source_mode: str,
+    retired_provider_keys: set[str] | None = None,
 ) -> tuple[str, ...]:
-    configured_keys = current_env.keys() | resolved_runtime_values.keys()
+    configured_keys = (current_env.keys() | resolved_runtime_values.keys()) - (
+        retired_provider_keys or set()
+    )
     compose_keys = set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)", compose_file))
     required_declarations = compose_keys & configured_keys
     if data_source_mode == "upstream_restore":
@@ -221,6 +224,7 @@ class OdooStableTargetReplacementPlan(BaseModel):
     allow_empty_data: bool = False
     data_source_mode: Literal["existing", "empty", "upstream_restore"] = "existing"
     approval_issue_url: str = ""
+    retired_provider_keys: tuple[str, ...] = ()
     blockers: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     steps: tuple[OdooStableTargetReplacementStep, ...] = ()
@@ -1068,6 +1072,7 @@ def build_odoo_stable_target_replacement_plan(
     current_target: OdooStableTargetRuntimeSnapshot | None = None
     desired_volume_values: dict[str, str] = {}
     volume_authority_drift_keys: tuple[str, ...] = ()
+    retired_provider_keys: set[str] = set()
     if target_record is None:
         blockers.append("Launchplane has no Dokploy target record for this lane.")
     if target_id_record is None:
@@ -1159,6 +1164,17 @@ def build_odoo_stable_target_replacement_plan(
                 application_runtime_keys.update(
                     override.payload.required_container_environment_keys
                 )
+            retired_provider_keys = (
+                control_plane_runtime_environments.retired_provider_keys_from_store(
+                    record_store=record_store,
+                    context_name=lane.context,
+                    instance_name=lane.instance,
+                )
+            )
+            control_plane_live_target_runtime.validate_provider_key_retirement(
+                retired_keys=retired_provider_keys,
+                application_keys=application_runtime_keys | ODOO_REPLACEMENT_DRIVER_ENV_KEYS,
+            )
             blockers.extend(
                 _runtime_configuration_blockers(
                     compose_file=dokploy_compose.render_odoo_raw_compose_file(
@@ -1170,6 +1186,7 @@ def build_odoo_stable_target_replacement_plan(
                     resolved_runtime_values=recorded_runtime_values,
                     application_runtime_keys=application_runtime_keys,
                     data_source_mode=request.data_source_mode,
+                    retired_provider_keys=retired_provider_keys,
                 )
             )
         except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
@@ -1251,6 +1268,7 @@ def build_odoo_stable_target_replacement_plan(
         allow_empty_data=request.allow_empty_data,
         data_source_mode=request.data_source_mode,
         approval_issue_url=approval_issue_url,
+        retired_provider_keys=tuple(sorted(retired_provider_keys)),
         blockers=blockers_tuple,
         warnings=tuple(warnings),
         steps=_build_steps(
@@ -1518,6 +1536,21 @@ def execute_odoo_stable_target_replacement_apply(
                 application_runtime_keys.update(
                     runtime_override_payload.required_container_environment_keys
                 )
+            retired_provider_keys = (
+                control_plane_runtime_environments.retired_provider_keys_from_store(
+                    record_store=record_store,
+                    context_name=plan.context,
+                    instance_name=plan.instance,
+                )
+            )
+            if retired_provider_keys != set(plan.retired_provider_keys):
+                raise click.ClickException(
+                    "Provider key retirement changed during execution; review current configuration."
+                )
+            control_plane_live_target_runtime.validate_provider_key_retirement(
+                retired_keys=retired_provider_keys,
+                application_keys=application_runtime_keys | ODOO_REPLACEMENT_DRIVER_ENV_KEYS,
+            )
             non_application_provider_keys = dokploy_api.parse_dokploy_env_text(
                 dokploy_api.serialize_dokploy_env_text(
                     {
@@ -1588,6 +1621,7 @@ def execute_odoo_stable_target_replacement_apply(
             resolved_runtime_values=unfiltered_runtime_values,
             application_runtime_keys=application_runtime_keys,
             data_source_mode=request.data_source_mode,
+            retired_provider_keys=retired_provider_keys,
         )
         if configuration_blockers:
             raise click.ClickException("; ".join(configuration_blockers))
@@ -1597,6 +1631,7 @@ def execute_odoo_stable_target_replacement_apply(
             - application_runtime_keys
             - ODOO_REPLACEMENT_DRIVER_ENV_KEYS
             - non_application_provider_keys
+            - retired_provider_keys
             if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
         }
         if undeclared_provider_keys:
@@ -1623,6 +1658,11 @@ def execute_odoo_stable_target_replacement_apply(
                 current_env_map.keys() - application_runtime_keys - ODOO_REPLACEMENT_DRIVER_ENV_KEYS
             )
         )
+        if retired_provider_keys:
+            runtime_source["retired_provider_keys"] = ",".join(sorted(retired_provider_keys))
+            runtime_source["retired_provider_key_count"] = str(
+                len(retired_provider_keys & current_env_map.keys())
+            )
         runtime_source.update(
             {
                 f"rendered_{key}": value
@@ -1763,6 +1803,10 @@ def execute_odoo_stable_target_replacement_apply(
         refreshed_env_map = dokploy_api.parse_dokploy_env_text(
             str(refreshed_payload.get("env") or "")
         )
+        if retired_provider_keys & refreshed_env_map.keys():
+            raise click.ClickException(
+                "Odoo target replacement did not remove every retired provider key."
+            )
         missing_keys = sorted(
             key for key, value in desired_env_map.items() if refreshed_env_map.get(key, "") != value
         )

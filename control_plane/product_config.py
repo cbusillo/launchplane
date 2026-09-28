@@ -3,14 +3,17 @@ from __future__ import annotations
 import json
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Literal, Protocol, TypedDict, cast
+from typing import Literal, NotRequired, Protocol, TypedDict, cast
 
 import click
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentScope
-from control_plane.contracts.runtime_environment_record import ScalarValue
+from control_plane.contracts.runtime_environment_record import (
+    ScalarValue,
+    normalize_retired_provider_keys,
+)
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeKeySafetyTarget,
@@ -60,6 +63,14 @@ class _SecretBindingLookupKwargs(TypedDict, total=False):
     limit: int | None
 
 
+class _ProductConfigRuntimeInput(TypedDict):
+    scope: str
+    context: str
+    instance: str
+    env: dict[str, object]
+    retired_provider_keys: NotRequired[tuple[str, ...] | None]
+
+
 class _ProductConfigSecretWritePlan(TypedDict):
     secret_id: str
     action: str
@@ -98,8 +109,8 @@ def load_product_config_apply_payload(input_file: Path) -> dict[str, object]:
 
 def validate_product_config_schema_version(payload: dict[str, object]) -> None:
     schema_version = payload.get("schema_version", 1)
-    if schema_version != 1:
-        raise ProductConfigError("Product config input schema_version must be 1.")
+    if type(schema_version) is not int or schema_version not in {1, 2}:
+        raise ProductConfigError("Product config input schema_version must be 1 or 2.")
 
 
 def required_text(payload: dict[str, object], key: str, *, default: str = "") -> str:
@@ -131,6 +142,7 @@ def summarize_runtime_environment_record(record: RuntimeEnvironmentRecord) -> di
         "source_label": record.source_label,
         "env_keys": sorted(record.env.keys()),
         "env_value_count": len(record.env),
+        "retired_provider_keys": list(record.retired_provider_keys),
     }
 
 
@@ -147,17 +159,20 @@ def normalize_product_config_payload(payload: dict[str, object]) -> dict[str, ob
         context_name=context_name,
         instance_name=instance_name,
     )
+    normalized_runtime_input: dict[str, object] = {
+        "scope": runtime_input["scope"],
+        "context": runtime_input["context"],
+        "instance": runtime_input["instance"],
+        "env": runtime_env,
+    }
+    if runtime_input.get("retired_provider_keys") is not None:
+        normalized_runtime_input["retired_provider_keys"] = runtime_input["retired_provider_keys"]
     return {
-        "schema_version": 1,
+        "schema_version": payload.get("schema_version", 1),
         "product": product,
         "context": context_name,
         "instance": instance_name,
-        "runtime_env": {
-            "scope": runtime_input["scope"],
-            "context": runtime_input["context"],
-            "instance": runtime_input["instance"],
-            "env": runtime_env,
-        },
+        "runtime_env": normalized_runtime_input,
         "secrets": [dict(secret) for secret in secrets],
     }
 
@@ -196,7 +211,7 @@ def plan_product_config_authority_bundle(
     product = str(normalized_payload["product"])
     context_name = str(normalized_payload["context"])
     instance_name = str(normalized_payload["instance"])
-    runtime_input = cast(dict[str, object], normalized_payload["runtime_env"])
+    runtime_input = cast(_ProductConfigRuntimeInput, normalized_payload["runtime_env"])
     runtime_env = cast(dict[str, ScalarValue], runtime_input["env"])
     secrets = tuple(cast(list[dict[str, object]], normalized_payload["secrets"]))
     _require_product_config_master_key_if_needed(secrets)
@@ -208,6 +223,7 @@ def plan_product_config_authority_bundle(
         context_name=str(runtime_input["context"]),
         instance_name=str(runtime_input["instance"]),
         env=runtime_env,
+        retired_provider_keys=runtime_input.get("retired_provider_keys"),
         source_label=source_label,
     )
     secret_summaries: list[dict[str, object]] = []
@@ -338,7 +354,7 @@ def _default_secret_scope(*, context_name: str, instance_name: str) -> str:
 
 def _product_config_runtime_input(
     payload: dict[str, object], *, context_name: str, instance_name: str
-) -> dict[str, object]:
+) -> _ProductConfigRuntimeInput:
     runtime_payload = payload.get("runtime_env", payload.get("runtime_environment", {}))
     if runtime_payload is None:
         return {
@@ -346,6 +362,7 @@ def _product_config_runtime_input(
             "context": context_name,
             "instance": instance_name,
             "env": {},
+            "retired_provider_keys": None,
         }
     if not isinstance(runtime_payload, dict):
         raise ProductConfigError("Product config runtime_env must be a JSON object.")
@@ -359,7 +376,7 @@ def _product_config_runtime_input(
         raw_env = {
             key: value
             for key, value in runtime_payload.items()
-            if key not in {"scope", "context", "instance"}
+            if key not in {"scope", "context", "instance", "retired_provider_keys"}
         }
     runtime_context = str(runtime_payload.get("context", context_name) or "").strip()
     runtime_instance = str(runtime_payload.get("instance", instance_name) or "").strip()
@@ -382,11 +399,27 @@ def _product_config_runtime_input(
         expected_context=context_name,
         expected_instance=instance_name,
     )
+    retired_keys = None
+    if (
+        "retired_provider_keys" in runtime_payload
+        and runtime_payload["retired_provider_keys"] is not None
+    ):
+        if payload.get("schema_version", 1) != 2:
+            raise ProductConfigError(
+                "Provider key retirement requires product-config schema version 2."
+            )
+        try:
+            retired_keys = normalize_retired_provider_keys(runtime_payload["retired_provider_keys"])
+        except ValueError as error:
+            raise ProductConfigError(str(error)) from error
+        if scope != "instance":
+            raise ProductConfigError("Provider key retirement requires an instance-scoped request.")
     return {
         "scope": scope,
         "context": runtime_context,
         "instance": runtime_instance,
         "env": raw_env,
+        "retired_provider_keys": retired_keys,
     }
 
 
@@ -890,6 +923,7 @@ def _plan_product_config_runtime_environment(
     instance_name: str,
     env: dict[str, ScalarValue],
     source_label: str,
+    retired_provider_keys: tuple[str, ...] | None = None,
 ) -> tuple[RuntimeEnvironmentRecord | None, dict[str, object]]:
     _validate_runtime_environment_scope_route(
         scope=scope,
@@ -902,7 +936,7 @@ def _plan_product_config_runtime_environment(
         context_name=context_name,
         instance_name=instance_name,
     )
-    if not env:
+    if not env and retired_provider_keys is None:
         return (
             None,
             {
@@ -917,10 +951,21 @@ def _plan_product_config_runtime_environment(
             },
         )
     current_values = dict(target_record.env) if target_record is not None else {}
+    previous_retired_keys = target_record.retired_provider_keys if target_record is not None else ()
+    planned_retired_keys = (
+        previous_retired_keys if retired_provider_keys is None else retired_provider_keys
+    )
+    if set(planned_retired_keys) & (current_values.keys() | env.keys()):
+        raise ProductConfigError("A provider key cannot be both configured and retired.")
+    if not current_values and not env:
+        raise ProductConfigError("Provider key retirement requires existing runtime values.")
     changed_keys = sorted(
-        key_name
-        for key_name, value in env.items()
-        if key_name not in current_values or str(current_values[key_name]) != str(value)
+        {
+            key_name
+            for key_name, value in env.items()
+            if key_name not in current_values or str(current_values[key_name]) != str(value)
+        }
+        | (set(previous_retired_keys) ^ set(planned_retired_keys))
     )
     unchanged_keys = sorted(key_name for key_name in env if key_name not in changed_keys)
     action = "created" if target_record is None else "updated"
@@ -932,10 +977,12 @@ def _plan_product_config_runtime_environment(
         target_record
         if not changed_keys and target_record is not None
         else RuntimeEnvironmentRecord(
+            schema_version=2 if planned_retired_keys else 1,
             scope=cast(RuntimeEnvironmentScope, scope),
             context=context_name,
             instance=instance_name,
             env=planned_values,
+            retired_provider_keys=planned_retired_keys,
             updated_at=utc_now_timestamp(),
             source_label=source_label.strip() or "product-config-apply",
         )
@@ -951,6 +998,8 @@ def _plan_product_config_runtime_environment(
             "changed_keys": changed_keys,
             "unchanged_keys": unchanged_keys,
             "env_value_count_after": len(planned_values),
+            "retired_provider_keys_before": list(previous_retired_keys),
+            "retired_provider_keys_after": list(planned_retired_keys),
         },
     )
 

@@ -20489,6 +20489,13 @@
             "title": "Instance",
             "type": "string"
           },
+          "retired_provider_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Retired Provider Keys",
+            "type": "array"
+          },
           "scope": {
             "enum": [
               "global",
@@ -20512,6 +20519,7 @@
           "env_keys",
           "env_value_count",
           "instance",
+          "retired_provider_keys",
           "scope",
           "source_label",
           "updated_at"
@@ -20570,6 +20578,20 @@
             ],
             "x-launchplane-optional-response": true
           },
+          "retired_provider_keys_after": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Retired Provider Keys After",
+            "type": "array"
+          },
+          "retired_provider_keys_before": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Retired Provider Keys Before",
+            "type": "array"
+          },
           "scope": {
             "enum": [
               "global",
@@ -20594,6 +20616,8 @@
           "env_value_count_after",
           "instance",
           "keys",
+          "retired_provider_keys_after",
+          "retired_provider_keys_before",
           "scope",
           "unchanged_keys"
         ],
@@ -27922,6 +27946,15 @@
             "default": "",
             "title": "Instance",
             "type": "string"
+          },
+          "retired_provider_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Retired Provider Keys",
+            "type": "array",
+            "x-launchplane-optional-response": true
           },
           "schema_version": {
             "default": 1,

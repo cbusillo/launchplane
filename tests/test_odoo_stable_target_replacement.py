@@ -1481,6 +1481,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 updated_at="2026-06-13T18:00:00Z",
             ),
         )
+        store.runtime_environment_records = tuple(
+            record.model_copy(
+                update={"schema_version": 2, "retired_provider_keys": ("LEGACY_PASSWORD",)}
+            )
+            if record.scope == "instance"
+            else record
+            for record in store.runtime_environment_records
+        )
         persisted_env = ""
         persisted_compose_file = "services: {}"
         domain_records: list[JsonValue] = []
@@ -1507,6 +1515,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     or "\n".join(
                         (
                             *_DATABASE_ENV_LINES,
+                            "LEGACY_PASSWORD=old-provider-secret",
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -1884,6 +1893,12 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             final_deployment.runtime_source["odoo_install_modules"],
             "launchplane_settings,disable_odoo_online,cm_website",
         )
+        self.assertNotIn("LEGACY_PASSWORD", persisted_env)
+        self.assertEqual(final_deployment.runtime_source["retired_provider_key_count"], "1")
+        self.assertEqual(
+            final_deployment.runtime_source["retired_provider_keys"], "LEGACY_PASSWORD"
+        )
+        self.assertNotIn("old-provider-secret", json.dumps(result.model_dump(mode="json")))
         self.assertEqual(result.runtime_source, final_deployment.runtime_source)
         assert final_deployment.runtime_identity is not None
         self.assertEqual(final_deployment.runtime_identity.product, "odoo-tenant-cm")
@@ -2979,9 +2994,18 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     target_id_record=_target_id_record(),
                     inventory=_inventory(),
                 )
+                store.runtime_environment_records = tuple(
+                    record.model_copy(
+                        update={"schema_version": 2, "retired_provider_keys": ("LEGACY_PASSWORD",)}
+                    )
+                    if record.scope == "instance"
+                    else record
+                    for record in store.runtime_environment_records
+                )
                 provider_env = "\n".join(
                     (
                         *_DATABASE_ENV_LINES,
+                        "LEGACY_PASSWORD=old-provider-secret",
                         "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                         "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                         "ODOO_DB_VOLUME=cm_testing_odoo_db",
