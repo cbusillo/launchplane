@@ -38429,10 +38429,6 @@
             "title": "Scope",
             "type": "string"
           },
-          "source_label": {
-            "title": "Source Label",
-            "type": "string"
-          },
           "updated_at": {
             "title": "Updated At",
             "type": "string"
@@ -38443,8 +38439,7 @@
           "context",
           "instance",
           "keys",
-          "updated_at",
-          "source_label"
+          "updated_at"
         ],
         "title": "RuntimeSettingNames",
         "type": "object"

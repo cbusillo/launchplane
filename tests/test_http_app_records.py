@@ -609,7 +609,8 @@ class FastApiRuntimeSettingNamesTests(unittest.IsolatedAsyncioTestCase):
                         instance=instance,
                         env=cast(dict[str, str | int | float | bool], env),
                         updated_at="2026-09-28T00:00:00Z",
-                        source_label="test",
+                        # Free text; a label must never become a way to read a value.
+                        source_label=f"import {next(iter(env))}={next(iter(env.values()))}",
                     )
                 )
             app = create_launchplane_fastapi_app(

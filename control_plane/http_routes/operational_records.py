@@ -133,7 +133,6 @@ class RuntimeSettingNames(BaseModel):
     instance: str
     keys: tuple[str, ...]
     updated_at: str
-    source_label: str
 
 
 class RuntimeSettingNamesResponse(BaseModel):
@@ -740,7 +739,6 @@ def register_managed_secret_read_routes(
                     instance=record.instance,
                     keys=tuple(sorted(record.env)),
                     updated_at=record.updated_at,
-                    source_label=record.source_label,
                 )
                 for record in records
             ),
