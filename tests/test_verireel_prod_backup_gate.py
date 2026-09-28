@@ -25,6 +25,7 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows import verireel_prod_backup_gate_worker
 from control_plane.workflows.verireel_prod_backup_gate import (
+    _resolve_worker_runtime_environment,
     DEFAULT_TIMEOUT_SECONDS,
     _run_delegated_worker,
     enqueue_verireel_prod_backup_gate,
@@ -237,6 +238,32 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
                         )
             finally:
                 stores[1].close()
+
+    def test_worker_takes_ssh_keys_only_from_the_worker_store(self) -> None:
+        with (
+            patch(
+                "control_plane.workflows.verireel_prod_backup_gate.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={
+                    "VERIREEL_PROD_PROXMOX_HOST": "proxmox.runtime.example",
+                    "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY": "inherited-private-key",
+                    "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS": "inherited-known-hosts",
+                },
+            ),
+            patch(
+                "control_plane.workflows.verireel_prod_backup_gate.control_plane_secrets.resolve_lane_worker_secret_values",
+                return_value={},
+            ),
+        ):
+            values = _resolve_worker_runtime_environment(
+                control_plane_root=Path("."),
+                request=VeriReelProdBackupGateWorkerRequest(
+                    context="verireel",
+                    instance="prod",
+                    backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                ),
+            )
+
+        self.assertEqual(values, {"VERIREEL_PROD_PROXMOX_HOST": "proxmox.runtime.example"})
 
     def test_run_delegated_worker_prefers_runtime_environment_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

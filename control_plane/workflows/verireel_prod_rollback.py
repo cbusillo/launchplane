@@ -115,6 +115,9 @@ class VeriReelProdRollbackResult(BaseModel):
 
 
 WORKER_COMMAND_ENV_VAR = "LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND"
+WORKER_SSH_KEYS = frozenset(
+    {"VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY", "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS"}
+)
 WORKER_RUNTIME_ENV_KEYS = (
     WORKER_COMMAND_ENV_VAR,
     "VERIREEL_PROD_PROXMOX_HOST",
@@ -321,7 +324,11 @@ def _resolve_worker_runtime_environment(
         )
     except click.ClickException:
         resolved_values = {}
-    # Worker settings come from the lane's runtime environment; its SSH keys from the worker store.
+    # Worker settings come from the lane's runtime environment; its SSH keys only from the
+    # worker store, never an inherited runtime secret.
+    resolved_values = {
+        key: value for key, value in resolved_values.items() if key not in WORKER_SSH_KEYS
+    }
     resolved_values.update(
         control_plane_secrets.resolve_lane_worker_secret_values(
             context_name=request.context,

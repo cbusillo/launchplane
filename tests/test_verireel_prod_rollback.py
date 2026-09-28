@@ -18,6 +18,7 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows import verireel_prod_rollback_worker
 from control_plane.workflows.verireel_prod_rollback import (
+    _resolve_worker_runtime_environment,
     VeriReelProdRollbackRequest,
     VeriReelProdRollbackWorkerRequest,
     VeriReelProdRollbackWorkerResult,
@@ -327,6 +328,34 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
                         start_after_rollback=False,
                     )
                 )
+
+    def test_worker_takes_ssh_keys_only_from_the_worker_store(self) -> None:
+        with (
+            patch(
+                "control_plane.workflows.verireel_prod_rollback.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={
+                    "VERIREEL_PROD_PROXMOX_HOST": "proxmox.runtime.example",
+                    "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY": "inherited-private-key",
+                    "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS": "inherited-known-hosts",
+                },
+            ),
+            patch(
+                "control_plane.workflows.verireel_prod_rollback.control_plane_secrets.resolve_lane_worker_secret_values",
+                return_value={},
+            ),
+        ):
+            values = _resolve_worker_runtime_environment(
+                control_plane_root=Path("."),
+                request=VeriReelProdRollbackWorkerRequest(
+                    context="verireel",
+                    instance="prod",
+                    promotion_record_id="promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                    backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                    snapshot_name="ver-predeploy-20260421-180000",
+                ),
+            )
+
+        self.assertEqual(values, {"VERIREEL_PROD_PROXMOX_HOST": "proxmox.runtime.example"})
 
     def test_run_delegated_worker_rejects_process_environment_worker_config(self) -> None:
         with (
