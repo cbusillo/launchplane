@@ -16,11 +16,14 @@ from unittest.mock import patch
 import click
 
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
-from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.dokploy import api as dokploy_api
-from control_plane.provider_operations import ProviderMutationUnknownError
+from control_plane.provider_operations import (
+    ProviderMutationOutcome,
+    ProviderMutationUnknownError,
+    ProviderOperationLease,
+)
 from control_plane.workflows.dokploy_deploy import execute_dokploy_artifact_deploy
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployRequest,
@@ -133,7 +136,6 @@ def _compose_ship_request() -> tuple[ShipRequest, ResolvedTargetEvidence]:
             provider_target_type="compose",
             deploy_mode="dokploy-compose-api",
             verify_health=False,
-            destination_health=HealthcheckEvidence(status="skipped"),
         ),
         ResolvedTargetEvidence(
             target_type="compose", target_id="compose-1", target_name="example-compose"
@@ -333,10 +335,19 @@ class UntitledDeploymentProofTests(unittest.TestCase):
         self.assertEqual(result.deploy_status, "fail")
 
 
+class _NoopLease(ProviderOperationLease):
+    def assert_current(self) -> None:
+        pass
+
+    def checkpoint_effect(self, phase: str) -> None:
+        del phase
+
+
 class DurableOperationOutcomeTests(unittest.TestCase):
     """The durable adapter completes a proven deploy and holds an unproven one."""
 
-    def _apply(self, provider: _UntitledComposeProvider) -> object:
+    @staticmethod
+    def _apply(provider: _UntitledComposeProvider) -> ProviderMutationOutcome:
         profile = _profile()
         store = _GenericWebDeployStore(profile)
         adapter = generic_web_deploy_tests.GenericWebDeployTests._provider_mutation_adapter(
@@ -346,20 +357,15 @@ class DurableOperationOutcomeTests(unittest.TestCase):
             deploy_request=_request(),
         )
 
-        class _Lease:
-            def assert_current(self) -> None:
-                return None
-
-            def checkpoint_effect(self, _phase: str) -> None:
-                return None
-
-        return adapter.apply("provider-operation:compose-identity", _Lease())
+        return adapter.apply("provider-operation:compose-identity", _NoopLease())
 
     def test_proven_untitled_deploy_completes_durably(self) -> None:
         outcome = self._apply(_UntitledComposeProvider(_runtime()))
 
-        self.assertTrue(getattr(outcome, "durable"))
-        self.assertEqual(getattr(outcome, "response_payload")["result"]["deploy_status"], "pass")
+        self.assertTrue(outcome.durable)
+        result = outcome.response_payload["result"]
+        assert isinstance(result, dict)
+        self.assertEqual(result["deploy_status"], "pass")
 
     def test_unproven_untitled_deploy_stays_unknown(self) -> None:
         with self.assertRaises(ProviderMutationUnknownError):
@@ -367,8 +373,8 @@ class DurableOperationOutcomeTests(unittest.TestCase):
 
 
 class DokployProviderIdentityTests(unittest.TestCase):
+    @staticmethod
     def _execute(
-        self,
         target_type: Literal["compose", "application"],
         returned: dokploy_api.JsonObject | None,
     ) -> tuple[object, bool]:
