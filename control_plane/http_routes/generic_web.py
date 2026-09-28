@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path as FilePath
@@ -162,6 +163,21 @@ __all__ = [
     "register_generic_web_rollback_write_routes",
     "register_generic_web_write_routes",
 ]
+
+
+_LOGGER = logging.getLogger(__name__)
+
+
+# Callers get a generic message; operators need the real cause, so record it
+# with the trace ID the caller received.
+def _log_masked_promotion_error(error: BaseException, *, trace_id: str) -> None:
+    _LOGGER.error(
+        "generic web prod promotion failed trace_id=%s error=%s: %s",
+        trace_id,
+        type(error).__name__,
+        error,
+        exc_info=error,
+    )
 
 
 class _GenericWebProdPromotionProviderMutationAdapter:
@@ -484,21 +500,28 @@ def build_generic_web_write_route_handlers(
         )
         return current_profile == profile and current_lane == lane, status.release_review
 
-    # A recorded approval of the current release checklist is the reviewed human
-    # "go" for exactly that build, so it authorizes a live promotion the same way
-    # a promotion intent does. A release that needs no review does not count.
-    def current_release_approval_recorded(
+    # Compiling the release checklist reads every pull request in the release,
+    # so one evaluation serves both checks made before the operation is reserved.
+    def evaluate_current_release(
         *,
         record_store: object,
         profile: LaunchplaneProductProfileRecord,
         lane: ProductLaneProfile,
-    ) -> bool:
+    ) -> tuple[bool, ReleaseReviewStatus] | Exception:
         try:
-            unchanged, decision = read_current_release_review(
+            return read_current_release_review(
                 record_store=record_store, profile=profile, lane=lane
             )
-        except (AttributeError, FileNotFoundError, ValueError, click.ClickException):
+        except (AttributeError, FileNotFoundError, ValueError, click.ClickException) as error:
+            return error
+
+    # A recorded approval of the current release checklist is the reviewed human
+    # "go" for exactly that build, so it authorizes a live promotion the same way
+    # a promotion intent does. A release that needs no review does not count.
+    def release_approval_recorded(evaluation: tuple[bool, ReleaseReviewStatus] | Exception) -> bool:
+        if isinstance(evaluation, Exception):
             return False
+        unchanged, decision = evaluation
         return unchanged and decision.required and decision.approved
 
     def require_current_release_approval(
@@ -507,18 +530,20 @@ def build_generic_web_write_route_handlers(
         profile: LaunchplaneProductProfileRecord,
         lane: ProductLaneProfile,
         trace_id: str,
+        evaluation: tuple[bool, ReleaseReviewStatus] | Exception | None = None,
     ) -> None:
-        try:
-            unchanged, decision = read_current_release_review(
+        if evaluation is None:
+            evaluation = evaluate_current_release(
                 record_store=record_store, profile=profile, lane=lane
             )
-        except (AttributeError, FileNotFoundError, ValueError, click.ClickException) as error:
+        if isinstance(evaluation, Exception):
             raise dependencies.http_error(
                 status_code=409,
                 trace_id=trace_id,
                 code="release_review_unavailable",
                 message="Owner release approval could not be evaluated for live promotion.",
-            ) from error
+            ) from evaluation
+        unchanged, decision = evaluation
         if not unchanged or (decision.required and not decision.approved):
             raise dependencies.http_error(
                 status_code=409,
@@ -1434,7 +1459,11 @@ def build_generic_web_write_route_handlers(
             )
         live_promotion = not promotion_request.promotion.dry_run
         promotion_intent_id = promotion_request.promotion.promotion_intent_id.strip()
+        release_evaluation: tuple[bool, ReleaseReviewStatus] | Exception | None = None
         if live_promotion:
+            release_evaluation = evaluate_current_release(
+                record_store=record_store, profile=profile, lane=lane
+            )
             if (
                 not promotion_intent_id
                 and not dependencies.authorization_allows(
@@ -1443,9 +1472,7 @@ def build_generic_web_write_route_handlers(
                     product=profile.product,
                     context=lane.context.strip(),
                 )
-                and not current_release_approval_recorded(
-                    record_store=record_store, profile=profile, lane=lane
-                )
+                and not release_approval_recorded(release_evaluation)
             ):
                 raise dependencies.http_error(
                     status_code=403,
@@ -1492,6 +1519,7 @@ def build_generic_web_write_route_handlers(
                 profile=profile,
                 lane=lane,
                 trace_id=trace_id,
+                evaluation=release_evaluation,
             )
 
             def validate_live_promotion(
@@ -1554,6 +1582,7 @@ def build_generic_web_write_route_handlers(
                     message=f"No Launchplane route for {_GENERIC_WEB_PROD_PROMOTION_ROUTE}.",
                 ) from error
             except (ValueError, click.ClickException) as error:
+                _log_masked_promotion_error(error, trace_id=trace_id)
                 raise dependencies.http_error(
                     status_code=400,
                     trace_id=trace_id,
@@ -1577,6 +1606,7 @@ def build_generic_web_write_route_handlers(
                 message=f"No Launchplane route for {_GENERIC_WEB_PROD_PROMOTION_ROUTE}.",
             ) from error
         except (ValueError, click.ClickException) as error:
+            _log_masked_promotion_error(error, trace_id=trace_id)
             raise dependencies.http_error(
                 status_code=400,
                 trace_id=trace_id,
