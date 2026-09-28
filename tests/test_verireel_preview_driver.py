@@ -356,6 +356,22 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             (),
         )
 
+    def test_template_credentials_are_found_by_name_or_embedded_password(self) -> None:
+        self.assertEqual(
+            _verireel_template_runtime_secret_keys(
+                {
+                    "POSTGRES_PASSWORD": "pg",
+                    "PGPASSWORD": "pg",
+                    "STRIPE_APIKEY": "sk",
+                    "REDIS_URL": "redis://default:redis-pass@redis.example:6379",
+                    "S3_ENDPOINT": "https://s3.example",
+                    "NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY": "pk_test",
+                    "APP_MODE": "testing",
+                }
+            ),
+            ("POSTGRES_PASSWORD", "PGPASSWORD", "STRIPE_APIKEY", "REDIS_URL"),
+        )
+
     def test_resolve_preview_secret_rotates_copied_template_values(self) -> None:
         self.assertEqual(
             _resolve_preview_secret(

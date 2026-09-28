@@ -406,8 +406,10 @@ decryption key state denies the reveal or resolution.
   The driver generates each preview's own `DATABASE_URL` (its own database
   role and password), `BETTER_AUTH_SECRET`, `VERIREEL_SECRETS_MASTER_KEY`,
   `VERIREEL_CRON_SECRET`, and `VERIREEL_SMOKE_MAINTENANCE_SECRET`, and drops
-  every other secret-shaped template key. Previews run unmerged code, so no
-  testing secret reaches them and no key-safety policy is consulted.
+  every other template key that looks like a credential: a name containing
+  `PASSWORD`, `PASSWD`, `TOKEN`, `SECRET`, `KEY`, or `CREDENTIAL`, or a URL value
+  with an embedded password. `NEXT_PUBLIC_*` keys are browser-bundled and kept.
+  Previews run unmerged code, so no key-safety policy is consulted.
 - Delegated backup and rollback workers read their SSH credentials from the
   `launchplane_worker` store for exactly their lane. That store is never part of
   an app's environment, so no policy gate is needed before the worker starts.

@@ -20,9 +20,6 @@ from control_plane.contracts.runtime_identity import (
     health_payload_runtime_identity_status,
     runtime_identity_env,
 )
-from control_plane.runtime_key_safety import (
-    is_secret_shaped_runtime_key,
-)
 from control_plane.workflows.preview_resource_destroy import (
     destroy_dokploy_preview_resource,
 )
@@ -362,9 +359,24 @@ def _verireel_template_runtime_secret_keys(
             continue
         if normalized_key in _PREVIEW_REFRESH_GENERATED_ENV_KEYS:
             continue
-        if is_secret_shaped_runtime_key(normalized_key):
+        if _looks_like_template_credential(normalized_key, str(value)):
             required_keys.append(normalized_key)
     return tuple(dict.fromkeys(required_keys))
+
+
+_CREDENTIAL_NAME_PARTS = ("PASSWORD", "PASSWD", "TOKEN", "SECRET", "KEY", "CREDENTIAL")
+
+
+def _looks_like_template_credential(key: str, value: str) -> bool:
+    # Browser-bundled values are public by definition.
+    if key.upper().startswith("NEXT_PUBLIC_"):
+        return False
+    if any(part in key.upper() for part in _CREDENTIAL_NAME_PARTS):
+        return True
+    try:
+        return bool(urlparse(value.strip()).password)
+    except ValueError:
+        return False
 
 
 def _build_admin_database_url(database_url: str) -> str:
