@@ -402,16 +402,14 @@ decryption key state denies the reveal or resolution.
   entries that combine an exact preview context with `instance_patterns`, for
   example `pr-*`. Use paired patterns for reusable preview lanes instead of
   adding one-off PR instance names to policy records or broadening stable scope.
-- Product-specific preview drivers that derive runtime secrets from a template,
-  such as VeriReel's preview database bootstrap, must run the same metadata-only
-  gate before creating databases, rendering preview env, or starting preview
-  instances. Template secret-shaped keys copied into the preview must resolve to
-  managed template-lane bindings, and the active policy must allow those
-  bindings for the preview target. Template values that the driver rewrites for
-  each preview, such as VeriReel's generated `DATABASE_URL`,
-  `BETTER_AUTH_SECRET`, `VERIREEL_SECRETS_MASTER_KEY`,
-  `VERIREEL_CRON_SECRET`, and `VERIREEL_SMOKE_MAINTENANCE_SECRET`, are not
-  copied template secrets.
+- VeriReel previews copy the testing template's settings but never its secrets.
+  The driver generates each preview's own `DATABASE_URL` (its own database
+  role and password), `BETTER_AUTH_SECRET`, `VERIREEL_SECRETS_MASTER_KEY`,
+  `VERIREEL_CRON_SECRET`, and `VERIREEL_SMOKE_MAINTENANCE_SECRET`, and drops
+  every other template key that looks like a credential: a name containing
+  `PASSWORD`, `PASSWD`, `TOKEN`, `SECRET`, `KEY`, or `CREDENTIAL`, or a URL value
+  with an embedded password. `NEXT_PUBLIC_*` keys are browser-bundled and kept.
+  Previews run unmerged code, so no key-safety policy is consulted.
 - Delegated backup and rollback workers read their SSH credentials from the
   `launchplane_worker` store for exactly their lane. That store is never part of
   an app's environment, so no policy gate is needed before the worker starts.
