@@ -463,6 +463,7 @@ def resolve_secret_values_for_integration_from_store(
             integration=integration,
             context_name=context_name,
             instance_name=instance_name,
+            exact_lane_only=exact_lane_only,
         ).items()
     }
 
@@ -473,6 +474,7 @@ def resolve_scoped_secret_values_for_integration_from_store(
     integration: str,
     context_name: str = "",
     instance_name: str = "",
+    exact_lane_only: bool = False,
 ) -> dict[str, tuple[str, SecretScope]]:
     """Return each effective binding value with the scope of the record that supplied it."""
 
