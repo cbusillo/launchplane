@@ -13821,13 +13821,13 @@ def create_launchplane_fastapi_app(
                 retirement_profile = database_store.read_product_profile_record(
                     product_config_request.product
                 )
-                application_keys = (
-                    control_plane_live_target_runtime.require_product_profile_runtime_keys(
-                        record_store=database_store,
-                        product_name=product_config_request.product,
-                        context_name=product_config_request.context,
-                        instance_name=product_config_request.instance,
-                    )
+                # A site lane needs no declaration (#2568); an empty declaration
+                # still protects driver keys, and the sync rechecks site values.
+                application_keys = control_plane_live_target_runtime.product_lane_declared_keys(
+                    record_store=database_store,
+                    product_name=product_config_request.product,
+                    context_name=product_config_request.context,
+                    instance_name=product_config_request.instance,
                 )
                 control_plane_live_target_runtime.validate_provider_key_retirement(
                     retired_keys=set(retired_provider_keys), application_keys=application_keys
