@@ -35,12 +35,15 @@ from control_plane.workflows.generic_web_deploy import (
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebDeployLegacyCorrelationProvider,
     GenericWebDeployProvider,
+    GenericWebDeployRuntimeArtifactProvider,
     GenericWebLegacyDeploymentCorrelation,
     GenericWebProviderDeploymentObservation,
     GenericWebResolvedDeployTarget,
+    GenericWebRuntimeCloseOutEvidence,
     build_generic_web_provider_reconciliation_key,
     build_generic_web_provider_target_key,
     default_generic_web_deploy_provider,
+    evaluate_generic_web_runtime_close_out,
     generic_web_provider_deployment_succeeded,
     resolve_generic_web_provider_reconciliation_target,
 )
@@ -95,6 +98,14 @@ class GenericWebDeployProviderMutationAdapter:
         self._trace_id = trace_id
         self._deploy_provider: GenericWebDeployProvider = default_generic_web_deploy_provider()
         self._resolved_deploy_target: GenericWebResolvedDeployTarget | None = None
+
+    @property
+    def profile(self) -> LaunchplaneProductProfileRecord:
+        return self._profile
+
+    @property
+    def lane(self) -> ProductLaneProfile:
+        return self._lane
 
     def _resolve_deploy_target(self) -> GenericWebResolvedDeployTarget:
         if self._resolved_deploy_target is None:
@@ -320,6 +331,33 @@ class GenericWebDeployProviderMutationAdapter:
             return None, "provider_status_unknown", ""
         except (FileNotFoundError, click.ClickException):
             return None, "provider_read_failed", "provider_request_failed"
+
+    def inspect_runtime_close_out(
+        self,
+        *,
+        resolved_deploy_target: GenericWebResolvedDeployTarget,
+    ) -> GenericWebRuntimeCloseOutEvidence | None:
+        """Return close-out evidence only when the original image provably runs.
+
+        Any unsupported provider, post-deploy phase, read failure, or mismatch
+        returns ``None`` so the caller keeps holding the reservation.
+        """
+
+        if generic_web_post_deploy_executor_for_driver_id(self._profile.driver_id) is not None:
+            return None
+        if not isinstance(self._deploy_provider, GenericWebDeployRuntimeArtifactProvider):
+            return None
+        try:
+            observation = self._deploy_provider.observe_runtime_artifact(
+                control_plane_root=self._control_plane_root,
+                resolved_deploy_target=resolved_deploy_target,
+            )
+            return evaluate_generic_web_runtime_close_out(
+                observation=observation,
+                expected_artifact_reference=resolved_deploy_target.ship_request.artifact_id,
+            )
+        except (FileNotFoundError, ValueError, click.ClickException):
+            return None
 
     def inspect_evidence(
         self,

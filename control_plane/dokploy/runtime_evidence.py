@@ -114,26 +114,15 @@ def fetch_compose_service_runtime(
     if not normalized_service_name:
         raise DokployEvidenceProviderError("service-select")
 
-    container_query: dict[str, str | int] = {
-        "appName": normalized_app_name,
-        "appType": "docker-compose",
-    }
-    if normalized_server_id:
-        container_query["serverId"] = normalized_server_id
-    try:
-        containers_payload = dokploy_api.dokploy_request(
-            host=host,
-            token=token,
-            path="/api/docker.getContainersByAppNameMatch",
-            query=container_query,
-        )
-    except click.ClickException as error:
-        raise DokployEvidenceProviderError("container-list") from error
-    if not isinstance(containers_payload, list):
-        raise DokployEvidenceProviderError("container-list")
+    containers = _list_compose_containers(
+        host=host,
+        token=token,
+        app_name=normalized_app_name,
+        server_id=normalized_server_id,
+    )
     try:
         selected_container = dokploy_api.select_dokploy_compose_container(
-            dokploy_api.collect_dokploy_object_items(containers_payload),
+            containers,
             app_name=normalized_app_name,
             service_name=normalized_service_name,
         )
@@ -143,21 +132,12 @@ def fetch_compose_service_runtime(
     if not container_id:
         raise DokployEvidenceProviderError("service-select")
 
-    config_query: dict[str, str | int] = {"containerId": container_id}
-    if normalized_server_id:
-        config_query["serverId"] = normalized_server_id
-    try:
-        config_payload = dokploy_api.dokploy_request(
-            host=host,
-            token=token,
-            path="/api/docker.getConfig",
-            query=config_query,
-        )
-    except click.ClickException as error:
-        raise DokployEvidenceProviderError("container-config") from error
-    container_config = _normalize_container_config(config_payload)
-    if container_config is None:
-        raise DokployEvidenceProviderError("container-config")
+    container_config = _read_container_config(
+        host=host,
+        token=token,
+        container_id=container_id,
+        server_id=normalized_server_id,
+    )
     raw_config = container_config.get("Config")
     configured_image = (
         str(raw_config.get("Image") or "").strip() if isinstance(raw_config, dict) else ""
@@ -205,6 +185,166 @@ def fetch_compose_service_runtime(
         "immutable_image_reference": immutable_image_reference,
         "image_reference_immutable": bool(immutable_image_reference),
     }
+
+
+def fetch_compose_running_container_images(
+    *,
+    host: str,
+    token: str,
+    app_name: str,
+    server_id: str = "",
+) -> tuple[str, ...]:
+    """Return the configured image of every running service container of one compose app.
+
+    Every listed container is inspected. Membership comes from the inspected
+    Compose project label, falling back to the exact app-name prefix only when
+    that label is absent. Running state comes from the inspected state and
+    excludes paused and restarting containers, and one-off ``compose run``
+    containers are skipped, so only the deployed services count.
+    """
+
+    normalized_app_name = app_name.strip()
+    if not normalized_app_name:
+        raise DokployEvidenceProviderError("target-inspect")
+    normalized_server_id = server_id.strip()
+    running_images: list[str] = []
+    for container in _list_compose_containers(
+        host=host,
+        token=token,
+        app_name=normalized_app_name,
+        server_id=normalized_server_id,
+    ):
+        container_id = str(container.get("containerId") or "").strip()
+        if not container_id:
+            raise DokployEvidenceProviderError("container-identity")
+        container_config = _read_container_config(
+            host=host,
+            token=token,
+            container_id=container_id,
+            server_id=normalized_server_id,
+        )
+        raw_config = container_config.get("Config")
+        config = raw_config if isinstance(raw_config, dict) else {}
+        if not _compose_container_belongs_to_app(
+            container,
+            inspected_labels=config.get("Labels"),
+            app_name=normalized_app_name,
+        ):
+            continue
+        if _compose_container_is_one_off(config.get("Labels")):
+            continue
+        if not _compose_container_is_running(container, container_config):
+            continue
+        configured_image = str(config.get("Image") or "").strip()
+        if not configured_image:
+            raise DokployEvidenceProviderError("image-identity")
+        running_images.append(configured_image[:_MAX_RUNTIME_TEXT_LENGTH])
+    return tuple(running_images)
+
+
+def _compose_container_is_running(
+    container: dokploy_api.JsonObject,
+    container_config: dokploy_api.JsonObject,
+) -> bool:
+    inspected_state = container_config.get("State")
+    if isinstance(inspected_state, dict) and "Running" in inspected_state:
+        return (
+            inspected_state.get("Running") is True
+            and inspected_state.get("Paused") is not True
+            and inspected_state.get("Restarting") is not True
+        )
+    listed_state = str(container.get("state") or container.get("State") or "")
+    return listed_state.strip().lower() == "running"
+
+
+def _list_compose_containers(
+    *,
+    host: str,
+    token: str,
+    app_name: str,
+    server_id: str,
+) -> list[dokploy_api.JsonObject]:
+    container_query: dict[str, str | int] = {
+        "appName": app_name,
+        "appType": "docker-compose",
+    }
+    if server_id:
+        container_query["serverId"] = server_id
+    try:
+        containers_payload = dokploy_api.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/docker.getContainersByAppNameMatch",
+            query=container_query,
+        )
+    except click.ClickException as error:
+        raise DokployEvidenceProviderError("container-list") from error
+    if not isinstance(containers_payload, list):
+        raise DokployEvidenceProviderError("container-list")
+    return dokploy_api.collect_dokploy_object_items(containers_payload)
+
+
+def _read_container_config(
+    *,
+    host: str,
+    token: str,
+    container_id: str,
+    server_id: str,
+) -> dokploy_api.JsonObject:
+    config_query: dict[str, str | int] = {"containerId": container_id}
+    if server_id:
+        config_query["serverId"] = server_id
+    try:
+        config_payload = dokploy_api.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/docker.getConfig",
+            query=config_query,
+        )
+    except click.ClickException as error:
+        raise DokployEvidenceProviderError("container-config") from error
+    container_config = _normalize_container_config(config_payload)
+    if container_config is None:
+        raise DokployEvidenceProviderError("container-config")
+    return container_config
+
+
+def _compose_container_is_one_off(inspected_labels: object) -> bool:
+    if not isinstance(inspected_labels, dict):
+        return False
+    return any(
+        str(label_key).strip().lower() == "com.docker.compose.oneoff"
+        and str(label_value or "").strip().lower() == "true"
+        for label_key, label_value in inspected_labels.items()
+    )
+
+
+def _compose_container_belongs_to_app(
+    container: dokploy_api.JsonObject,
+    *,
+    inspected_labels: object,
+    app_name: str,
+) -> bool:
+    normalized_app_name = app_name.strip().lower()
+    for labels in (inspected_labels, container.get("labels"), container.get("Labels")):
+        if isinstance(labels, dict):
+            for label_key, label_value in labels.items():
+                if str(label_key).strip().lower() == "com.docker.compose.project":
+                    return str(label_value or "").strip().lower() == normalized_app_name
+    names: list[str] = []
+    for key in ("name", "Name", "containerName", "container_name"):
+        value = str(container.get(key) or "").strip()
+        if value:
+            names.append(value)
+    for key in ("names", "Names"):
+        values = container.get(key)
+        if isinstance(values, list):
+            names.extend(str(value).strip() for value in values if value is not None)
+    return any(
+        name.strip().lower().strip("/").startswith(f"{normalized_app_name}{separator}")
+        for name in names
+        for separator in ("-", "_", ".")
+    )
 
 
 def fetch_compose_container_logs(
