@@ -156,6 +156,11 @@ not part of this input flow.
   env. Missing managed bindings are a hard error.
 - Secret status surfaces return metadata only. Launchplane does not expose
   routine plaintext read commands or service endpoints.
+- Credentials that only Launchplane's own jobs use for one lane, such as the
+  production backup and VeriReel Proxmox SSH keys, live in the
+  `launchplane_worker` integration, stored for exactly that lane. They are not
+  part of the lane's runtime environment, so no deploy or sync can deliver them
+  to an app. Store new worker credentials there with `context_instance` scope.
 
 ## Managed Secret Model
 

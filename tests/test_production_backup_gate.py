@@ -267,6 +267,50 @@ class ProductionBackupGateTests(unittest.TestCase):
         self.assertEqual(backup.source, "launchplane-production-backup-gate")
         self.assertEqual(backup.evidence, evidence)
 
+    def test_backup_uses_ssh_material_from_the_worker_store(self) -> None:
+        enqueue_production_backup_gate(
+            record_store=self.store,
+            request=self.binding.request,
+            authorization=self.authorization,
+            operation_key="caller|worker-store",
+        )
+        with (
+            patch(
+                "control_plane.workflows.production_backup_gate.enforce_worker_runtime_key_safety"
+            ),
+            patch(
+                "control_plane.workflows.production_backup_gate.runtime_environments.resolve_runtime_environment_values",
+                return_value={},
+            ),
+            patch(
+                "control_plane.workflows.production_backup_gate.control_plane_secrets.resolve_lane_worker_secret_values",
+                return_value={
+                    "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "worker-private",
+                    "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": "worker-hosts",
+                },
+            ) as worker_secrets,
+            patch(
+                "control_plane.workflows.production_backup_gate.execute_production_backup_provider",
+                return_value=ProductionBackupGateWorkerResult(
+                    status="pass",
+                    started_at="2026-09-26T10:00:00Z",
+                    finished_at="2026-09-26T10:01:00Z",
+                    evidence={"snapshot_name": "example-20260926-100000-abcdef"},
+                ),
+            ) as provider,
+        ):
+            run_verireel_prod_backup_gate_operation_worker_once(
+                record_store=self.store,
+                control_plane_root_path=self.root,
+                lease_owner="test-worker",
+            )
+        worker_secrets.assert_called_once_with(
+            context_name=self.binding.request.context,
+            instance_name=self.binding.request.instance,
+        )
+        self.assertEqual(provider.call_args.kwargs["ssh_private_key"], "worker-private")
+        self.assertEqual(provider.call_args.kwargs["ssh_known_hosts"], "worker-hosts")
+
     def test_retired_binding_blocks_worker_before_provider(self) -> None:
         operation = enqueue_production_backup_gate(
             record_store=self.store,

@@ -311,6 +311,81 @@ class LaunchplaneSecretsTests(unittest.TestCase):
                 )
             store.close()
 
+    def test_worker_secrets_reach_only_their_lane_and_never_the_app(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            _seed_runtime_environment_records(
+                database_url=database_url,
+                definition=runtime_environments.RuntimeEnvironmentDefinition(
+                    schema_version=1,
+                    shared_env={},
+                    contexts={
+                        "site": runtime_environments.RuntimeEnvironmentContextDefinition(
+                            shared_env={},
+                            instances={
+                                "prod": runtime_environments.RuntimeEnvironmentInstanceDefinition(
+                                    env={"SITE_MODE": "live"}
+                                )
+                            },
+                        )
+                    },
+                ),
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            with patch.dict(
+                os.environ,
+                {
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                },
+                clear=True,
+            ):
+                control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="context_instance",
+                    integration=control_plane_secrets.LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
+                    name="PRODUCTION_BACKUP_SSH_PRIVATE_KEY",
+                    plaintext_value="lane-backup-key",
+                    binding_key="PRODUCTION_BACKUP_SSH_PRIVATE_KEY",
+                    context_name="site",
+                    instance_name="prod",
+                    actor="test",
+                )
+                control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="context",
+                    integration=control_plane_secrets.LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
+                    name="PRODUCTION_BACKUP_SSH_KNOWN_HOSTS",
+                    plaintext_value="shared-hosts",
+                    binding_key="PRODUCTION_BACKUP_SSH_KNOWN_HOSTS",
+                    context_name="site",
+                    actor="test",
+                )
+
+                self.assertEqual(
+                    control_plane_secrets.resolve_lane_worker_secret_values(
+                        context_name="site", instance_name="prod"
+                    ),
+                    {"PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "lane-backup-key"},
+                )
+                self.assertEqual(
+                    control_plane_secrets.resolve_lane_worker_secret_values(
+                        context_name="site", instance_name="testing"
+                    ),
+                    {},
+                )
+                app_values = runtime_environments.resolve_runtime_environment_values(
+                    control_plane_root=control_plane_root,
+                    context_name="site",
+                    instance_name="prod",
+                )
+                self.assertEqual(app_values["SITE_MODE"], "live")
+                self.assertNotIn("PRODUCTION_BACKUP_SSH_PRIVATE_KEY", app_values)
+                self.assertNotIn("PRODUCTION_BACKUP_SSH_KNOWN_HOSTS", app_values)
+            store.close()
+
     def test_json_encryption_keys_are_exact_and_fail_closed(self) -> None:
         key1 = _test_fernet_key(0)
         key2 = _test_fernet_key(32)
