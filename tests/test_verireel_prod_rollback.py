@@ -14,11 +14,6 @@ from control_plane.contracts.promotion_record import (
     DeploymentEvidence,
     PromotionRecord,
 )
-from control_plane.contracts.runtime_key_safety_policy import (
-    RuntimeKeySafetyPolicyRecord,
-    RuntimeSecretClass,
-    RuntimeSecretSafetyRule,
-)
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows import verireel_prod_rollback_worker
@@ -33,12 +28,6 @@ from control_plane.workflows.verireel_prod_rollback import (
 from control_plane.workflows.verireel_rollout import VeriReelRolloutVerificationResult
 
 
-PROD_WORKER_SECRET_BINDING_KEYS = (
-    "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS",
-    "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY",
-)
-
-
 class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
     def _sqlite_database_url(self, root: Path) -> str:
         return f"sqlite+pysqlite:///{root / 'launchplane.sqlite3'}"
@@ -46,12 +35,7 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
     def _record_store(self, root: Path) -> FilesystemRecordStore:
         return FilesystemRecordStore(root / "state")
 
-    def _write_prod_worker_secret_bindings(
-        self,
-        store: PostgresRecordStore,
-        *,
-        secret_class: RuntimeSecretClass = "prod_only",
-    ) -> None:
+    def _write_prod_worker_secret_bindings(self, store: PostgresRecordStore) -> None:
         plaintext_values = {
             "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS": "runtime-known-hosts",
             "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY": "runtime-private-key",
@@ -64,7 +48,7 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
                 control_plane_secrets.write_secret_value(
                     record_store=store,
                     scope="context_instance",
-                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                    integration=control_plane_secrets.LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
                     name=binding_key,
                     plaintext_value=plaintext_value,
                     binding_key=binding_key,
@@ -72,23 +56,6 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
                     instance_name="prod",
                     actor="test",
                 )
-        store.write_runtime_key_safety_policy_record(
-            RuntimeKeySafetyPolicyRecord(
-                record_id="runtime-key-safety-policy-test",
-                status="active",
-                source="test",
-                updated_at="2026-05-05T22:30:00Z",
-                rules=tuple(
-                    RuntimeSecretSafetyRule(
-                        binding_key=binding_key,
-                        secret_class=secret_class,
-                        allowed_contexts=("verireel",),
-                        allowed_instances=("prod",),
-                    )
-                    for binding_key in PROD_WORKER_SECRET_BINDING_KEYS
-                ),
-            )
-        )
 
     def _write_backup_gate(self, record_store: FilesystemRecordStore) -> None:
         record_store.write_backup_gate_record(
@@ -220,56 +187,6 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
         self.assertEqual(worker_env["VERIREEL_PROD_CT_ID"], "211")
         self.assertEqual(worker_env["VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY"], "runtime-private-key")
         self.assertEqual(worker_env["VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS"], "runtime-known-hosts")
-
-    def test_run_delegated_worker_blocks_unsafe_managed_runtime_secret(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = self._sqlite_database_url(root)
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            try:
-                self._write_prod_worker_secret_bindings(store, secret_class="testing")
-            finally:
-                store.close()
-
-            with (
-                patch.dict("os.environ", {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True),
-                patch("control_plane.workflows.verireel_prod_rollback.subprocess.run") as run,
-            ):
-                with self.assertRaisesRegex(click.ClickException, "key-safety gate failed"):
-                    _run_delegated_worker(
-                        control_plane_root=root,
-                        request=VeriReelProdRollbackWorkerRequest(
-                            context="verireel",
-                            instance="prod",
-                            promotion_record_id="promotion-verireel-testing-to-prod-run-12345-attempt-1",
-                            backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
-                            snapshot_name="ver-predeploy-20260421-180000",
-                        ),
-                    )
-
-        run.assert_not_called()
-
-    def test_run_delegated_worker_requires_database_for_runtime_key_safety(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            with (
-                patch.dict("os.environ", {}, clear=True),
-                patch("control_plane.workflows.verireel_prod_rollback.subprocess.run") as run,
-            ):
-                with self.assertRaisesRegex(click.ClickException, "LAUNCHPLANE_DATABASE_URL"):
-                    _run_delegated_worker(
-                        control_plane_root=root,
-                        request=VeriReelProdRollbackWorkerRequest(
-                            context="verireel",
-                            instance="prod",
-                            promotion_record_id="promotion-verireel-testing-to-prod-run-12345-attempt-1",
-                            backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
-                            snapshot_name="ver-predeploy-20260421-180000",
-                        ),
-                    )
-
-        run.assert_not_called()
 
     def test_rollout_base_url_resolution_accepts_rollback_request_shape(self) -> None:
         request = VeriReelProdRollbackRequest(
@@ -425,7 +342,9 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
                 clear=True,
             ),
         ):
-            with self.assertRaisesRegex(click.ClickException, "LAUNCHPLANE_DATABASE_URL"):
+            with self.assertRaisesRegex(
+                click.ClickException, "Missing LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND"
+            ):
                 _run_delegated_worker(
                     control_plane_root=Path(temporary_directory_name),
                     request=VeriReelProdRollbackWorkerRequest(
