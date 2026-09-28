@@ -229,6 +229,21 @@ class OwnerSessionHttpTests(unittest.IsolatedAsyncioTestCase):
                 response = await _asgi_get(self.app, path, headers=headers)
                 self.assertEqual(response.status_code, 401, response.text)
 
+    async def test_owner_session_does_not_come_back_after_ownership_returns(self) -> None:
+        headers = self.cookie()
+        original = self.store.read_product_profile_record("example-site")
+        self.store.write_product_profile_record(
+            original.model_copy(
+                update={"owner": ProductOwnerProfile(github_id="7777", github_login="new-owner")}
+            )
+        )
+        removed = await _asgi_get(self.app, "/v1/auth/session", headers=headers)
+        self.store.write_product_profile_record(original)
+        restored = await _asgi_get(self.app, "/v1/auth/session", headers=headers)
+
+        self.assertEqual(removed.status_code, 401, removed.text)
+        self.assertEqual(restored.status_code, 401, restored.text)
+
     async def test_owner_session_does_not_pick_up_a_later_policy_grant(self) -> None:
         headers = self.cookie()
         granted = create_launchplane_fastapi_app(

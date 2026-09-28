@@ -4159,8 +4159,14 @@ def create_launchplane_fastapi_app(
         # Owner of an active product, whatever the revalidation setting.
         if session.identity.role != "owner":
             return session
-        if allow_owner and github_id_owns_active_product(session.identity.github_id):
+        if not allow_owner:
+            return None
+        if github_id_owns_active_product(session.identity.github_id):
             return session
+        # Ownership is gone, so end the session for good; reassigning the person
+        # later must require a fresh sign-in.
+        if human_session_manager is not None:
+            human_session_manager.revoke(session)
         return None
 
     def read_human_session(
