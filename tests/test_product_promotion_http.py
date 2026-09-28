@@ -1854,5 +1854,64 @@ class FastApiProductPromotionTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class GenericWebPromotionAdapterInventoryTests(unittest.TestCase):
+    def test_live_adapter_resolves_the_target_for_the_inventory_build(self) -> None:
+        # A promotion workflow may leave the artifact to Launchplane; the live
+        # adapter must resolve the target for testing's inventory build instead
+        # of failing on the empty request artifact.
+        from control_plane.drivers.generic_web_dispatch import GenericWebProdPromotionEnvelope
+        from control_plane.http_routes.generic_web import (
+            _GenericWebProdPromotionProviderMutationAdapter,
+        )
+
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            FastApiProductPromotionTests._seed_store(store)
+            store.write_environment_inventory(
+                _inventory(
+                    instance="testing",
+                    artifact_id=TESTING_ARTIFACT,
+                    source_git_ref=TESTING_SOURCE_REF,
+                    image_reference=TESTING_DEPLOY_REFERENCE,
+                    updated_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                )
+            )
+            profile = store.read_product_profile_record("atlas-commerce")
+            lane = next(candidate for candidate in profile.lanes if candidate.instance == "prod")
+            provider = Mock()
+            with patch(
+                "control_plane.http_routes.generic_web.default_generic_web_deploy_provider",
+                return_value=provider,
+            ):
+                adapter = _GenericWebProdPromotionProviderMutationAdapter(
+                    control_plane_root=Path(temporary_directory_name),
+                    record_store=store,
+                    promotion_request=GenericWebProdPromotionEnvelope.model_validate(
+                        {
+                            "schema_version": 1,
+                            "product": "atlas-commerce",
+                            "promotion": {"schema_version": 1, "product": "atlas-commerce"},
+                        }
+                    ),
+                    profile=profile,
+                    lane=lane,
+                    trace_id="trace-inventory",
+                    validate_before_effect=lambda _target: None,
+                )
+                adapter.resolve_deploy_target()
+            store.close()
+
+        arguments = provider.resolve_deploy_target.call_args.kwargs
+        self.assertEqual(arguments["request_artifact_id"], TESTING_ARTIFACT)
+        self.assertEqual(arguments["normalized_artifact_id"], TESTING_ARTIFACT)
+        self.assertEqual(arguments["request_deploy_reference"], TESTING_DEPLOY_REFERENCE)
+        self.assertEqual(arguments["request_source_git_ref"], TESTING_SOURCE_REF)
+
+
 if __name__ == "__main__":
     unittest.main()

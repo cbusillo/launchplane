@@ -221,6 +221,24 @@ def resolve_generic_web_promotion_lanes(
     return profile, source_lane, destination_lane
 
 
+def resolve_generic_web_promotion_inputs(
+    *,
+    record_store: GenericWebPromotionStore,
+    request: GenericWebProdPromotionRequest,
+) -> GenericWebProdPromotionRequest:
+    """Fill the artifact, deploy reference, and source revision from testing inventory."""
+    profile, source_lane, _destination_lane = resolve_generic_web_promotion_lanes(
+        record_store=record_store,
+        request=request,
+    )
+    return _resolve_source_inventory_inputs(
+        record_store=record_store,
+        profile=profile,
+        request=request,
+        source_lane=source_lane,
+    )
+
+
 def execute_generic_web_prod_promotion(
     *,
     control_plane_root: Path,
