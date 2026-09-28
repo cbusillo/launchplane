@@ -181,6 +181,15 @@ OPERATION_SPECS = (
     ),
     OperationSpec(
         "POST",
+        "/v1/product-config/odoo-addon-settings/apply",
+        "Dry-run or apply an Odoo lane's addon settings with secret-binding references.",
+        ("agent_helper", "operator_ui", "service_api"),
+        ("dry-run", "apply"),
+        "apply",
+        ("reviewed_plan_digest",),
+    ),
+    OperationSpec(
+        "POST",
         "/v1/work-graph/merge-train/controller/run-once",
         "Advance one merge-train controller phase with bounded recovery evidence.",
         ("agent_helper", "operator_ui", "service_api"),

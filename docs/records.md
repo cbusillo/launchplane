@@ -1944,6 +1944,12 @@ run` is the foreground loop intended for an external process supervisor, and
   `web.base.url`.
 - `addon_settings` stores addon-shaped intent such as Authentik SSO or Shopify
   settings without coupling Launchplane records to environment variable names.
+- Shopify addon settings are written through
+  `POST /v1/product-config/odoo-addon-settings/apply`, which records
+  `shop_url_key`, `api_version` and `test_store` as literals and `api_token` and
+  `webhook_key` as secret-binding references, with source label
+  `service:odoo-addon-settings`. See `docs/operations.md` for the refusals and
+  the dry-run digest.
 - `website_bootstrap` stores the typed devkit website bootstrap payload,
   including site identity, canonical URL, logo path, source metadata, and route
   definitions. Product repos remain the source of that intent; Launchplane
