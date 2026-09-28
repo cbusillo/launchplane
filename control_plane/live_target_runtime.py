@@ -354,6 +354,20 @@ def require_product_profile_runtime_keys(
             f"Product {product_name!r} has no lane for {context_name}/{instance_name}.",
             code="product_lane_not_found",
         )
+    allowed_keys = _declared_runtime_keys(
+        profile=profile, context_name=context_name, instance_name=instance_name
+    )
+    if not allowed_keys:
+        raise LiveTargetRuntimeError(
+            f"Product {product_name!r} has no expected runtime keys for {context_name}/{instance_name}.",
+            code="runtime_environment_empty",
+        )
+    return allowed_keys
+
+
+def _declared_runtime_keys(
+    *, profile: LaunchplaneProductProfileRecord, context_name: str, instance_name: str
+) -> set[str]:
     allowed_keys: set[str] = set()
     for runtime_requirement in profile.expected_config.runtime_environment_keys:
         if _expected_config_route_matches(
@@ -376,11 +390,6 @@ def require_product_profile_runtime_keys(
             instance_name=instance_name,
         ):
             allowed_keys.add(secret_requirement.binding_key)
-    if not allowed_keys:
-        raise LiveTargetRuntimeError(
-            f"Product {product_name!r} has no expected runtime keys for {context_name}/{instance_name}.",
-            code="runtime_environment_empty",
-        )
     return allowed_keys
 
 
@@ -453,16 +462,31 @@ def _expected_config_route_matches(
     return True
 
 
-def _filter_runtime_environment_to_product_keys(
-    *, desired_env_map: dict[str, str], allowed_keys: set[str]
-) -> dict[str, str]:
-    return {key: value for key, value in desired_env_map.items() if key in allowed_keys}
+def _product_lane_declared_keys(
+    *,
+    record_store: LiveTargetRuntimeProfileStore,
+    product_name: str,
+    context_name: str,
+    instance_name: str,
+) -> set[str]:
+    profile = record_store.read_product_profile_record(product_name)
+    if not any(
+        lane.context == context_name and lane.instance == instance_name for lane in profile.lanes
+    ):
+        raise LiveTargetRuntimeError(
+            f"Product {product_name!r} has no lane for {context_name}/{instance_name}.",
+            code="product_lane_not_found",
+        )
+    return _declared_runtime_keys(
+        profile=profile, context_name=context_name, instance_name=instance_name
+    )
 
 
 def _require_expected_runtime_secret_values(
-    *, desired_env_map: dict[str, str], runtime_secret_binding_keys: set[str]
+    *, resolved_secret_keys: frozenset[str], runtime_secret_binding_keys: set[str]
 ) -> None:
-    missing_keys = sorted(key for key in runtime_secret_binding_keys if key not in desired_env_map)
+    # A plain setting with the same name does not stand in for a declared managed secret.
+    missing_keys = sorted(runtime_secret_binding_keys - resolved_secret_keys)
     if missing_keys:
         raise LiveTargetRuntimeError(
             "Expected managed runtime secret values are missing from the resolved "
@@ -515,20 +539,18 @@ def apply_live_target_runtime_environment(
         operation_name="Runtime environment live target apply",
     )
     try:
-        app_runtime_environment = (
-            control_plane_runtime_environments.resolve_app_runtime_environment(
-                control_plane_root=control_plane_root,
-                context_name=context_name,
-                instance_name=instance_name,
-                database_url=database_url,
-            )
+        site_environment = control_plane_runtime_environments.resolve_site_app_runtime_environment(
+            control_plane_root=control_plane_root,
+            context_name=context_name,
+            instance_name=instance_name,
+            database_url=database_url,
         )
     except runtime_platform_credentials.PlatformCredentialRefusedError as error:
         raise LiveTargetRuntimeError(error.message, code=error.code) from error
     except click.ClickException as error:
         raise LiveTargetRuntimeError(str(error), code="runtime_environment_unavailable") from error
-    desired_env_map = app_runtime_environment.values
-    retired_keys = set(app_runtime_environment.retired_keys)
+    desired_env_map = site_environment.values
+    retired_keys = set(site_environment.retired_keys)
     if not desired_env_map:
         raise LiveTargetRuntimeError(
             f"No Launchplane runtime environment values resolved for {context_name}/{instance_name}.",
@@ -539,7 +561,6 @@ def apply_live_target_runtime_environment(
     # product scoping; the product branch below also checks application keys.
     validate_provider_key_retirement(retired_keys=retired_keys, application_keys=set())
     database_url = resolve_database_url(database_url)
-    runtime_secret_binding_keys: set[str] = set()
     if product_name.strip():
         if database_url is None:
             raise LiveTargetRuntimeError(
@@ -549,7 +570,7 @@ def apply_live_target_runtime_environment(
         postgres_store = PostgresRecordStore(database_url=database_url)
         try:
             postgres_store.ensure_schema()
-            allowed_keys = require_product_profile_runtime_keys(
+            declared_keys = _product_lane_declared_keys(
                 record_store=postgres_store,
                 product_name=product_name.strip(),
                 context_name=context_name,
@@ -557,28 +578,23 @@ def apply_live_target_runtime_environment(
             )
             validate_provider_key_retirement(
                 retired_keys=retired_keys,
-                application_keys=allowed_keys,
+                application_keys=control_plane_runtime_environments.site_application_keys(
+                    site_environment.site_keys
+                )
+                | declared_keys,
             )
-            desired_env_map = _filter_runtime_environment_to_product_keys(
-                desired_env_map=desired_env_map, allowed_keys=allowed_keys
-            )
-            runtime_secret_binding_keys = _require_product_profile_runtime_secret_keys(
+            declared_secret_keys = _require_product_profile_runtime_secret_keys(
                 record_store=postgres_store,
                 product_name=product_name.strip(),
                 context_name=context_name,
                 instance_name=instance_name,
             )
             _require_expected_runtime_secret_values(
-                desired_env_map=desired_env_map,
-                runtime_secret_binding_keys=runtime_secret_binding_keys,
+                resolved_secret_keys=site_environment.secret_keys,
+                runtime_secret_binding_keys=declared_secret_keys,
             )
         finally:
             postgres_store.close()
-        if not desired_env_map:
-            raise LiveTargetRuntimeError(
-                f"No expected Launchplane runtime environment values resolved for {product_name}/{context_name}/{instance_name}.",
-                code="runtime_environment_empty",
-            )
 
     try:
         host, token = dokploy_source.read_dokploy_config(
@@ -626,7 +642,7 @@ def apply_live_target_runtime_environment(
                 context_name=context_name,
                 instance_name=instance_name,
                 require_policy=apply_changes,
-                required_binding_keys=tuple(sorted(runtime_secret_binding_keys)),
+                required_binding_keys=tuple(sorted(site_environment.secret_keys)),
             )
         finally:
             postgres_store.close()
@@ -655,7 +671,17 @@ def apply_live_target_runtime_environment(
                 if product_name.strip():
                     validate_provider_key_retirement(
                         retired_keys=retired_keys,
-                        application_keys=require_product_profile_runtime_keys(
+                        application_keys=control_plane_runtime_environments.site_application_keys(
+                            set(
+                                control_plane_runtime_environments.resolve_site_runtime_environment(
+                                    control_plane_root=control_plane_root,
+                                    context_name=context_name,
+                                    instance_name=instance_name,
+                                    database_url=database_url,
+                                ).values
+                            )
+                        )
+                        | _product_lane_declared_keys(
                             record_store=postgres_store,
                             product_name=product_name.strip(),
                             context_name=context_name,
@@ -745,8 +771,8 @@ def apply_live_target_runtime_environment(
             "target_name": target_definition.target_name,
         },
         "runtime_environment": initial_delta,
-        "provider_env_platform_credentials": provider_env_platform_credentials,
         "runtime_key_safety": runtime_key_safety,
+        "provider_env_platform_credentials": provider_env_platform_credentials,
         "apply": {
             "applied": apply_changes,
             "env_updated": bool(apply_changes and changed_key_count),

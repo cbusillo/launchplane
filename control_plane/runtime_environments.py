@@ -9,9 +9,11 @@ import click
 from control_plane import runtime_platform_credentials
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.secret_record import SecretScope
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.dokploy import source as dokploy_source
+from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 
 DEFAULT_RUNTIME_ENVIRONMENTS_FILE = "config/runtime-environments.toml"
 
@@ -111,6 +113,136 @@ def resolve_runtime_environment_values(
         instance_name=instance_name,
         database_url=database_url,
     )
+
+
+@dataclass(frozen=True)
+class SiteRuntimeEnvironment:
+    values: dict[str, str]
+    secret_keys: frozenset[str]
+
+
+def resolve_site_runtime_environment(
+    *,
+    control_plane_root: Path,
+    context_name: str,
+    instance_name: str,
+    database_url: str | None = None,
+) -> SiteRuntimeEnvironment:
+    """The environment a site's lane runs with: its own values and nothing else.
+
+    Values shared by every product and Launchplane's own credentials are left out. Secrets
+    shared across the site reach its testing and prod lanes, never a preview.
+    """
+    definition = load_runtime_environment_definition(
+        control_plane_root=control_plane_root,
+        database_url=database_url,
+    )
+    context_definition = definition.contexts.get(context_name)
+    if context_definition is None:
+        raise MissingRuntimeContextDefinitionError(
+            f"Runtime environments file has no context definition for {context_name!r}."
+        )
+    values = _normalize_scalar_map(context_definition.shared_env)
+    instance_definition = context_definition.instances.get(instance_name)
+    if instance_definition is not None:
+        values.update(_normalize_scalar_map(instance_definition.env))
+    values.update(
+        resolve_tracked_target_environment_values(
+            control_plane_root=control_plane_root,
+            context_name=context_name,
+            instance_name=instance_name,
+            database_url=database_url,
+        )
+    )
+    secret_values = control_plane_secrets.resolve_site_secret_values(
+        context_name=context_name,
+        instance_name=instance_name,
+        include_site_shared=runtime_key_safety_environment_class(instance_name)
+        in {"prod", "testing"},
+        database_url=database_url,
+    )
+    values.update(secret_values)
+    return SiteRuntimeEnvironment(values=values, secret_keys=frozenset(secret_values))
+
+
+@dataclass(frozen=True)
+class SiteAppRuntimeEnvironment:
+    """A site lane's environment after retirement and the platform-credential policy."""
+
+    values: dict[str, str]
+    secret_keys: frozenset[str]
+    retired_keys: frozenset[str]
+    site_keys: frozenset[str]
+    withheld_launchplane_keys: tuple[str, ...] = ()
+
+
+def resolve_site_app_runtime_environment(
+    *,
+    control_plane_root: Path,
+    context_name: str,
+    instance_name: str,
+    database_url: str | None = None,
+) -> SiteAppRuntimeEnvironment:
+    """The site environment a live-target sync may write into the app.
+
+    Starts from ``resolve_site_runtime_environment`` and applies the same
+    provider-key retirement and platform-credential policy as
+    ``resolve_app_runtime_environment``: context-scope Launchplane credentials
+    are withheld, any other platform credential refuses the render.
+    """
+
+    site_environment = resolve_site_runtime_environment(
+        control_plane_root=control_plane_root,
+        context_name=context_name,
+        instance_name=instance_name,
+        database_url=database_url,
+    )
+    retired_keys = retired_provider_keys_for_lane(
+        context_name=context_name, instance_name=instance_name, database_url=database_url
+    )
+    values = {
+        key: value for key, value in site_environment.values.items() if key not in retired_keys
+    }
+    withheld: tuple[str, ...] = ()
+    if runtime_platform_credentials.find_platform_credentials(values):
+        secret_scopes: frozenset[SecretScope] = (
+            frozenset({"context", "context_instance"})
+            if runtime_key_safety_environment_class(instance_name) in {"prod", "testing"}
+            else frozenset({"context_instance"})
+        )
+        try:
+            sources = _runtime_value_sources(
+                control_plane_root=control_plane_root,
+                context_name=context_name,
+                instance_name=instance_name,
+                database_url=database_url,
+                include_global=False,
+                secret_scopes=secret_scopes,
+            )
+        except click.ClickException:
+            # Without attribution nothing can be withheld as Launchplane's own, so
+            # every finding refuses.
+            sources = {}
+        values, withheld = _apply_platform_credential_policy(
+            values=values, sources=sources, target=f"{context_name}/{instance_name}"
+        )
+    return SiteAppRuntimeEnvironment(
+        values=values,
+        secret_keys=frozenset(key for key in site_environment.secret_keys if key in values),
+        retired_keys=retired_keys,
+        site_keys=frozenset(site_environment.values),
+        withheld_launchplane_keys=withheld,
+    )
+
+
+def site_application_keys(site_keys: frozenset[str] | set[str]) -> set[str]:
+    """Site keys that count as application settings for retirement checks.
+
+    Platform-credential names are never application settings: the app either
+    never receives them (withheld Launchplane credentials) or the render refuses.
+    """
+
+    return set(site_keys) - runtime_platform_credentials.PLATFORM_CREDENTIAL_KEYS
 
 
 @dataclass(frozen=True)
@@ -284,15 +416,18 @@ def _record_layers(
     context_name: str,
     instance_name: str,
     target_env: dict[str, str],
+    include_global: bool = True,
 ) -> list[tuple[ScalarMap | dict[str, str], _RuntimeValueSource]]:
     """Record and tracked-target layers in merge order, each with its source."""
 
-    layers: list[tuple[ScalarMap | dict[str, str], _RuntimeValueSource]] = [
-        (
-            definition.shared_env,
-            _RuntimeValueSource("the global runtime-environment record", True),
+    layers: list[tuple[ScalarMap | dict[str, str], _RuntimeValueSource]] = []
+    if include_global:
+        layers.append(
+            (
+                definition.shared_env,
+                _RuntimeValueSource("the global runtime-environment record", True),
+            )
         )
-    ]
     context_definition = definition.contexts.get(context_name)
     if context_definition is not None:
         layers.append(
@@ -329,8 +464,14 @@ def _runtime_value_sources(
     context_name: str,
     instance_name: str,
     database_url: str | None,
+    include_global: bool = True,
+    secret_scopes: frozenset[SecretScope] | None = None,
 ) -> dict[str, _RuntimeValueSource]:
-    """Attribute each effective key to the layer that supplied it, in merge order."""
+    """Attribute each effective key to the layer that supplied it, in merge order.
+
+    ``include_global`` and ``secret_scopes`` must match the resolver whose values
+    are being attributed, so a key is credited to the layer that actually won.
+    """
 
     layers = _record_layers(
         definition=load_runtime_environment_definition(
@@ -344,6 +485,7 @@ def _runtime_value_sources(
             instance_name=instance_name,
             database_url=database_url,
         ),
+        include_global=include_global,
     )
     sources: dict[str, _RuntimeValueSource] = {}
     for layer_values, source in layers:
@@ -360,6 +502,7 @@ def _runtime_value_sources(
                 integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
                 context_name=context_name,
                 instance_name=instance_name,
+                scopes=secret_scopes,
             )
         )
     finally:

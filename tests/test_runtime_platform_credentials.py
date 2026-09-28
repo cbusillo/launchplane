@@ -150,6 +150,25 @@ class StableLaneSyncRefusalTests(unittest.TestCase):
         self.assertIn("GitHub token value", str(refusal.exception))
         self.assertNotIn(_FAKE_GITHUB_TOKEN, str(refusal.exception))
 
+    def test_context_scope_launchplane_credential_is_withheld_from_the_site_sync(self) -> None:
+        context_record = RuntimeEnvironmentRecord(
+            scope="context",
+            context="example-site",
+            instance="",
+            env={"GITHUB_TOKEN": "launchplane-comment-token"},
+            updated_at="2026-09-28T00:00:00Z",
+            source_label="test",
+        )
+        lane = _LaneFixture(self, context_record, _instance_record({"APP_MODE": "on"}))
+
+        result, updates = lane.sync(provider_env="APP_MODE=off")
+
+        runtime_environment = cast(dict[str, object], result["runtime_environment"])
+        self.assertNotIn("GITHUB_TOKEN", cast(list[str], runtime_environment["changed_keys"]))
+        self.assertEqual(len(updates), 1)
+        self.assertNotIn("GITHUB_TOKEN", str(updates[0]["env_text"]))
+        self.assertNotIn("launchplane-comment-token", str(result))
+
 
 class ProviderEnvReportTests(unittest.TestCase):
     def test_sync_reports_legacy_provider_credentials_without_deleting_them(self) -> None:

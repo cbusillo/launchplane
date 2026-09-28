@@ -454,7 +454,7 @@ def resolve_secret_values_for_integration_from_store(
     integration: str,
     context_name: str = "",
     instance_name: str = "",
-    exact_lane_only: bool = False,
+    scopes: frozenset[SecretScope] | None = None,
 ) -> dict[str, str]:
     return {
         binding_key: value
@@ -463,7 +463,7 @@ def resolve_secret_values_for_integration_from_store(
             integration=integration,
             context_name=context_name,
             instance_name=instance_name,
-            exact_lane_only=exact_lane_only,
+            scopes=scopes,
         ).items()
     }
 
@@ -474,7 +474,7 @@ def resolve_scoped_secret_values_for_integration_from_store(
     integration: str,
     context_name: str = "",
     instance_name: str = "",
-    exact_lane_only: bool = False,
+    scopes: frozenset[SecretScope] | None = None,
 ) -> dict[str, tuple[str, SecretScope]]:
     """Return each effective binding value with the scope of the record that supplied it."""
 
@@ -483,7 +483,7 @@ def resolve_scoped_secret_values_for_integration_from_store(
         for record in record_store.list_secret_records(integration=integration)
         if record.status == SECRET_STATUS_CONFIGURED
         and _scope_matches_record(record, context_name=context_name, instance_name=instance_name)
-        and (not exact_lane_only or record.scope == "context_instance")
+        and (scopes is None or record.scope in scopes)
     ]
     candidate_records.sort(
         key=lambda record: (_scope_rank(record.scope), record.updated_at, record.secret_id)
@@ -525,7 +525,41 @@ def resolve_lane_worker_secret_values(
             integration=LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
             context_name=context_name,
             instance_name=instance_name,
-            exact_lane_only=True,
+            scopes=frozenset({"context_instance"}),
+        )
+    finally:
+        store.close()
+
+
+def resolve_site_secret_values(
+    *,
+    context_name: str,
+    instance_name: str,
+    include_site_shared: bool,
+    database_url: str | None = None,
+) -> dict[str, str]:
+    """Resolve a site lane's own runtime secrets, never global or another site's.
+
+    Secrets shared across the site are included only when the caller says the lane may
+    receive them; previews run unmerged code and get only secrets stored for them.
+    """
+    if not context_name.strip() or not instance_name.strip():
+        return {}
+    store = _open_secret_store(database_url)
+    if store is None:
+        return {}
+    scopes: frozenset[SecretScope] = (
+        frozenset({"context", "context_instance"})
+        if include_site_shared
+        else frozenset({"context_instance"})
+    )
+    try:
+        return resolve_secret_values_for_integration_from_store(
+            record_store=store,
+            integration=RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+            context_name=context_name,
+            instance_name=instance_name,
+            scopes=scopes,
         )
     finally:
         store.close()
