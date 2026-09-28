@@ -392,7 +392,7 @@ def run_compose_post_deploy_update(
         desired_env_map.pop(key, None)
     desired_env_map.update(runtime_override_target_environment)
     if run_destructive_restore:
-        upstream_restore_environment = _resolve_upstream_restore_workflow_environment(
+        upstream_restore_environment = resolve_upstream_restore_workflow_environment(
             desired_env_map=desired_env_map,
         )
         resolved_workflow_environment_overrides.update(upstream_restore_environment)
@@ -4589,7 +4589,7 @@ def _apply_post_deploy_env_file_overrides(
     return desired_env_map
 
 
-def _resolve_upstream_restore_workflow_environment(
+def resolve_upstream_restore_workflow_environment(
     *, desired_env_map: Mapping[str, str]
 ) -> dict[str, str]:
     upstream_environment: dict[str, str] = {}

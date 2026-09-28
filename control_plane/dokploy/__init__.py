@@ -176,7 +176,7 @@ from control_plane.dokploy.post_deploy import (
     _has_running_schedule_deployment as _has_running_schedule_deployment,
     _should_clear_stale_data_workflow_lock as _should_clear_stale_data_workflow_lock,
     _apply_post_deploy_env_file_overrides as _apply_post_deploy_env_file_overrides,
-    _resolve_upstream_restore_workflow_environment as _resolve_upstream_restore_workflow_environment,
+    resolve_upstream_restore_workflow_environment as _resolve_upstream_restore_workflow_environment,
 )
 
 deployment_log_id = deployment_key

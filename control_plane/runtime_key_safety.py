@@ -163,6 +163,8 @@ def evaluate_runtime_key_safety(
             continue
 
         rule = rules_by_binding_key.get(binding.binding_key)
+        if rule is None and _binding_stored_for_exact_stable_lane(binding=binding, target=target):
+            continue
         if rule is None:
             findings.append(
                 RuntimeKeySafetyFinding(
@@ -182,6 +184,25 @@ def evaluate_runtime_key_safety(
         target=target,
         checked_binding_keys=checked_binding_keys,
         findings=tuple(findings),
+    )
+
+
+_LANE_CLASSIFIED_ENVIRONMENT_CLASSES = frozenset({"prod", "testing", "dev"})
+
+
+# A secret stored for one exact stable lane resolves only for that lane, so the
+# lane is its classification and no policy rule is needed. Previews are
+# excluded: they copy template-lane values, and their check retargets the
+# template's bindings to the preview, which would otherwise look lane-exact.
+def _binding_stored_for_exact_stable_lane(
+    *, binding: SecretBinding, target: RuntimeKeySafetyTarget
+) -> bool:
+    return (
+        target.environment_class in _LANE_CLASSIFIED_ENVIRONMENT_CLASSES
+        and bool(binding.context)
+        and bool(binding.instance)
+        and binding.context == target.context
+        and binding.instance == target.instance
     )
 
 

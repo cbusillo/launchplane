@@ -12,6 +12,12 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyTarget,
 )
+from control_plane.odoo_instance_overrides import (
+    LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,
+    LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
+    ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+    ODOO_OVERRIDE_SECRET_ENV_PREFIX,
+)
 from control_plane.runtime_key_safety import (
     RuntimeKeySafetyPolicyReadStore,
     evaluate_runtime_key_safety,
@@ -98,10 +104,41 @@ class LiveTargetRuntimeProfileStore(RuntimeKeySafetyPolicyReadStore, Protocol):
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
 
+def validate_provider_key_retirement(*, retired_keys: set[str], application_keys: set[str]) -> None:
+    protected_keys = {
+        "PLATFORM_CONTEXT",
+        "PLATFORM_INSTANCE",
+        "DOCKER_IMAGE_REFERENCE",
+        "LAUNCHPLANE_RUNTIME_IDENTITY_JSON",
+        "LAUNCHPLANE_DEPLOYMENT_RECORD_ID",
+        "LAUNCHPLANE_ARTIFACT_ID",
+        "LAUNCHPLANE_SOURCE_GIT_REF",
+        "ODOO_DATA_VOLUME",
+        "ODOO_LOG_VOLUME",
+        "ODOO_DB_VOLUME",
+        "ODOO_DB_NAME",
+        "ODOO_DB_USER",
+        "ODOO_DB_PASSWORD",
+        "ODOO_ADDONS_PATH",
+        "ODOO_INSTALL_MODULES",
+        ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+        LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,
+        LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
+    }
+    if retired_keys & (application_keys | protected_keys) or any(
+        key.startswith(ODOO_OVERRIDE_SECRET_ENV_PREFIX) for key in retired_keys
+    ):
+        raise LiveTargetRuntimeError(
+            "Provider key retirement conflicts with declared application or driver settings.",
+            code="runtime_retirement_conflict",
+        )
+
+
 def runtime_env_live_target_delta(
     *,
     desired_env_map: dict[str, str],
     live_env_map: dict[str, str],
+    retired_keys: set[str] | None = None,
 ) -> dict[str, object]:
     desired_keys = sorted(desired_env_map)
     missing_keys = [env_key for env_key in desired_keys if env_key not in live_env_map]
@@ -115,14 +152,18 @@ def runtime_env_live_target_delta(
         for env_key in desired_keys
         if env_key in live_env_map and live_env_map[env_key] == desired_env_map[env_key]
     ]
-    return {
+    retired_keys_present = sorted((retired_keys or set()) & live_env_map.keys())
+    result: dict[str, object] = {
         "desired_key_count": len(desired_keys),
         "live_key_count": len(live_env_map),
         "missing_keys": missing_keys,
         "different_keys": different_keys,
-        "changed_keys": sorted({*missing_keys, *different_keys}),
+        "changed_keys": sorted({*missing_keys, *different_keys, *retired_keys_present}),
         "unchanged_key_count": len(unchanged_keys),
     }
+    if retired_keys:
+        result["retired_keys_present"] = retired_keys_present
+    return result
 
 
 def evaluate_runtime_key_safety_for_live_target_sync(
@@ -248,6 +289,13 @@ def require_product_profile_runtime_keys(
             instance_name=instance_name,
         ):
             allowed_keys.add(secret_requirement.binding_key)
+    allowed_keys.update(
+        _lane_runtime_secret_binding_keys(
+            record_store=record_store,
+            context_name=context_name,
+            instance_name=instance_name,
+        )
+    )
     if not allowed_keys:
         raise LiveTargetRuntimeError(
             f"Product {product_name!r} has no expected runtime keys for {context_name}/{instance_name}.",
@@ -274,6 +322,32 @@ def _require_product_profile_runtime_secret_keys(
             context_name=context_name,
             instance_name=instance_name,
         )
+    } | _lane_runtime_secret_binding_keys(
+        record_store=record_store,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+
+
+# A managed secret stored for exactly this lane is part of the lane's expected
+# runtime, so storing it is enough to deliver it; no profile declaration is needed.
+def _lane_runtime_secret_binding_keys(
+    *,
+    record_store: LiveTargetRuntimeProfileStore,
+    context_name: str,
+    instance_name: str,
+) -> set[str]:
+    return {
+        binding.binding_key
+        for binding in record_store.list_secret_bindings(
+            integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+            context_name=context_name,
+            instance_name=instance_name,
+            limit=None,
+        )
+        if binding.status == "configured"
+        and binding.context == context_name
+        and binding.instance == instance_name
     }
 
 
@@ -403,6 +477,7 @@ def apply_live_target_runtime_environment(
 
     database_url = resolve_database_url(database_url)
     runtime_secret_binding_keys: set[str] = set()
+    retired_keys: set[str] = set()
     if product_name.strip():
         if database_url is None:
             raise LiveTargetRuntimeError(
@@ -412,14 +487,23 @@ def apply_live_target_runtime_environment(
         postgres_store = PostgresRecordStore(database_url=database_url)
         try:
             postgres_store.ensure_schema()
+            allowed_keys = require_product_profile_runtime_keys(
+                record_store=postgres_store,
+                product_name=product_name.strip(),
+                context_name=context_name,
+                instance_name=instance_name,
+            )
+            retired_keys = control_plane_runtime_environments.retired_provider_keys_from_store(
+                record_store=postgres_store,
+                context_name=context_name,
+                instance_name=instance_name,
+            )
+            validate_provider_key_retirement(
+                retired_keys=retired_keys,
+                application_keys=allowed_keys,
+            )
             desired_env_map = _filter_runtime_environment_to_product_keys(
-                desired_env_map=desired_env_map,
-                allowed_keys=require_product_profile_runtime_keys(
-                    record_store=postgres_store,
-                    product_name=product_name.strip(),
-                    context_name=context_name,
-                    instance_name=instance_name,
-                ),
+                desired_env_map=desired_env_map, allowed_keys=allowed_keys
             )
             runtime_secret_binding_keys = _require_product_profile_runtime_secret_keys(
                 record_store=postgres_store,
@@ -456,6 +540,7 @@ def apply_live_target_runtime_environment(
     initial_delta = runtime_env_live_target_delta(
         desired_env_map=desired_env_map,
         live_env_map=live_env_map,
+        retired_keys=retired_keys,
     )
     changed_keys = initial_delta["changed_keys"]
     changed_key_count = len(changed_keys) if isinstance(changed_keys, list) else 0
@@ -487,6 +572,33 @@ def apply_live_target_runtime_environment(
             postgres_store.close()
 
     if apply_changes and changed_key_count:
+        if retired_keys:
+            assert database_url is not None  # Required by the product-scoped read above.
+            postgres_store = PostgresRecordStore(database_url=database_url)
+            try:
+                current_retired_keys = (
+                    control_plane_runtime_environments.retired_provider_keys_from_store(
+                        record_store=postgres_store,
+                        context_name=context_name,
+                        instance_name=instance_name,
+                    )
+                )
+                if current_retired_keys != retired_keys:
+                    raise LiveTargetRuntimeError(
+                        "Provider key retirement changed during execution; review current configuration.",
+                        code="runtime_retirement_changed",
+                    )
+                validate_provider_key_retirement(
+                    retired_keys=retired_keys,
+                    application_keys=require_product_profile_runtime_keys(
+                        record_store=postgres_store,
+                        product_name=product_name.strip(),
+                        context_name=context_name,
+                        instance_name=instance_name,
+                    ),
+                )
+            finally:
+                postgres_store.close()
         try:
             refreshed_payload = dokploy_api.fetch_dokploy_target_payload(
                 host=host,
@@ -497,7 +609,9 @@ def apply_live_target_runtime_environment(
             refreshed_env_map = dokploy_api.parse_dokploy_env_text(
                 str(refreshed_payload.get("env") or "")
             )
-            updated_env_map = dict(refreshed_env_map)
+            updated_env_map = {
+                key: value for key, value in refreshed_env_map.items() if key not in retired_keys
+            }
             updated_env_map.update(desired_env_map)
             dokploy_api.update_dokploy_target_env(
                 host=host,
@@ -521,6 +635,7 @@ def apply_live_target_runtime_environment(
         verification_delta = runtime_env_live_target_delta(
             desired_env_map=desired_env_map,
             live_env_map=persisted_env_map,
+            retired_keys=retired_keys,
         )
         verification_changed_keys = verification_delta["changed_keys"]
         verification = {
@@ -529,9 +644,11 @@ def apply_live_target_runtime_environment(
             "different_keys": verification_delta["different_keys"],
             "verified_key_count": verification_delta["unchanged_key_count"],
         }
+        if retired_keys:
+            verification["retired_keys_still_present"] = verification_delta["retired_keys_present"]
         if verification["status"] != "pass":
             raise LiveTargetRuntimeError(
-                "Dokploy target env did not persist all Launchplane runtime environment keys.",
+                "Dokploy target env did not persist the requested values and retired-key absence.",
                 code="dokploy_target_verification_failed",
             )
 

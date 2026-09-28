@@ -26128,6 +26128,13 @@
             "title": "Instance",
             "type": "string"
           },
+          "retired_provider_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Retired Provider Keys",
+            "type": "array"
+          },
           "scope": {
             "enum": [
               "global",
@@ -26208,6 +26215,20 @@
               }
             ],
             "x-launchplane-optional-response": true
+          },
+          "retired_provider_keys_after": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Retired Provider Keys After",
+            "type": "array"
+          },
+          "retired_provider_keys_before": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Retired Provider Keys Before",
+            "type": "array"
           },
           "scope": {
             "enum": [
@@ -37980,6 +38001,15 @@
             "default": "",
             "title": "Instance",
             "type": "string"
+          },
+          "retired_provider_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Retired Provider Keys",
+            "type": "array",
+            "x-launchplane-optional-response": true
           },
           "schema_version": {
             "default": 1,
@@ -71683,6 +71713,20 @@
                           }
                         ],
                         "title": "Instance"
+                      },
+                      "retired_provider_keys": {
+                        "anyOf": [
+                          {
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Retired Provider Keys"
                       },
                       "scope": {
                         "anyOf": [
