@@ -627,6 +627,7 @@ def run_compose_odoo_stable_bootstrap(
     env_file: Path | None,
     workflow_environment_overrides: Mapping[str, str] | None = None,
     required_workflow_environment_keys: tuple[str, ...] = (),
+    protected_shopify_store_keys: tuple[str, ...] = (),
     timeout_seconds: int | None = None,
 ) -> None:
     compose_id = target_definition.target_id.strip()
@@ -753,6 +754,7 @@ def run_compose_odoo_stable_bootstrap(
         required_update_modules=required_update_modules,
         workflow_environment_overrides=resolved_workflow_environment_overrides,
         required_workflow_environment_keys=resolved_required_workflow_environment_keys,
+        protected_shopify_store_keys=protected_shopify_store_keys,
     )
     schedule_payload: api.JsonObject = {
         "name": DOKPLOY_ODOO_BOOTSTRAP_SCHEDULE_NAME,
@@ -2186,6 +2188,48 @@ def compose_data_workflow_is_quiescent(
     return not _has_running_schedule_deployment(schedule)
 
 
+# TODO(#2554): shopify.api_token and shopify.webhook_key are production
+# credentials too, but no protected-value source exists for them yet: target
+# policies carry only protected store keys. Compare them here once #2554 adds a
+# supported source for a lane's protected integration keys.
+_SHOPIFY_STORE_KEY_GUARD_PROGRAM = """import os
+import sys
+
+import psycopg2
+
+database_name = sys.argv[1]
+protected_store_keys = {value.strip().lower() for value in sys.argv[2:] if value.strip()}
+
+connection = psycopg2.connect(
+    host=(os.environ.get("ODOO_DB_HOST") or "database").strip(),
+    port=(os.environ.get("ODOO_DB_PORT") or "5432").strip(),
+    user=(os.environ.get("ODOO_DB_USER") or "odoo").strip(),
+    password=os.environ.get("ODOO_DB_PASSWORD") or "",
+    dbname=database_name,
+)
+try:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT value FROM ir_config_parameter WHERE key = %s LIMIT 1",
+            ("shopify.shop_url_key",),
+        )
+        row = cursor.fetchone()
+finally:
+    connection.close()
+
+current_store_key = str(row[0]).strip() if row and row[0] is not None else ""
+normalized_store_key = current_store_key.lower()
+if normalized_store_key in protected_store_keys:
+    protected_list = ", ".join(sorted(protected_store_keys))
+    raise SystemExit(
+        "Protected Shopify store key is not allowed on this Dokploy lane. "
+        f"db={database_name} current={current_store_key or '<empty>'} protected={protected_list}"
+    )
+
+print(f"shopify_store_key_guard_pass db={database_name} value={current_store_key or '<empty>'}")
+"""
+
+
 def _build_dokploy_data_workflow_script(
     *,
     compose_app_name: str,
@@ -2238,6 +2282,7 @@ def _build_dokploy_data_workflow_script(
     workflow_label = workflow_label_by_mode[workflow_mode]
     module_update_modules_configured = "1" if required_update_modules.strip() else "0"
     readback_marker_patterns = "|".join(sorted(ODOO_POST_DEPLOY_READBACK_MARKERS))
+    shopify_store_key_guard_program = _SHOPIFY_STORE_KEY_GUARD_PROGRAM
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -2255,6 +2300,8 @@ protected_shopify_store_keys=()
 clear_stale_lock={"1" if clear_stale_lock else "0"}
 data_workflow_lock_path={quoted_lock_path}
 web_was_running=0
+shopify_store_key_guard_passed=0
+web_restart_blocked=0
 module_update_modules_configured={module_update_modules_configured}
 
 resolve_single_running_container() {{
@@ -2306,8 +2353,41 @@ start_web_container() {{
     fi
 }}
 
+# Reads shopify.shop_url_key from the database and fails when it is one of the
+# lane's protected store keys. `docker exec -i` is required: without it Docker
+# does not attach stdin, python3 reads an empty program and exits 0.
+enforce_shopify_store_key_guard() {{
+    if [ "${{#protected_shopify_store_keys[@]}}" -eq 0 ]; then
+        return 0
+    fi
+    echo "Checking protected Shopify store keys for ${{database_name}}"
+    local guard_status=0
+    docker exec -i "${{script_runner_container_id}}" python3 - "${{database_name}}" "${{protected_shopify_store_keys[@]}}" <<'PY' || guard_status=$?
+{shopify_store_key_guard_program}PY
+    if [ "${{guard_status}}" -ne 0 ]; then
+        echo "shopify_store_key_guard_refused db=${{database_name}} exit_status=${{guard_status}}"
+        return "${{guard_status}}"
+    fi
+    shopify_store_key_guard_passed=1
+}}
+
 exit_trap() {{
     local exit_status="$?"
+    trap - EXIT
+    if [ "${{web_restart_blocked}}" != "1" ] \
+        && [ "${{web_was_running}}" = "1" ] \
+        && [ "${{shopify_store_key_guard_passed}}" != "1" ] \
+        && [ "${{#protected_shopify_store_keys[@]}}" -gt 0 ]; then
+        # The workflow failed before the guard ran; the database may already
+        # hold restored data, so web only comes back if the guard passes now.
+        if ! enforce_shopify_store_key_guard; then
+            web_restart_blocked=1
+        fi
+    fi
+    if [ "${{web_restart_blocked}}" = "1" ]; then
+        echo "Leaving web container ${{web_container_id}} stopped: the Shopify protected store key guard did not pass." >&2
+        exit "${{exit_status}}"
+    fi
     start_web_container
     exit "${{exit_status}}"
 }}
@@ -2443,45 +2523,9 @@ echo "odoo_module_update_image_match=true"
 echo "odoo_module_update_modules_configured=true"
 echo "odoo_module_update_completed=true"
 
-if [ "${{#protected_shopify_store_keys[@]}}" -gt 0 ]; then
-    echo "Checking protected Shopify store keys for ${{database_name}}"
-    docker exec "${{script_runner_container_id}}" python3 - "${{database_name}}" "${{protected_shopify_store_keys[@]}}" <<'PY'
-import os
-import sys
-
-import psycopg2
-
-database_name = sys.argv[1]
-protected_store_keys = {{value.strip().lower() for value in sys.argv[2:] if value.strip()}}
-
-connection = psycopg2.connect(
-    host=(os.environ.get("ODOO_DB_HOST") or "database").strip(),
-    port=(os.environ.get("ODOO_DB_PORT") or "5432").strip(),
-    user=(os.environ.get("ODOO_DB_USER") or "odoo").strip(),
-    password=os.environ.get("ODOO_DB_PASSWORD") or "",
-    dbname=database_name,
-)
-try:
-    with connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT value FROM ir_config_parameter WHERE key = %s LIMIT 1",
-            ("shopify.shop_url_key",),
-        )
-        row = cursor.fetchone()
-finally:
-    connection.close()
-
-current_store_key = str(row[0]).strip() if row and row[0] is not None else ""
-normalized_store_key = current_store_key.lower()
-if normalized_store_key in protected_store_keys:
-    protected_list = ", ".join(sorted(protected_store_keys))
-    raise SystemExit(
-        "Protected Shopify store key is not allowed on this Dokploy lane. "
-        f"db={{database_name}} current={{current_store_key or '<empty>'}} protected={{protected_list}}"
-    )
-
-print(f"shopify_store_key_guard_pass db={{database_name}} value={{current_store_key or '<empty>'}}")
-PY
+if ! enforce_shopify_store_key_guard; then
+    web_restart_blocked=1
+    exit 1
 fi
 
 start_web_container

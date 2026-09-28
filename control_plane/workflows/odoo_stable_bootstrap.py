@@ -441,15 +441,19 @@ def execute_odoo_stable_bootstrap(
             project_name=target_record.project_name,
             deploy_timeout_seconds=target_record.deploy_timeout_seconds,
             healthcheck_timeout_seconds=target_record.healthcheck_timeout_seconds,
+            policies=target_record.policies,
+        )
+        protected_shopify_store_keys = (
+            dokploy_source.protected_shopify_store_keys_for_target_definition(target_definition)
         )
         workflow_environment_overrides: dict[str, str] = {}
         required_workflow_environment_keys: tuple[str, ...] = ()
         if odoo_override_record is not None and "deploy" in odoo_override_record.apply_on:
-            post_deploy_environment = control_plane_odoo_instance_overrides.build_post_deploy_environment(
-                odoo_override_record,
-                protected_shopify_store_keys=dokploy_source.protected_shopify_store_keys_for_target_definition(
-                    target_definition
-                ),
+            post_deploy_environment = (
+                control_plane_odoo_instance_overrides.build_post_deploy_environment(
+                    odoo_override_record,
+                    protected_shopify_store_keys=protected_shopify_store_keys,
+                )
             )
             workflow_environment_overrides = post_deploy_environment.inline_environment
             required_workflow_environment_keys = (
@@ -464,6 +468,7 @@ def execute_odoo_stable_bootstrap(
             env_file=env_file,
             workflow_environment_overrides=workflow_environment_overrides,
             required_workflow_environment_keys=required_workflow_environment_keys,
+            protected_shopify_store_keys=protected_shopify_store_keys,
             timeout_seconds=request.timeout_seconds,
         )
     except click.ClickException as error:
