@@ -1830,10 +1830,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             "/opt/project/addons,/opt/launchplane/addons,/odoo/addons,/opt/enterprise",
         )
         self.assertEqual(persisted_env_map[LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY], "true")
-        self.assertNotIn(
-            LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,
-            persisted_env_map,
-        )
+        # A non-production lane carries an explicit Shopify clear even without settings.
+        self.assertEqual(persisted_env_map[LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY], "true")
         persisted_override_payload = json.loads(
             base64.b64decode(persisted_env_map[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]).decode(
                 "utf-8"
@@ -1931,7 +1929,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             "true",
         )
         self.assertEqual(
-            final_deployment.runtime_source["runtime_override_instance_required"], "false"
+            final_deployment.runtime_source["runtime_override_instance_required"], "true"
         )
         self.assertEqual(
             final_deployment.runtime_source["required_odoo_modules"],
