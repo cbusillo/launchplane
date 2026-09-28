@@ -16,6 +16,7 @@ from click.testing import CliRunner
 
 from control_plane.cli import main
 from control_plane import live_target_runtime as control_plane_live_target_runtime
+from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
 from control_plane.notifications import public_discord_url_error, public_url_error
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -6942,9 +6943,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertNotIn("must-not-sync", json.dumps(payload))
         self.assertNotIn("context-secret-value", json.dumps(payload))
 
-    def test_live_target_runtime_api_does_not_deliver_undeclared_lane_secrets(self) -> None:
-        # Worker-only secrets such as backup SSH keys are stored for the lane too;
-        # only keys the product profile declares may reach the app runtime.
+    def test_live_target_runtime_api_delivers_lane_secrets_but_not_worker_secrets(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
@@ -6991,14 +6990,26 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             record_store=store,
                             scope="context_instance",
                             integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-                            name="production-backup-ssh-private-key",
+                            name="contact-alert-discord-webhook",
                             plaintext_value=value,
-                            binding_key="PRODUCTION_BACKUP_SSH_PRIVATE_KEY",
+                            binding_key="CONTACT_ALERT_DISCORD_WEBHOOK_URL",
                             context_name="sellyouroutboard",
                             instance_name=instance,
                             actor="test",
                             source_label="test",
                         )
+                    control_plane_secrets.write_secret_value(
+                        record_store=store,
+                        scope="context_instance",
+                        integration=control_plane_secrets.LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
+                        name="production-backup-ssh-private-key",
+                        plaintext_value="worker-secret-value",
+                        binding_key="PRODUCTION_BACKUP_SSH_PRIVATE_KEY",
+                        context_name="sellyouroutboard",
+                        instance_name="prod",
+                        actor="test",
+                        source_label="test",
+                    )
                     store.write_runtime_key_safety_policy_record(
                         RuntimeKeySafetyPolicyRecord(
                             record_id="runtime-key-safety-policy-live-target-test",
@@ -7085,7 +7096,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         result = payload["result"]
         self.assertEqual(
             result["runtime_environment"]["missing_keys"],
-            ["GOOGLE_ANALYTICS_MEASUREMENT_ID"],
+            ["CONTACT_ALERT_DISCORD_WEBHOOK_URL", "GOOGLE_ANALYTICS_MEASUREMENT_ID"],
         )
         self.assertNotIn(
             "PRODUCTION_BACKUP_SSH_PRIVATE_KEY",
@@ -7093,6 +7104,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertNotIn("lane-secret-value", json.dumps(payload))
         self.assertNotIn("other-lane-value", json.dumps(payload))
+        self.assertNotIn("worker-secret-value", json.dumps(payload))
 
     def test_live_target_runtime_api_requires_expected_managed_secret_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -7503,8 +7515,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ),
                 ),
                 patch(
-                    "control_plane.runtime_environments.resolve_runtime_environment_values",
-                    return_value={"GOOGLE_ANALYTICS_MEASUREMENT_ID": "G-9KRMER45KG"},
+                    "control_plane.runtime_environments.resolve_site_runtime_environment",
+                    return_value=control_plane_runtime_environments.SiteRuntimeEnvironment(
+                        values={"GOOGLE_ANALYTICS_MEASUREMENT_ID": "G-9KRMER45KG"},
+                        secret_keys=frozenset(),
+                    ),
                 ),
                 patch(
                     "control_plane.dokploy.source.read_dokploy_config",

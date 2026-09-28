@@ -357,16 +357,14 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
                         if failure == "retirement_changed":
                             store.write_runtime_environment_record(_runtime_record())
                         elif failure == "application_changed":
-                            profile = _profile().model_dump(mode="json")
-                            profile["expected_config"]["runtime_environment_keys"].append(
-                                {
-                                    "key": "LEGACY_PASSWORD",
-                                    "context": "example-site",
-                                    "instance": "testing",
-                                }
-                            )
-                            store.write_product_profile_record(
-                                LaunchplaneProductProfileRecord.model_validate(profile)
+                            store.write_runtime_environment_record(
+                                RuntimeEnvironmentRecord(
+                                    scope="context",
+                                    context="example-site",
+                                    env={"LEGACY_PASSWORD": "now-an-app-setting"},
+                                    updated_at="2026-09-27T00:00:00Z",
+                                    source_label="test",
+                                )
                             )
                     return {
                         "name": "test-app",
