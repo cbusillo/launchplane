@@ -802,6 +802,38 @@ def record_observed_generic_web_deploy(
     return {"deployment_record_id": deployment_record_id}, result.model_dump(mode="json")
 
 
+def build_generic_web_runtime_close_out_result(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    resolved_deploy_target: GenericWebResolvedDeployTarget,
+    provider_effect_started_at: str,
+) -> dict[str, object]:
+    """Describe a deploy closed out from runtime evidence.
+
+    No provider deployment record was observed, so this writes no deployment or
+    inventory record and leaves the deployment record id and finish time empty.
+    """
+
+    lane = _canonical_generic_web_lane(lane)
+    target_fields = _deploy_result_target_fields(resolved_deploy_target=resolved_deploy_target)
+    return GenericWebDeployResult(
+        deployment_record_id="",
+        deploy_status="pass",
+        deploy_started_at=provider_effect_started_at.strip(),
+        deploy_finished_at="",
+        product=profile.product,
+        context=lane.context,
+        instance=lane.instance,
+        target_name=target_fields.target_name,
+        target_id=target_fields.target_id,
+        target_category=target_fields.target_category,
+        provider_id=target_fields.provider_id,
+        provider_target_type=target_fields.provider_target_type,
+        provider_effect_attempted=True,
+    ).model_dump(mode="json")
+
+
 def _generic_web_deploy_post_deploy_status(
     post_deploy_update: PostDeployUpdateEvidence,
 ) -> Literal["pass", "fail", "skipped"]:
