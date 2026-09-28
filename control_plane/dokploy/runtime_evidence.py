@@ -196,8 +196,11 @@ def fetch_compose_running_container_images(
 ) -> tuple[str, ...]:
     """Return the configured image of every running container of one compose app.
 
-    Only containers whose Compose project label or container name belongs to the
-    exact app name are included, so a similarly named app cannot contribute.
+    Every listed container is inspected. Membership comes from the inspected
+    Compose project label, falling back to the exact app-name prefix only when
+    that label is absent, and running state comes from the inspected state, so a
+    custom container name or a container that stopped after listing cannot be
+    miscounted.
     """
 
     normalized_app_name = app_name.strip()
@@ -211,27 +214,41 @@ def fetch_compose_running_container_images(
         app_name=normalized_app_name,
         server_id=normalized_server_id,
     ):
-        if not _compose_container_belongs_to_app(container, app_name=normalized_app_name):
-            continue
-        state = str(container.get("state") or container.get("State") or "").strip().lower()
-        if state != "running":
-            continue
         container_id = str(container.get("containerId") or "").strip()
         if not container_id:
             raise DokployEvidenceProviderError("container-identity")
-        raw_config = _read_container_config(
+        container_config = _read_container_config(
             host=host,
             token=token,
             container_id=container_id,
             server_id=normalized_server_id,
-        ).get("Config")
-        configured_image = (
-            str(raw_config.get("Image") or "").strip() if isinstance(raw_config, dict) else ""
         )
+        raw_config = container_config.get("Config")
+        config = raw_config if isinstance(raw_config, dict) else {}
+        if not _compose_container_belongs_to_app(
+            container,
+            inspected_labels=config.get("Labels"),
+            app_name=normalized_app_name,
+        ):
+            continue
+        if not _compose_container_is_running(container, container_config):
+            continue
+        configured_image = str(config.get("Image") or "").strip()
         if not configured_image:
             raise DokployEvidenceProviderError("image-identity")
         running_images.append(configured_image[:_MAX_RUNTIME_TEXT_LENGTH])
     return tuple(running_images)
+
+
+def _compose_container_is_running(
+    container: dokploy_api.JsonObject,
+    container_config: dokploy_api.JsonObject,
+) -> bool:
+    inspected_state = container_config.get("State")
+    if isinstance(inspected_state, dict) and "Running" in inspected_state:
+        return inspected_state.get("Running") is True
+    listed_state = str(container.get("state") or container.get("State") or "")
+    return listed_state.strip().lower() == "running"
 
 
 def _list_compose_containers(
@@ -289,11 +306,11 @@ def _read_container_config(
 def _compose_container_belongs_to_app(
     container: dokploy_api.JsonObject,
     *,
+    inspected_labels: object,
     app_name: str,
 ) -> bool:
     normalized_app_name = app_name.strip().lower()
-    for labels_key in ("labels", "Labels"):
-        labels = container.get(labels_key)
+    for labels in (inspected_labels, container.get("labels"), container.get("Labels")):
         if isinstance(labels, dict):
             for label_key, label_value in labels.items():
                 if str(label_key).strip().lower() == "com.docker.compose.project":

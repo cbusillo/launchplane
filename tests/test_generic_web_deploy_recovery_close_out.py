@@ -429,6 +429,18 @@ class RuntimeCloseOutEvaluationTests(unittest.TestCase):
         self.assertEqual(evidence.matching_container_count, 1)
         self.assertNotIn(_ORIGINAL_IMAGE, evidence.model_dump_json())
 
+    def test_tag_and_digest_reference_of_the_same_repository_is_a_mismatch(self) -> None:
+        with self.assertRaises(ValueError):
+            evaluate_generic_web_runtime_close_out(
+                observation=_runtime(
+                    running=(
+                        _ORIGINAL_IMAGE,
+                        "ghcr.io/cbusillo/sellyouroutboard:old@sha256:" + "b" * 64,
+                    ),
+                ),
+                expected_artifact_reference=_ORIGINAL_IMAGE,
+            )
+
     def test_registry_port_is_not_mistaken_for_a_tag(self) -> None:
         original = "registry.example:5000/team/app@sha256:" + "c" * 64
         with self.assertRaises(ValueError):
@@ -443,28 +455,31 @@ class RuntimeCloseOutEvaluationTests(unittest.TestCase):
 
 class DokployRuntimeArtifactReadTests(unittest.TestCase):
     def test_reads_running_images_of_the_exact_compose_app_only(self) -> None:
-        requests: list[tuple[str, dict[str, object]]] = []
+        project = "com.docker.compose.project"
         containers = [
             {"containerId": "c1", "name": "app-x1-sync-1", "state": "running"},
             {"containerId": "c2", "name": "app-x1-db-1", "state": "running"},
             {"containerId": "c3", "name": "app-x1-old-1", "state": "exited"},
             {"containerId": "c4", "name": "app-x10-sync-1", "state": "running"},
-            {
-                "containerId": "c5",
-                "name": "renamed",
-                "state": "running",
-                "labels": {"com.docker.compose.project": "app-x1"},
-            },
+            {"containerId": "c5", "name": "frontend", "state": "running"},
+            {"containerId": "c6", "name": "app-x1-worker-1", "state": "running"},
         ]
-        images = {"c1": _ORIGINAL_IMAGE, "c2": _DATABASE_IMAGE, "c5": _ORIGINAL_IMAGE}
+        inspected = {
+            "c1": ({"Image": _ORIGINAL_IMAGE}, {"Running": True}),
+            "c2": ({"Image": _DATABASE_IMAGE, "Labels": {project: "app-x1"}}, None),
+            "c3": ({"Image": _OTHER_DIGEST_IMAGE}, {"Running": False}),
+            "c4": ({"Image": _OTHER_DIGEST_IMAGE, "Labels": {project: "app-x10"}}, None),
+            "c5": ({"Image": _OTHER_DIGEST_IMAGE, "Labels": {project: "app-x1"}}, None),
+            "c6": ({"Image": _OTHER_DIGEST_IMAGE}, {"Running": False}),
+        }
 
         def fake_request(*, path: str, query: dict[str, object], **_kwargs: object) -> object:
-            requests.append((path, query))
             if path == "/api/docker.getContainersByAppNameMatch":
                 return containers
             container_id = query["containerId"]
             assert isinstance(container_id, str)
-            return {"Config": {"Image": images[container_id]}}
+            config, state = inspected[container_id]
+            return {"Config": config, **({"State": state} if state is not None else {})}
 
         with patch("control_plane.dokploy.api.dokploy_request", fake_request):
             running = dokploy_runtime_evidence.fetch_compose_running_container_images(
@@ -474,11 +489,10 @@ class DokployRuntimeArtifactReadTests(unittest.TestCase):
                 server_id="server-1",
             )
 
-        self.assertEqual(running, (_ORIGINAL_IMAGE, _DATABASE_IMAGE, _ORIGINAL_IMAGE))
-        self.assertEqual(
-            [query["containerId"] for path, query in requests if path == "/api/docker.getConfig"],
-            ["c1", "c2", "c5"],
-        )
+        # c5 has a custom name but belongs to the app by its inspected project
+        # label; c4 belongs to another app; c3 and c6 are not running when
+        # inspected, even though c6 was listed as running.
+        self.assertEqual(running, (_ORIGINAL_IMAGE, _DATABASE_IMAGE, _OTHER_DIGEST_IMAGE))
 
     def test_running_container_without_image_fails_closed(self) -> None:
         def fake_request(*, path: str, **_kwargs: object) -> object:

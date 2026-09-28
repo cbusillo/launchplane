@@ -276,9 +276,7 @@ _IMMUTABLE_ARTIFACT_REFERENCE_PATTERN = re.compile(r"^[^\s@]+@sha256:[a-f0-9]{64
 
 
 def _image_repository(image_reference: str) -> str:
-    reference = image_reference.strip()
-    if "@" in reference:
-        return reference.split("@", 1)[0]
+    reference = image_reference.strip().split("@", 1)[0]
     registry_and_path, separator, last_segment = reference.rpartition("/")
     repository_name = last_segment.split(":", 1)[0]
     return f"{registry_and_path}{separator}{repository_name}"

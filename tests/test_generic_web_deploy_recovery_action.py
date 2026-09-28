@@ -549,6 +549,10 @@ await import('./{ACTION_ENTRYPOINT.as_posix()}');
         }
         cases: dict[str, tuple[dict[str, object], bool]] = {
             "close-out evidence": (close_out, True),
+            "replayed close-out evidence": (
+                {**close_out, "provider_outcome": "not_inspected"},
+                True,
+            ),
             "close-out claiming a provider deployment": (
                 {**close_out, "provider_outcome": "present", "provider_status": "done"},
                 False,

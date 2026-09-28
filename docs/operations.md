@@ -594,8 +594,10 @@ deployment is absent after the effect started. Dry-run proposes
 - the original deploy artifact is an immutable `repository@sha256:` reference;
 - the target's `DOCKER_IMAGE_REFERENCE` equals that reference exactly;
 - at least one running container of the exact compose app runs that reference,
-  and no running container runs any other reference (digest or tag) of the same
-  image repository.
+  and no running container runs any other reference (digest, tag, or both) of
+  the same image repository. Every listed container is inspected; membership
+  comes from its inspected Compose project label (the app-name prefix only when
+  the label is absent) and running state from its inspected state.
 
 Any provider read failure, missing image, or mismatch keeps `hold_unknown`.
 The digest adds only a hash of the artifact reference and the running and
@@ -653,7 +655,8 @@ pre-effect rejection, lease loss, uncertain, or non-durable outcomes.
 evidence without any provider call. The recovery action accepts an apply
 response only when it settles the reservation without retry: `adopt_observed`
 with provider outcome `present`/`done`, or `close_out_observed` with provider
-outcome `unknown` and an empty provider status. Successful
+outcome `unknown` (or `not_inspected` when a lost-response retry replays the
+completed close-out) and an empty provider status. Successful
 apply preserves the original deploy response evidence and adds only bounded
 recovery metadata, `recovery_digest` and `recovery_action`, so a lost-response
 apply retry can replay safely without exposing raw scope, key, target, or
