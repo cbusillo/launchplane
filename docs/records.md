@@ -1913,6 +1913,13 @@ run` is the foreground loop intended for an external process supervisor, and
 - Shopify guard values such as protected store keys now belong in
   `policies.shopify.protected_store_keys` on this record instead of a route map
   hardcoded in Python.
+- When that list is not empty, the deploy, stable bootstrap, and target
+  replacement data-workflow schedules read `shopify.shop_url_key` back from the
+  database before starting web again. A protected key, or a read-back that
+  cannot run, fails the schedule and leaves web stopped. If the workflow itself
+  fails first, web is restarted only when this read-back passes. Only the store
+  key is compared today: `shopify.api_token` and `shopify.webhook_key` have no
+  protected-value source yet (issue #2554).
 - The operator write path for this record family is the Launchplane CLI,
   including `dokploy-targets list`, `show`,
   `put-shopify-protected-store-key`, and

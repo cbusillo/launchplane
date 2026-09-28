@@ -9,7 +9,11 @@ import click
 
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetPolicies,
+    DokployTargetRecord,
+    DokployTargetShopifyPolicy,
+)
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.odoo_instance_override_record import (
     OdooConfigParameterOverride,
@@ -293,6 +297,66 @@ class OdooStableBootstrapTests(unittest.TestCase):
         self.assertEqual(
             store.environment_inventories[0].deployment_record_id,
             "deployment-cm-testing-bootstrap",
+        )
+
+    def test_execute_passes_target_protected_store_keys_to_bootstrap_runner(self) -> None:
+        store = _Store()
+        store.target_record = store.target_record.model_copy(
+            update={
+                "policies": DokployTargetPolicies(
+                    shopify=DokployTargetShopifyPolicy(
+                        protected_store_keys=("example-production-store",)
+                    )
+                )
+            }
+        )
+        captured_bootstrap_runs: list[dict[str, object]] = []
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.dokploy_post_deploy.run_compose_odoo_stable_bootstrap",
+                side_effect=lambda **kwargs: captured_bootstrap_runs.append(kwargs),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.execute_odoo_post_deploy",
+                return_value=OdooPostDeployResult(
+                    context="cm",
+                    instance="testing",
+                    phase="deploy",
+                    post_deploy_status="pass",
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.verify_odoo_stable_readiness",
+                return_value=_verification_result(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.utc_now_timestamp",
+                side_effect=("2026-05-10T02:00:00Z", "2026-05-10T02:01:00Z"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.generate_deployment_record_id",
+                return_value="deployment-cm-testing-bootstrap",
+            ),
+        ):
+            execute_odoo_stable_bootstrap(
+                control_plane_root=Path("/tmp/launchplane"),
+                record_store=store,
+                request=OdooStableBootstrapRequest(
+                    product="odoo-tenant-cm",
+                    instance="testing",
+                    confirmation=_BOOTSTRAP_CONFIRMATION,
+                ),
+                dokploy_request=cast(DokployRequest, _dokploy_request),
+            )
+
+        self.assertEqual(len(captured_bootstrap_runs), 1)
+        self.assertEqual(
+            captured_bootstrap_runs[0]["protected_shopify_store_keys"],
+            ("example-production-store",),
         )
 
     def test_execute_passes_override_payload_to_bootstrap_runner(self) -> None:
