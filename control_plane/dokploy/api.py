@@ -852,6 +852,80 @@ def wait_for_target_deployment(
     )
 
 
+def wait_for_titled_or_sole_new_target_deployment(
+    *,
+    host: str,
+    token: str,
+    target_type: str,
+    target_id: str,
+    known_deployment_keys: frozenset[str],
+    deployment_title: str,
+    timeout_seconds: int,
+) -> JsonObject:
+    """Wait for the deployment this caller triggered and return it once it succeeds.
+
+    The deployment carrying ``deployment_title`` is preferred. When no deployment
+    carries that title, the only deployment absent from ``known_deployment_keys``
+    (the keys listed before the trigger) is used instead. Several new untitled
+    deployments are ambiguous and are never chosen; the wait then times out.
+    A failed terminal status raises ``DokployDeploymentFailed``.
+    """
+
+    normalized_title = deployment_title.strip()
+    if not normalized_title:
+        raise click.ClickException("Dokploy deployment identity requires a title.")
+    failure_message_prefix = (
+        "Dokploy compose deployment failed"
+        if target_type == "compose"
+        else "Dokploy deployment failed"
+    )
+    start_time = time.monotonic()
+    while time.monotonic() - start_time <= timeout_seconds:
+        deployments = list_deployments_for_target(
+            host=host,
+            token=token,
+            target_type=target_type,
+            target_id=target_id,
+        )
+        titled = [
+            deployment
+            for deployment in deployments
+            if str(deployment.get("title") or "").strip() == normalized_title
+        ]
+        new_deployments = [
+            deployment
+            for deployment in deployments
+            if deployment_key(deployment)
+            and deployment_key(deployment) not in known_deployment_keys
+        ]
+        candidate = (
+            _latest_deployment_from_list(titled)
+            if titled
+            else (new_deployments[0] if len(new_deployments) == 1 else None)
+        )
+        if candidate is not None:
+            candidate_status = _deployment_status(candidate)
+            if candidate_status in _DEPLOYMENT_SUCCESS_STATUSES:
+                return candidate
+            if candidate_status in _DEPLOYMENT_FAILURE_STATUSES:
+                raise DokployDeploymentFailed(
+                    deployment_id=deployment_key(candidate),
+                    deployment_status=candidate_status,
+                    message_prefix=failure_message_prefix,
+                )
+        time.sleep(3)
+
+    raise click.ClickException("Timed out waiting for Dokploy deployment status.")
+
+
+_DEPLOYMENT_SUCCESS_STATUSES = frozenset(
+    {"success", "succeeded", "done", "completed", "healthy", "finished"}
+)
+_DEPLOYMENT_FAILURE_STATUSES = frozenset(
+    {"failed", "error", "canceled", "cancelled", "killed", "unhealthy", "timeout"}
+)
+
+
 def resolve_dokploy_user_id(*, host: str, token: str) -> str:
     payload = dokploy_request(host=host, token=token, path="/api/user.session")
     payload_as_object = as_json_object(payload)

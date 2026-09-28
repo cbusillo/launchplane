@@ -373,7 +373,15 @@ class GenericWebDeployProvider(Protocol):
         deployment_title: str,
         before_provider_mutation: Callable[[str], None],
         effect_started: Callable[[], None],
-    ) -> None: ...
+    ) -> GenericWebProviderDeploymentObservation | None:
+        """Deploy and wait; return an untitled deployment observation or ``None``.
+
+        ``None`` means the deployment carrying ``deployment_title`` finished, so
+        the caller observes it by title. A returned observation is the only new
+        provider deployment, which did not carry the title; the caller must
+        prove its effect from runtime evidence before treating it as complete.
+        """
+        ...
 
     def observe_artifact_deploy(
         self,
@@ -528,9 +536,12 @@ class DokployGenericWebDeployProvider:
         deployment_title: str,
         before_provider_mutation: Callable[[str], None],
         effect_started: Callable[[], None],
-    ) -> None:
+    ) -> GenericWebProviderDeploymentObservation | None:
         host, token = self._read_provider_config(control_plane_root=control_plane_root)
-        execute_dokploy_artifact_deploy(
+        # Dokploy compose deployments have not carried the title Launchplane
+        # sends (cbusillo/launchplane#2531), so compose deploys also accept the
+        # sole new deployment and leave proof of its effect to runtime evidence.
+        untitled_deployment = execute_dokploy_artifact_deploy(
             host=host,
             token=token,
             ship_request=resolved_deploy_target.ship_request,
@@ -540,7 +551,18 @@ class DokployGenericWebDeployProvider:
             deployment_title=deployment_title,
             before_provider_mutation=before_provider_mutation,
             effect_started=effect_started,
+            accept_sole_new_deployment=(
+                resolved_deploy_target.resolved_target.target_type == "compose"
+            ),
         )
+        if untitled_deployment is None:
+            return None
+        try:
+            return _terminal_deployment_observation(untitled_deployment)
+        except ValueError as error:
+            raise click.ClickException(
+                "Untitled Dokploy deployment has incomplete terminal evidence."
+            ) from error
 
     def observe_artifact_deploy(
         self,
@@ -671,6 +693,23 @@ class DokployGenericWebDeployProvider:
             ),
             running_container_images=running_images,
         )
+
+
+def _terminal_deployment_observation(
+    deployment: dokploy_api.JsonObject,
+) -> GenericWebProviderDeploymentObservation:
+    return GenericWebProviderDeploymentObservation(
+        outcome="present",
+        deployment_status=dokploy_api.deployment_status(deployment),
+        deployment_id=dokploy_api.deployment_key(deployment),
+        started_at=str(deployment.get("startedAt") or deployment.get("started_at") or "").strip(),
+        finished_at=str(
+            deployment.get("finishedAt") or deployment.get("finished_at") or ""
+        ).strip(),
+        error_message=str(
+            deployment.get("errorMessage") or deployment.get("error_message") or ""
+        ).strip(),
+    )
 
 
 def correlate_legacy_dokploy_deployment(

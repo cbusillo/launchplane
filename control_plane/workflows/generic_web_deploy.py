@@ -25,6 +25,12 @@ from control_plane.contracts.ship_request import ShipRequest
 from control_plane.drivers.registry import read_driver_descriptor
 from control_plane.workflows.generic_web_deploy_provider import GenericWebDeployProvider
 from control_plane.workflows.generic_web_deploy_provider import (
+    GenericWebDeployRuntimeArtifactProvider,
+)
+from control_plane.workflows.generic_web_deploy_provider import (
+    evaluate_generic_web_runtime_close_out,
+)
+from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebProviderDeploymentObservation,
 )
 from control_plane.workflows.generic_web_deploy_provider import GenericWebResolvedDeployTarget
@@ -507,7 +513,7 @@ def execute_generic_web_deploy(
         provider_effect_attempted = True
 
     try:
-        resolved_deploy_provider.execute_artifact_deploy(
+        untitled_deployment_observation = resolved_deploy_provider.execute_artifact_deploy(
             control_plane_root=control_plane_root,
             resolved_deploy_target=prepared_deploy_target,
             runtime_identity=_build_runtime_identity(
@@ -520,7 +526,14 @@ def execute_generic_web_deploy(
             before_provider_mutation=(provider_effect_checkpoint or (lambda _phase: None)),
             effect_started=mark_provider_effect_started,
         )
-        if normalized_provider_operation_title:
+        if normalized_provider_operation_title and untitled_deployment_observation is not None:
+            provider_deployment_observation = _prove_untitled_deployment_effect(
+                control_plane_root=control_plane_root,
+                deploy_provider=resolved_deploy_provider,
+                resolved_deploy_target=prepared_deploy_target,
+                observation=untitled_deployment_observation,
+            )
+        elif normalized_provider_operation_title:
             provider_deployment_observation = resolved_deploy_provider.observe_artifact_deploy(
                 control_plane_root=control_plane_root,
                 resolved_deploy_target=prepared_deploy_target,
@@ -800,6 +813,45 @@ def record_observed_generic_web_deploy(
         ),
     )
     return {"deployment_record_id": deployment_record_id}, result.model_dump(mode="json")
+
+
+def _prove_untitled_deployment_effect(
+    *,
+    control_plane_root: Path,
+    deploy_provider: GenericWebDeployProvider,
+    resolved_deploy_target: GenericWebResolvedDeployTarget,
+    observation: GenericWebProviderDeploymentObservation,
+) -> GenericWebProviderDeploymentObservation:
+    """Accept an untitled provider deployment only when its effect is proven.
+
+    The deployment must have succeeded, and the target must be configured for
+    and running exactly the original immutable image, using the same runtime
+    checks as recovery close-out. Anything less keeps the outcome unknown.
+    """
+
+    if observation.outcome != "present" or not generic_web_provider_deployment_succeeded(
+        observation.deployment_status
+    ):
+        raise click.ClickException(
+            "Generic web provider deployment did not return exact successful evidence."
+        )
+    if not isinstance(deploy_provider, GenericWebDeployRuntimeArtifactProvider):
+        raise click.ClickException(
+            "Generic web provider cannot prove an untitled deployment from runtime evidence."
+        )
+    try:
+        evaluate_generic_web_runtime_close_out(
+            observation=deploy_provider.observe_runtime_artifact(
+                control_plane_root=control_plane_root,
+                resolved_deploy_target=resolved_deploy_target,
+            ),
+            expected_artifact_reference=resolved_deploy_target.ship_request.artifact_id,
+        )
+    except (FileNotFoundError, ValueError) as error:
+        raise click.ClickException(
+            "Untitled generic web provider deployment is not proven by runtime evidence."
+        ) from error
+    return observation
 
 
 def build_generic_web_runtime_close_out_result(

@@ -215,13 +215,37 @@ def execute_dokploy_artifact_deploy(
     deployment_title: str = "",
     before_provider_mutation: Callable[[str], None] | None = None,
     effect_started: Callable[[], None] | None = None,
-) -> None:
+    accept_sole_new_deployment: bool = False,
+) -> dokploy_api.JsonObject | None:
+    """Deploy the artifact and wait for the provider deployment to finish.
+
+    With ``accept_sole_new_deployment`` and a deployment title, the wait also
+    accepts the only deployment created after the trigger when none carries the
+    title, and returns that deployment so the caller can prove its effect.
+    Otherwise it returns ``None``.
+    """
+
     latest_before = dokploy_api.latest_deployment_for_target(
         host=host,
         token=token,
         target_type=resolved_target.target_type,
         target_id=resolved_target.target_id,
     )
+    known_deployment_keys: frozenset[str] = frozenset()
+    if accept_sole_new_deployment and deployment_title:
+        known_deployment_keys = frozenset(
+            key
+            for key in (
+                dokploy_api.deployment_key(item)
+                for item in dokploy_api.list_deployments_for_target(
+                    host=host,
+                    token=token,
+                    target_type=resolved_target.target_type,
+                    target_id=resolved_target.target_id,
+                )
+            )
+            if key
+        )
     deploy_reference = dokploy_deploy_artifact_reference(
         ship_request=ship_request,
         target_type=resolved_target.target_type,
@@ -248,6 +272,19 @@ def execute_dokploy_artifact_deploy(
         no_cache=ship_request.no_cache,
         title=deployment_title,
     )
+    if deployment_title and accept_sole_new_deployment:
+        matched_deployment = dokploy_api.wait_for_titled_or_sole_new_target_deployment(
+            host=host,
+            token=token,
+            target_type=resolved_target.target_type,
+            target_id=resolved_target.target_id,
+            known_deployment_keys=known_deployment_keys,
+            deployment_title=deployment_title,
+            timeout_seconds=deploy_timeout_seconds,
+        )
+        if str(matched_deployment.get("title") or "").strip() == deployment_title.strip():
+            return None
+        return matched_deployment
     if deployment_title:
         dokploy_api.wait_for_target_deployment(
             host=host,
@@ -267,3 +304,4 @@ def execute_dokploy_artifact_deploy(
             before_key=dokploy_api.deployment_key(latest_before),
             timeout_seconds=deploy_timeout_seconds,
         )
+    return None
