@@ -329,10 +329,6 @@ def evaluate_runtime_key_safety_for_live_target_sync(
     return summary
 
 
-def skipped_runtime_key_safety_summary() -> dict[str, object]:
-    return {"required": False, "status": "skipped", "checked_binding_keys": []}
-
-
 def require_product_profile_runtime_keys(
     *,
     record_store: LiveTargetRuntimeProfileStore,
@@ -672,32 +668,11 @@ def apply_live_target_runtime_environment(
     )
     changed_keys = initial_delta["changed_keys"]
     changed_key_count = len(changed_keys) if isinstance(changed_keys, list) else 0
-    runtime_key_safety = skipped_runtime_key_safety_summary()
     deploy_result: dict[str, str] | None = None
     verification: dict[str, object] = {
         "status": "skipped",
         "reason": "dry_run" if not apply_changes else "no_runtime_env_changes",
     }
-
-    if apply_changes and database_url is None:
-        raise LiveTargetRuntimeError(
-            "Live target runtime apply requires LAUNCHPLANE_DATABASE_URL for DB-backed "
-            "runtime key-safety evaluation.",
-            code="runtime_key_safety_unavailable",
-        )
-    if database_url is not None and (not apply_changes or changed_key_count or deploy):
-        postgres_store = PostgresRecordStore(database_url=database_url)
-        try:
-            postgres_store.ensure_schema()
-            runtime_key_safety = evaluate_runtime_key_safety_for_live_target_sync(
-                record_store=postgres_store,
-                context_name=context_name,
-                instance_name=instance_name,
-                require_policy=apply_changes,
-                required_binding_keys=tuple(sorted(site_environment.secret_keys)),
-            )
-        finally:
-            postgres_store.close()
 
     if apply_changes and changed_key_count:
         if retired_keys:
@@ -821,7 +796,6 @@ def apply_live_target_runtime_environment(
             "target_name": target_definition.target_name,
         },
         "runtime_environment": initial_delta,
-        "runtime_key_safety": runtime_key_safety,
         "provider_env_platform_credentials": provider_env_platform_credentials,
         "apply": {
             "applied": apply_changes,
