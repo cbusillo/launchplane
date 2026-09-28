@@ -858,7 +858,7 @@ export function promotionStatusForFixture(
     base_driver_id: detail.base_driver_id,
     repository: detail.repository,
     workflow_id: "promote-prod.yml",
-    release_review: { required: false, approved: true, checklist: null, checklist_digest: "", blockers: [], latest_decision: null },
+    release_review: { required: false, approved: true, checklist: null, checklist_digest: "", blockers: [], latest_decision: null, unavailable_reason: null },
     workflow_ref: "main",
     context: detail.context,
     source_environment: "testing",
@@ -3189,7 +3189,7 @@ export function releaseReviewForFixture(mode: string): import("./generated/opena
     trace_id: "fixture-release-review", product: "example-site", display_name: "Example site",
     owner_github_login: "site-owner", viewer_is_owner: mode !== "operator", can_override: mode === "operator",
     review: {
-      required: true, approved: false, checklist_digest: "a".repeat(64), latest_decision: null,
+      required: true, approved: false, checklist_digest: "a".repeat(64), latest_decision: null, unavailable_reason: null,
       blockers: additionalChanges.length ? additionalChanges : ["Owner approval of this release is required."],
       checklist: {
         product: "example-site", repository: "example/site", owner_github_id: "9001",
@@ -3205,6 +3205,9 @@ export function releaseReviewForFixture(mode: string): import("./generated/opena
       },
     },
   };
+  if (mode === "empty") {
+    return { ...response, review: { required: true, approved: false, checklist: null, checklist_digest: "", latest_decision: null, unavailable_reason: "production_identity_missing", blockers: ["The current release checklist is unavailable. Production has no recorded deployed version."] } };
+  }
   return mode === "error" ? releaseDecisionForFixture(response, "accepted", "", false) : response;
 }
 

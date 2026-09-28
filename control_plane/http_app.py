@@ -14039,6 +14039,7 @@ def create_launchplane_fastapi_app(
                 record_store=record_store,
                 product=product,
                 destination_environment=environment,
+                trace_id=trace_id,
                 action_allowed=lambda action, requested_product, context, instances: (
                     resolved_authz_policy_runtime.policy.allows(
                         identity=identity,
@@ -24125,11 +24126,12 @@ def create_launchplane_fastapi_app(
             read_github_human_browser_mutation_identity=(
                 read_owner_review_browser_mutation_identity
             ),
-            current_review=lambda store, profile: current_release_review(
+            current_review=lambda store, profile, trace_id: current_release_review(
                 control_plane_root=resolved_control_plane_root,
                 record_store=store,
                 profile=profile,
                 include_prelaunch=True,
+                trace_id=trace_id,
             ),
             publish_decision=lambda profile, decision: publish_release_decision(
                 control_plane_root=resolved_control_plane_root,
