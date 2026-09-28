@@ -161,6 +161,10 @@ not part of this input flow.
   `launchplane_worker` integration, stored for exactly that lane. They are not
   part of the lane's runtime environment, so no deploy or sync can deliver them
   to an app. Store new worker credentials there with `context_instance` scope.
+- Launchplane's own service credentials, its `GITHUB_TOKEN` for PR comments
+  and release review and the advisory GitHub App private key, live in the
+  `launchplane_service` integration at global or context scope. A context copy
+  wins over the global one. No app environment resolves this integration.
 
 ## Managed Secret Model
 

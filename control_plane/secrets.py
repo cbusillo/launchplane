@@ -36,6 +36,9 @@ RUNTIME_ENVIRONMENT_SECRET_INTEGRATION = "runtime_environment"
 # Credentials Launchplane's own jobs use for one lane, such as backup SSH keys.
 # They are never part of a lane's runtime environment, so no app receives them.
 LAUNCHPLANE_WORKER_SECRET_INTEGRATION = "launchplane_worker"
+# Credentials Launchplane itself uses as a service, such as its GitHub token for PR
+# comments and release review. They are never part of any app's runtime environment.
+LAUNCHPLANE_SERVICE_SECRET_INTEGRATION = "launchplane_service"
 SECRET_STATUS_CONFIGURED = "configured"
 LEGACY_SECRET_KEY_ID = "launchplane-master-key"
 _KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -529,6 +532,21 @@ def resolve_lane_worker_secret_values(
         )
     finally:
         store.close()
+
+
+def resolve_launchplane_service_secret(
+    *, context_name: str, binding_key: str, database_url: str | None = None
+) -> str:
+    """Resolve one of Launchplane's own credentials, preferring the context's copy."""
+    return (
+        resolve_secret_values_for_integration(
+            integration=LAUNCHPLANE_SERVICE_SECRET_INTEGRATION,
+            context_name=context_name,
+            database_url=database_url,
+        )
+        .get(binding_key, "")
+        .strip()
+    )
 
 
 def resolve_site_secret_values(

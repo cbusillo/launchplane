@@ -10,10 +10,15 @@ from control_plane import runtime_environments
 from control_plane import secrets as control_plane_secrets
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.worker_secret_migration import (
+    LAUNCHPLANE_SERVICE_INTEGRATION,
     LAUNCHPLANE_WORKER_INTEGRATION,
+    MISSPELLED_RUNTIME_ENVIRONMENT_INTEGRATION,
     RUNTIME_ENVIRONMENT_INTEGRATION,
+    move_service_secrets,
     move_worker_secrets,
+    set_integration_status,
 )
+from control_plane.workflows.launchplane import resolve_launchplane_github_token
 
 RUNTIME = control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
 
@@ -49,7 +54,11 @@ class WorkerSecretMigrationTests(unittest.TestCase):
                                 env={"SITE_MODE": "live"}
                             )
                         },
-                    )
+                    ),
+                    "launchplane": runtime_environments.RuntimeEnvironmentContextDefinition(
+                        shared_env={"LAUNCHPLANE_ADVISORY_GITHUB_APP_ID": "123"},
+                        instances={},
+                    ),
                 },
             ),
             updated_at="2026-09-28T00:00:00Z",
@@ -79,6 +88,31 @@ class WorkerSecretMigrationTests(unittest.TestCase):
                 return move_worker_secrets(connection, source=source, destination=destination)
         finally:
             engine.dispose()
+
+    def move_service(self, *, source: str, destination: str) -> int:
+        engine = sa.create_engine(self.database_url)
+        try:
+            with engine.begin() as connection:
+                return move_service_secrets(connection, source=source, destination=destination)
+        finally:
+            engine.dispose()
+
+    def write_shared(
+        self, *, integration: str, key: str, value: str, scope: str, context: str = ""
+    ) -> dict[str, str]:
+        return control_plane_secrets.write_secret_value(
+            record_store=self.store,
+            scope=scope,  # type: ignore[arg-type]
+            integration=integration,
+            name=key,
+            plaintext_value=value,
+            binding_key=key,
+            context_name=context,
+            actor="test",
+        )
+
+    def github_token(self, context: str) -> str:
+        return resolve_launchplane_github_token(control_plane_root=self.root, context_name=context)
 
     def app_values(self) -> dict[str, str]:
         return runtime_environments.resolve_runtime_environment_values(
@@ -158,6 +192,102 @@ class WorkerSecretMigrationTests(unittest.TestCase):
 
         self.assertEqual(self.worker_values(), {})
         self.assertEqual(self.app_values()["VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY"], "key")
+
+    def test_launchplane_credentials_move_to_the_service_store(self) -> None:
+        self.write_shared(
+            integration=RUNTIME, key="GITHUB_TOKEN", value="global-token", scope="global"
+        )
+        self.write_shared(
+            integration=RUNTIME,
+            key="GITHUB_TOKEN",
+            value="launchplane-token",
+            scope="context",
+            context="launchplane",
+        )
+        self.write_shared(
+            integration=RUNTIME,
+            key="LAUNCHPLANE_ADVISORY_GITHUB_APP_PRIVATE_KEY",
+            value="advisory-key",
+            scope="context",
+            context="launchplane",
+        )
+
+        moved = self.move_service(
+            source=RUNTIME_ENVIRONMENT_INTEGRATION, destination=LAUNCHPLANE_SERVICE_INTEGRATION
+        )
+
+        self.assertEqual(moved, 3)
+        self.assertEqual(self.github_token("launchplane"), "launchplane-token")
+        self.assertEqual(self.github_token("site"), "global-token")
+        self.assertEqual(
+            control_plane_secrets.resolve_launchplane_service_secret(
+                context_name="launchplane",
+                binding_key="LAUNCHPLANE_ADVISORY_GITHUB_APP_PRIVATE_KEY",
+            ),
+            "advisory-key",
+        )
+        for context in ("site", "launchplane"):
+            values = runtime_environments.resolve_runtime_context_values(
+                control_plane_root=self.root, context_name=context
+            )
+            self.assertNotIn("GITHUB_TOKEN", values)
+            self.assertNotIn("LAUNCHPLANE_ADVISORY_GITHUB_APP_PRIVATE_KEY", values)
+
+    def test_service_credentials_move_back_on_downgrade(self) -> None:
+        self.write_shared(
+            integration=RUNTIME, key="GITHUB_TOKEN", value="global-token", scope="global"
+        )
+        self.move_service(
+            source=RUNTIME_ENVIRONMENT_INTEGRATION, destination=LAUNCHPLANE_SERVICE_INTEGRATION
+        )
+
+        self.move_service(
+            source=LAUNCHPLANE_SERVICE_INTEGRATION, destination=RUNTIME_ENVIRONMENT_INTEGRATION
+        )
+
+        self.assertEqual(
+            control_plane_secrets.resolve_launchplane_service_secret(
+                context_name="site", binding_key="GITHUB_TOKEN"
+            ),
+            "",
+        )
+        self.assertEqual(self.github_token("site"), "global-token")
+        self.assertEqual(
+            runtime_environments.resolve_runtime_context_values(
+                control_plane_root=self.root, context_name="site"
+            )["GITHUB_TOKEN"],
+            "global-token",
+        )
+
+    def test_misspelled_integration_records_are_disabled(self) -> None:
+        written = self.write_shared(
+            integration=MISSPELLED_RUNTIME_ENVIRONMENT_INTEGRATION,
+            key="GITHUB_TOKEN",
+            value="stray-token",
+            scope="context",
+            context="site",
+        )
+        engine = sa.create_engine(self.database_url)
+        try:
+            with engine.begin() as connection:
+                changed = set_integration_status(
+                    connection,
+                    integration=MISSPELLED_RUNTIME_ENVIRONMENT_INTEGRATION,
+                    status="disabled",
+                )
+        finally:
+            engine.dispose()
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(self.store.read_secret_record(written["secret_id"]).status, "disabled")
+        self.assertTrue(
+            all(
+                binding.status == "disabled"
+                for binding in self.store.list_secret_bindings(
+                    integration=MISSPELLED_RUNTIME_ENVIRONMENT_INTEGRATION, limit=None
+                )
+            )
+        )
 
 
 if __name__ == "__main__":
