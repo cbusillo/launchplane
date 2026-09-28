@@ -125,7 +125,8 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
             self.assertTrue(result.override_payload_rendered)
             self.assertEqual(result.workflow_intent, "deploy")
             self.assertEqual(result.override_payload_schema_version, 1)
-            self.assertEqual(result.override_count, 1)
+            # web.base.url plus the explicit Shopify clear for a non-production lane.
+            self.assertEqual(result.override_count, 2)
             self.assertFalse(result.website_bootstrap_included)
             self.assertRegex(result.override_payload_sha256, r"^[0-9a-f]{64}$")
             self.assertEqual(
@@ -474,7 +475,8 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
             self.assertEqual(result.override_status, "pass")
             self.assertTrue(result.override_payload_rendered)
             self.assertEqual(result.workflow_intent, "restore")
-            self.assertEqual(result.override_count, 1)
+            # web.base.url plus the explicit Shopify clear for a non-production lane.
+            self.assertEqual(result.override_count, 2)
             self.assertFalse(result.website_bootstrap_included)
             self.assertEqual(result.override_evidence["website_bootstrap_included"], "false")
             self.assertEqual(len(captured_runs), 1)
@@ -568,6 +570,11 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                 decoded_payload["addon_settings"],
                 [
                     {
+                        "addon": "shopify",
+                        "setting": "action",
+                        "value": {"source": "literal", "value": "clear"},
+                    },
+                    {
                         "addon": "openai",
                         "setting": "api_key",
                         "value": {
@@ -575,7 +582,7 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                             "secret_binding_id": "secret-opw-testing-openai",
                             "environment_variable": "ODOO_OVERRIDE_SECRET__ADDON__OPENAI__API_KEY",
                         },
-                    }
+                    },
                 ],
             )
             self.assertEqual(

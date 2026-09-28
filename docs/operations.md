@@ -2391,6 +2391,40 @@ context only, and `context_instance` has both context and instance.
   Service-written `web.base.url` records are always marked for `deploy` and
   `promotion` application so Odoo post-deploy and stable-bootstrap drivers can
   apply the canonical URL before verification.
+- For shared/live Shopify addon settings, use
+  `POST /v1/product-config/odoo-addon-settings/apply` (contract operation
+  `apply_odoo_addon_settings`) through the Launchplane helper or service API.
+  It replaces the lane's Shopify settings on its instance-override record and
+  leaves every other override untouched:
+  - `shop_url_key`, `api_version` and `test_store` are literals. The API token
+    and webhook key are references to existing managed secret bindings. The
+    request schema has no plaintext secret field, and a value shaped like a
+    Shopify credential is rejected without being echoed.
+  - Each binding must exist, be configured, be scoped to the exact lane, and use
+    the post-deploy transport key: `ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN`
+    and `ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__WEBHOOK_KEY`. Create the secrets
+    first through product-config with those binding keys.
+  - Dry-run needs `product_config.plan`, and apply needs `product_config.apply`,
+    both instance-scoped. Terminal agent credentials are refused. Dry-run
+    returns a redacted diff and `plan_sha256`. Apply requires that digest as
+    `reviewed_plan_sha256`, a reason and an `Idempotency-Key`. It re-plans
+    against current authority, refuses a stale digest, writes, and returns a
+    read-back with setting names, presence, binding presence and non-secret
+    values only.
+  - Both modes refuse a store key in the lane target's
+    `policies.shopify.protected_store_keys` or one that looks production-like,
+    comparing bare store handles so a protected key's `.myshopify.com` form is
+    refused too (the post-deploy renderer applies the same comparison),
+    `test_store` on a production lane, a lane with no tracked target record, and
+    missing or invalid bindings.
+  - The record changes only intent. Run Odoo post-deploy for the lane afterwards
+    so the database receives the settings, then verify them in the lane database.
+- On a non-production lane, post-deploy always sends an explicit Shopify
+  action. A lane with complete Shopify settings sends `apply`; a lane with no or
+  partial Shopify settings sends `clear`, so a restored production copy loses
+  production's store key, token and webhook key even when no dev store is
+  declared. A production lane without Shopify settings sends no Shopify action,
+  as before. The preview website-bootstrap payload does not carry this clear.
 - `odoo-overrides put-addon-setting --allow-direct-db-mutation` writes
   addon-shaped Odoo override intent such as Authentik or Shopify settings for a
   context and instance. Use it only for explicit local/bootstrap repair.

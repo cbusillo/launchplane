@@ -61,6 +61,12 @@ Anything not explicitly selected by the generator is absent. The artifact must
 never contain real product, tenant, repository, branch, domain, lane,
 provider-target, credential, operator, or runtime-topology authority.
 
+`apply_odoo_addon_settings` is the supported write for an Odoo lane's
+addon settings on its instance-override record, with Shopify as the first
+addon. It carries secret-binding references, never plaintext, and its apply
+mode requires the reviewed dry-run digest. It is a service route, not a
+protected workflow.
+
 The browser-only activation self-check is intentionally absent from this
 agent/operator allow-list. It accepts only the signed-in human's Launchplane
 session cookie and has no bearer helper or agent surface.

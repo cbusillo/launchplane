@@ -72029,6 +72029,218 @@
         "summary": "Plan or apply product config"
       }
     },
+    "/v1/product-config/odoo-addon-settings/apply": {
+      "post": {
+        "operationId": "apply_odoo_addon_settings",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$defs": {
+                  "OdooShopifyAddonSettingsInput": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "api_token_secret_binding_id": {
+                        "title": "Api Token Secret Binding Id",
+                        "type": "string"
+                      },
+                      "api_version": {
+                        "title": "Api Version",
+                        "type": "string"
+                      },
+                      "shop_url_key": {
+                        "title": "Shop Url Key",
+                        "type": "string"
+                      },
+                      "test_store": {
+                        "title": "Test Store",
+                        "type": "boolean"
+                      },
+                      "webhook_key_secret_binding_id": {
+                        "title": "Webhook Key Secret Binding Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "shop_url_key",
+                      "api_version",
+                      "api_token_secret_binding_id",
+                      "webhook_key_secret_binding_id",
+                      "test_store"
+                    ],
+                    "title": "OdooShopifyAddonSettingsInput",
+                    "type": "object"
+                  }
+                },
+                "additionalProperties": false,
+                "properties": {
+                  "addon": {
+                    "const": "shopify",
+                    "default": "shopify",
+                    "title": "Addon",
+                    "type": "string"
+                  },
+                  "context": {
+                    "title": "Context",
+                    "type": "string"
+                  },
+                  "instance": {
+                    "title": "Instance",
+                    "type": "string"
+                  },
+                  "mode": {
+                    "default": "dry-run",
+                    "enum": [
+                      "dry-run",
+                      "apply"
+                    ],
+                    "title": "Mode",
+                    "type": "string"
+                  },
+                  "product": {
+                    "title": "Product",
+                    "type": "string"
+                  },
+                  "reason": {
+                    "title": "Reason",
+                    "type": "string"
+                  },
+                  "reviewed_plan_sha256": {
+                    "default": "",
+                    "title": "Reviewed Plan Sha256",
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "const": 1,
+                    "default": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  },
+                  "shopify": {
+                    "$ref": "#/$defs/OdooShopifyAddonSettingsInput"
+                  }
+                },
+                "required": [
+                  "product",
+                  "context",
+                  "instance",
+                  "reason",
+                  "shopify"
+                ],
+                "title": "OdooAddonSettingsApplyRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Dry-run or apply Odoo instance-override addon settings"
+      }
+    },
     "/v1/product-onboarding/apply": {
       "post": {
         "operationId": "apply_product_onboarding",
