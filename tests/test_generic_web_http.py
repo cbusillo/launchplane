@@ -10,6 +10,8 @@ from types import SimpleNamespace
 from typing import Any, Literal
 from unittest.mock import patch
 
+import click
+
 from click import ClickException
 
 from control_plane.contracts.release_review import ReleaseReviewStatus
@@ -1633,7 +1635,7 @@ class GenericWebHttpTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
     def _invoke_live_promotion_without_intent_or_grant(
-        self, release_review: ReleaseReviewStatus | None = None
+        self, release_review: ReleaseReviewStatus | None = None, *, dry_run: bool = False
     ) -> tuple[int, dict[str, Any]]:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -1684,7 +1686,7 @@ class GenericWebHttpTests(unittest.TestCase):
                     SimpleNamespace(release_review=release_review),
                 ),
             )
-            with review_patch if release_review is not None else nullcontext():
+            with review_patch if release_review is not None else nullcontext() as review_mock:
                 status_code, payload = _invoke_app(
                     app,
                     method="POST",
@@ -1697,11 +1699,13 @@ class GenericWebHttpTests(unittest.TestCase):
                             "product": "sellyouroutboard",
                             "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
                             "source_git_ref": "abc123",
+                            **({"dry_run": True} if dry_run else {}),
                         },
                     },
                     headers={"Idempotency-Key": "generic-web-prod-promotion-reviewed-only"},
                 )
 
+        self.release_review_evaluations = review_mock.call_count if review_mock else 0
         return status_code, payload
 
     def test_generic_web_prod_promotion_live_requires_intent_or_unreviewed_grant(self) -> None:
@@ -1721,6 +1725,31 @@ class GenericWebHttpTests(unittest.TestCase):
         self.assertNotEqual(
             payload.get("error", {}).get("code"), "promotion_intent_required", payload
         )
+
+    def test_generic_web_prod_promotion_live_compiles_the_release_once_before_reserving(
+        self,
+    ) -> None:
+        status_code, payload = self._invoke_live_promotion_without_intent_or_grant(
+            ReleaseReviewStatus(required=True, approved=True)
+        )
+
+        self.assertNotEqual(status_code, 403, payload)
+        self.assertEqual(self.release_review_evaluations, 1)
+
+    def test_generic_web_prod_promotion_logs_the_masked_error_with_its_trace(self) -> None:
+        with (
+            patch(
+                "control_plane.http_routes.generic_web.execute_generic_web_prod_promotion_result",
+                side_effect=click.ClickException("source inventory mismatch"),
+            ),
+            self.assertLogs("control_plane.http_routes.generic_web", level="ERROR") as logs,
+        ):
+            status_code, payload = self._invoke_live_promotion_without_intent_or_grant(dry_run=True)
+
+        self.assertEqual(status_code, 400, payload)
+        self.assertEqual(payload["error"]["message"], "Request could not be completed.")
+        self.assertIn(payload["trace_id"], logs.output[0])
+        self.assertIn("source inventory mismatch", logs.output[0])
 
     def test_generic_web_prod_promotion_live_needs_a_recorded_approval_not_an_exemption(
         self,
