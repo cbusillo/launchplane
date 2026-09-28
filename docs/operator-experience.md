@@ -433,8 +433,9 @@ once, acquires a durable target-scoped mutation reservation, and passes the same
 snapshot into deployment; concurrent retries are rejected while the first call
 is running, and completed retries replay the original response. Trusted
 automation that intentionally bypasses product-owned review requires the separate
-`generic_web_prod_promotion.execute_unreviewed` grant; the normal execute grant
-alone cannot run raw live promotion. The escape hatch still requires database
+`generic_web_prod_promotion.execute_unreviewed` grant. The normal execute grant
+alone can run raw live promotion only after the current release checklist has a
+recorded approval. The escape hatch still requires database
 storage, an `Idempotency-Key`, the same target snapshot check, and the same
 durable provider-mutation reservation.
 

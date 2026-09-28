@@ -21,6 +21,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
+from control_plane.contracts.release_review import ReleaseReviewStatus
 from control_plane.drivers import native_routes
 from control_plane.generic_web_deploy_http import (
     GENERIC_WEB_DEPLOY_ROUTE as _GENERIC_WEB_DEPLOY_ROUTE,
@@ -467,6 +468,39 @@ def build_generic_web_write_route_handlers(
                 message="The production provider target changed before promotion execution.",
             )
 
+    def read_current_release_review(
+        *,
+        record_store: object,
+        profile: LaunchplaneProductProfileRecord,
+        lane: ProductLaneProfile,
+    ) -> tuple[bool, ReleaseReviewStatus]:
+        current_profile, current_lane, status = build_product_promotion_status(
+            control_plane_root=dependencies.control_plane_root,
+            record_store=record_store,
+            product=profile.product,
+            destination_environment=lane.instance,
+            action_allowed=lambda _action, _product, _context, _instances: True,
+            workflow_credentials_ready=lambda _context: True,
+        )
+        return current_profile == profile and current_lane == lane, status.release_review
+
+    # A recorded approval of the current release checklist is the reviewed human
+    # "go" for exactly that build, so it authorizes a live promotion the same way
+    # a promotion intent does. A release that needs no review does not count.
+    def current_release_approval_recorded(
+        *,
+        record_store: object,
+        profile: LaunchplaneProductProfileRecord,
+        lane: ProductLaneProfile,
+    ) -> bool:
+        try:
+            unchanged, decision = read_current_release_review(
+                record_store=record_store, profile=profile, lane=lane
+            )
+        except (AttributeError, FileNotFoundError, ValueError, click.ClickException):
+            return False
+        return unchanged and decision.required and decision.approved
+
     def require_current_release_approval(
         *,
         record_store: object,
@@ -475,13 +509,8 @@ def build_generic_web_write_route_handlers(
         trace_id: str,
     ) -> None:
         try:
-            current_profile, current_lane, status = build_product_promotion_status(
-                control_plane_root=dependencies.control_plane_root,
-                record_store=record_store,
-                product=profile.product,
-                destination_environment=lane.instance,
-                action_allowed=lambda _action, _product, _context, _instances: True,
-                workflow_credentials_ready=lambda _context: True,
+            unchanged, decision = read_current_release_review(
+                record_store=record_store, profile=profile, lane=lane
             )
         except (AttributeError, FileNotFoundError, ValueError, click.ClickException) as error:
             raise dependencies.http_error(
@@ -490,12 +519,7 @@ def build_generic_web_write_route_handlers(
                 code="release_review_unavailable",
                 message="Owner release approval could not be evaluated for live promotion.",
             ) from error
-        decision = status.release_review
-        if (
-            current_profile != profile
-            or current_lane != lane
-            or (decision.required and not decision.approved)
-        ):
+        if not unchanged or (decision.required and not decision.approved):
             raise dependencies.http_error(
                 status_code=409,
                 trace_id=trace_id,
@@ -1411,12 +1435,16 @@ def build_generic_web_write_route_handlers(
         live_promotion = not promotion_request.promotion.dry_run
         promotion_intent_id = promotion_request.promotion.promotion_intent_id.strip()
         if live_promotion:
-            if not promotion_intent_id and not (
-                dependencies.authorization_allows(
+            if (
+                not promotion_intent_id
+                and not dependencies.authorization_allows(
                     identity=identity,
                     action="generic_web_prod_promotion.execute_unreviewed",
                     product=profile.product,
                     context=lane.context.strip(),
+                )
+                and not current_release_approval_recorded(
+                    record_store=record_store, profile=profile, lane=lane
                 )
             ):
                 raise dependencies.http_error(
@@ -1424,8 +1452,8 @@ def build_generic_web_write_route_handlers(
                     trace_id=trace_id,
                     code="promotion_intent_required",
                     message=(
-                        "Live generic-web promotion requires a product-owned intent or an "
-                        "explicit unreviewed-automation grant."
+                        "Live generic-web promotion requires an approved release checklist, "
+                        "a product-owned intent, or an explicit unreviewed-automation grant."
                     ),
                 )
             if not idempotency_key.strip():

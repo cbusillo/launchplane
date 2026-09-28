@@ -343,9 +343,12 @@ inputs creates a new row instead of being suppressed forever.
 The workflow input set includes `promotion_intent_id`, equal to the persisted
 outbox delivery ID. Product workflows must pass it to the raw live promotion
 route and use it as that request's `Idempotency-Key`; the service revalidates
-the current evidence and target against the intent before execution. The
-separate `generic_web_prod_promotion.execute_unreviewed` authorization action is
-the only supported escape hatch for deliberately unreviewed automation.
+the current evidence and target against the intent before execution. Without an
+intent, a recorded Owner approval or operator override of the current release
+checklist authorizes the live call, because that decision is already the human
+go-ahead for exactly that build. A release that needs no review does not count.
+The separate `generic_web_prod_promotion.execute_unreviewed` authorization action
+is the only supported escape hatch for deliberately unreviewed automation.
 
 GitHub workflow dispatch does not provide a provider idempotency token. Its
 worker therefore persists the observation window and an in-doubt marker before

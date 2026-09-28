@@ -2905,7 +2905,9 @@ resolved once and carried into execution under a durable target-scoped mutation
 reservation, so target-record changes cannot redirect an accepted intent and
 concurrent uses of the same intent cannot both reach the provider. Completed
 requests remain replayable before current evidence is revalidated. Raw live
-automation without an intent is denied unless policy explicitly grants
+automation without an intent is denied unless the current release checklist has
+a recorded approval (Owner acceptance or operator override; a release that needs
+no review does not count) or policy explicitly grants
 `generic_web_prod_promotion.execute_unreviewed` in addition to the normal
 execute action. That grant bypasses product review, not mutation safety: every
 live raw promotion requires database storage, a non-empty idempotency key, an
