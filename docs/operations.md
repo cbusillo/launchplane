@@ -2469,6 +2469,34 @@ context only, and `context_instance` has both context and instance.
   production's store key, token and webhook key even when no dev store is
   declared. A production lane without Shopify settings sends no Shopify action,
   as before. The preview website-bootstrap payload does not carry this clear.
+- A non-production lane may hold an integration's settings only when a lane
+  allowance says why (owner decision on #2554: an allowlist, not a list of
+  production keys). Allowances live on the lane's tracked target record as
+  `policies.integration_allowances`, one per integration, each with a kind, a
+  reason, optional evidence, who recorded it and when:
+  - `dev_store`: a non-production service account, such as a Shopify
+    development store.
+  - `read_only_source`: a production import source reached with a read-only
+    account. Evidence of the read-only grant is required.
+  - `pre_live`: until a tenant's production lane is live on Launchplane, its
+    testing lane may keep the tenant's real integration settings, because
+    testing is the working instance. Only testing and dev lanes accept it.
+- Read a lane's allowances with `GET /v1/product-config/integration-allowances`
+  (query `product`, `context`, `instance`; needs `product_config.plan`). Set
+  them with `POST /v1/product-config/integration-allowances/apply`. The request
+  carries the lane's whole allowance list, so an omitted integration is removed.
+  - Dry-run needs `product_config.plan`, and apply needs
+    `product_config.apply`, both instance-scoped. Terminal agent credentials are
+    refused. Dry-run returns a per-integration diff and `plan_sha256`. Apply
+    requires that digest as `reviewed_plan_sha256`, a reason and an
+    `Idempotency-Key`, re-plans against the current record, refuses a stale
+    digest, writes, and returns a read-back.
+  - Both modes refuse any allowance on a production lane, `pre_live` outside a
+    testing or dev lane, and a lane with no tracked target record. Every other
+    target policy, including the Shopify protected store keys, is left as it is.
+  - An unchanged allowance keeps its original `recorded_by` and `recorded_at`.
+  - The record states intent only. The read-back that checks a lane's database
+    against its allowances before web starts is tracked in #2595.
 - `odoo-overrides put-addon-setting --allow-direct-db-mutation` writes
   addon-shaped Odoo override intent such as Authentik or Shopify settings for a
   context and instance. Use it only for explicit local/bootstrap repair.

@@ -1,3 +1,4 @@
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -24,10 +25,63 @@ class DokployTargetShopifyPolicy(BaseModel):
         return self
 
 
+IntegrationAllowanceKind = Literal["dev_store", "read_only_source", "pre_live"]
+_INTEGRATION_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
+class DokployTargetIntegrationAllowance(BaseModel):
+    """Why a non-production lane may hold one integration's settings.
+
+    ``dev_store`` is a non-production service account. ``read_only_source`` is a
+    production import source reached with a read-only account, with the grant as
+    evidence. ``pre_live`` lets a testing lane keep a tenant's real settings until the
+    tenant's production lane is live on Launchplane.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    integration: str
+    kind: IntegrationAllowanceKind
+    reason: str
+    evidence: str = ""
+    recorded_by: str = ""
+    recorded_at: str = ""
+
+    @model_validator(mode="after")
+    def _validate_allowance(self) -> "DokployTargetIntegrationAllowance":
+        self.integration = self.integration.strip().lower()
+        self.reason = self.reason.strip()
+        self.evidence = self.evidence.strip()
+        self.recorded_by = self.recorded_by.strip()
+        self.recorded_at = self.recorded_at.strip()
+        if not _INTEGRATION_NAME_PATTERN.fullmatch(self.integration):
+            raise ValueError(
+                "Integration allowance names use lowercase letters, digits and underscores."
+            )
+        if not self.reason:
+            raise ValueError("Integration allowances require a reason.")
+        if self.kind == "read_only_source" and not self.evidence:
+            raise ValueError(
+                "A read_only_source allowance requires evidence of the read-only grant."
+            )
+        return self
+
+
 class DokployTargetPolicies(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     shopify: DokployTargetShopifyPolicy = Field(default_factory=DokployTargetShopifyPolicy)
+    integration_allowances: tuple[DokployTargetIntegrationAllowance, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_unique_allowances(self) -> "DokployTargetPolicies":
+        integrations = [allowance.integration for allowance in self.integration_allowances]
+        if len(integrations) != len(set(integrations)):
+            raise ValueError("A lane has at most one allowance per integration.")
+        self.integration_allowances = tuple(
+            sorted(self.integration_allowances, key=lambda allowance: allowance.integration)
+        )
+        return self
 
 
 class DokployTargetRecord(BaseModel):
