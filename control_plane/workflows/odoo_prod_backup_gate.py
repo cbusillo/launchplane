@@ -275,11 +275,11 @@ def _runtime_values(
     instance: str,
 ) -> dict[str, str]:
     try:
-        return control_plane_runtime_environments.resolve_runtime_environment_values(
+        return control_plane_runtime_environments.resolve_site_runtime_environment(
             control_plane_root=control_plane_root,
             context_name=context,
             instance_name=instance,
-        )
+        ).values
     except click.ClickException as error:
         raise click.ClickException(
             "Odoo prod backup workflow requires DB-backed runtime environment records for "
