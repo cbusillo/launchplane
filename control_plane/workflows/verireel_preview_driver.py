@@ -15,6 +15,7 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane.runtime_platform_credentials import looks_like_credential
 from control_plane.contracts.runtime_identity import (
     RuntimeIdentity,
     health_payload_runtime_identity_status,
@@ -359,24 +360,9 @@ def _verireel_template_runtime_secret_keys(
             continue
         if normalized_key in _PREVIEW_REFRESH_GENERATED_ENV_KEYS:
             continue
-        if _looks_like_template_credential(normalized_key, str(value)):
+        if looks_like_credential(normalized_key, str(value)):
             required_keys.append(normalized_key)
     return tuple(dict.fromkeys(required_keys))
-
-
-_CREDENTIAL_NAME_PARTS = ("PASSWORD", "PASSWD", "TOKEN", "SECRET", "KEY", "CREDENTIAL")
-
-
-def _looks_like_template_credential(key: str, value: str) -> bool:
-    # Browser-bundled values are public by definition.
-    if key.upper().startswith("NEXT_PUBLIC_"):
-        return False
-    if any(part in key.upper() for part in _CREDENTIAL_NAME_PARTS):
-        return True
-    try:
-        return bool(urlparse(value.strip()).password)
-    except ValueError:
-        return False
 
 
 def _build_admin_database_url(database_url: str) -> str:
