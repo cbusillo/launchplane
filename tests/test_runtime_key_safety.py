@@ -4,6 +4,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeEnvironmentClass,
     RuntimeKeySafetyPolicyRecord,
     RuntimeKeySafetyTarget,
+    RuntimeSecretClass,
     RuntimeSecretSafetyRule,
     RuntimeSecretSafetyTargetScope,
 )
@@ -484,6 +485,48 @@ class RuntimeKeySafetyTests(unittest.TestCase):
 
                 self.assertEqual(evaluation.status, "pass")
                 self.assertEqual(evaluation.findings, ())
+
+    def test_declared_class_on_an_exact_lane_binding_must_suit_the_lane(self) -> None:
+        cases: tuple[tuple[RuntimeSecretClass, str], ...] = (
+            ("testing", "pass"),
+            ("non_prod", "pass"),
+            ("prod_only", "fail"),
+            ("preview", "fail"),
+        )
+        for declared_class, expected_status in cases:
+            with self.subTest(declared_class=declared_class):
+                evaluation = evaluate_runtime_key_safety(
+                    target=RuntimeKeySafetyTarget(
+                        context="opw",
+                        instance="testing",
+                        environment_class="testing",
+                    ),
+                    required_binding_keys=("DEV_STORE_API_TOKEN",),
+                    secret_bindings=(
+                        _binding(binding_key="DEV_STORE_API_TOKEN", instance="testing").model_copy(
+                            update={"declared_secret_class": declared_class}
+                        ),
+                    ),
+                    secret_rules=(),
+                )
+
+                self.assertEqual(evaluation.status, expected_status)
+                if expected_status == "fail":
+                    self.assertEqual(evaluation.findings[0].code, "secret_class_not_allowed")
+                    self.assertEqual(evaluation.findings[0].secret_class, declared_class)
+
+    def test_declared_secret_class_requires_an_exact_lane_binding(self) -> None:
+        with self.assertRaises(ValueError):
+            SecretBinding(
+                binding_id="binding-1",
+                secret_id="secret-1",
+                integration="runtime_environment",
+                binding_key="DEV_STORE_API_TOKEN",
+                context="opw",
+                declared_secret_class="testing",
+                created_at="2026-09-29T00:00:00Z",
+                updated_at="2026-09-29T00:00:00Z",
+            )
 
     def test_unclassified_lane_secret_still_fails_for_a_preview_target(self) -> None:
         # Preview checks retarget the template lane's bindings to the preview,

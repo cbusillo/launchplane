@@ -13,6 +13,7 @@ from control_plane.contracts.runtime_environment_record import (
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyFinding,
     RuntimeKeySafetyTarget,
+    RuntimeSecretClass,
 )
 from control_plane.contracts.secret_record import SecretScope
 from control_plane.contracts.product_profile_record import (
@@ -47,6 +48,7 @@ class ProductConfigSecretInput(BaseModel):
     binding_key: str | None = None
     value: str
     description: str = ""
+    secret_class: RuntimeSecretClass | None = None
 
     @model_validator(mode="after")
     def _require_secret_identity(self) -> "ProductConfigSecretInput":
@@ -176,6 +178,10 @@ class ProductConfigSecretResult(BaseModel):
     context: str
     instance: str
     secret_id: str = ""
+    secret_class: RuntimeSecretClass | None = Field(
+        default=None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class ProductConfigApplySummary(BaseModel):

@@ -2,6 +2,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretClass
+
 SecretScope = Literal["global", "context", "context_instance"]
 SecretPolicy = Literal["write_only"]
 SecretStatus = Literal["configured", "disabled"]
@@ -85,6 +87,9 @@ class SecretBinding(BaseModel):
     context: str = ""
     instance: str = ""
     status: SecretStatus = "configured"
+    # The writer's key-safety classification for a secret stored on one exact
+    # lane. Runtime key safety uses it only for that lane's own bindings.
+    declared_secret_class: RuntimeSecretClass | None = None
     created_at: str
     updated_at: str
 
@@ -100,6 +105,10 @@ class SecretBinding(BaseModel):
             raise ValueError("secret binding requires binding_key")
         if not self.created_at.strip() or not self.updated_at.strip():
             raise ValueError("secret binding requires created_at and updated_at")
+        if self.declared_secret_class is not None and not (
+            self.context.strip() and self.instance.strip()
+        ):
+            raise ValueError("secret binding declared_secret_class requires context and instance")
         return self
 
 
