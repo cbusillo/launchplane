@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from typing import Literal
 
@@ -68,6 +69,22 @@ class PlatformCredentialRefusedError(click.ClickException):
             "source, or retire a legacy provider key through product-config "
             "retired_provider_keys."
         )
+
+
+_CREDENTIAL_NAME_PARTS = ("PASSWORD", "PASSWD", "TOKEN", "SECRET", "KEY", "CREDENTIAL")
+
+
+def looks_like_credential(key: str, value: str) -> bool:
+    """Whether a setting looks like a credential, by its name or a password in a URL value."""
+    # Browser-bundled values are public by definition.
+    if key.upper().startswith("NEXT_PUBLIC_"):
+        return False
+    if any(part in key.upper() for part in _CREDENTIAL_NAME_PARTS):
+        return True
+    try:
+        return bool(urlparse(value.strip()).password)
+    except ValueError:
+        return False
 
 
 def platform_credential_reason(key: str, value: str) -> PlatformCredentialReason | None:

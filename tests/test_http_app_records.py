@@ -589,15 +589,15 @@ class FastApiRecentOperationsReadTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
-class FastApiRuntimeSettingNamesTests(unittest.IsolatedAsyncioTestCase):
-    async def test_lists_setting_names_that_apply_to_a_lane_and_never_values(self) -> None:
+class FastApiRuntimeSettingsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lists_the_settings_that_apply_to_a_lane(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(Path(temporary_directory_name) / "lp.sqlite3")
             store = PostgresRecordStore(database_url=database_url)
             store.ensure_schema()
             for scope, context, instance, env in (
                 ("global", "", "", {"EVERY_PRODUCT": "global-value"}),
-                ("context", "example-site", "", {"SITE_SETTING": "context-value"}),
+                ("context", "example-site", "", {"SITE_SETTING": 3}),
                 ("instance", "example-site", "prod", {"LANE_SETTING": "lane-value"}),
                 ("instance", "example-site", "testing", {"OTHER_LANE": "other-lane-value"}),
                 ("context", "other-site", "", {"OTHER_SITE": "other-site-value"}),
@@ -609,8 +609,6 @@ class FastApiRuntimeSettingNamesTests(unittest.IsolatedAsyncioTestCase):
                         instance=instance,
                         env=cast(dict[str, str | int | float | bool], env),
                         updated_at="2026-09-28T00:00:00Z",
-                        # Free text; a label must never become a way to read a value.
-                        source_label=f"import {next(iter(env))}={next(iter(env.values()))}",
                     )
                 )
             app = create_launchplane_fastapi_app(
@@ -627,18 +625,58 @@ class FastApiRuntimeSettingNamesTests(unittest.IsolatedAsyncioTestCase):
             store.close()
 
         self.assertEqual(response.status_code, 200, response.text)
-        settings = response.json()["settings"]
         self.assertEqual(
-            {(item["scope"], item["instance"]): tuple(item["keys"]) for item in settings},
             {
-                ("global", ""): ("EVERY_PRODUCT",),
-                ("context", ""): ("SITE_SETTING",),
-                ("instance", "prod"): ("LANE_SETTING",),
+                (item["scope"], item["instance"]): item["values"]
+                for item in response.json()["settings"]
+            },
+            {
+                ("global", ""): {"EVERY_PRODUCT": "global-value"},
+                ("context", ""): {"SITE_SETTING": "3"},
+                ("instance", "prod"): {"LANE_SETTING": "lane-value"},
             },
         )
-        for value in ("global-value", "context-value", "lane-value", "other-lane-value"):
-            self.assertNotIn(value, response.text)
+        self.assertNotIn("other-lane-value", response.text)
         self.assertNotIn("OTHER_SITE", response.text)
+
+    async def test_withholds_values_that_look_like_credentials(self) -> None:
+        github_token = "ghp_" + "a" * 36
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(Path(temporary_directory_name) / "lp.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="context",
+                    context="example-site",
+                    env={
+                        "SMTP_PASSWORD": "misfiled-password",
+                        "DATABASE_URL": "postgresql://app:url-password@db/app",
+                        "SYNC_SOURCE": github_token,
+                        "ODOO_DB_USER": "odoo",
+                    },
+                    updated_at="2026-09-28T00:00:00Z",
+                )
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(action="secret.list", context="example-site"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await http_get(
+                app,
+                "/v1/contexts/example-site/runtime-settings",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+            store.close()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        (setting,) = response.json()["settings"]
+        self.assertEqual(setting["values"], {"ODOO_DB_USER": "odoo"})
+        self.assertEqual(setting["withheld_keys"], ["DATABASE_URL", "SMTP_PASSWORD", "SYNC_SOURCE"])
+        for value in ("misfiled-password", "url-password", github_token):
+            self.assertNotIn(value, response.text)
 
     async def test_refuses_a_context_the_caller_cannot_list(self) -> None:
         app = create_launchplane_fastapi_app(

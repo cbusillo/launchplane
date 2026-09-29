@@ -317,16 +317,16 @@ class FastApiReadRouteRegistrarTests(unittest.TestCase):
             ),
             (
                 "/v1/contexts/{context}/runtime-settings",
-                "list_context_runtime_setting_names",
-                "list_context_runtime_setting_names",
-                "RuntimeSettingNamesResponse",
+                "list_context_runtime_settings",
+                "list_context_runtime_settings",
+                "RuntimeSettingsResponse",
                 "control_plane.http_routes.operational_records",
             ),
             (
                 "/v1/contexts/{context}/instances/{instance}/runtime-settings",
-                "list_instance_runtime_setting_names",
-                "list_instance_runtime_setting_names",
-                "RuntimeSettingNamesResponse",
+                "list_instance_runtime_settings",
+                "list_instance_runtime_settings",
+                "RuntimeSettingsResponse",
                 "control_plane.http_routes.operational_records",
             ),
             (
