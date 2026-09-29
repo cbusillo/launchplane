@@ -2421,12 +2421,12 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ),
             (
                 ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "RESOLVED_DEVKIT_REPOSITORY",
+                "LAUNCHPLANE_DEVKIT_REPOSITORY",
                 "${{ steps.publish_inputs.outputs.devkit_repository }}",
             ),
             (
                 ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "RESOLVED_SHARED_ADDONS_REPOSITORY",
+                "LAUNCHPLANE_SHARED_ADDONS_REPOSITORY",
                 "${{ steps.publish_inputs.outputs.shared_addons_repository }}",
             ),
             (
@@ -2491,7 +2491,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ),
             (
                 ".github/workflows/reusable-odoo-preview.yml",
-                "RESOLVED_DEVKIT_REPOSITORY",
+                "LAUNCHPLANE_DEVKIT_REPOSITORY",
                 "${{ steps.publish_inputs.outputs.devkit_repository }}",
             ),
             (
@@ -2501,7 +2501,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ),
             (
                 ".github/workflows/reusable-odoo-preview.yml",
-                "RESOLVED_SHARED_ADDONS_REPOSITORY",
+                "LAUNCHPLANE_SHARED_ADDONS_REPOSITORY",
                 "${{ steps.publish_inputs.outputs.shared_addons_repository }}",
             ),
             (
@@ -2512,12 +2512,12 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             (
                 ".github/workflows/reusable-odoo-preview.yml",
                 "checkout.repository[2]",
-                "${{ steps.publish_inputs.outputs.devkit_repository }}",
+                "${{ steps.build_repositories.outputs.devkit_repository }}",
             ),
             (
                 ".github/workflows/reusable-odoo-preview.yml",
                 "checkout.repository[3]",
-                "${{ steps.publish_inputs.outputs.shared_addons_repository }}",
+                "${{ steps.build_repositories.outputs.shared_addons_repository }}",
             ),
             (
                 ".github/workflows/reusable-odoo-preview.yml",
