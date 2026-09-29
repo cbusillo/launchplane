@@ -19,7 +19,8 @@ class RuntimeKeySafetyPolicyApplyEnvelope(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     product: str
     source_label: str = "service:runtime-key-safety-policy"
-    rules: tuple[RuntimeSecretSafetyRule, ...]
+    rules: tuple[RuntimeSecretSafetyRule, ...] = ()
+    integration_key_markers: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "RuntimeKeySafetyPolicyApplyEnvelope":
@@ -27,8 +28,10 @@ class RuntimeKeySafetyPolicyApplyEnvelope(BaseModel):
             raise ValueError("Runtime key-safety policy writes require product 'launchplane'.")
         self.product = "launchplane"
         self.source_label = self.source_label.strip() or "service:runtime-key-safety-policy"
-        if not self.rules:
-            raise ValueError("Runtime key-safety policy writes require at least one rule.")
+        if not self.rules and not self.integration_key_markers:
+            raise ValueError(
+                "Runtime key-safety policy writes require at least one rule or integration key marker."
+            )
         return self
 
 
@@ -50,6 +53,7 @@ def apply_runtime_key_safety_policy_route(
             record_store=record_store,
             rules=request.rules,
             source_label=request.source_label,
+            integration_key_markers=request.integration_key_markers,
             now_timestamp=now_timestamp,
             record_slug=record_slug,
         )
