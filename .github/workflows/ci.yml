@@ -471,7 +471,22 @@ jobs:
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
     env:
       UNITTEST_TIMINGS_CACHE: .ci-cache/unittest-timings/history.json
+      UNITTEST_SHARD_COUNT: "12"
+      UNITTEST_MAX_TESTS_PER_TARGET: "20"
+      UNITTEST_MAX_SECONDS_PER_TARGET: "30"
     steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python
+        run: uv python install 3.13
+
       - name: Restore unittest timings
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -493,6 +508,20 @@ jobs:
           fi
           printf '%s:%s\n' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" \
             > "${snapshot_directory}/snapshot-id"
+
+      # Plan once here. Shards on different runners can discover different
+      # targets, so each shard runs its slice of this one plan (#2618).
+      - name: Plan unittest shards
+        run: |
+          set -euo pipefail
+          snapshot_directory="${RUNNER_TEMP}/unittest-timing-snapshot"
+          uv run --extra dev launchplane ci unittest-shard plan \
+            --shard-count "${UNITTEST_SHARD_COUNT}" \
+            --timings-file "${snapshot_directory}/history.json" \
+            --max-tests-per-target "${UNITTEST_MAX_TESTS_PER_TARGET}" \
+            --max-seconds-per-target "${UNITTEST_MAX_SECONDS_PER_TARGET}" \
+            > "${snapshot_directory}/plan.json"
+          cat "${snapshot_directory}/plan.json"
 
       - name: Upload unittest timing snapshot
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -542,22 +571,12 @@ jobs:
           name: unittest-timing-snapshot
           path: ${{ runner.temp }}/unittest-timing-snapshot
 
-      - name: Show unit test shard plan
-        run: >-
-          uv run --extra dev launchplane ci unittest-shard plan
-          --shard-count "${UNITTEST_SHARD_COUNT}"
-          --timings-file "${RUNNER_TEMP}/unittest-timing-snapshot/history.json"
-          --max-tests-per-target "${UNITTEST_MAX_TESTS_PER_TARGET}"
-          --max-seconds-per-target "${UNITTEST_MAX_SECONDS_PER_TARGET}"
-
       - name: Run unit test shard
         run: >-
           uv run --extra dev launchplane ci unittest-shard run
           --shard-count "${UNITTEST_SHARD_COUNT}"
           --shard-index ${{ matrix.shard_index }}
-          --timings-file "${RUNNER_TEMP}/unittest-timing-snapshot/history.json"
-          --max-tests-per-target "${UNITTEST_MAX_TESTS_PER_TARGET}"
-          --max-seconds-per-target "${UNITTEST_MAX_SECONDS_PER_TARGET}"
+          --plan-file "${RUNNER_TEMP}/unittest-timing-snapshot/plan.json"
           --timings-output "${RUNNER_TEMP}/unittest-timings/shard-${{ matrix.shard_index }}.json"
 
       - name: Upload unittest timings
@@ -627,9 +646,7 @@ jobs:
           uv run --extra dev launchplane ci unittest-shard aggregate
           --shard-count "${UNITTEST_SHARD_COUNT}"
           --results-dir "${RUNNER_TEMP}/unittest-timings"
-          --timings-file "${RUNNER_TEMP}/unittest-timing-snapshot/history.json"
-          --max-tests-per-target "${UNITTEST_MAX_TESTS_PER_TARGET}"
-          --max-seconds-per-target "${UNITTEST_MAX_SECONDS_PER_TARGET}"
+          --plan-file "${RUNNER_TEMP}/unittest-timing-snapshot/plan.json"
           --timings-output "${UNITTEST_TIMINGS_CACHE}"
 
       - name: Save unittest timings
