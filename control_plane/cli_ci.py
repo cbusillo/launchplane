@@ -24,6 +24,7 @@ from control_plane.unittest_sharding import (
     plan_shards,
     read_json_object,
     read_module_timings,
+    read_shard_plan_targets,
     run_test_modules,
     utc_timestamp,
     write_json_object,
@@ -196,6 +197,12 @@ def plan_unittest_shards(
     default=Path("."),
     show_default=True,
 )
+@click.option(
+    "--plan-file",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    default=None,
+    help="Use this saved shard plan instead of discovering targets on this machine.",
+)
 @click.option("--verbosity", type=int, default=2, show_default=True)
 def run_unittest_shard(
     shard_count: int,
@@ -207,35 +214,43 @@ def run_unittest_shard(
     max_tests_per_target: int,
     max_seconds_per_target: float,
     import_root: Path,
+    plan_file: Path | None,
     verbosity: int,
 ) -> None:
     """Run one unittest shard and write its timing artifact."""
     try:
-        timings = read_module_timings(timings_file)
-        modules = discover_test_targets(
-            start_directory=start_directory,
-            pattern=pattern,
-            import_root=import_root,
-            max_tests_per_target=max_tests_per_target,
-            max_seconds_per_target=max_seconds_per_target,
-            module_seconds=timings,
-        )
-        shard = plan_shards(modules, shard_count=shard_count, module_seconds=timings).shard(
-            shard_index
-        )
+        if plan_file is not None:
+            shard_targets = _planned_shard_targets(
+                plan_file, shard_count=shard_count, shard_index=shard_index
+            )
+        else:
+            timings = read_module_timings(timings_file)
+            modules = discover_test_targets(
+                start_directory=start_directory,
+                pattern=pattern,
+                import_root=import_root,
+                max_tests_per_target=max_tests_per_target,
+                max_seconds_per_target=max_seconds_per_target,
+                module_seconds=timings,
+            )
+            shard_targets = (
+                plan_shards(modules, shard_count=shard_count, module_seconds=timings)
+                .shard(shard_index)
+                .modules
+            )
         click.echo(
             json.dumps(
                 {
                     "shard_count": shard_count,
                     "shard_index": shard_index,
-                    "modules": list(shard.modules),
+                    "modules": list(shard_targets),
                 },
                 indent=2,
                 sort_keys=True,
             )
         )
         summary = _run_and_write_unittest_shard(
-            targets=shard.modules,
+            targets=shard_targets,
             shard_index=shard_index,
             shard_count=shard_count,
             import_root=import_root,
@@ -468,6 +483,12 @@ def run_local_unittest_suite(
     default=Path("."),
     show_default=True,
 )
+@click.option(
+    "--plan-file",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    default=None,
+    help="Use this saved shard plan instead of discovering targets on this machine.",
+)
 def aggregate_unittest_shards(
     shard_count: int,
     results_dir: Path,
@@ -478,18 +499,26 @@ def aggregate_unittest_shards(
     max_tests_per_target: int,
     max_seconds_per_target: float,
     import_root: Path,
+    plan_file: Path | None,
 ) -> None:
     """Aggregate shard timing artifacts into a next-run timing file."""
     try:
-        timings = read_module_timings(timings_file)
-        modules = discover_test_targets(
-            start_directory=start_directory,
-            pattern=pattern,
-            import_root=import_root,
-            max_tests_per_target=max_tests_per_target,
-            max_seconds_per_target=max_seconds_per_target,
-            module_seconds=timings,
-        )
+        if plan_file is not None:
+            modules = tuple(
+                target
+                for shard_targets in read_shard_plan_targets(plan_file, shard_count=shard_count)
+                for target in shard_targets
+            )
+        else:
+            timings = read_module_timings(timings_file)
+            modules = discover_test_targets(
+                start_directory=start_directory,
+                pattern=pattern,
+                import_root=import_root,
+                max_tests_per_target=max_tests_per_target,
+                max_seconds_per_target=max_seconds_per_target,
+                module_seconds=timings,
+            )
         payload = aggregate_shard_timings(
             results_directory=results_dir,
             shard_count=shard_count,
@@ -636,6 +665,17 @@ def _start_local_shard_process(
             text=True,
         )
     return LocalShardProcess(shard_index=shard.index, process=process, log_file=log_file)
+
+
+def _planned_shard_targets(
+    plan_file: Path, *, shard_count: int, shard_index: int
+) -> tuple[str, ...]:
+    if not 0 <= shard_index < shard_count:
+        raise UnittestShardingError(f"shard index {shard_index} is outside 0..{shard_count - 1}")
+    targets = read_shard_plan_targets(plan_file, shard_count=shard_count)[shard_index]
+    if not targets:
+        raise UnittestShardingError(f"shard plan gives shard {shard_index} no targets")
+    return targets
 
 
 def _read_unittest_targets_file(

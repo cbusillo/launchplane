@@ -184,6 +184,86 @@ class CiUnittestCliTests(unittest.TestCase):
             1,
         )
 
+    def test_run_with_plan_file_runs_exactly_the_planned_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            tests_directory = _write_test_package(
+                root, package_name="sample_cli_plan_file_tests", extra_test=True
+            )
+            _remove_imported_package("sample_cli_plan_file_tests")
+            planned_target = "sample_cli_plan_file_tests.test_sample.SampleTests.test_other"
+            plan_file = _write_plan_file(root, [[planned_target], ["other.target"]])
+            output_file = root / "timings" / "shard-0.json"
+
+            # Local discovery would keep this module whole; the shared plan wins.
+            result = CliRunner().invoke(
+                main,
+                [
+                    "ci",
+                    "unittest-shard",
+                    "run",
+                    "--shard-count",
+                    "2",
+                    "--shard-index",
+                    "0",
+                    "--start-directory",
+                    str(tests_directory),
+                    "--import-root",
+                    str(root),
+                    "--plan-file",
+                    str(plan_file),
+                    "--timings-output",
+                    str(output_file),
+                    "--verbosity",
+                    "1",
+                ],
+            )
+            payload = json.loads(output_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(list(payload["modules"]), [planned_target])
+
+    def test_run_and_aggregate_refuse_a_plan_that_assigns_a_target_twice(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            plan_file = _write_plan_file(root, [["tests.test_a"], ["tests.test_a"]])
+            run_result = CliRunner().invoke(
+                main,
+                [
+                    "ci",
+                    "unittest-shard",
+                    "run",
+                    "--shard-count",
+                    "2",
+                    "--shard-index",
+                    "1",
+                    "--plan-file",
+                    str(plan_file),
+                    "--timings-output",
+                    str(root / "shard-1.json"),
+                ],
+            )
+            aggregate_result = CliRunner().invoke(
+                main,
+                [
+                    "ci",
+                    "unittest-shard",
+                    "aggregate",
+                    "--shard-count",
+                    "2",
+                    "--results-dir",
+                    str(root),
+                    "--plan-file",
+                    str(plan_file),
+                    "--timings-output",
+                    str(root / "history.json"),
+                ],
+            )
+
+        for result in (run_result, aggregate_result):
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("assigns a target twice", result.output)
+
     def test_local_runs_isolated_shards_and_writes_aggregate_timings(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -437,6 +517,24 @@ class CiUnittestCliTests(unittest.TestCase):
             ]["seconds"],
             0.25,
         )
+
+
+def _write_plan_file(root: Path, shards: list[list[str]]) -> Path:
+    plan_file = root / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "schema_version": TIMING_SCHEMA_VERSION,
+                "record_type": "unittest_shard_plan",
+                "shard_count": len(shards),
+                "shards": [
+                    {"index": index, "modules": targets} for index, targets in enumerate(shards)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return plan_file
 
 
 def _write_test_package(
