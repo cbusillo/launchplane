@@ -76,6 +76,13 @@ large. This lets hot modules distribute across shards without physical file
 moves. Timing files are balancing hints only; discovered tests remain the source
 of truth.
 
+CI plans once. The `test_timing_snapshot` job writes `plan.json` next to the
+frozen timings. Each shard runs its slice with `unittest-shard run --plan-file`,
+and `aggregate --plan-file` checks coverage against that same plan. Self-hosted
+runners can discover different targets, so shards that each planned for
+themselves could overlap or miss tests (#2618). Without `--plan-file`, `run` and
+`aggregate` still discover and plan locally.
+
 For pushes to `main` and `launchplane/train/**`, the `verified-tree` job can
 reuse a completed, successful GitHub Actions `ci-gate` on the exact pushed
 commit. Its check suite must identify that same commit on main without a PR

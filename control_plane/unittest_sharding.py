@@ -301,6 +301,33 @@ def module_name_for_test_file(test_file: Path, *, start_directory: Path) -> str:
     return ".".join(relative_file.with_suffix("").parts)
 
 
+def read_shard_plan_targets(plan_file: Path, *, shard_count: int) -> tuple[tuple[str, ...], ...]:
+    """Targets per shard from a saved plan, so every CI shard runs the same plan."""
+    payload = read_json_object(plan_file)
+    require_schema(payload, timings_file=plan_file, record_type="unittest_shard_plan")
+    if payload.get("shard_count") != shard_count:
+        raise UnittestShardingError(f"shard plan has wrong shard count: {plan_file}")
+    shards_payload = payload.get("shards")
+    if not isinstance(shards_payload, list) or len(shards_payload) != shard_count:
+        raise UnittestShardingError(f"shard plan must list {shard_count} shards: {plan_file}")
+    shard_targets: list[tuple[str, ...]] = []
+    seen_targets: set[str] = set()
+    for expected_index, shard_payload in enumerate(shards_payload):
+        if not isinstance(shard_payload, dict) or shard_payload.get("index") != expected_index:
+            raise UnittestShardingError(f"shard plan shards are out of order: {plan_file}")
+        targets = shard_payload.get("modules")
+        if not isinstance(targets, list) or not all(
+            isinstance(target, str) and target for target in targets
+        ):
+            raise UnittestShardingError(f"shard plan has invalid targets: {plan_file}")
+        duplicates = seen_targets.intersection(targets)
+        if duplicates or len(set(targets)) != len(targets):
+            raise UnittestShardingError(f"shard plan assigns a target twice: {plan_file}")
+        seen_targets.update(targets)
+        shard_targets.append(tuple(targets))
+    return tuple(shard_targets)
+
+
 def read_module_timings(timings_file: Path | None) -> dict[str, float]:
     if timings_file is None or not timings_file.exists():
         return {}
