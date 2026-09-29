@@ -353,6 +353,36 @@ class RuntimeKeySafetyServiceTests(unittest.TestCase):
         self.assertEqual(repeated_record.record_id, record.record_id)
         self.assertEqual(store.written_records, [record])
 
+    def test_write_runtime_key_safety_policy_adds_markers_and_keeps_existing_ones(self) -> None:
+        store = _RuntimeKeySafetyPolicyStore()
+        smtp_rule = _rule("SMTP_PASSWORD", contexts=("cm",), instances=("prod",))
+
+        def write(
+            rules: tuple[RuntimeSecretSafetyRule, ...], markers: tuple[str, ...] = ()
+        ) -> tuple[RuntimeKeySafetyPolicyRecord, bool]:
+            return write_runtime_key_safety_policy(
+                record_store=store,
+                rules=rules,
+                source_label="test:runtime-key-safety-policy",
+                now_timestamp=lambda: "2026-09-29T15:45:00Z",
+                record_slug=lambda value: value.lower().replace(":", "-"),
+                integration_key_markers=markers,
+            )
+
+        first_record, _ = write((smtp_rule,), ("cm_data",))
+        rules_only_record, rules_only_changed = write((smtp_rule,))
+        marker_record, marker_changed = write((), ("CM_DATA", "SYNC_DB"))
+
+        self.assertEqual(first_record.integration_key_markers, ("CM_DATA",))
+        self.assertFalse(rules_only_changed)
+        self.assertEqual(rules_only_record.integration_key_markers, ("CM_DATA",))
+        self.assertTrue(marker_changed)
+        self.assertEqual(marker_record.integration_key_markers, ("CM_DATA", "SYNC_DB"))
+        self.assertEqual(
+            summarize_runtime_key_safety_policy_record(marker_record)["integration_key_markers"],
+            ["CM_DATA", "SYNC_DB"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

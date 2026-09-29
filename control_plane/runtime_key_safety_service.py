@@ -38,6 +38,7 @@ def summarize_runtime_key_safety_policy_record(
         "policy_sha256": record.policy_sha256,
         "rule_count": len(record.rules),
         "binding_keys": [rule.binding_key for rule in record.rules],
+        "integration_key_markers": list(record.integration_key_markers),
     }
 
 
@@ -48,6 +49,7 @@ def write_runtime_key_safety_policy(
     source_label: str,
     now_timestamp: TimestampProvider,
     record_slug: RecordSlugProvider,
+    integration_key_markers: tuple[str, ...] = (),
 ) -> tuple[RuntimeKeySafetyPolicyRecord, bool]:
     existing_records = record_store.list_runtime_key_safety_policy_records(status="active", limit=1)
     existing_record = existing_records[0] if existing_records else None
@@ -61,6 +63,11 @@ def write_runtime_key_safety_policy(
         source=source_label,
         updated_at=updated_at,
         rules=merged_rules,
+        # Markers are additive, like rules: a write never drops an existing one.
+        integration_key_markers=(
+            *(existing_record.integration_key_markers if existing_record is not None else ()),
+            *integration_key_markers,
+        ),
     )
     if (
         existing_record is not None

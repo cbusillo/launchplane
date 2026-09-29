@@ -1,3 +1,5 @@
+import hashlib
+import json
 import unittest
 
 from control_plane.contracts.runtime_key_safety_policy import (
@@ -13,6 +15,7 @@ from control_plane.contracts.secret_record import SecretStatus
 from control_plane.runtime_key_safety import (
     evaluate_runtime_key_safety,
     evaluate_runtime_key_safety_from_store,
+    is_integration_runtime_key,
     is_secret_shaped_runtime_key,
     latest_active_runtime_key_safety_policy,
     runtime_key_safety_environment_class,
@@ -463,9 +466,10 @@ class RuntimeKeySafetyTests(unittest.TestCase):
                 self.assertEqual(evaluation.status, "fail")
                 self.assertEqual(evaluation.findings[0].code, "unclassified_binding")
 
-    def test_unclassified_secret_stored_for_the_exact_stable_lane_passes(self) -> None:
+    def test_unclassified_ordinary_secret_stored_for_the_exact_stable_lane_passes(self) -> None:
         lanes: tuple[tuple[str, RuntimeEnvironmentClass], ...] = (
             ("testing", "testing"),
+            ("dev", "dev"),
             ("prod", "prod"),
         )
         for instance, environment_class in lanes:
@@ -476,9 +480,12 @@ class RuntimeKeySafetyTests(unittest.TestCase):
                         instance=instance,
                         environment_class=environment_class,
                     ),
-                    required_binding_keys=("SHOPIFY_ACCESS_TOKEN",),
+                    required_binding_keys=("CONTACT_ALERT_DISCORD_WEBHOOK_URL",),
                     secret_bindings=(
-                        _binding(binding_key="SHOPIFY_ACCESS_TOKEN", instance=instance),
+                        _binding(
+                            binding_key="CONTACT_ALERT_DISCORD_WEBHOOK_URL",
+                            instance=instance,
+                        ),
                     ),
                     secret_rules=(),
                 )
@@ -527,6 +534,161 @@ class RuntimeKeySafetyTests(unittest.TestCase):
                 created_at="2026-09-29T00:00:00Z",
                 updated_at="2026-09-29T00:00:00Z",
             )
+
+    def test_unclassified_integration_secret_on_a_non_production_lane_fails(self) -> None:
+        lanes: tuple[tuple[str, RuntimeEnvironmentClass], ...] = (
+            ("testing", "testing"),
+            ("dev", "dev"),
+        )
+        for binding_key in (
+            "SHOPIFY_ACCESS_TOKEN",
+            "ENV_OVERRIDE_SHOPIFY__API_TOKEN",
+            "STRIPE_SECRET_KEY",
+            "SMTP_PASSWORD",
+            "PRINTNODE_API_KEY",
+            "REPAIRSHOPR_API_KEY",
+            "FISHBOWL_PASSWORD",
+        ):
+            for instance, environment_class in lanes:
+                with self.subTest(binding_key=binding_key, instance=instance):
+                    evaluation = evaluate_runtime_key_safety(
+                        target=RuntimeKeySafetyTarget(
+                            context="opw",
+                            instance=instance,
+                            environment_class=environment_class,
+                        ),
+                        required_binding_keys=(binding_key,),
+                        secret_bindings=(_binding(binding_key=binding_key, instance=instance),),
+                        secret_rules=(),
+                    )
+
+                    self.assertEqual(evaluation.status, "fail")
+                    self.assertEqual(evaluation.findings[0].code, "unclassified_binding")
+
+    def test_declared_class_classifies_an_integration_secret_on_a_testing_lane(self) -> None:
+        cases: tuple[tuple[RuntimeSecretClass, str], ...] = (
+            ("testing", "pass"),
+            ("prod_only", "fail"),
+        )
+        for declared_class, expected_status in cases:
+            with self.subTest(declared_class=declared_class):
+                evaluation = evaluate_runtime_key_safety(
+                    target=RuntimeKeySafetyTarget(
+                        context="opw",
+                        instance="testing",
+                        environment_class="testing",
+                    ),
+                    required_binding_keys=("SHOPIFY_ACCESS_TOKEN",),
+                    secret_bindings=(
+                        _binding(binding_key="SHOPIFY_ACCESS_TOKEN", instance="testing").model_copy(
+                            update={"declared_secret_class": declared_class}
+                        ),
+                    ),
+                    secret_rules=(),
+                )
+
+                self.assertEqual(evaluation.status, expected_status)
+                if expected_status == "fail":
+                    self.assertEqual(evaluation.findings[0].code, "secret_class_not_allowed")
+
+    def test_policy_integration_key_markers_extend_the_default_markers(self) -> None:
+        target = RuntimeKeySafetyTarget(
+            context="cm",
+            instance="testing",
+            environment_class="testing",
+        )
+        binding = _binding(
+            binding_key="ENV_OVERRIDE_CM_DATA__DB_PASSWORD",
+            context="cm",
+            instance="testing",
+        )
+
+        without_marker = evaluate_runtime_key_safety(
+            target=target,
+            required_binding_keys=(binding.binding_key,),
+            secret_bindings=(binding,),
+            secret_rules=(),
+        )
+        with_marker = evaluate_runtime_key_safety(
+            target=target,
+            required_binding_keys=(binding.binding_key,),
+            secret_bindings=(binding,),
+            secret_rules=(),
+            integration_key_markers=("CM_DATA",),
+        )
+
+        self.assertEqual(without_marker.status, "pass")
+        self.assertEqual(with_marker.status, "fail")
+        self.assertEqual(with_marker.findings[0].code, "unclassified_binding")
+
+    def test_classified_integration_secret_on_a_testing_lane_passes(self) -> None:
+        evaluation = evaluate_runtime_key_safety(
+            target=RuntimeKeySafetyTarget(
+                context="opw",
+                instance="testing",
+                environment_class="testing",
+            ),
+            required_binding_keys=("SHOPIFY_ACCESS_TOKEN",),
+            secret_bindings=(_binding(binding_key="SHOPIFY_ACCESS_TOKEN", instance="testing"),),
+            secret_rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="SHOPIFY_ACCESS_TOKEN",
+                    secret_class="testing",
+                ),
+            ),
+        )
+
+        self.assertEqual(evaluation.status, "pass")
+
+    def test_integration_marker_matches_whole_key_parts_only(self) -> None:
+        self.assertTrue(is_integration_runtime_key("SMTP_PASSWORD"))
+        self.assertTrue(is_integration_runtime_key("ENV_OVERRIDE_SHOPIFY__WEBHOOK_KEY"))
+        self.assertTrue(is_integration_runtime_key("AUTHORIZE_NET_LOGIN"))
+        self.assertFalse(is_integration_runtime_key("EMAIL_ALERT_WEBHOOK_URL"))
+        self.assertFalse(is_integration_runtime_key("SQUARESPACE_TOKEN"))
+        self.assertFalse(is_integration_runtime_key("ODOO_KEY"))
+        self.assertTrue(
+            is_integration_runtime_key("cm_data.db.password", extra_markers=("CM_DATA",))
+        )
+
+    def test_policy_record_normalizes_integration_key_markers(self) -> None:
+        record = RuntimeKeySafetyPolicyRecord(
+            record_id="runtime-key-safety-policy-1",
+            source="test",
+            updated_at="2026-09-29T00:00:00Z",
+            rules=(RuntimeSecretSafetyRule(binding_key="A", secret_class="shared_safe"),),
+            integration_key_markers=(" cm_data ", "CM_DATA"),
+        )
+
+        self.assertEqual(record.integration_key_markers, ("CM_DATA",))
+        with self.assertRaises(ValueError):
+            RuntimeKeySafetyPolicyRecord(
+                record_id="runtime-key-safety-policy-1",
+                source="test",
+                updated_at="2026-09-29T00:00:00Z",
+                rules=(RuntimeSecretSafetyRule(binding_key="A", secret_class="shared_safe"),),
+                integration_key_markers=("CM-DATA",),
+            )
+
+    def test_policy_sha256_is_unchanged_for_records_without_markers(self) -> None:
+        record = RuntimeKeySafetyPolicyRecord(
+            record_id="runtime-key-safety-policy-1",
+            source="test",
+            updated_at="2026-09-29T00:00:00Z",
+            rules=(RuntimeSecretSafetyRule(binding_key="A", secret_class="shared_safe"),),
+        )
+        with_marker = record.model_copy(update={"integration_key_markers": ("CM_DATA",)})
+        legacy_payload = {
+            "schema_version": 1,
+            "status": "active",
+            "rules": [rule.model_dump(mode="json") for rule in record.rules],
+        }
+        legacy_sha = hashlib.sha256(
+            json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+        self.assertEqual(record.policy_sha256, legacy_sha)
+        self.assertNotEqual(with_marker.policy_sha256, legacy_sha)
 
     def test_unclassified_lane_secret_still_fails_for_a_preview_target(self) -> None:
         # Preview checks retarget the template lane's bindings to the preview,

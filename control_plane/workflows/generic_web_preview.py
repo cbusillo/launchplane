@@ -1069,6 +1069,7 @@ def _enforce_preview_copied_runtime_key_safety(
             preview_slug=preview_slug,
         ),
         secret_rules=policy_record.rules,
+        integration_key_markers=policy_record.integration_key_markers,
     )
     if evaluation.status == "pass":
         return

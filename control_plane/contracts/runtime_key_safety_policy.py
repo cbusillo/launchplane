@@ -110,6 +110,7 @@ class RuntimeKeySafetyPolicyRecord(BaseModel):
     source: str
     updated_at: str
     rules: tuple[RuntimeSecretSafetyRule, ...]
+    integration_key_markers: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _validate_record(self) -> "RuntimeKeySafetyPolicyRecord":
@@ -126,6 +127,16 @@ class RuntimeKeySafetyPolicyRecord(BaseModel):
             if rule.binding_key in binding_keys:
                 raise ValueError("runtime key safety policy rules must be unique by binding_key")
             binding_keys.append(rule.binding_key)
+        self.integration_key_markers = _normalize_unique_values(
+            tuple(marker.upper() for marker in self.integration_key_markers),
+            "runtime key safety integration_key_markers values must be non-empty",
+        )
+        for marker in self.integration_key_markers:
+            if not all(character.isalnum() or character == "_" for character in marker):
+                raise ValueError(
+                    "runtime key safety integration_key_markers may contain only letters, "
+                    "digits and underscores"
+                )
         self.record_id = self.record_id.strip()
         self.source = self.source.strip()
         self.updated_at = self.updated_at.strip()
@@ -138,6 +149,9 @@ class RuntimeKeySafetyPolicyRecord(BaseModel):
 
 def runtime_key_safety_policy_sha256(record: RuntimeKeySafetyPolicyRecord) -> str:
     payload = record.model_dump(mode="json", exclude={"record_id", "source", "updated_at"})
+    # Keep hashes of records written before markers existed unchanged.
+    if not payload["integration_key_markers"]:
+        del payload["integration_key_markers"]
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 

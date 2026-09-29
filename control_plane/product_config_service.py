@@ -108,6 +108,7 @@ def _runtime_key_safety_ready(
                 for binding_key in binding_keys
             ),
             secret_rules=policy.rules,
+            integration_key_markers=policy.integration_key_markers,
         )
     except (AttributeError, TypeError, ValueError):
         return False
