@@ -385,7 +385,7 @@ jobs:
             ${{ steps.publish_inputs.outputs.shared_addons_repository }}
         run: |
           set -euo pipefail
-          python3 - <<'PY' >>"$GITHUB_OUTPUT"
+          uv run --no-project --python 3.13 python - <<'PY' >>"$GITHUB_OUTPUT"
           import os
           import re
           import sys
