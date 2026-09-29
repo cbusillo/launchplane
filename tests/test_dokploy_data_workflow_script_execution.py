@@ -21,6 +21,7 @@ from typing import cast
 from unittest.mock import patch
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane.dokploy import post_deploy as dokploy_post_deploy
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetPolicies,
     DokployTargetShopifyPolicy,
@@ -93,7 +94,7 @@ def main(argv):
         return 0
     if program[:2] == ["python3", "-u"]:
         log("exec workflow")
-        print("workflow ran")
+        print(os.environ.get("FAKE_WORKFLOW_OUTPUT", "workflow ran"))
         return int(os.environ.get("FAKE_WORKFLOW_EXIT", "0"))
     if program[:2] == ["python3", "-"]:
         log("exec guard" + (" -i" if interactive else ""))
@@ -242,6 +243,74 @@ def _render_script(protected_store_keys: tuple[str, ...]) -> str:
     return cast(str, schedule_payloads[0]["script"])
 
 
+def _render_restore_script() -> str:
+    """Render the schedule script through the destructive-restore post-deploy entrypoint."""
+    schedule_payloads: list[dict[str, object]] = []
+
+    def capture_schedule_payload(**kwargs: object) -> dict[str, str]:
+        schedule_payloads.append(cast("dict[str, object]", kwargs["schedule_payload"]))
+        return {"scheduleId": "schedule-123"}
+
+    target_definition = control_plane_dokploy.DokployTargetDefinition(
+        context="example",
+        instance="testing",
+        target_id="compose-123",
+        target_name="example-testing",
+    )
+    with (
+        patch(
+            "control_plane.dokploy.api.fetch_dokploy_target_payload",
+            return_value={
+                "name": "example-testing",
+                "env": textwrap.dedent(
+                    """\
+                    ODOO_DB_NAME=example_testing
+                    ODOO_INSTALL_MODULES=base
+                    ODOO_UPSTREAM_HOST=source.example.com
+                    ODOO_UPSTREAM_USER=backup
+                    ODOO_UPSTREAM_DB_NAME=source
+                    ODOO_UPSTREAM_DB_USER=odoo
+                    ODOO_UPSTREAM_FILESTORE_PATH=/source/filestore
+                    """
+                ),
+                "appName": "example-testing-app",
+                "serverId": "server-123",
+            },
+        ),
+        patch("control_plane.dokploy.api.update_dokploy_target_env"),
+        patch("control_plane.dokploy.api.trigger_deployment"),
+        patch("control_plane.dokploy.api.wait_for_target_deployment"),
+        patch("control_plane.dokploy.api.latest_deployment_for_target", return_value=None),
+        patch("control_plane.dokploy.api.find_matching_dokploy_schedule", return_value=None),
+        patch(
+            "control_plane.dokploy.api.upsert_dokploy_schedule",
+            side_effect=capture_schedule_payload,
+        ),
+        patch(
+            "control_plane.dokploy.api.latest_deployment_for_schedule",
+            side_effect=(
+                {"deploymentId": "schedule-before"},
+                {"deploymentId": "schedule-after", "logs": ["odoo_restore_completed=true"]},
+            ),
+        ),
+        patch(
+            "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+            return_value="deployment=schedule-after status=done",
+        ),
+        patch("control_plane.dokploy.api.dokploy_request", return_value={"ok": True}),
+    ):
+        control_plane_dokploy.run_compose_post_deploy_update(
+            host="https://dokploy.example.com",
+            token="secret-token",
+            target_definition=target_definition,
+            env_file=None,
+            run_destructive_restore=True,
+        )
+    if len(schedule_payloads) != 1:
+        raise AssertionError(f"expected one schedule upsert, got {len(schedule_payloads)}")
+    return cast(str, schedule_payloads[0]["script"])
+
+
 @unittest.skipIf(BASH is None, "bash 4 or newer is required to run the rendered script")
 class DataWorkflowScriptExecutionTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -369,6 +438,48 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.assertEqual(run.returncode, 7)
         self.assertNotIn("exec guard -i", run.docker_log)
         self.assertTrue(run.web_restarted, run.docker_log)
+
+    def test_successful_restore_prints_the_completion_marker(self) -> None:
+        run = self._run(
+            _render_restore_script(),
+            FAKE_WORKFLOW_OUTPUT="Upstream overwrite completed successfully.",
+        )
+
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("odoo_restore_completed=true", run.stdout.splitlines())
+        self.assertNotIn("odoo_restore_completed=false", run.stdout)
+
+    def test_restore_that_exits_non_zero_is_not_marked_complete(self) -> None:
+        run = self._run(
+            _render_restore_script(),
+            FAKE_WORKFLOW_OUTPUT="pg_restore: error: could not execute query",
+            FAKE_WORKFLOW_EXIT="40",
+        )
+
+        self.assertEqual(run.returncode, 40)
+        self.assertIn("odoo_restore_completed=false", run.stdout.splitlines())
+        self.assertNotIn("odoo_restore_completed=true", run.stdout)
+
+    def test_restore_that_logs_a_failure_but_exits_zero_is_failed(self) -> None:
+        for failure_line in dokploy_post_deploy.ODOO_RESTORE_FAILURE_LOG_PATTERNS:
+            with self.subTest(failure_line=failure_line):
+                run = self._run(
+                    _render_restore_script(),
+                    FAKE_WORKFLOW_OUTPUT=f"ERROR {failure_line} (host key verification failed).",
+                )
+
+                self.assertEqual(run.returncode, 1)
+                lines = run.stdout.splitlines()
+                self.assertIn("odoo_restore_failure_logged=true", lines)
+                self.assertIn("odoo_restore_completed=false", lines)
+                self.assertNotIn("odoo_restore_completed=true", lines)
+
+    def test_maintenance_does_not_print_restore_markers(self) -> None:
+        run = self._run(_render_script(()), FAKE_WORKFLOW_OUTPUT="Upstream restore failed (x).")
+
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertNotIn("odoo_restore_completed", run.stdout)
+        self.assertNotIn("odoo_restore_failure_logged", run.stdout)
 
 
 if __name__ == "__main__":

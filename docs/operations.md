@@ -2534,6 +2534,16 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
 - Launchplane passes one typed payload to the Odoo settings apply path; legacy
   `ENV_OVERRIDE_*` values are migration input only, not the deploy-time
   settings contract.
+- A restore passes only with positive evidence. The schedule script prints
+  `odoo_restore_completed=true` after the workflow exits 0 and the Shopify guard
+  passes; every other exit prints `odoo_restore_completed=false`. If the
+  workflow output contains a restore-failure line (`Upstream restore failed`,
+  `Upstream capture or validation failed`, `Restore failed`, or
+  `pg_restore: error:`), the script fails the restore and prints
+  `odoo_restore_failure_logged=true`, even when the workflow exited 0.
+  Launchplane records the post-deploy, and so the target replacement, as failed
+  unless the schedule logs show that the restore completed and logged no
+  failure.
 - Secret-backed overrides are still not rendered into schedule scripts as
   plaintext. The payload references the already-present neutral
   `ODOO_OVERRIDE_SECRET__*` script-runner environment key for each managed
