@@ -164,6 +164,7 @@ def evaluate_runtime_key_safety(
 
         rule = rules_by_binding_key.get(binding.binding_key)
         if rule is None and _binding_stored_for_exact_stable_lane(binding=binding, target=target):
+            findings.extend(_evaluate_declared_secret_class(target=target, binding=binding))
             continue
         if rule is None:
             findings.append(
@@ -203,6 +204,30 @@ def _binding_stored_for_exact_stable_lane(
         and bool(binding.instance)
         and binding.context == target.context
         and binding.instance == target.instance
+    )
+
+
+def _evaluate_declared_secret_class(
+    *, target: RuntimeKeySafetyTarget, binding: SecretBinding
+) -> tuple[RuntimeKeySafetyFinding, ...]:
+    declared_class = binding.declared_secret_class
+    if declared_class is None:
+        return ()
+    if declared_class in ALLOWED_SECRET_CLASSES_BY_ENVIRONMENT[target.environment_class]:
+        return ()
+    return (
+        RuntimeKeySafetyFinding(
+            code="secret_class_not_allowed",
+            binding_key=binding.binding_key,
+            binding_id=binding.binding_id,
+            secret_id=binding.secret_id,
+            secret_class=declared_class,
+            detail=(
+                f"Managed secret binding {binding.binding_key!r} is declared "
+                f"{declared_class!r}, which is not allowed for "
+                f"{target.environment_class!r} environments."
+            ),
+        ),
     )
 
 

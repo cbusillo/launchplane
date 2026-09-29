@@ -6,6 +6,7 @@ import tomllib
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from collections.abc import Mapping
 from typing import cast
 from unittest.mock import patch
 
@@ -273,6 +274,40 @@ class _FakeProductConfigStore:
             self.write_secret_audit_event(event)
 
 
+def _apply_declared_class_secret(
+    store: _FakeProductConfigStore,
+    *,
+    secret: Mapping[str, object],
+    mode: str = "apply",
+) -> dict[str, object]:
+    with patch.dict(
+        os.environ,
+        {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "test-master-key"},
+        clear=True,
+    ):
+        return control_plane_product_config.apply_product_config_bundle(
+            record_store=store,
+            payload={
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "context": "sellyouroutboard",
+                "instance": "testing",
+                "runtime_env": {},
+                "secrets": [
+                    {
+                        "name": "dev-store-api-token",
+                        "binding_key": "DEV_STORE_API_TOKEN",
+                        "value": "dev-store-token-value",
+                        **secret,
+                    }
+                ],
+            },
+            mode=cast(control_plane_product_config.ProductConfigMode, mode),
+            actor="operator@example.com",
+            source_label="fake-store-test",
+        )
+
+
 class _FakeRuntimeEnvironmentStore:
     def __init__(self, records: tuple[RuntimeEnvironmentRecord, ...]) -> None:
         self.records = records
@@ -525,6 +560,45 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         secret_binding = next(iter(store.secret_bindings.values()))
         self.assertEqual(secret_binding.binding_key, "SMTP_PASSWORD")
         self.assertEqual(store.secret_audit_events[0].actor, "operator@example.com")
+
+    def test_product_config_apply_records_declared_secret_class_on_lane_binding(self) -> None:
+        store = _FakeProductConfigStore()
+
+        payload = _apply_declared_class_secret(store, secret={"secret_class": "testing"})
+
+        secret_payloads = cast("list[dict[str, object]]", payload["secrets"])
+        self.assertEqual(secret_payloads[0]["secret_class"], "testing")
+        secret_binding = next(iter(store.secret_bindings.values()))
+        self.assertEqual(secret_binding.instance, "testing")
+        self.assertEqual(secret_binding.declared_secret_class, "testing")
+
+    def test_product_config_apply_rejects_declared_class_not_allowed_for_the_lane(self) -> None:
+        store = _FakeProductConfigStore()
+
+        with self.assertRaises(control_plane_product_config.ProductConfigError) as raised:
+            _apply_declared_class_secret(
+                store, secret={"secret_class": "prod_only"}, mode="dry-run"
+            )
+
+        self.assertEqual(raised.exception.code, "runtime_key_safety_failed")
+        self.assertEqual(store.secret_bindings, {})
+
+    def test_product_config_apply_rejects_invalid_declared_secret_class(self) -> None:
+        for secret, message in (
+            ({"secret_class": "production"}, "secret_class must be one of"),
+            (
+                {"secret_class": "testing", "scope": "context"},
+                "applies only to a secret stored for one exact lane",
+            ),
+        ):
+            with self.subTest(secret=secret):
+                store = _FakeProductConfigStore()
+
+                with self.assertRaises(control_plane_product_config.ProductConfigError) as raised:
+                    _apply_declared_class_secret(store, secret=secret, mode="dry-run")
+
+                self.assertIn(message, str(raised.exception))
+                self.assertEqual(store.secret_bindings, {})
 
     def test_product_config_apply_guards_runtime_record_from_planning_snapshot(self) -> None:
         store = _FakeProductConfigStore()

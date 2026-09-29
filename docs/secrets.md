@@ -382,6 +382,13 @@ decryption key state denies the reveal or resolution.
   still applies when one exists. Preview targets never get this: previews copy
   template-lane values, and their check retargets the template's bindings to
   the preview, so a copied lane secret still needs an explicit rule.
+- The writer of a secret stored for one exact lane can declare its class with
+  `secret_class` on a product-config secret entry (scope `context_instance`
+  only). Launchplane stores it on the binding as `declared_secret_class`, and
+  key safety refuses it when the class is not allowed for the lane, for example
+  `prod_only` on a `testing` lane. A declaration covers that binding only; a
+  later write without `secret_class` clears it. A policy rule for the key still
+  takes precedence.
 - `prod_only` bindings are allowed only for `prod` runtime targets. `testing`
   targets may use `testing`, `non_prod`, or `shared_safe` bindings. `preview`
   targets may use `preview`, `non_prod`, or `shared_safe` bindings.

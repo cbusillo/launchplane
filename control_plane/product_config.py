@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Literal, NotRequired, Protocol, TypedDict, cast
+from typing import Literal, NotRequired, Protocol, TypedDict, cast, get_args
 
 import click
 
@@ -16,6 +16,7 @@ from control_plane.contracts.runtime_environment_record import (
 )
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretClass,
     RuntimeKeySafetyTarget,
 )
 from control_plane.contracts.secret_record import SecretAuditEvent, SecretRecord, SecretVersion
@@ -254,6 +255,7 @@ def plan_product_config_authority_bundle(
                 context_name=str(secret["context"]),
                 instance_name=str(secret["instance"]),
                 description=str(secret["description"]),
+                declared_secret_class=cast(RuntimeSecretClass | None, secret["secret_class"]),
                 actor=actor,
                 source_label=source_label,
             )
@@ -513,6 +515,9 @@ def _product_config_secret_inputs(
         ).strip()
         if not integration:
             raise ProductConfigError(f"Product config secret #{index} requires integration.")
+        secret_class = _product_config_declared_secret_class(
+            raw_secret.get("secret_class"), scope=validated_scope, index=index
+        )
         normalized.append(
             {
                 "scope": validated_scope,
@@ -523,9 +528,28 @@ def _product_config_secret_inputs(
                 "context": secret_context,
                 "instance": secret_instance,
                 "description": str(raw_secret.get("description", "") or "").strip(),
+                "secret_class": secret_class,
             }
         )
     return tuple(normalized)
+
+
+def _product_config_declared_secret_class(
+    raw_value: object, *, scope: SecretScope, index: int
+) -> RuntimeSecretClass | None:
+    if raw_value is None or raw_value == "":
+        return None
+    if not isinstance(raw_value, str) or raw_value.strip() not in get_args(RuntimeSecretClass):
+        allowed = ", ".join(get_args(RuntimeSecretClass))
+        raise ProductConfigError(
+            f"Product config secret #{index} secret_class must be one of: {allowed}."
+        )
+    if scope != "context_instance":
+        raise ProductConfigError(
+            f"Product config secret #{index} secret_class applies only to a secret stored "
+            "for one exact lane (scope context_instance)."
+        )
+    return cast(RuntimeSecretClass, raw_value.strip())
 
 
 def _validate_product_config_secret_scope_route(
@@ -612,6 +636,7 @@ def _plan_product_config_secret_write(
     context_name: str = "",
     instance_name: str = "",
     description: str = "",
+    declared_secret_class: RuntimeSecretClass | None = None,
     actor: str = "",
     source_label: str = "manual",
 ) -> _ProductConfigSecretWritePlan:
@@ -646,6 +671,7 @@ def _plan_product_config_secret_write(
         binding_key=binding_key,
         context=context_name,
         instance=instance_name,
+        declared_secret_class=declared_secret_class,
         created_at=created_at,
         updated_at=now,
     )
@@ -794,6 +820,7 @@ def _planned_runtime_secret_bindings(
                 context=str(secret["context"]),
                 instance=str(secret["instance"]),
                 status="configured",
+                declared_secret_class=cast(RuntimeSecretClass | None, secret["secret_class"]),
                 created_at=existing_binding.created_at if existing_binding is not None else now,
                 updated_at=now,
             )
@@ -910,6 +937,8 @@ def _summarize_product_config_secret_input(
         "context": secret["context"],
         "instance": secret["instance"],
     }
+    if secret["secret_class"] is not None:
+        summary["secret_class"] = secret["secret_class"]
     if secret_id:
         summary["secret_id"] = secret_id
     return summary
