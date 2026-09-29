@@ -389,6 +389,16 @@ decryption key state denies the reveal or resolution.
   `prod_only` on a `testing` lane. A declaration covers that binding only; a
   later write without `secret_class` clears it. A policy rule for the key still
   takes precedence.
+- A production integration credential never takes its classification from a
+  `testing` or `dev` lane, because the lane cannot tell a production key from a
+  test key. A binding whose key names an integration needs a policy rule or a
+  declared `secret_class` there, even when it is stored for exactly that lane.
+  Code recognizes store, payment, outgoing-mail, printing and common
+  business-system connector names (`DEFAULT_INTEGRATION_KEY_MARKERS` in
+  `control_plane/runtime_key_safety.py`), matched on whole underscore-separated
+  key parts. The active policy record's `integration_key_markers` add
+  product-specific ones. Policy apply adds markers and never removes one. `prod`
+  lanes keep the lane-exact shortcut.
 - `prod_only` bindings are allowed only for `prod` runtime targets. `testing`
   targets may use `testing`, `non_prod`, or `shared_safe` bindings. `preview`
   targets may use `preview`, `non_prod`, or `shared_safe` bindings.

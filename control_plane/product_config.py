@@ -758,6 +758,7 @@ def _evaluate_product_config_runtime_key_safety(
             secrets=runtime_secrets,
         ),
         secret_rules=policy_record.rules,
+        integration_key_markers=policy_record.integration_key_markers,
     )
     summary: dict[str, object] = {
         "required": True,

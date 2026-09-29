@@ -38210,11 +38210,20 @@
       "RuntimeKeySafetyPolicyApplyEnvelope": {
         "additionalProperties": false,
         "properties": {
+          "integration_key_markers": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Integration Key Markers",
+            "type": "array"
+          },
           "product": {
             "title": "Product",
             "type": "string"
           },
           "rules": {
+            "default": [],
             "items": {
               "$ref": "#/components/schemas/RuntimeSecretSafetyRule"
             },
@@ -38234,8 +38243,7 @@
           }
         },
         "required": [
-          "product",
-          "rules"
+          "product"
         ],
         "title": "RuntimeKeySafetyPolicyApplyEnvelope",
         "type": "object"
@@ -38243,6 +38251,14 @@
       "RuntimeKeySafetyPolicyRecord": {
         "additionalProperties": false,
         "properties": {
+          "integration_key_markers": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Integration Key Markers",
+            "type": "array"
+          },
           "record_id": {
             "title": "Record Id",
             "type": "string"

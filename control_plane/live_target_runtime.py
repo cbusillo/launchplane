@@ -290,6 +290,7 @@ def evaluate_runtime_key_safety_for_live_target_sync(
                 required_binding_keys=binding_keys,
                 secret_bindings=bindings,
                 secret_rules=policy_record.rules,
+                integration_key_markers=policy_record.integration_key_markers,
             )
         else:
             evaluation = evaluate_runtime_key_safety_from_store(

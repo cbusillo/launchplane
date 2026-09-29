@@ -25,12 +25,53 @@ ALLOWED_SECRET_CLASSES_BY_ENVIRONMENT: dict[RuntimeEnvironmentClass, set[Runtime
     "unknown": set(),
 }
 SECRET_SHAPED_RUNTIME_KEY_PARTS = frozenset({"PASSWORD", "TOKEN", "SECRET", "KEY"})
+# Key-name markers for production integration credentials: stores, payments,
+# outgoing mail, printing and common business-system connectors. A binding whose
+# key carries one of these never takes its classification from a non-production
+# lane. The active policy record can add product-specific markers.
+DEFAULT_INTEGRATION_KEY_MARKERS = (
+    "SHOPIFY",
+    "STRIPE",
+    "PAYPAL",
+    "SQUARE",
+    "BRAINTREE",
+    "AUTHORIZE_NET",
+    "PAYMENT",
+    "SMTP",
+    "MAIL",
+    "SENDGRID",
+    "MAILGUN",
+    "POSTMARK",
+    "RESEND",
+    "PRINTNODE",
+    "REPAIRSHOPR",
+    "FISHBOWL",
+)
 
 
 def is_secret_shaped_runtime_key(key_name: str) -> bool:
     return any(
         key_part in SECRET_SHAPED_RUNTIME_KEY_PARTS for key_part in key_name.upper().split("_")
     )
+
+
+def is_integration_runtime_key(key_name: str, *, extra_markers: Iterable[str] = ()) -> bool:
+    key_parts = _key_parts(key_name)
+    for marker in (*DEFAULT_INTEGRATION_KEY_MARKERS, *extra_markers):
+        marker_parts = _key_parts(marker)
+        if not marker_parts:
+            continue
+        width = len(marker_parts)
+        if any(
+            key_parts[index : index + width] == marker_parts
+            for index in range(len(key_parts) - width + 1)
+        ):
+            return True
+    return False
+
+
+def _key_parts(key_name: str) -> tuple[str, ...]:
+    return tuple(part for part in key_name.upper().replace(".", "_").split("_") if part)
 
 
 def runtime_key_safety_environment_class(instance_name: str) -> RuntimeEnvironmentClass:
@@ -95,6 +136,7 @@ def evaluate_runtime_key_safety_from_store(
             limit=None,
         ),
         secret_rules=policy.rules,
+        integration_key_markers=policy.integration_key_markers,
     )
 
 
@@ -104,7 +146,9 @@ def evaluate_runtime_key_safety(
     required_binding_keys: Iterable[str],
     secret_bindings: Iterable[SecretBinding],
     secret_rules: Iterable[RuntimeSecretSafetyRule],
+    integration_key_markers: Iterable[str] = (),
 ) -> RuntimeKeySafetyEvaluation:
+    extra_integration_key_markers = tuple(integration_key_markers)
     checked_binding_keys = _normalize_required_binding_keys(required_binding_keys)
     rules_by_binding_key = _rules_by_binding_key(secret_rules)
     bindings_by_binding_key = _bindings_by_binding_key(secret_bindings)
@@ -163,7 +207,11 @@ def evaluate_runtime_key_safety(
             continue
 
         rule = rules_by_binding_key.get(binding.binding_key)
-        if rule is None and _binding_stored_for_exact_stable_lane(binding=binding, target=target):
+        if rule is None and _binding_stored_for_exact_stable_lane(
+            binding=binding,
+            target=target,
+            extra_integration_key_markers=extra_integration_key_markers,
+        ):
             findings.extend(_evaluate_declared_secret_class(target=target, binding=binding))
             continue
         if rule is None:
@@ -195,9 +243,23 @@ _LANE_CLASSIFIED_ENVIRONMENT_CLASSES = frozenset({"prod", "testing", "dev"})
 # lane is its classification and no policy rule is needed. Previews are
 # excluded: they copy template-lane values, and their check retargets the
 # template's bindings to the preview, which would otherwise look lane-exact.
+# A production integration credential stored on a non-production lane is also
+# excluded unless its writer declared a class: the lane cannot tell a production
+# key from a test key, so it needs a rule or a declared class.
 def _binding_stored_for_exact_stable_lane(
-    *, binding: SecretBinding, target: RuntimeKeySafetyTarget
+    *,
+    binding: SecretBinding,
+    target: RuntimeKeySafetyTarget,
+    extra_integration_key_markers: tuple[str, ...],
 ) -> bool:
+    if (
+        target.environment_class != "prod"
+        and binding.declared_secret_class is None
+        and is_integration_runtime_key(
+            binding.binding_key, extra_markers=extra_integration_key_markers
+        )
+    ):
+        return False
     return (
         target.environment_class in _LANE_CLASSIFIED_ENVIRONMENT_CLASSES
         and bool(binding.context)
