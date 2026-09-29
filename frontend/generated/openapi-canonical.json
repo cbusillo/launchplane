@@ -26360,6 +26360,25 @@
             "title": "Scope",
             "type": "string"
           },
+          "secret_class": {
+            "anyOf": [
+              {
+                "enum": [
+                  "prod_only",
+                  "testing",
+                  "preview",
+                  "non_prod",
+                  "shared_safe"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret Class",
+            "x-launchplane-optional-response": true
+          },
           "secret_id": {
             "default": "",
             "title": "Secret Id",
@@ -38526,6 +38545,24 @@
           "created_at": {
             "title": "Created At",
             "type": "string"
+          },
+          "declared_secret_class": {
+            "anyOf": [
+              {
+                "enum": [
+                  "prod_only",
+                  "testing",
+                  "preview",
+                  "non_prod",
+                  "shared_safe"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Declared Secret Class"
           },
           "instance": {
             "default": "",
@@ -72119,6 +72156,24 @@
                           }
                         ],
                         "title": "Scope"
+                      },
+                      "secret_class": {
+                        "anyOf": [
+                          {
+                            "enum": [
+                              "prod_only",
+                              "testing",
+                              "preview",
+                              "non_prod",
+                              "shared_safe"
+                            ],
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Secret Class"
                       },
                       "value": {
                         "title": "Value",

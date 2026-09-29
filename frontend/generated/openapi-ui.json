@@ -20728,6 +20728,25 @@
             "title": "Scope",
             "type": "string"
           },
+          "secret_class": {
+            "anyOf": [
+              {
+                "enum": [
+                  "prod_only",
+                  "testing",
+                  "preview",
+                  "non_prod",
+                  "shared_safe"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret Class",
+            "x-launchplane-optional-response": true
+          },
           "secret_id": {
             "default": "",
             "title": "Secret Id",
@@ -28207,6 +28226,24 @@
             "title": "Created At",
             "type": "string"
           },
+          "declared_secret_class": {
+            "anyOf": [
+              {
+                "enum": [
+                  "prod_only",
+                  "testing",
+                  "preview",
+                  "non_prod",
+                  "shared_safe"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Declared Secret Class"
+          },
           "instance": {
             "default": "",
             "title": "Instance",
@@ -28246,6 +28283,7 @@
           "binding_type",
           "context",
           "created_at",
+          "declared_secret_class",
           "instance",
           "integration",
           "schema_version",

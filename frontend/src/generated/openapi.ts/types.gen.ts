@@ -2507,6 +2507,7 @@ export type ProductConfigSecretResult = {
     integration: string;
     name: string;
     scope: 'global' | 'context' | 'context_instance';
+    secret_class?: 'prod_only' | 'testing' | 'preview' | 'non_prod' | 'shared_safe' | null;
     secret_id: string;
 };
 
@@ -3746,6 +3747,7 @@ export type SecretBinding = {
     binding_type: 'env';
     context: string;
     created_at: string;
+    declared_secret_class: 'prod_only' | 'testing' | 'preview' | 'non_prod' | 'shared_safe' | null;
     instance: string;
     integration: string;
     schema_version: number;
