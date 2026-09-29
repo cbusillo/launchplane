@@ -267,6 +267,7 @@ class DataWorkflowExecutionBudgetTests(unittest.TestCase):
                 "odoo_module_update_image_match=true",
                 "odoo_module_update_modules_configured=true",
                 "odoo_module_update_completed=true",
+                "odoo_restore_completed=true",
             ],
         }
         provider = FakeProvider(
