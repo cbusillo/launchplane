@@ -1080,17 +1080,25 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "ODOO_SOURCE_GITHUB_TOKEN": frozenset(
             ("${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}",)
         ),
-        "RESOLVED_DEVKIT_REPOSITORY": frozenset(
+        "LAUNCHPLANE_DEVKIT_REPOSITORY": frozenset(
             ("${{ steps.publish_inputs.outputs.devkit_repository }}",)
         ),
+        "LAUNCHPLANE_SHARED_ADDONS_REPOSITORY": frozenset(
+            ("${{ steps.publish_inputs.outputs.shared_addons_repository }}",)
+        ),
+        "MANIFEST_PATH": frozenset(("tenant/workspace.toml",)),
         "RESOLVED_IMAGE_REPOSITORY": frozenset(
             ("${{ steps.publish_inputs.outputs.image_repository }}",)
         ),
         "RESOLVED_PRODUCT_REPOSITORY": frozenset(
             ("${{ steps.publish_inputs.outputs.repository }}",)
         ),
-        "RESOLVED_SHARED_ADDONS_REPOSITORY": frozenset(
-            ("${{ steps.publish_inputs.outputs.shared_addons_repository }}",)
+        "SITE_REPOSITORY": frozenset(("${{ steps.publish_inputs.outputs.repository }}",)),
+        "checkout.repository[2]": frozenset(
+            ("${{ steps.build_repositories.outputs.devkit_repository }}",)
+        ),
+        "checkout.repository[3]": frozenset(
+            ("${{ steps.build_repositories.outputs.shared_addons_repository }}",)
         ),
         "idempotency-key": frozenset(
             (
@@ -1101,8 +1109,8 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "password": frozenset(("${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}",)),
         "repository": frozenset(
             (
-                "${{ steps.publish_inputs.outputs.devkit_repository }}",
-                "${{ steps.publish_inputs.outputs.shared_addons_repository }}",
+                "${{ steps.build_repositories.outputs.devkit_repository }}",
+                "${{ steps.build_repositories.outputs.shared_addons_repository }}",
                 "${{ steps.publish_inputs.outputs.repository }}",
             )
         ),
@@ -1117,21 +1125,23 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "IMAGE_REPOSITORY": frozenset(("${{ steps.publish_inputs.outputs.image_repository }}",)),
         "ODOO_GHCR_PUBLISH_TOKEN": frozenset(("${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}",)),
         "ODOO_SOURCE_GITHUB_TOKEN": frozenset(("${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}",)),
-        "RESOLVED_DEVKIT_REPOSITORY": frozenset(
+        "LAUNCHPLANE_DEVKIT_REPOSITORY": frozenset(
             ("${{ steps.publish_inputs.outputs.devkit_repository }}",)
         ),
+        "LAUNCHPLANE_SHARED_ADDONS_REPOSITORY": frozenset(
+            ("${{ steps.publish_inputs.outputs.shared_addons_repository }}",)
+        ),
+        "MANIFEST_PATH": frozenset(("${{ steps.facts.outputs.tenant_path }}/workspace.toml",)),
         "RESOLVED_IMAGE_REPOSITORY": frozenset(
             ("${{ steps.publish_inputs.outputs.image_repository }}",)
         ),
-        "RESOLVED_SHARED_ADDONS_REPOSITORY": frozenset(
-            ("${{ steps.publish_inputs.outputs.shared_addons_repository }}",)
-        ),
+        "SITE_REPOSITORY": frozenset(("${{ steps.facts.outputs.tenant_repository }}",)),
         "checkout.repository[1]": frozenset(("${{ steps.facts.outputs.tenant_repository }}",)),
         "checkout.repository[2]": frozenset(
-            ("${{ steps.publish_inputs.outputs.devkit_repository }}",)
+            ("${{ steps.build_repositories.outputs.devkit_repository }}",)
         ),
         "checkout.repository[3]": frozenset(
-            ("${{ steps.publish_inputs.outputs.shared_addons_repository }}",)
+            ("${{ steps.build_repositories.outputs.shared_addons_repository }}",)
         ),
         "idempotency-key": frozenset(
             (
@@ -1284,10 +1294,13 @@ PYTHON_SCHEMA_ONLY_PATH_KEY_VALUES = {
         "PUBLISH_DEPENDENCY_REPOSITORY_KEYS.shared_addons_repository": frozenset(
             ("ODOO_SHARED_ADDONS_REPOSITORY",)
         ),
-        "PUBLISH_RUNTIME_ENVIRONMENT_KEYS[0]": frozenset(("ODOO_ADDON_REPOSITORIES",)),
-        "PUBLISH_RUNTIME_ENVIRONMENT_KEYS[1]": frozenset(("OPENUPGRADE_ADDON_REPOSITORY",)),
-        "PUBLISH_RUNTIME_ENVIRONMENT_KEYS[2]": frozenset(("OPENUPGRADELIB_INSTALL_SPEC",)),
-        "PUBLISH_RUNTIME_ENVIRONMENT_KEYS[3]": frozenset(("ODOO_PYTHON_SYNC_SKIP_ADDONS",)),
+        "PUBLISH_RUNTIME_ENVIRONMENT_KEYS[0]": frozenset(("ODOO_VERSION",)),
+        "PUBLISH_RUNTIME_ENVIRONMENT_KEYS[1]": frozenset(("ODOO_BASE_RUNTIME_IMAGE",)),
+        "PUBLISH_RUNTIME_ENVIRONMENT_KEYS[2]": frozenset(("ODOO_BASE_DEVTOOLS_IMAGE",)),
+        "PUBLISH_RUNTIME_ENVIRONMENT_KEYS[3]": frozenset(("ODOO_ADDON_REPOSITORIES",)),
+        "PUBLISH_RUNTIME_ENVIRONMENT_KEYS[4]": frozenset(("OPENUPGRADE_ADDON_REPOSITORY",)),
+        "PUBLISH_RUNTIME_ENVIRONMENT_KEYS[5]": frozenset(("OPENUPGRADELIB_INSTALL_SPEC",)),
+        "PUBLISH_RUNTIME_ENVIRONMENT_KEYS[6]": frozenset(("ODOO_PYTHON_SYNC_SKIP_ADDONS",)),
         "instance": frozenset(("testing",)),
     },
 }
@@ -1298,6 +1311,9 @@ PYTHON_SCHEMA_ONLY_PATH_CONTAINER_VALUES = {
             "shared_addons_repository": "ODOO_SHARED_ADDONS_REPOSITORY",
         },
         "PUBLISH_RUNTIME_ENVIRONMENT_KEYS": (
+            "ODOO_VERSION",
+            "ODOO_BASE_RUNTIME_IMAGE",
+            "ODOO_BASE_DEVTOOLS_IMAGE",
             "ODOO_ADDON_REPOSITORIES",
             "OPENUPGRADE_ADDON_REPOSITORY",
             "OPENUPGRADELIB_INSTALL_SPEC",

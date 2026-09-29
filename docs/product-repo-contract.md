@@ -410,7 +410,13 @@ Python version, and `[repos.devkit]` / `[repos.shared_addons]` name the
 `repository` the reusable workflows check out. The build resolves image tags to
 digests and records them, with every source commit, in the artifact manifest;
 the artifact, not a Launchplane setting, is the exact record of what was built
-(cbusillo/launchplane#2583). Reusable Odoo workflows read the
+(cbusillo/launchplane#2583). The devkit and shared-addons repositories must
+belong to the tenant repository's owner, because the build runs their code with
+the source and registry tokens. During the rollout, a tenant revision that does
+not declare these values still gets them from the Launchplane
+`ODOO_DEVKIT_REPOSITORY`, `ODOO_SHARED_ADDONS_REPOSITORY`, `ODOO_VERSION` and
+base-image records, which publish-inputs keeps returning until those records
+are retired. Reusable Odoo workflows read the
 Launchplane service URL from `LAUNCHPLANE_PUBLIC_URL` by default and derive the
 GitHub OIDC audience from that URL host unless the caller passes an explicit
 `launchplane_audience` input. The reusable jobs run on GitHub-hosted runners

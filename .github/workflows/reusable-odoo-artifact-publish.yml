@@ -225,7 +225,9 @@ jobs:
             repository=result.repository,
             image_repository=result.image_repository,
             image_tag=result.image_tag,
-            preview_slug=result.preview_slug
+            preview_slug=result.preview_slug,
+            devkit_repository=result.devkit_repository,
+            shared_addons_repository=result.shared_addons_repository
 
       - name: Validate Launchplane publish inputs
         env:
@@ -267,6 +269,12 @@ jobs:
         id: build_repositories
         env:
           MANIFEST_PATH: tenant/workspace.toml
+          SITE_REPOSITORY: ${{ steps.publish_inputs.outputs.repository }}
+          # Transitional: revisions whose workspace.toml predates [repos.*] repository.
+          LAUNCHPLANE_DEVKIT_REPOSITORY: >-
+            ${{ steps.publish_inputs.outputs.devkit_repository }}
+          LAUNCHPLANE_SHARED_ADDONS_REPOSITORY: >-
+            ${{ steps.publish_inputs.outputs.shared_addons_repository }}
         run: |
           set -euo pipefail
           python3 - <<'PY' >>"$GITHUB_OUTPUT"
@@ -277,10 +285,16 @@ jobs:
 
           with open(os.environ["MANIFEST_PATH"], "rb") as manifest_file:
               repos = tomllib.load(manifest_file).get("repos", {})
+          site_owner = os.environ["SITE_REPOSITORY"].strip().split("/")[0].casefold()
           for key in ("devkit", "shared_addons"):
               repository = str(repos.get(key, {}).get("repository", "")).strip()
+              if not repository:
+                  repository = os.environ[f"LAUNCHPLANE_{key.upper()}_REPOSITORY"].strip()
               if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
                   sys.exit(f"workspace.toml must declare [repos.{key}] repository as owner/name.")
+              # The build runs this code with the source and registry tokens.
+              if not site_owner or repository.split("/")[0].casefold() != site_owner:
+                  sys.exit(f"[repos.{key}] repository must belong to the site repository's owner.")
               print(f"{key}_repository={repository}")
           PY
 

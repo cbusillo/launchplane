@@ -398,16 +398,6 @@ class ProductOnboardingTests(unittest.TestCase):
             "RESOLVED_IMAGE_TAG: ${{ steps.publish_inputs.outputs.image_tag }}",
             workflow_text,
         )
-        self.assertIn(
-            "RESOLVED_DEVKIT_REPOSITORY: >-\n"
-            "            ${{ steps.publish_inputs.outputs.devkit_repository }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "RESOLVED_SHARED_ADDONS_REPOSITORY: >-\n"
-            "            ${{ steps.publish_inputs.outputs.shared_addons_repository }}",
-            workflow_text,
-        )
         self.assertIn("devkit_repository=result.devkit_repository", workflow_text)
         self.assertIn("repository=result.repository", workflow_text)
         self.assertIn(
@@ -419,10 +409,10 @@ class ProductOnboardingTests(unittest.TestCase):
             workflow_text,
         )
         self.assertIn(
-            "repository: ${{ steps.publish_inputs.outputs.devkit_repository }}", workflow_text
+            "repository: ${{ steps.build_repositories.outputs.devkit_repository }}", workflow_text
         )
         self.assertIn(
-            "repository: ${{ steps.publish_inputs.outputs.shared_addons_repository }}",
+            "repository: ${{ steps.build_repositories.outputs.shared_addons_repository }}",
             workflow_text,
         )
         self.assertIn("publish.manifest=${{ steps.publish.outputs.manifest_file }}", workflow_text)

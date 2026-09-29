@@ -27,8 +27,10 @@ from control_plane.runtime_key_safety import (
 )
 
 DEVKIT_RUNTIME_ENVIRONMENT_PAYLOAD_KEY = "ODOO_DEVKIT_RUNTIME_ENVIRONMENT_JSON"
-# The Odoo version and base images come from the tenant's workspace.toml [build] table.
 PUBLISH_RUNTIME_ENVIRONMENT_KEYS = (
+    "ODOO_VERSION",
+    "ODOO_BASE_RUNTIME_IMAGE",
+    "ODOO_BASE_DEVTOOLS_IMAGE",
     "ODOO_ADDON_REPOSITORIES",
     "OPENUPGRADE_ADDON_REPOSITORY",
     "OPENUPGRADELIB_INSTALL_SPEC",

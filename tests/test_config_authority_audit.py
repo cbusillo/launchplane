@@ -1273,13 +1273,16 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             (
                 "PUBLISH_RUNTIME_ENVIRONMENT_KEYS",
                 (
+                    "ODOO_VERSION",
+                    "ODOO_BASE_RUNTIME_IMAGE",
+                    "ODOO_BASE_DEVTOOLS_IMAGE",
                     "ODOO_ADDON_REPOSITORIES",
                     "OPENUPGRADE_ADDON_REPOSITORY",
                     "OPENUPGRADELIB_INSTALL_SPEC",
                     "ODOO_PYTHON_SYNC_SKIP_ADDONS",
                 ),
             ),
-            ("PUBLISH_RUNTIME_ENVIRONMENT_KEYS[0]", "ODOO_ADDON_REPOSITORIES"),
+            ("PUBLISH_RUNTIME_ENVIRONMENT_KEYS[0]", "ODOO_VERSION"),
             (
                 "PUBLISH_DEPENDENCY_REPOSITORY_KEYS",
                 {
@@ -2418,12 +2421,12 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ),
             (
                 ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "RESOLVED_DEVKIT_REPOSITORY",
+                "LAUNCHPLANE_DEVKIT_REPOSITORY",
                 "${{ steps.publish_inputs.outputs.devkit_repository }}",
             ),
             (
                 ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "RESOLVED_SHARED_ADDONS_REPOSITORY",
+                "LAUNCHPLANE_SHARED_ADDONS_REPOSITORY",
                 "${{ steps.publish_inputs.outputs.shared_addons_repository }}",
             ),
             (
@@ -2488,7 +2491,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ),
             (
                 ".github/workflows/reusable-odoo-preview.yml",
-                "RESOLVED_DEVKIT_REPOSITORY",
+                "LAUNCHPLANE_DEVKIT_REPOSITORY",
                 "${{ steps.publish_inputs.outputs.devkit_repository }}",
             ),
             (
@@ -2498,7 +2501,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ),
             (
                 ".github/workflows/reusable-odoo-preview.yml",
-                "RESOLVED_SHARED_ADDONS_REPOSITORY",
+                "LAUNCHPLANE_SHARED_ADDONS_REPOSITORY",
                 "${{ steps.publish_inputs.outputs.shared_addons_repository }}",
             ),
             (
@@ -2509,12 +2512,12 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             (
                 ".github/workflows/reusable-odoo-preview.yml",
                 "checkout.repository[2]",
-                "${{ steps.publish_inputs.outputs.devkit_repository }}",
+                "${{ steps.build_repositories.outputs.devkit_repository }}",
             ),
             (
                 ".github/workflows/reusable-odoo-preview.yml",
                 "checkout.repository[3]",
-                "${{ steps.publish_inputs.outputs.shared_addons_repository }}",
+                "${{ steps.build_repositories.outputs.shared_addons_repository }}",
             ),
             (
                 ".github/workflows/reusable-odoo-preview.yml",
