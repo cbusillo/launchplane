@@ -16,6 +16,13 @@ Judge every change by one question: can a product be maintained without
 anyone touching Launchplane? Work that adds upkeep to Launchplane itself needs
 a strong reason. Prefer deleting a concept to adding one.
 
+A product repository builds its own artifacts from its own files, with
+provenance Launchplane can verify; it never calls Launchplane, and Launchplane
+never supplies its build inputs. Launchplane reacts to source-control events,
+verifies which repository and commit an artifact came from, and deploys it
+with the site's runtime settings and secrets. The artifact is the only handoff
+between them.
+
 Code and tests are upkeep. A change that deletes code or tests without losing
 a behavior needs no other reason. A test earns its place by catching a real
 regression, not by restating the code or its wording.
@@ -62,12 +69,19 @@ Launchplane by hand. Whatever blocks that run is the next piece of work.
 - billing and collections, and general planning or work graphs inside
   Launchplane
 - the blanket authorization freeze; granting access is a stop boundary instead
+- product repositories calling Launchplane: workflow-identity grants, pinned
+  reusable Launchplane workflows, and Launchplane-held build settings
 
 A retired concept comes back only through a direction change, in a shape that
 fits this file.
 
 ## Milestones
 
+- `Product repos never call Launchplane` proves the CM website's previews,
+  testing deploys, and releases run from its own builds with no Launchplane
+  workflow, grant, or build setting referenced by its repository; ends if a
+  Launchplane change forces a product repository change, or a product change
+  needs a new Launchplane grant.
 - `CM website live through Launchplane` proves the journey once: owner
   approval at release is built, and three changes in a row go through with
   Justin; ends if Justin has to use GitHub, the operator touches Launchplane
