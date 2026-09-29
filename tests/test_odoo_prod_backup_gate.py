@@ -15,6 +15,15 @@ from control_plane.workflows.odoo_prod_backup_gate import (
     execute_odoo_prod_backup_gate,
     execute_odoo_prod_backup_verification,
 )
+from control_plane import runtime_platform_credentials
+from control_plane.runtime_environments import SiteRuntimeEnvironment
+from control_plane.workflows.odoo_prod_backup_gate import (
+    _runtime_values as resolve_backup_runtime_values,
+)
+
+
+def _site_environment(values: dict[str, str]) -> SiteRuntimeEnvironment:
+    return SiteRuntimeEnvironment(values=values, secret_keys=frozenset())
 
 
 def _target_record() -> DokployTargetRecord:
@@ -152,8 +161,8 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
                 return_value="c" * 64,
             ),
             patch(
-                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value=_runtime_values(),
+                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment(_runtime_values()),
             ),
         ):
             result = execute_odoo_prod_backup_gate(
@@ -216,8 +225,8 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
                 return_value="c" * 64,
             ),
             patch(
-                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value=_runtime_values(),
+                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment(_runtime_values()),
             ),
         ):
             result = execute_odoo_prod_backup_gate(
@@ -247,8 +256,8 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
                 side_effect=click.ClickException("backup failed"),
             ),
             patch(
-                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value=_runtime_values(),
+                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment(_runtime_values()),
             ),
         ):
             result = execute_odoo_prod_backup_gate(
@@ -275,8 +284,8 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value={},
+                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment({}),
             ),
             self.assertRaises(click.ClickException),
         ):
@@ -298,8 +307,8 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value=runtime_values,
+                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment(runtime_values),
             ),
             self.assertRaises(click.ClickException),
         ):
@@ -321,8 +330,8 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value=runtime_values,
+                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment(runtime_values),
             ),
             self.assertRaisesRegex(click.ClickException, "dedicated Launchplane backup root"),
         ):
@@ -355,8 +364,8 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
                 return_value="c" * 64,
             ),
             patch(
-                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value=_runtime_values(),
+                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment(_runtime_values()),
             ),
         ):
             result = execute_odoo_prod_backup_verification(
@@ -410,8 +419,8 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
                 return_value="c" * 64,
             ),
             patch(
-                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value=_runtime_values(),
+                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment(_runtime_values()),
             ),
         ):
             result = execute_odoo_prod_backup_verification(
@@ -445,8 +454,8 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
                 return_value="c" * 64,
             ),
             patch(
-                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value=_runtime_values(),
+                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment(_runtime_values()),
             ),
         ):
             result = execute_odoo_prod_backup_verification(
@@ -475,8 +484,8 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value=_runtime_values(),
+                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment(_runtime_values()),
             ),
             patch(
                 "control_plane.workflows.odoo_prod_backup_gate.dokploy_post_deploy.run_compose_odoo_backup_verification"
@@ -502,8 +511,8 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value=_runtime_values(),
+                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment(_runtime_values()),
             ),
             patch(
                 "control_plane.workflows.odoo_prod_backup_gate.dokploy_post_deploy.run_compose_odoo_backup_verification"
@@ -537,8 +546,8 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
                 ),
             ),
             patch(
-                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value=_runtime_values(),
+                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment(_runtime_values()),
             ),
         ):
             result = execute_odoo_prod_backup_verification(
@@ -558,3 +567,23 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OdooProdBackupGateRuntimeValuesTests(unittest.TestCase):
+    def test_a_platform_credential_refusal_keeps_its_key_and_source(self) -> None:
+        refusal = runtime_platform_credentials.PlatformCredentialRefusedError(
+            target="cm/prod",
+            findings=(
+                runtime_platform_credentials.PlatformCredentialFinding(
+                    key="DOKPLOY_TOKEN", reason="platform_credential_key", source="lane record"
+                ),
+            ),
+        )
+        with patch(
+            "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_site_runtime_environment",
+            side_effect=refusal,
+        ):
+            with self.assertRaises(runtime_platform_credentials.PlatformCredentialRefusedError):
+                resolve_backup_runtime_values(
+                    control_plane_root=Path("/control-plane"), context="cm", instance="prod"
+                )

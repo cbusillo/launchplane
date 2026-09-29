@@ -262,75 +262,9 @@ def site_application_keys(site_keys: frozenset[str] | set[str]) -> set[str]:
 
 
 @dataclass(frozen=True)
-class AppRuntimeEnvironment:
-    """Values Launchplane may write into an application runtime, with retirement applied."""
-
-    values: dict[str, str]
-    retired_keys: frozenset[str]
-    withheld_launchplane_keys: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
 class _RuntimeValueSource:
     label: str
     launchplane_scope: bool
-
-
-def resolve_app_runtime_environment(
-    *,
-    control_plane_root: Path,
-    context_name: str,
-    instance_name: str,
-    database_url: str | None = None,
-) -> AppRuntimeEnvironment:
-    """Transitional: the environment Odoo target replacement may write for one lane.
-
-    Target replacement and backup restore stay on this global-inclusive resolution
-    until #2538 stores the remaining global Odoo values (``ODOO_KEY``) per site;
-    then they move to ``resolve_site_runtime_environment`` and this goes away.
-
-    Paths that write an app runtime environment from Launchplane records use
-    this function, so provider-key retirement and the platform-credential
-    refusal apply to all of them the same way.
-
-    Global- and context-scope records are also where Launchplane keeps its own
-    operating credentials (for example the token it uses for preview PR
-    comments). Named platform-credential keys from those scopes are withheld
-    from the app. Any other platform credential, or a GitHub token value under
-    any key, refuses the render and names the key and its source.
-    """
-
-    values = resolve_runtime_environment_values(
-        control_plane_root=control_plane_root,
-        context_name=context_name,
-        instance_name=instance_name,
-        database_url=database_url,
-    )
-    retired_keys = retired_provider_keys_for_lane(
-        context_name=context_name, instance_name=instance_name, database_url=database_url
-    )
-    values = {key: value for key, value in values.items() if key not in retired_keys}
-    if not runtime_platform_credentials.find_platform_credentials(values):
-        return AppRuntimeEnvironment(values=values, retired_keys=retired_keys)
-    try:
-        sources = _runtime_value_sources(
-            control_plane_root=control_plane_root,
-            context_name=context_name,
-            instance_name=instance_name,
-            database_url=database_url,
-        )
-    except click.ClickException:
-        # Without attribution nothing can be withheld as Launchplane's own, so
-        # every finding refuses.
-        sources = {}
-    app_values, withheld = _apply_platform_credential_policy(
-        values=values, sources=sources, target=f"{context_name}/{instance_name}"
-    )
-    return AppRuntimeEnvironment(
-        values=app_values,
-        retired_keys=retired_keys,
-        withheld_launchplane_keys=withheld,
-    )
 
 
 def resolve_app_values_from_definition(
@@ -344,7 +278,7 @@ def resolve_app_values_from_definition(
     """Record-and-target app values for a lane, under the same credential policy.
 
     For store-backed drivers that resolve records without the managed-secret
-    overlay. Same withholding and refusal as ``resolve_app_runtime_environment``.
+    overlay. Same withholding and refusal as ``resolve_site_runtime_environment``.
     """
 
     layers = _record_layers(
