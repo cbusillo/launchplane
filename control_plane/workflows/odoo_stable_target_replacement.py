@@ -883,6 +883,12 @@ def _verify_required_runtime_identity_evidence(
     return verified_evidence
 
 
+def _restore_omits_website_bootstrap(record: OdooInstanceOverrideRecord | None) -> bool:
+    return bool(
+        record is not None and "deploy" in record.apply_on and record.website_bootstrap is not None
+    )
+
+
 def _write_failed_deployment(
     *,
     record_store: OdooStableTargetReplacementStore,
@@ -1933,6 +1939,9 @@ def execute_odoo_stable_target_replacement_apply(
         ),
         run_destructive_restore=plan.data_source_mode == "upstream_restore",
         provider_effect_checkpoint=provider_effect_checkpoint,
+        schedule_execution_timeout_seconds=(
+            request.timeout_seconds if plan.data_source_mode == "upstream_restore" else None
+        ),
     )
     post_deploy_evidence = PostDeployUpdateEvidence(
         attempted=True,
@@ -1961,6 +1970,62 @@ def execute_odoo_stable_target_replacement_apply(
             runtime_source=runtime_source,
             error_message=post_deploy_result.error_message or "Odoo post-deploy failed.",
         )
+
+    if post_deploy_phase == "restore" and _restore_omits_website_bootstrap(
+        normalized_override_record
+    ):
+        # Restore payloads leave out website bootstrap, so the restored copy
+        # still carries the source's canonical URL. Apply the deploy-phase
+        # settings without another restore before verifying the target.
+        bootstrap_result = execute_odoo_post_deploy(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            request=OdooPostDeployRequest(
+                context=plan.context,
+                instance=plan.instance,
+                phase="deploy",
+            ),
+            run_destructive_restore=False,
+            provider_effect_checkpoint=provider_effect_checkpoint,
+        )
+        post_deploy_evidence = PostDeployUpdateEvidence(
+            attempted=True,
+            status=bootstrap_result.post_deploy_status,
+            detail=(
+                bootstrap_result.error_message
+                or "Odoo restore and deploy-phase website bootstrap completed after stable "
+                "target replacement apply."
+            ),
+            evidence={
+                **post_deploy_result.override_evidence,
+                **{
+                    f"deploy_phase_{key}": value
+                    for key, value in bootstrap_result.override_evidence.items()
+                },
+                "deploy_phase_post_deploy_status": bootstrap_result.post_deploy_status,
+            },
+        )
+        if bootstrap_result.post_deploy_status != "pass":
+            _write_failed_deployment(
+                record_store=record_store,
+                ship_request=ship_request,
+                deployment_record_id=deployment_record_id,
+                started_at=started_at,
+                resolved_target=resolved_target,
+                runtime_source=runtime_source,
+                runtime_identity=runtime_identity,
+                post_deploy_update=post_deploy_evidence,
+                destination_health=HealthcheckEvidence(status="skipped"),
+            )
+            return base_result.result(
+                deploy_status="fail",
+                post_deploy_status=bootstrap_result.post_deploy_status,
+                post_deploy_result=bootstrap_result,
+                runtime_identity_injected=True,
+                runtime_source=runtime_source,
+                error_message="Odoo deploy-phase post-deploy after restore failed: "
+                + (bootstrap_result.error_message or "no detail"),
+            )
 
     verification = verify_odoo_stable_readiness(
         base_url=base_url,
