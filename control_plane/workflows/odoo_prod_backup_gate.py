@@ -11,6 +11,7 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane import runtime_platform_credentials
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -280,6 +281,9 @@ def _runtime_values(
             context_name=context,
             instance_name=instance,
         ).values
+    except runtime_platform_credentials.PlatformCredentialRefusedError:
+        # Already names the key and its source, never the value.
+        raise
     except click.ClickException as error:
         raise click.ClickException(
             "Odoo prod backup workflow requires DB-backed runtime environment records for "

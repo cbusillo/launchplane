@@ -15,7 +15,11 @@ from control_plane.workflows.odoo_prod_backup_gate import (
     execute_odoo_prod_backup_gate,
     execute_odoo_prod_backup_verification,
 )
+from control_plane import runtime_platform_credentials
 from control_plane.runtime_environments import SiteRuntimeEnvironment
+from control_plane.workflows.odoo_prod_backup_gate import (
+    _runtime_values as resolve_backup_runtime_values,
+)
 
 
 def _site_environment(values: dict[str, str]) -> SiteRuntimeEnvironment:
@@ -563,3 +567,23 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OdooProdBackupGateRuntimeValuesTests(unittest.TestCase):
+    def test_a_platform_credential_refusal_keeps_its_key_and_source(self) -> None:
+        refusal = runtime_platform_credentials.PlatformCredentialRefusedError(
+            target="cm/prod",
+            findings=(
+                runtime_platform_credentials.PlatformCredentialFinding(
+                    key="DOKPLOY_TOKEN", reason="platform_credential_key", source="lane record"
+                ),
+            ),
+        )
+        with patch(
+            "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_site_runtime_environment",
+            side_effect=refusal,
+        ):
+            with self.assertRaises(runtime_platform_credentials.PlatformCredentialRefusedError):
+                resolve_backup_runtime_values(
+                    control_plane_root=Path("/control-plane"), context="cm", instance="prod"
+                )
