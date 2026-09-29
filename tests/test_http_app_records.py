@@ -7,6 +7,7 @@ from unittest.mock import patch
 from urllib.parse import quote
 
 from control_plane import secrets as control_plane_secrets
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import (
@@ -88,6 +89,7 @@ from tests.http_app_test_support import (
     _write_recent_operations_records,
     _write_secret_status_records,
 )
+from tests.support.http import get as http_get
 from tests.support.http import request as http_request
 from tests.support.operational_records import (
     _get_context_secret_statuses,
@@ -585,6 +587,74 @@ class FastApiRecentOperationsReadTests(unittest.IsolatedAsyncioTestCase):
             openapi["components"]["schemas"]["RecentOperationsResponse"]["additionalProperties"],
             False,
         )
+
+
+class FastApiRuntimeSettingNamesTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lists_setting_names_that_apply_to_a_lane_and_never_values(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(Path(temporary_directory_name) / "lp.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            for scope, context, instance, env in (
+                ("global", "", "", {"EVERY_PRODUCT": "global-value"}),
+                ("context", "example-site", "", {"SITE_SETTING": "context-value"}),
+                ("instance", "example-site", "prod", {"LANE_SETTING": "lane-value"}),
+                ("instance", "example-site", "testing", {"OTHER_LANE": "other-lane-value"}),
+                ("context", "other-site", "", {"OTHER_SITE": "other-site-value"}),
+            ):
+                store.write_runtime_environment_record(
+                    RuntimeEnvironmentRecord(
+                        scope=scope,  # type: ignore[arg-type]
+                        context=context,
+                        instance=instance,
+                        env=cast(dict[str, str | int | float | bool], env),
+                        updated_at="2026-09-28T00:00:00Z",
+                        # Free text; a label must never become a way to read a value.
+                        source_label=f"import {next(iter(env))}={next(iter(env.values()))}",
+                    )
+                )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(action="secret.list", context="example-site"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await http_get(
+                app,
+                "/v1/contexts/example-site/instances/prod/runtime-settings",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+            store.close()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        settings = response.json()["settings"]
+        self.assertEqual(
+            {(item["scope"], item["instance"]): tuple(item["keys"]) for item in settings},
+            {
+                ("global", ""): ("EVERY_PRODUCT",),
+                ("context", ""): ("SITE_SETTING",),
+                ("instance", "prod"): ("LANE_SETTING",),
+            },
+        )
+        for value in ("global-value", "context-value", "lane-value", "other-lane-value"):
+            self.assertNotIn(value, response.text)
+        self.assertNotIn("OTHER_SITE", response.text)
+
+    async def test_refuses_a_context_the_caller_cannot_list(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="secret.list", context="other-site"),
+            record_store_factory=lambda: _SecretStatusProbeStore(),
+        )
+
+        response = await http_get(
+            app,
+            "/v1/contexts/example-site/runtime-settings",
+            headers={"Authorization": "Bearer valid-token"},
+        )
+
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
 
 class FastApiSecretStatusReadTests(unittest.IsolatedAsyncioTestCase):

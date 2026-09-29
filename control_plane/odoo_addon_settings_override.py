@@ -3,6 +3,8 @@
 Shopify is the first addon. The operator declares a lane's store key, API version
 and ``test_store`` flag as literals, and points the API token and webhook key at
 existing managed secret bindings. Plaintext secret values never enter this path.
+Each binding must be the one the lane's runtime delivery puts in its container, or
+Odoo refuses the override at startup.
 """
 
 from __future__ import annotations
@@ -24,7 +26,10 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooOverrideApplyResult,
     OdooOverrideValue,
 )
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
+from control_plane.runtime_environments import site_delivered_secret_bindings_from_store
+from control_plane.secrets import RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
 from control_plane.odoo_instance_overrides import (
     DEFAULT_SHOPIFY_PRODUCTION_INDICATORS,
     SHOPIFY_ACTION_APPLY,
@@ -48,6 +53,7 @@ OdooAddonSettingsRefusalCode = Literal[
     "production_test_store",
     "secret_binding_missing",
     "secret_binding_invalid",
+    "secret_binding_not_delivered",
     "target_policy_missing",
     "render_refused",
 ]
@@ -95,6 +101,19 @@ class OdooAddonSettingsStore(Protocol):
     ) -> tuple[SecretBinding, ...]: ...
 
     def read_secret_record(self, secret_id: str) -> SecretRecord: ...
+
+    def list_secret_records(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretRecord, ...]: ...
+
+    def list_runtime_environment_records(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
 
 
 def _looks_like_shopify_credential(value: str) -> bool:
@@ -294,6 +313,11 @@ def _validated_secret_bindings(
             context_name=request.context, instance_name=request.instance
         )
     }
+    delivered_bindings = site_delivered_secret_bindings_from_store(
+        record_store=record_store,
+        context_name=request.context,
+        instance_name=request.instance,
+    )
     validated: dict[str, SecretBinding] = {}
     for setting_name, binding_id in request.shopify.secret_binding_ids().items():
         expected_key = addon_setting_secret_env_key(
@@ -305,7 +329,8 @@ def _validated_secret_bindings(
             raise OdooAddonSettingsRefusal(
                 "secret_binding_missing",
                 f"Shopify {setting_name} references a secret binding that does not exist for "
-                f"this lane. Create it through product-config with binding key {expected_key}.",
+                f"this lane. Create it through product-config under integration "
+                f"{RUNTIME_ENVIRONMENT_SECRET_INTEGRATION} with binding key {expected_key}.",
             )
         if binding.context != request.context or binding.instance != request.instance:
             raise OdooAddonSettingsRefusal(
@@ -333,6 +358,17 @@ def _validated_secret_bindings(
             raise OdooAddonSettingsRefusal(
                 "secret_binding_invalid",
                 f"Shopify {setting_name} managed secret is not configured.",
+            )
+        delivered = delivered_bindings.get(expected_key)
+        if delivered is None or delivered.binding_id != binding.binding_id:
+            raise OdooAddonSettingsRefusal(
+                "secret_binding_not_delivered",
+                f"Shopify {setting_name} secret binding is not delivered to this lane's "
+                f"container, so Odoo would refuse the override at startup. The lane receives "
+                f"its {RUNTIME_ENVIRONMENT_SECRET_INTEGRATION} secrets under keys that are not "
+                f"retired. Create the secret through product-config under integration "
+                f"{RUNTIME_ENVIRONMENT_SECRET_INTEGRATION}, scoped to this lane, with binding "
+                f"key {expected_key}.",
             )
         validated[setting_name] = binding
     return validated

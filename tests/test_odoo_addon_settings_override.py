@@ -17,6 +17,7 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooOverrideValue,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord, SecretStatus
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.odoo_addon_settings_override import (
@@ -58,6 +59,7 @@ def _seed_lane(
     binding_key_override: dict[str, str] | None = None,
     binding_status: SecretStatus = "configured",
     write_target: bool = True,
+    integration: str = "runtime_environment",
 ) -> None:
     if write_target:
         store.write_dokploy_target_record(
@@ -76,7 +78,7 @@ def _seed_lane(
             SecretRecord(
                 secret_id=secret_id,
                 scope="context_instance",
-                integration="shopify",
+                integration=integration,
                 name=setting,
                 context=_CONTEXT,
                 instance=instance,
@@ -93,7 +95,7 @@ def _seed_lane(
             SecretBinding(
                 binding_id=_binding_id(instance, setting),
                 secret_id=secret_id,
-                integration="shopify",
+                integration=integration,
                 binding_key=binding_key,
                 context=_CONTEXT,
                 instance=instance,
@@ -352,6 +354,92 @@ class OdooAddonSettingsPlanTests(unittest.TestCase):
     def test_refuses_disabled_binding(self) -> None:
         self._assert_refused("secret_binding_invalid", seed={"binding_status": "disabled"})
 
+    def test_refuses_binding_the_lane_runtime_never_receives(self) -> None:
+        # 2026-09-28: bindings under integration "shopify" passed, and Odoo refused to boot.
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            _seed_lane(store, integration="shopify")
+            with self.assertRaises(OdooAddonSettingsRefusal) as dry_run:
+                build_odoo_addon_settings_plan(record_store=store, request=_request())
+            with self.assertRaises(OdooAddonSettingsRefusal) as apply:
+                apply_odoo_addon_settings_plan(
+                    record_store=store,
+                    request=_request(mode="apply", reviewed_plan_sha256="0" * 64),
+                )
+            with self.assertRaises(FileNotFoundError):
+                store.read_odoo_instance_override_record(
+                    context_name=_CONTEXT, instance_name="testing"
+                )
+        self.assertEqual(dry_run.exception.code, "secret_binding_not_delivered")
+        self.assertEqual(apply.exception.code, "secret_binding_not_delivered")
+        self.assertIn("runtime_environment", str(dry_run.exception))
+
+    def test_refuses_binding_whose_key_is_retired_for_the_lane(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            _seed_lane(store)
+            store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    schema_version=2,
+                    scope="instance",
+                    context=_CONTEXT,
+                    instance="testing",
+                    env={"ODOO_DB_NAME": "cm_testing"},
+                    retired_provider_keys=(
+                        addon_setting_secret_env_key(
+                            addon_name="shopify", setting_name="webhook_key"
+                        ),
+                    ),
+                    updated_at=_TIMESTAMP,
+                )
+            )
+            with self.assertRaises(OdooAddonSettingsRefusal) as raised:
+                build_odoo_addon_settings_plan(record_store=store, request=_request())
+        self.assertEqual(raised.exception.code, "secret_binding_not_delivered")
+        self.assertIn("webhook_key", str(raised.exception))
+
+    def test_refuses_binding_shadowed_by_the_one_the_lane_receives(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            _seed_lane(store)
+            binding_key = addon_setting_secret_env_key(
+                addon_name="shopify", setting_name="api_token"
+            )
+            newer_secret_id = "secret-shopify-api_token-newer"
+            store.write_secret_record(
+                SecretRecord(
+                    secret_id=newer_secret_id,
+                    scope="context_instance",
+                    integration="runtime_environment",
+                    name="api_token newer",
+                    context=_CONTEXT,
+                    instance="testing",
+                    current_version_id=f"{newer_secret_id}-version-1",
+                    created_at=_TIMESTAMP,
+                    updated_at="2026-09-28T13:00:00Z",
+                )
+            )
+            store.write_secret_binding(
+                SecretBinding(
+                    binding_id="secret-shopify-api_token-newer-binding",
+                    secret_id=newer_secret_id,
+                    integration="runtime_environment",
+                    binding_key=binding_key,
+                    context=_CONTEXT,
+                    instance="testing",
+                    created_at=_TIMESTAMP,
+                    updated_at="2026-09-28T13:00:00Z",
+                )
+            )
+            with self.assertRaises(OdooAddonSettingsRefusal) as raised:
+                build_odoo_addon_settings_plan(record_store=store, request=_request())
+            delivered, _, _ = build_odoo_addon_settings_plan(
+                record_store=store,
+                request=_request(api_token_binding="secret-shopify-api_token-newer-binding"),
+            )
+        self.assertEqual(raised.exception.code, "secret_binding_not_delivered")
+        self.assertTrue(delivered.changed)
+
     def test_refuses_without_target_policy_record(self) -> None:
         self._assert_refused("target_policy_missing", seed={"write_target": False})
 
@@ -583,6 +671,35 @@ class OdooAddonSettingsRouteTests(unittest.IsolatedAsyncioTestCase):
             response.json()["error"]["code"],
             "addon_settings_protected_store_key",
         )
+
+    async def test_undelivered_binding_is_refused_before_any_write(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(
+                    _odoo_profile_payload_with_prod_lane()
+                )
+            )
+            _seed_lane(store, integration="shopify")
+            app = self._app(store, root, "product_config.plan", "product_config.apply")
+            dry_run = await self._post(app, _request_payload())
+            apply = await self._post(
+                app,
+                _request_payload(mode="apply", reviewed_plan_sha256="a" * 64),
+                idempotency_key="cm-testing-shopify-undelivered",
+            )
+            with self.assertRaises(FileNotFoundError):
+                store.read_odoo_instance_override_record(
+                    context_name=_CONTEXT, instance_name="testing"
+                )
+
+        for response in (dry_run, apply):
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(
+                response.json()["error"]["code"],
+                "addon_settings_secret_binding_not_delivered",
+            )
 
     async def test_plaintext_secret_is_rejected_and_not_echoed(self) -> None:
         payload = _request_payload()
