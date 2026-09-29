@@ -111,6 +111,7 @@ export type ArtifactIdentityManifest = ({
     odoo_install_modules: Array<string>;
     openupgrade_inputs: ArtifactOpenUpgradeInputs;
     schema_version: 1 | 2;
+    source_build: ArtifactSourceBuild | null;
     source_commit: string;
 };
 
@@ -147,6 +148,19 @@ export type ArtifactPythonPackageSource = {
     commit: string;
     kind: 'registry' | 'vcs';
     repository: string;
+};
+
+export type ArtifactSourceBuild = {
+    event: 'push' | 'pull_request';
+    github_artifact_id: number;
+    manifest_artifact_id: string;
+    pull_request_number: number | null;
+    purpose: 'release' | 'preview';
+    repository: string;
+    repository_id: string;
+    run_attempt: number;
+    run_id: number;
+    workflow_path: string;
 };
 
 export type ArtifactUvLockProvenance = {

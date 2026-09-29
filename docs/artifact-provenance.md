@@ -1,6 +1,6 @@
 # Artifact Provenance
 
-Status: design for issue #2604, not yet built.
+Status: built in `control_plane/build_provenance.py` (#2604). Event handling is #2605.
 
 A product repository builds its own artifact and never calls Launchplane.
 Launchplane decides for itself which artifact came from which commit by reading
@@ -10,7 +10,7 @@ it.
 
 ## What the product repository provides
 
-- A workflow at a fixed path (for CM website, `.github/workflows/build.yml`)
+- A workflow at `.github/workflows/build.yml`
   that runs on `push` to the default branch and on `pull_request`.
 - For each run attempt, an Actions artifact named
   `artifact-manifest-<run_attempt>` holding one devkit artifact manifest
@@ -22,11 +22,9 @@ workflow reference, or setting.
 
 ## What Launchplane records per product
 
-On the product record, not in checked-in config:
-
-- the repository's immutable GitHub id and `owner/name`;
-- the build workflow path;
-- the image repository (already there).
+The product profile's repository, immutable repository id and image
+repository. The build workflow path is the fixed contract path
+`.github/workflows/build.yml`, not a per-product setting.
 
 ## Verifying an artifact for a commit
 
@@ -66,10 +64,11 @@ for a PR preview, with the PR number).
 
 ## Where each purpose may go
 
-- Testing deploy and prod promotion accept only `release` artifacts.
-- A preview accepts `preview` or `release` artifacts for its own PR head.
-- A `preview` artifact can never be promoted, because a PR's workflow file
-  comes from the PR itself and can build anything.
+- Only `release` artifacts are recorded in the artifact store, and testing
+  deploys, prod promotions, rollbacks and restores read only that store. A
+  `preview` artifact is handed to its own preview deploy and never recorded
+  there, so it can never be promoted. A PR's workflow file comes from the PR
+  itself and can build anything.
 
 ## Why a `release` run is trustworthy
 
@@ -80,11 +79,12 @@ buildx reported for the push in that run.
 
 ## Access this needs
 
-Launchplane mints a separate repository-scoped reader token from its GitHub
-App with `actions: read` (runs and artifacts), `contents: read` (commits) and
-`pull_requests: read` (a PR's current head). The App installation needs
-`actions: read` added; existing tokens such as the merge-train one keep their
-own narrower permission sets. No product repository gets any new access.
+Launchplane mints a separate repository-scoped token from the GitHub App its
+merge train already uses for the product repository, requesting only
+`actions: read` (runs and artifacts), `contents: read` (commits) and
+`pull_requests: read` (a PR's current head). That App's installation already
+grants these, and the train's own token keeps its own permission set. No
+product repository gets any new access, and no new grant is needed.
 
 ## What it replaces
 
