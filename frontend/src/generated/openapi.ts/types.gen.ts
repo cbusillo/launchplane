@@ -365,7 +365,17 @@ export type DokployTargetIdRecord = {
     updated_at: string;
 };
 
+export type DokployTargetIntegrationAllowance = {
+    evidence: string;
+    integration: string;
+    kind: 'dev_store' | 'read_only_source' | 'pre_live';
+    reason: string;
+    recorded_at: string;
+    recorded_by: string;
+};
+
 export type DokployTargetPolicies = {
+    integration_allowances: Array<DokployTargetIntegrationAllowance>;
     shopify: DokployTargetShopifyPolicy;
 };
 

@@ -7863,9 +7863,65 @@
         "title": "DokployTargetIdRecord",
         "type": "object"
       },
+      "DokployTargetIntegrationAllowance": {
+        "additionalProperties": false,
+        "description": "Why a non-production lane may hold one integration's settings.\n\n``dev_store`` is a non-production service account. ``read_only_source`` is a\nproduction import source reached with a read-only account, with the grant as\nevidence. ``pre_live`` lets a testing lane keep a tenant's real settings until the\ntenant's production lane is live on Launchplane.",
+        "properties": {
+          "evidence": {
+            "default": "",
+            "title": "Evidence",
+            "type": "string"
+          },
+          "integration": {
+            "title": "Integration",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "dev_store",
+              "read_only_source",
+              "pre_live"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "recorded_at": {
+            "default": "",
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "recorded_by": {
+            "default": "",
+            "title": "Recorded By",
+            "type": "string"
+          }
+        },
+        "required": [
+          "evidence",
+          "integration",
+          "kind",
+          "reason",
+          "recorded_at",
+          "recorded_by"
+        ],
+        "title": "DokployTargetIntegrationAllowance",
+        "type": "object"
+      },
       "DokployTargetPolicies": {
         "additionalProperties": false,
         "properties": {
+          "integration_allowances": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/DokployTargetIntegrationAllowance"
+            },
+            "title": "Integration Allowances",
+            "type": "array"
+          },
           "shopify": {
             "$ref": "#/components/schemas/DokployTargetShopifyPolicy"
           }
@@ -7873,6 +7929,7 @@
         "title": "DokployTargetPolicies",
         "type": "object",
         "required": [
+          "integration_allowances",
           "shopify"
         ]
       },

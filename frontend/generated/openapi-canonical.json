@@ -4072,9 +4072,62 @@
         "title": "DokployTargetInspectResponse",
         "type": "object"
       },
+      "DokployTargetIntegrationAllowance": {
+        "additionalProperties": false,
+        "description": "Why a non-production lane may hold one integration's settings.\n\n``dev_store`` is a non-production service account. ``read_only_source`` is a\nproduction import source reached with a read-only account, with the grant as\nevidence. ``pre_live`` lets a testing lane keep a tenant's real settings until the\ntenant's production lane is live on Launchplane.",
+        "properties": {
+          "evidence": {
+            "default": "",
+            "title": "Evidence",
+            "type": "string"
+          },
+          "integration": {
+            "title": "Integration",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "dev_store",
+              "read_only_source",
+              "pre_live"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "recorded_at": {
+            "default": "",
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "recorded_by": {
+            "default": "",
+            "title": "Recorded By",
+            "type": "string"
+          }
+        },
+        "required": [
+          "integration",
+          "kind",
+          "reason"
+        ],
+        "title": "DokployTargetIntegrationAllowance",
+        "type": "object"
+      },
       "DokployTargetPolicies": {
         "additionalProperties": false,
         "properties": {
+          "integration_allowances": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/DokployTargetIntegrationAllowance"
+            },
+            "title": "Integration Allowances",
+            "type": "array"
+          },
           "shopify": {
             "$ref": "#/components/schemas/DokployTargetShopifyPolicy"
           }
@@ -72407,6 +72460,326 @@
           }
         },
         "summary": "Plan or apply product config"
+      }
+    },
+    "/v1/product-config/integration-allowances": {
+      "get": {
+        "operationId": "read_integration_allowances",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "context",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Context",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "instance",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Instance",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read a lane's non-production integration allowances"
+      }
+    },
+    "/v1/product-config/integration-allowances/apply": {
+      "post": {
+        "operationId": "apply_integration_allowances",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$defs": {
+                  "IntegrationAllowanceInput": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "evidence": {
+                        "default": "",
+                        "title": "Evidence",
+                        "type": "string"
+                      },
+                      "integration": {
+                        "title": "Integration",
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "dev_store",
+                          "read_only_source",
+                          "pre_live"
+                        ],
+                        "title": "Kind",
+                        "type": "string"
+                      },
+                      "reason": {
+                        "title": "Reason",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "integration",
+                      "kind",
+                      "reason"
+                    ],
+                    "title": "IntegrationAllowanceInput",
+                    "type": "object"
+                  }
+                },
+                "additionalProperties": false,
+                "properties": {
+                  "allowances": {
+                    "default": [],
+                    "items": {
+                      "$ref": "#/$defs/IntegrationAllowanceInput"
+                    },
+                    "title": "Allowances",
+                    "type": "array"
+                  },
+                  "context": {
+                    "title": "Context",
+                    "type": "string"
+                  },
+                  "instance": {
+                    "title": "Instance",
+                    "type": "string"
+                  },
+                  "mode": {
+                    "default": "dry-run",
+                    "enum": [
+                      "dry-run",
+                      "apply"
+                    ],
+                    "title": "Mode",
+                    "type": "string"
+                  },
+                  "product": {
+                    "title": "Product",
+                    "type": "string"
+                  },
+                  "reason": {
+                    "title": "Reason",
+                    "type": "string"
+                  },
+                  "reviewed_plan_sha256": {
+                    "default": "",
+                    "title": "Reviewed Plan Sha256",
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "const": 1,
+                    "default": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "product",
+                  "context",
+                  "instance",
+                  "reason"
+                ],
+                "title": "IntegrationAllowancesApplyRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Dry-run or apply a lane's non-production integration allowances"
       }
     },
     "/v1/product-config/odoo-addon-settings/apply": {

@@ -150,7 +150,10 @@ from control_plane.contracts.retired_change_impact_audit import (
 )
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetRecord,
+    DokployTargetRecordChanged,
+)
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
@@ -36285,6 +36288,46 @@ class PostgresRecordStore(HumanSessionStore):
 
     def write_dokploy_target_record(self, record: DokployTargetRecord) -> None:
         self._write_row(self._dokploy_target_row(record))
+
+    def compare_and_write_dokploy_target_record(
+        self,
+        *,
+        expected_record: DokployTargetRecord,
+        replacement_record: DokployTargetRecord,
+    ) -> DokployTargetRecord:
+        if (expected_record.context, expected_record.instance) != (
+            replacement_record.context,
+            replacement_record.instance,
+        ):
+            raise ValueError("Dokploy target compare-and-write cannot move a record between lanes.")
+        statement = (
+            select(LaunchplaneDokployTargetRow)
+            .where(
+                LaunchplaneDokployTargetRow.context == expected_record.context,
+                LaunchplaneDokployTargetRow.instance == expected_record.instance,
+            )
+            .limit(1)
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        with self._session_factory() as session:
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(
+                    "Dokploy target record was missing during compare-and-write."
+                )
+            current_record = self._read_payload(
+                model_type=DokployTargetRecord,
+                payload=_payload_from_row(row),
+            )
+            if current_record != expected_record:
+                raise DokployTargetRecordChanged(
+                    "Dokploy target record changed since it was reviewed."
+                )
+            row.updated_at = replacement_record.updated_at
+            row.payload = self._payload_dict(replacement_record)
+            session.commit()
+        return replacement_record
 
     def compare_and_write_dokploy_target_domains(
         self,
