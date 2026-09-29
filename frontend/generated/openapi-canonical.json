@@ -38456,8 +38456,9 @@
         "title": "RuntimeSecretSafetyTargetScope",
         "type": "object"
       },
-      "RuntimeSettingNames": {
+      "RuntimeSettings": {
         "additionalProperties": false,
+        "description": "One plain runtime-environment record's settings.\n\n``values`` omits any setting that looks like a credential; its key is listed in\n``withheld_keys`` instead, because a credential stored as a plain setting belongs\nin a managed secret.",
         "properties": {
           "context": {
             "title": "Context",
@@ -38486,6 +38487,20 @@
           "updated_at": {
             "title": "Updated At",
             "type": "string"
+          },
+          "values": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Values",
+            "type": "object"
+          },
+          "withheld_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Withheld Keys",
+            "type": "array"
           }
         },
         "required": [
@@ -38493,12 +38508,14 @@
           "context",
           "instance",
           "keys",
+          "values",
+          "withheld_keys",
           "updated_at"
         ],
-        "title": "RuntimeSettingNames",
+        "title": "RuntimeSettings",
         "type": "object"
       },
-      "RuntimeSettingNamesResponse": {
+      "RuntimeSettingsResponse": {
         "additionalProperties": false,
         "properties": {
           "context": {
@@ -38511,7 +38528,7 @@
           },
           "settings": {
             "items": {
-              "$ref": "#/components/schemas/RuntimeSettingNames"
+              "$ref": "#/components/schemas/RuntimeSettings"
             },
             "title": "Settings",
             "type": "array"
@@ -38533,7 +38550,7 @@
           "instance",
           "settings"
         ],
-        "title": "RuntimeSettingNamesResponse",
+        "title": "RuntimeSettingsResponse",
         "type": "object"
       },
       "SecretBinding": {
@@ -48132,7 +48149,7 @@
     },
     "/v1/contexts/{context}/instances/{instance}/runtime-settings": {
       "get": {
-        "operationId": "list_instance_runtime_setting_names",
+        "operationId": "list_instance_runtime_settings",
         "parameters": [
           {
             "in": "path",
@@ -48182,7 +48199,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RuntimeSettingNamesResponse"
+                  "$ref": "#/components/schemas/RuntimeSettingsResponse"
                 }
               }
             },
@@ -48229,7 +48246,7 @@
             "description": "Service Unavailable"
           }
         },
-        "summary": "List plain runtime setting names for a context or lane, never values"
+        "summary": "List the plain runtime settings for a context or lane, withholding credential-like values"
       }
     },
     "/v1/contexts/{context}/instances/{instance}/secrets": {
@@ -48457,7 +48474,7 @@
     },
     "/v1/contexts/{context}/runtime-settings": {
       "get": {
-        "operationId": "list_context_runtime_setting_names",
+        "operationId": "list_context_runtime_settings",
         "parameters": [
           {
             "in": "path",
@@ -48496,7 +48513,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RuntimeSettingNamesResponse"
+                  "$ref": "#/components/schemas/RuntimeSettingsResponse"
                 }
               }
             },
@@ -48543,7 +48560,7 @@
             "description": "Service Unavailable"
           }
         },
-        "summary": "List plain runtime setting names for a context or lane, never values"
+        "summary": "List the plain runtime settings for a context or lane, withholding credential-like values"
       }
     },
     "/v1/contexts/{context}/secrets": {
