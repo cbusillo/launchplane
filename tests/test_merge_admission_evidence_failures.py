@@ -227,3 +227,60 @@ class MergeAdmissionEvidenceFailureHttpTests(unittest.IsolatedAsyncioTestCase):
             ("idle", "clean", ""),
         )
         self.assertEqual(controller_state.last_phase, "admit_pull_request")
+
+    async def test_admission_reads_evidence_with_the_policy_credential(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "policy-token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            api = _EvidenceApi(
+                [
+                    {"filename": "private/path.py", "status": "modified"},
+                    {"filename": "private/path.py", "status": "modified"},
+                ],
+            )
+            tokens: list[str] = []
+
+            def recording_api(*, path: str, token: str) -> object:
+                tokens.append(token)
+                return api(path=path, token=token)
+
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch("control_plane.http_app.github_api_request", recording_api),
+                patch(
+                    "control_plane.http_app.resolve_launchplane_github_token",
+                    return_value="service-token",
+                ),
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_admission_live.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _AdmissionInvokingMergeTrainGitHubClient,
+                ),
+            ):
+                for _ in range(5):
+                    await _post_merge_train_controller_run_once(
+                        app,
+                        {
+                            "schema_version": 1,
+                            "repository": "cbusillo/sellyouroutboard",
+                            "base_branch": "main",
+                            "mutate": True,
+                        },
+                    )
+        self.assertEqual(api.file_reads, 1)
+        self.assertEqual(set(tokens), {"policy-token"})
