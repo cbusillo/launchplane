@@ -1322,6 +1322,35 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         self.assertEqual(observed_candidate.status, "passed")
         self.assertEqual(observed_candidate.required_checks_status, "pass")
 
+    def test_observe_batch_candidate_checks_uses_latest_check_run_rerun(self) -> None:
+        for earlier, later, expected in (
+            ("failure", "success", "pass"),
+            ("success", "failure", "fail"),
+        ):
+            with self.subTest(earlier=earlier, later=later):
+                candidate = _batch_candidate().model_copy(
+                    update={"candidate_sha": "candidate-sha", "status": "ready_for_checks"}
+                )
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks(),
+                        _combined_status(),
+                        {
+                            "check_runs": [
+                                {**_required_check_run("ci-gate", "completed", later), "id": 2},
+                                {**_required_check_run("ci-gate", "completed", earlier), "id": 1},
+                                _required_check_run("security-gate", "completed", "success"),
+                            ]
+                        },
+                    )
+                )
+
+                observed_candidate = GitHubMergeTrainClient(
+                    transport=transport
+                ).observe_batch_candidate_checks(candidate=candidate)
+
+                self.assertEqual(observed_candidate.required_checks_status, expected)
+
     def test_observe_batch_candidate_checks_keeps_latest_duplicate_pending(self) -> None:
         candidate = _batch_candidate().model_copy(
             update={"candidate_sha": "candidate-sha", "status": "ready_for_checks"}
@@ -2727,9 +2756,15 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _combined_status(),
                 {
                     "total_count": 101,
-                    "check_runs": [_check_run("completed", "success") for _ in range(100)],
+                    "check_runs": [
+                        {"name": f"check-{index}", **_check_run("completed", "success")}
+                        for index in range(100)
+                    ],
                 },
-                {"total_count": 101, "check_runs": [_check_run("completed", "failure")]},
+                {
+                    "total_count": 101,
+                    "check_runs": [{"name": "check-100", **_check_run("completed", "failure")}],
+                },
             )
         )
 
