@@ -32,7 +32,9 @@ def copy_global_settings_to_contexts(
     """Copy each global setting in ``keys`` into each context's own settings.
 
     A context that already has its own value for a key keeps it. A key with no
-    global value is skipped. Returns the keys copied, by context.
+    global value is skipped. The context row is locked while it is merged, so a
+    settings save during the migration is not overwritten. Returns the keys copied,
+    by context.
     """
     global_payload: dict[str, Any] | None = connection.execute(
         sa.select(_RUNTIME_ENVIRONMENTS.c.payload).where(
@@ -51,7 +53,7 @@ def copy_global_settings_to_contexts(
             _RUNTIME_ENVIRONMENTS.c.instance == "",
         )
         payload: dict[str, Any] | None = connection.execute(
-            sa.select(_RUNTIME_ENVIRONMENTS.c.payload).where(*where)
+            sa.select(_RUNTIME_ENVIRONMENTS.c.payload).where(*where).with_for_update()
         ).scalar_one_or_none()
         env: dict[str, object] = dict((payload or {}).get("env") or {})
         added = tuple(key for key in copyable if key not in env)
