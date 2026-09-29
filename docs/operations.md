@@ -2158,7 +2158,8 @@ return a typed blocked result rather than guessing a domain.
   `GET /v1/contexts/{context}/instances/{instance}/runtime-settings` return the
   plain settings that apply (global, the context's, and the lane's), with
   values, under the `secret.list` permission. A setting that looks like a
-  credential (by name, a password in a URL, or a GitHub token value) is listed
+  credential (by name, a password or credential-named query parameter in a URL,
+  or a GitHub token value) is listed
   in `withheld_keys` without its value; it belongs in a managed secret.
 - `environments put` remains an explicit local/bootstrap repair path for
   non-secret `KEY=VALUE` runtime settings in DB-backed runtime-environment

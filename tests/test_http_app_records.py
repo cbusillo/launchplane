@@ -653,6 +653,8 @@ class FastApiRuntimeSettingsTests(unittest.IsolatedAsyncioTestCase):
                         "SMTP_PASSWORD": "misfiled-password",
                         "DATABASE_URL": "postgresql://app:url-password@db/app",
                         "SYNC_SOURCE": github_token,
+                        "REPLICA_URL": "postgresql://app@db/app?password=query-password",
+                        "NEXT_PUBLIC_API_URL": "https://app:public-password@api/v1",
                         "ODOO_DB_USER": "odoo",
                     },
                     updated_at="2026-09-28T00:00:00Z",
@@ -674,8 +676,17 @@ class FastApiRuntimeSettingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200, response.text)
         (setting,) = response.json()["settings"]
         self.assertEqual(setting["values"], {"ODOO_DB_USER": "odoo"})
-        self.assertEqual(setting["withheld_keys"], ["DATABASE_URL", "SMTP_PASSWORD", "SYNC_SOURCE"])
-        for value in ("misfiled-password", "url-password", github_token):
+        self.assertEqual(
+            setting["withheld_keys"],
+            ["DATABASE_URL", "NEXT_PUBLIC_API_URL", "REPLICA_URL", "SMTP_PASSWORD", "SYNC_SOURCE"],
+        )
+        for value in (
+            "misfiled-password",
+            "url-password",
+            github_token,
+            "query-password",
+            "public-password",
+        ):
             self.assertNotIn(value, response.text)
 
     async def test_refuses_a_context_the_caller_cannot_list(self) -> None:

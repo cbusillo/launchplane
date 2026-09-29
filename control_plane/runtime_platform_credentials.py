@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 from dataclasses import dataclass
 from typing import Literal
 
@@ -85,6 +85,28 @@ def looks_like_credential(key: str, value: str) -> bool:
         return bool(urlparse(value.strip()).password)
     except ValueError:
         return False
+
+
+def plain_setting_looks_like_credential(key: str, value: str) -> bool:
+    """Whether a plain setting may hold a credential, so its value must not be shown.
+
+    Stricter than ``looks_like_credential``: a ``NEXT_PUBLIC_`` name is no
+    exemption, and a URL query parameter with a credential-like name counts.
+    """
+    if _has_credential_name(key) or platform_credential_reason(key, value) is not None:
+        return True
+    try:
+        parsed = urlparse(value.strip())
+        if parsed.password:
+            return True
+        query = parse_qsl(parsed.query, keep_blank_values=True)
+    except ValueError:
+        return False
+    return any(_has_credential_name(name) for name, _ in query)
+
+
+def _has_credential_name(name: str) -> bool:
+    return any(part in name.upper() for part in _CREDENTIAL_NAME_PARTS)
 
 
 def platform_credential_reason(key: str, value: str) -> PlatformCredentialReason | None:

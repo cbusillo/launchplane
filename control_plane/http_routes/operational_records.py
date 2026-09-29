@@ -160,8 +160,7 @@ def _runtime_settings(record: RuntimeEnvironmentRecord) -> RuntimeSettings:
     withheld = tuple(
         key
         for key, value in values.items()
-        if runtime_platform_credentials.looks_like_credential(key, value)
-        or runtime_platform_credentials.platform_credential_reason(key, value) is not None
+        if runtime_platform_credentials.plain_setting_looks_like_credential(key, value)
     )
     return RuntimeSettings(
         scope=record.scope,
