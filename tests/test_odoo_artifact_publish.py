@@ -527,8 +527,10 @@ class OdooArtifactPublishWorkflowTests(unittest.TestCase):
         with patch(
             "control_plane.workflows.odoo_artifact_publish.control_plane_runtime_environments.resolve_runtime_environment_values",
             return_value={
+                "ODOO_ADDON_REPOSITORIES": "example/addons@main",
+                # Build inputs the tenant's workspace.toml declares are not sent.
+                "ODOO_VERSION": "19.0",
                 "ODOO_BASE_RUNTIME_IMAGE": "ghcr.io/cbusillo/runtime:19",
-                "ODOO_BASE_DEVTOOLS_IMAGE": "ghcr.io/cbusillo/devtools:19",
                 "ODOO_DB_PASSWORD": "do-not-return",
                 "GITHUB_TOKEN": "do-not-return",
             },
@@ -539,13 +541,7 @@ class OdooArtifactPublishWorkflowTests(unittest.TestCase):
             )
 
         self.assertEqual(payload["context"], "cm")
-        self.assertEqual(
-            payload["environment"],
-            {
-                "ODOO_BASE_RUNTIME_IMAGE": "ghcr.io/cbusillo/runtime:19",
-                "ODOO_BASE_DEVTOOLS_IMAGE": "ghcr.io/cbusillo/devtools:19",
-            },
-        )
+        self.assertEqual(payload["environment"], {"ODOO_ADDON_REPOSITORIES": "example/addons@main"})
 
 
 if __name__ == "__main__":

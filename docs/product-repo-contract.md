@@ -403,11 +403,14 @@ artifact-record request, idempotency keys, and response mapping. The tenant
 workflow should not duplicate `/v1/drivers/odoo/artifact-publish-inputs` or
 `/v1/drivers/odoo/artifact-publish` wiring once it uses that workflow. The
 tenant workflow must pass the Launchplane product key explicitly; reusable
-workflows do not derive product identity from context names. Odoo dependency
-repository identities for the devkit and shared addons are resolved by
-`/v1/drivers/odoo/artifact-publish-inputs` from Launchplane runtime records and
-returned as `devkit_repository` and `shared_addons_repository`, so product repos
-do not carry those checked-in defaults either. Reusable Odoo workflows read the
+workflows do not derive product identity from context names. An Odoo tenant's
+build inputs live in its own `workspace.toml`, not in Launchplane: the `[build]`
+table declares the Odoo version and base-image tags, `workspace.python` the
+Python version, and `[repos.devkit]` / `[repos.shared_addons]` name the
+`repository` the reusable workflows check out. The build resolves image tags to
+digests and records them, with every source commit, in the artifact manifest;
+the artifact, not a Launchplane setting, is the exact record of what was built
+(cbusillo/launchplane#2583). Reusable Odoo workflows read the
 Launchplane service URL from `LAUNCHPLANE_PUBLIC_URL` by default and derive the
 GitHub OIDC audience from that URL host unless the caller passes an explicit
 `launchplane_audience` input. The reusable jobs run on GitHub-hosted runners

@@ -1273,16 +1273,13 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             (
                 "PUBLISH_RUNTIME_ENVIRONMENT_KEYS",
                 (
-                    "ODOO_VERSION",
-                    "ODOO_BASE_RUNTIME_IMAGE",
-                    "ODOO_BASE_DEVTOOLS_IMAGE",
                     "ODOO_ADDON_REPOSITORIES",
                     "OPENUPGRADE_ADDON_REPOSITORY",
                     "OPENUPGRADELIB_INSTALL_SPEC",
                     "ODOO_PYTHON_SYNC_SKIP_ADDONS",
                 ),
             ),
-            ("PUBLISH_RUNTIME_ENVIRONMENT_KEYS[0]", "ODOO_VERSION"),
+            ("PUBLISH_RUNTIME_ENVIRONMENT_KEYS[0]", "ODOO_ADDON_REPOSITORIES"),
             (
                 "PUBLISH_DEPENDENCY_REPOSITORY_KEYS",
                 {

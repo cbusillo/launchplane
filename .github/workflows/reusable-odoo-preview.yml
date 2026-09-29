@@ -353,19 +353,13 @@ jobs:
           output-paths: >-
             image_repository=result.image_repository,
             image_tag=result.image_tag,
-            preview_slug=result.preview_slug,
-            devkit_repository=result.devkit_repository,
-            shared_addons_repository=result.shared_addons_repository
+            preview_slug=result.preview_slug
 
       - name: Validate Launchplane publish inputs
         env:
-          RESOLVED_DEVKIT_REPOSITORY: >-
-            ${{ steps.publish_inputs.outputs.devkit_repository }}
           RESOLVED_IMAGE_REPOSITORY: >-
             ${{ steps.publish_inputs.outputs.image_repository }}
           RESOLVED_IMAGE_TAG: ${{ steps.publish_inputs.outputs.image_tag }}
-          RESOLVED_SHARED_ADDONS_REPOSITORY: >-
-            ${{ steps.publish_inputs.outputs.shared_addons_repository }}
         run: |
           set -euo pipefail
           if [ -z "$RESOLVED_IMAGE_REPOSITORY" ]; then
@@ -376,19 +370,32 @@ jobs:
             echo "Launchplane publish inputs missing image_tag." >&2
             exit 1
           fi
-          if ! [[ "$RESOLVED_DEVKIT_REPOSITORY" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]]; then
-            echo "Launchplane publish inputs missing valid devkit_repository." >&2
-            exit 1
-          fi
-          if ! [[ "$RESOLVED_SHARED_ADDONS_REPOSITORY" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]]; then
-            echo "Launchplane publish inputs missing valid shared_addons_repository." >&2
-            exit 1
-          fi
+
+      - name: Read build repositories from the site manifest
+        id: build_repositories
+        env:
+          MANIFEST_PATH: ${{ steps.facts.outputs.tenant_path }}/workspace.toml
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >>"$GITHUB_OUTPUT"
+          import os
+          import re
+          import sys
+          import tomllib
+
+          with open(os.environ["MANIFEST_PATH"], "rb") as manifest_file:
+              repos = tomllib.load(manifest_file).get("repos", {})
+          for key in ("devkit", "shared_addons"):
+              repository = str(repos.get(key, {}).get("repository", "")).strip()
+              if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+                  sys.exit(f"workspace.toml must declare [repos.{key}] repository as owner/name.")
+              print(f"{key}_repository={repository}")
+          PY
 
       - name: Checkout devkit repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: ${{ steps.publish_inputs.outputs.devkit_repository }}
+          repository: ${{ steps.build_repositories.outputs.devkit_repository }}
           path: odoo-devkit
           token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}
           persist-credentials: false
@@ -396,7 +403,7 @@ jobs:
       - name: Checkout shared addons repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: ${{ steps.publish_inputs.outputs.shared_addons_repository }}
+          repository: ${{ steps.build_repositories.outputs.shared_addons_repository }}
           path: odoo-shared-addons
           token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}
           persist-credentials: false
