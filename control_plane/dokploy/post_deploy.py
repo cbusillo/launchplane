@@ -92,6 +92,8 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         "website_bootstrap_logo_present",
         "website_bootstrap_company_email_matches",
         "website_bootstrap_applied",
+        "odoo_restore_completed",
+        "odoo_restore_failure_logged",
     }
 )
 ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS = frozenset({"website_bootstrap_website_id"})
@@ -102,6 +104,15 @@ ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS = (
     "odoo_module_update_completed",
     "odoo_module_update_image_match",
     "odoo_module_update_modules_configured",
+)
+# The restore script prints these lines when the upstream restore failed. The
+# schedule script fails a restore whose output contains one of them, even when
+# the workflow process exits 0.
+ODOO_RESTORE_FAILURE_LOG_PATTERNS = (
+    "Upstream restore failed",
+    "Upstream capture or validation failed",
+    "Restore failed",
+    "pg_restore: error:",
 )
 ODOO_WEBSITE_BOOTSTRAP_REQUIRED_READBACK_MARKERS = (
     "website_bootstrap_applied",
@@ -609,6 +620,8 @@ def run_compose_post_deploy_update(
         deployment_id=completed_schedule_deployment_key,
         deployment=completed_schedule_deployment,
     )
+    if run_destructive_restore:
+        require_odoo_restore_readback_evidence(evidence)
     if require_company_email:
         require_odoo_module_update_readback_evidence(evidence)
         if evidence.get("website_bootstrap_company_email_matches") != "true":
@@ -2075,6 +2088,21 @@ def require_odoo_module_update_readback_evidence(evidence: Mapping[str, str]) ->
         )
 
 
+def require_odoo_restore_readback_evidence(evidence: Mapping[str, str]) -> None:
+    """Refuse to record an upstream restore as passed without the script's success marker."""
+    if evidence.get("odoo_restore_failure_logged") == "true":
+        raise OdooPostDeployReadbackFailure(
+            "Odoo upstream restore logged a restore failure; the restore is recorded as failed.",
+            evidence=evidence,
+        )
+    if evidence.get("log_available") != "true" or evidence.get("odoo_restore_completed") != "true":
+        raise OdooPostDeployReadbackFailure(
+            "Odoo upstream restore evidence did not prove the restore completed: "
+            "odoo_restore_completed",
+            evidence=evidence,
+        )
+
+
 def require_odoo_website_bootstrap_readback_evidence(evidence: Mapping[str, str]) -> None:
     if evidence.get("log_available") != "true":
         raise click.ClickException(
@@ -2283,6 +2311,9 @@ def _build_dokploy_data_workflow_script(
     module_update_modules_configured = "1" if required_update_modules.strip() else "0"
     readback_marker_patterns = "|".join(sorted(ODOO_POST_DEPLOY_READBACK_MARKERS))
     shopify_store_key_guard_program = _SHOPIFY_STORE_KEY_GUARD_PROGRAM
+    restore_failure_grep_arguments = " ".join(
+        f"-e {shlex.quote(pattern)}" for pattern in ODOO_RESTORE_FAILURE_LOG_PATTERNS
+    )
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -2303,6 +2334,8 @@ web_was_running=0
 shopify_store_key_guard_passed=0
 web_restart_blocked=0
 module_update_modules_configured={module_update_modules_configured}
+restore_mode={"1" if workflow_mode == "restore" else "0"}
+restore_completed=0
 
 resolve_single_running_container() {{
     local service_name="$1"
@@ -2374,6 +2407,9 @@ enforce_shopify_store_key_guard() {{
 exit_trap() {{
     local exit_status="$?"
     trap - EXIT
+    if [ "${{restore_mode}}" = "1" ] && [ "${{restore_completed}}" != "1" ]; then
+        echo "odoo_restore_completed=false"
+    fi
     if [ "${{web_restart_blocked}}" != "1" ] \
         && [ "${{web_was_running}}" = "1" ] \
         && [ "${{shopify_store_key_guard_passed}}" != "1" ] \
@@ -2512,12 +2548,22 @@ echo "Odoo {workflow_label} readback markers:"
 grep -E '^({readback_marker_patterns})=' "$workflow_output_file" \
     | sort -u \
     || true
+restore_failure_logged=0
+if [ "${{restore_mode}}" = "1" ] \
+    && grep -Fq {restore_failure_grep_arguments} -- "$workflow_output_file"; then
+    restore_failure_logged=1
+fi
 rm -f "$workflow_output_file"
 if [ "$workflow_exit_status" -ne 0 ]; then
     exit "$workflow_exit_status"
 fi
 if [ "$workflow_output_status" -ne 0 ]; then
     exit "$workflow_output_status"
+fi
+if [ "${{restore_failure_logged}}" = "1" ]; then
+    echo "odoo_restore_failure_logged=true"
+    echo "Odoo restore logged a restore failure but exited 0; failing the restore." >&2
+    exit 1
 fi
 echo "odoo_module_update_image_match=true"
 echo "odoo_module_update_modules_configured=true"
@@ -2528,6 +2574,10 @@ if ! enforce_shopify_store_key_guard; then
     exit 1
 fi
 
+if [ "${{restore_mode}}" = "1" ]; then
+    restore_completed=1
+    echo "odoo_restore_completed=true"
+fi
 start_web_container
 trap - EXIT
 """

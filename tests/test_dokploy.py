@@ -3497,7 +3497,7 @@ domains = ["cm-testing.shinycomputers.com"]
             ),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
-                return_value=(),
+                return_value=("odoo_restore_completed=true",),
             ),
             patch(
                 "control_plane.dokploy.api.dokploy_request",
