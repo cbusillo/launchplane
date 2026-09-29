@@ -118,7 +118,10 @@ unconfigured. If the selected source cannot resolve a token, the service
 refuses the operation; it never tries a service-host bootstrap token, a different
 context, or an agent's local credential. Configured global runtime values are
 part of the selected context, not an alternate source. Controller, phase-specific operations, historical proof and
-current governance readiness use the same resolver. Adding optional source fields
+current governance readiness use the same resolver. The controller's landing
+admission reads pull-request evidence with that same policy credential, so
+enrolling a repository never also requires the service-wide
+`LAUNCHPLANE_GITHUB_TOKEN` to reach it. Adding optional source fields
 does not change existing policy bytes or digests. Selecting a managed source
 changes the full policy digest and therefore requires a new reviewed policy
 revision. Check every repository in that policy for active train work before
