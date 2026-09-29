@@ -2531,6 +2531,9 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   the devkit restore path performs restore sanitization, website bootstrap,
   admin normalization, and service-user API-key replacement before readiness
   verification.
+- Launchplane passes one typed payload to the Odoo settings apply path; legacy
+  `ENV_OVERRIDE_*` values are migration input only, not the deploy-time
+  settings contract.
 - A restore passes only with positive evidence. The schedule script prints
   `odoo_restore_completed=true` after the workflow exits 0 and the Shopify guard
   passes; every other exit prints `odoo_restore_completed=false`. If the
@@ -2541,9 +2544,6 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   Launchplane records the post-deploy, and so the target replacement, as failed
   unless the schedule logs show that the restore completed and logged no
   failure.
-- Launchplane passes one typed payload to the Odoo settings apply path; legacy
-  `ENV_OVERRIDE_*` values are migration input only, not the deploy-time
-  settings contract.
 - Secret-backed overrides are still not rendered into schedule scripts as
   plaintext. The payload references the already-present neutral
   `ODOO_OVERRIDE_SECRET__*` script-runner environment key for each managed
