@@ -7579,6 +7579,37 @@ def create_launchplane_fastapi_app(
                 ),
             )
 
+    def _require_integration_allowances_lane(
+        *, record_store: object, product: str, context: str, instance: str, trace_id: str
+    ) -> None:
+        # Authorization names a product; storage selects by context and instance, so
+        # prove the product owns the lane before reading or writing it.
+        try:
+            resolve_odoo_post_deploy_product_route(
+                record_store=record_store, product=product, context=context, instance=instance
+            )
+        except OdooPostDeployRouteDependencyError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Odoo product lane was not found for the requested allowances.",
+            ) from error
+        except OdooPostDeployProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+
     async def read_integration_allowances(
         identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
@@ -7600,6 +7631,13 @@ def create_launchplane_fastapi_app(
         _authorize_integration_allowances(
             identity=identity,
             action="product_config.plan",
+            product=product,
+            context=context,
+            instance=instance,
+            trace_id=trace_id,
+        )
+        _require_integration_allowances_lane(
+            record_store=record_store,
             product=product,
             context=context,
             instance=instance,
@@ -7670,6 +7708,13 @@ def create_launchplane_fastapi_app(
                 if allowances_request.mode == "apply"
                 else "product_config.plan"
             ),
+            product=allowances_request.product,
+            context=allowances_request.context,
+            instance=allowances_request.instance,
+            trace_id=trace_id,
+        )
+        _require_integration_allowances_lane(
+            record_store=record_store,
             product=allowances_request.product,
             context=allowances_request.context,
             instance=allowances_request.instance,

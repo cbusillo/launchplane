@@ -25,6 +25,10 @@ class DokployTargetShopifyPolicy(BaseModel):
         return self
 
 
+class DokployTargetRecordChanged(ValueError):
+    """A compare-and-write found the target record changed since it was reviewed."""
+
+
 IntegrationAllowanceKind = Literal["dev_store", "read_only_source", "pre_live"]
 _INTEGRATION_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 

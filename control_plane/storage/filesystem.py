@@ -205,7 +205,10 @@ from control_plane.contracts.retired_manager_preview_approval import (
     ManagerPreviewApprovalEventConflictError,
 )
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetRecord,
+    DokployTargetRecordChanged,
+)
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentDeleteEvent,
     RuntimeEnvironmentRecord,
@@ -3695,6 +3698,29 @@ class FilesystemRecordStore:
             _context_instance_record_id(record.context, record.instance),
             record,
         )
+
+    def compare_and_write_dokploy_target_record(
+        self,
+        *,
+        expected_record: DokployTargetRecord,
+        replacement_record: DokployTargetRecord,
+    ) -> DokployTargetRecord:
+        if (expected_record.context, expected_record.instance) != (
+            replacement_record.context,
+            replacement_record.instance,
+        ):
+            raise ValueError("Dokploy target compare-and-write cannot move a record between lanes.")
+        record_id = _context_instance_record_id(expected_record.context, expected_record.instance)
+        with self._product_authority_bundle_lock():
+            current_record = self._read_model_locked(
+                DokployTargetRecord, "dokploy_targets", record_id
+            )
+            if current_record != expected_record:
+                raise DokployTargetRecordChanged(
+                    "Dokploy target record changed since it was reviewed."
+                )
+            self._write_model_locked("dokploy_targets", record_id, replacement_record)
+        return replacement_record
 
     def compare_and_write_dokploy_target_domains(
         self,

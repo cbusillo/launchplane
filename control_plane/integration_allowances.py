@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetIntegrationAllowance,
     DokployTargetRecord,
+    DokployTargetRecordChanged,
     IntegrationAllowanceKind,
 )
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
@@ -50,7 +51,12 @@ class IntegrationAllowancesStore(Protocol):
         self, *, context_name: str, instance_name: str
     ) -> DokployTargetRecord: ...
 
-    def write_dokploy_target_record(self, record: DokployTargetRecord) -> object: ...
+    def compare_and_write_dokploy_target_record(
+        self,
+        *,
+        expected_record: DokployTargetRecord,
+        replacement_record: DokployTargetRecord,
+    ) -> DokployTargetRecord: ...
 
 
 class IntegrationAllowanceInput(BaseModel):
@@ -314,20 +320,44 @@ def apply_integration_allowances_plan(
     plan, replacement = build_integration_allowances_plan(
         record_store=record_store, request=request, actor=actor
     )
-    if request.reviewed_plan_sha256 != plan.plan_sha256:
-        raise IntegrationAllowancesStale(
-            "Reviewed integration allowances plan no longer matches the lane's record."
-        )
+    requested_terms = [
+        _allowance_terms(item) for item in replacement.policies.integration_allowances
+    ]
     applied = False
-    if plan.changed:
-        record_store.write_dokploy_target_record(
-            replacement.model_copy(
-                update={
-                    "updated_at": _utc_now_timestamp(),
-                    "source_label": INTEGRATION_ALLOWANCES_SOURCE_LABEL,
-                }
-            )
+    if request.reviewed_plan_sha256 != plan.plan_sha256:
+        current = _read_target_record(
+            record_store=record_store, context=request.context, instance=request.instance
         )
+        current_terms = [_allowance_terms(item) for item in current.policies.integration_allowances]
+        # A retried apply whose first attempt wrote but lost its receipt finds the lane
+        # already holding exactly the requested allowances: report it, don't refuse it.
+        if current_terms != requested_terms:
+            raise IntegrationAllowancesStale(
+                "Reviewed integration allowances plan no longer matches the lane's record."
+            )
+        plan = plan.model_copy(update={"changed": False})
+    elif plan.changed:
+        expected = _read_target_record(
+            record_store=record_store, context=request.context, instance=request.instance
+        )
+        if _record_sha256(expected) != plan.record_sha256_before:
+            raise IntegrationAllowancesStale(
+                "Reviewed integration allowances plan no longer matches the lane's record."
+            )
+        try:
+            record_store.compare_and_write_dokploy_target_record(
+                expected_record=expected,
+                replacement_record=replacement.model_copy(
+                    update={
+                        "updated_at": _utc_now_timestamp(),
+                        "source_label": INTEGRATION_ALLOWANCES_SOURCE_LABEL,
+                    }
+                ),
+            )
+        except DokployTargetRecordChanged as error:
+            raise IntegrationAllowancesStale(
+                "The lane's target record changed while the allowances were applied."
+            ) from error
         applied = True
     stored = _read_target_record(
         record_store=record_store, context=request.context, instance=request.instance
@@ -338,7 +368,7 @@ def apply_integration_allowances_plan(
             "applied": applied,
             "read_back": stored_allowances,
             "read_back_matches": [_allowance_terms(item) for item in stored_allowances]
-            == [_allowance_terms(item) for item in replacement.policies.integration_allowances],
+            == requested_terms,
             "record_sha256_after": _record_sha256(stored),
         }
     )

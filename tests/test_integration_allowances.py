@@ -9,6 +9,7 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetIntegrationAllowance,
     DokployTargetPolicies,
     DokployTargetRecord,
+    DokployTargetRecordChanged,
     DokployTargetShopifyPolicy,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -24,9 +25,11 @@ from control_plane.integration_allowances import (
 )
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _AsgiResponse, _asgi_request
 from tests.support.auth import _identity, _StubVerifier
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
+from tests.support.stores import _sqlite_database_url
 
 _PRODUCT = "odoo-tenant-cm"
 _CONTEXT = "cm"
@@ -234,6 +237,91 @@ class IntegrationAllowancesPlanTests(unittest.TestCase):
             [(c.integration, c.action) for c in removal.changes], [("fishbowl", "remove")]
         )
 
+    def test_retried_apply_after_a_lost_receipt_reports_already_applied(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            _seed_target(store)
+            plan, _ = build_integration_allowances_plan(
+                record_store=store, request=_request(), actor="operator"
+            )
+            apply_request = _request(mode="apply", reviewed_plan_sha256=plan.plan_sha256)
+            first = apply_integration_allowances_plan(
+                record_store=store, request=apply_request, actor="operator"
+            )
+            retried = apply_integration_allowances_plan(
+                record_store=store, request=apply_request, actor="operator"
+            )
+
+        self.assertTrue(first.applied)
+        self.assertFalse(retried.applied)
+        self.assertFalse(retried.changed)
+        self.assertTrue(retried.read_back_matches)
+
+    def test_apply_refuses_a_target_changed_after_review(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            _seed_target(store)
+            plan, _ = build_integration_allowances_plan(
+                record_store=store, request=_request(), actor="operator"
+            )
+            current = store.read_dokploy_target_record(
+                context_name=_CONTEXT, instance_name="testing"
+            )
+            store.write_dokploy_target_record(
+                current.model_copy(update={"domains": ("cm-testing.example.com",)})
+            )
+
+            with self.assertRaises(IntegrationAllowancesStale):
+                apply_integration_allowances_plan(
+                    record_store=store,
+                    request=_request(mode="apply", reviewed_plan_sha256=plan.plan_sha256),
+                    actor="operator",
+                )
+            stored = store.read_dokploy_target_record(
+                context_name=_CONTEXT, instance_name="testing"
+            )
+
+        self.assertEqual(stored.domains, ("cm-testing.example.com",))
+        self.assertEqual(stored.policies.integration_allowances, ())
+
+    def test_compare_and_write_refuses_a_changed_record_in_both_stores(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            stores: tuple[FilesystemRecordStore | PostgresRecordStore, ...] = (
+                FilesystemRecordStore(state_dir=root / "state"),
+                PostgresRecordStore(
+                    database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+                ),
+            )
+            for store in stores:
+                with self.subTest(store=type(store).__name__):
+                    if isinstance(store, PostgresRecordStore):
+                        store.ensure_schema()
+                    _seed_target(store)  # type: ignore[arg-type]
+                    reviewed = store.read_dokploy_target_record(
+                        context_name=_CONTEXT, instance_name="testing"
+                    )
+                    changed = reviewed.model_copy(update={"domains": ("a.example.com",)})
+                    store.write_dokploy_target_record(changed)
+                    with self.assertRaises(DokployTargetRecordChanged):
+                        store.compare_and_write_dokploy_target_record(
+                            expected_record=reviewed,
+                            replacement_record=reviewed.model_copy(update={"domains": ()}),
+                        )
+                    written = store.compare_and_write_dokploy_target_record(
+                        expected_record=changed,
+                        replacement_record=changed.model_copy(update={"domains": ()}),
+                    )
+                    self.assertEqual(
+                        store.read_dokploy_target_record(
+                            context_name=_CONTEXT, instance_name="testing"
+                        ),
+                        written,
+                    )
+            for store in stores:
+                if isinstance(store, PostgresRecordStore):
+                    store.close()
+
     def test_refusals(self) -> None:
         cases = (
             ("prod", _request_payload(instance="prod"), "production_lane"),
@@ -403,6 +491,48 @@ class IntegrationAllowancesRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dry_run.status_code, 202)
         self.assertEqual(denied_apply.status_code, 403)
 
+    async def test_refuses_a_lane_the_product_does_not_own(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._store(root)
+            store.write_dokploy_target_record(
+                DokployTargetRecord(context="opw", instance="testing", updated_at=_TIMESTAMP)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [self._WORKFLOW_REF],
+                            "event_names": ["workflow_dispatch"],
+                            "products": [_PRODUCT],
+                            "contexts": [_CONTEXT, "opw"],
+                            "actions": ["product_config.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            payload = _request_payload()
+            payload["context"] = "opw"
+            dry_run = await self._post(app, payload)
+            read = await _asgi_request(
+                app,
+                "GET",
+                f"{INTEGRATION_ALLOWANCES_ROUTE}?product={_PRODUCT}&context=opw&instance=testing",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+            stored = store.read_dokploy_target_record(context_name="opw", instance_name="testing")
+
+        self.assertIn(dry_run.status_code, {403, 404})
+        self.assertIn(read.status_code, {403, 404})
+        self.assertEqual(stored.policies.integration_allowances, ())
+
     async def test_refusal_and_invalid_request_do_not_echo_input(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -422,7 +552,7 @@ class IntegrationAllowancesRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refused.json()["error"]["code"], "integration_allowances_production_lane")
         self.assertEqual(invalid.status_code, 400)
         self.assertNotIn("hunter2", invalid.text)
-        self.assertEqual(missing.status_code, 404)
+        self.assertIn(missing.status_code, {403, 404})
 
 
 if __name__ == "__main__":

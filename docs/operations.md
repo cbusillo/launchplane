@@ -2495,6 +2495,14 @@ context only, and `context_instance` has both context and instance.
     testing or dev lane, and a lane with no tracked target record. Every other
     target policy, including the Shopify protected store keys, is left as it is.
   - An unchanged allowance keeps its original `recorded_by` and `recorded_at`.
+  - Both routes first prove the product owns the lane, because authorization
+    names a product while storage selects by context and instance.
+  - Apply writes with a locking compare-and-write, so a target record changed
+    after the review, for example by a domain repair, is refused as `stale`
+    rather than overwritten. A retried apply whose first attempt wrote but lost
+    its idempotency receipt finds the lane already holding the requested
+    allowances and reports `changed: false` with a read-back, instead of
+    `stale`.
   - The record states intent only. The read-back that checks a lane's database
     against its allowances before web starts is tracked in #2595.
 - `odoo-overrides put-addon-setting --allow-direct-db-mutation` writes
