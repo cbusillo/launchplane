@@ -73,6 +73,10 @@ ODOO_UPSTREAM_RESTORE_WORKFLOW_ENV_KEYS = (
     "ODOO_UPSTREAM_FILESTORE_PATH",
 )
 DEFAULT_DATA_WORKFLOW_LOCK_PATH = "/volumes/data/.data_workflow_in_progress"
+# An upstream restore copies a production database and filestore and may run an
+# OpenUpgrade migration; OPW's first fresh copy took 22 minutes. The execution
+# budget stays bounded and larger than an ordinary deploy timeout.
+DEFAULT_ODOO_UPSTREAM_RESTORE_EXECUTION_TIMEOUT_SECONDS = 2 * 60 * 60
 DEFAULT_ODOO_BACKUP_ROOT = "/volumes/data/backups/launchplane"
 ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
     {
@@ -92,6 +96,8 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         "website_bootstrap_logo_present",
         "website_bootstrap_company_email_matches",
         "website_bootstrap_applied",
+        "odoo_restore_completed",
+        "odoo_restore_failure_logged",
     }
 )
 ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS = frozenset({"website_bootstrap_website_id"})
@@ -102,6 +108,15 @@ ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS = (
     "odoo_module_update_completed",
     "odoo_module_update_image_match",
     "odoo_module_update_modules_configured",
+)
+# The restore script prints these lines when the upstream restore failed. The
+# schedule script fails a restore whose output contains one of them, even when
+# the workflow process exits 0.
+ODOO_RESTORE_FAILURE_LOG_PATTERNS = (
+    "Upstream restore failed",
+    "Upstream capture or validation failed",
+    "Restore failed",
+    "pg_restore: error:",
 )
 ODOO_WEBSITE_BOOTSTRAP_REQUIRED_READBACK_MARKERS = (
     "website_bootstrap_applied",
@@ -329,6 +344,20 @@ OdooBackupRestorePhase = Literal[
 ]
 
 
+def resolve_data_workflow_execution_timeout_seconds(
+    *,
+    deploy_timeout_seconds: int,
+    run_destructive_restore: bool,
+    requested_timeout_seconds: int | None = None,
+) -> int:
+    """Return how long a data-workflow schedule job may run once triggered."""
+    if requested_timeout_seconds is not None:
+        return requested_timeout_seconds
+    if run_destructive_restore:
+        return max(deploy_timeout_seconds, DEFAULT_ODOO_UPSTREAM_RESTORE_EXECUTION_TIMEOUT_SECONDS)
+    return deploy_timeout_seconds
+
+
 def run_compose_post_deploy_update(
     *,
     host: str,
@@ -341,6 +370,7 @@ def run_compose_post_deploy_update(
     run_destructive_restore: bool = False,
     before_provider_mutation: Callable[[str], None] | None = None,
     deployment_title: str = "",
+    schedule_execution_timeout_seconds: int | None = None,
 ) -> dict[str, str]:
     compose_id = target_definition.target_id.strip()
     compose_name = (
@@ -417,6 +447,11 @@ def run_compose_post_deploy_update(
         )
     schedule_timeout_seconds = (
         target_definition.deploy_timeout_seconds or DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
+    )
+    resolved_schedule_execution_timeout_seconds = resolve_data_workflow_execution_timeout_seconds(
+        deploy_timeout_seconds=schedule_timeout_seconds,
+        run_destructive_restore=run_destructive_restore,
+        requested_timeout_seconds=schedule_execution_timeout_seconds,
     )
     if desired_env_map != current_env_map:
         if before_provider_mutation is not None:
@@ -575,21 +610,13 @@ def run_compose_post_deploy_update(
     )
     if before_provider_mutation is not None:
         before_provider_mutation("post_deploy_schedule_trigger")
-    api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/schedule.runManually",
-        method="POST",
-        payload={"scheduleId": schedule_id},
-        timeout_seconds=schedule_timeout_seconds,
-    )
     completed_schedule_deployment_key = api.deployment_key_from_wait_result(
-        api.wait_for_dokploy_schedule_deployment(
+        api.trigger_dokploy_schedule_and_wait(
             host=host,
             token=token,
             schedule_id=schedule_id,
             before_key=api.deployment_key(latest_schedule_deployment),
-            timeout_seconds=schedule_timeout_seconds,
+            execution_timeout_seconds=resolved_schedule_execution_timeout_seconds,
         )
     )
     if not completed_schedule_deployment_key:
@@ -609,6 +636,8 @@ def run_compose_post_deploy_update(
         deployment_id=completed_schedule_deployment_key,
         deployment=completed_schedule_deployment,
     )
+    if run_destructive_restore:
+        require_odoo_restore_readback_evidence(evidence)
     if require_company_email:
         require_odoo_module_update_readback_evidence(evidence)
         if evidence.get("website_bootstrap_company_email_matches") != "true":
@@ -788,21 +817,13 @@ def run_compose_odoo_stable_bootstrap(
         token=token,
         schedule_id=schedule_id,
     )
-    api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/schedule.runManually",
-        method="POST",
-        payload={"scheduleId": schedule_id},
-        timeout_seconds=schedule_timeout_seconds,
-    )
     completed_schedule_deployment_key = api.deployment_key_from_wait_result(
-        api.wait_for_dokploy_schedule_deployment(
+        api.trigger_dokploy_schedule_and_wait(
             host=host,
             token=token,
             schedule_id=schedule_id,
             before_key=api.deployment_key(latest_schedule_deployment),
-            timeout_seconds=schedule_timeout_seconds,
+            execution_timeout_seconds=schedule_timeout_seconds,
         )
     )
     if not completed_schedule_deployment_key:
@@ -921,20 +942,12 @@ def run_compose_odoo_backup_gate(
         token=token,
         schedule_id=schedule_id,
     )
-    api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/schedule.runManually",
-        method="POST",
-        payload={"scheduleId": schedule_id},
-        timeout_seconds=schedule_timeout_seconds,
-    )
-    wait_result = api.wait_for_dokploy_schedule_deployment(
+    wait_result = api.trigger_dokploy_schedule_and_wait(
         host=host,
         token=token,
         schedule_id=schedule_id,
         before_key=api.deployment_key(latest_schedule_deployment),
-        timeout_seconds=schedule_timeout_seconds,
+        execution_timeout_seconds=schedule_timeout_seconds,
     )
     deployment_id = api.deployment_key_from_wait_result(wait_result)
     if not deployment_id:
@@ -1062,20 +1075,12 @@ def run_compose_odoo_backup_verification(
         token=token,
         schedule_id=schedule_id,
     )
-    api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/schedule.runManually",
-        method="POST",
-        payload={"scheduleId": schedule_id},
-        timeout_seconds=schedule_timeout_seconds,
-    )
-    wait_result = api.wait_for_dokploy_schedule_deployment(
+    wait_result = api.trigger_dokploy_schedule_and_wait(
         host=host,
         token=token,
         schedule_id=schedule_id,
         before_key=api.deployment_key(latest_schedule_deployment),
-        timeout_seconds=schedule_timeout_seconds,
+        execution_timeout_seconds=schedule_timeout_seconds,
     )
     deployment_id = api.deployment_key_from_wait_result(wait_result)
     if not deployment_id:
@@ -1952,20 +1957,12 @@ def _run_compose_odoo_backup_restore_phase(
     )
     if before_provider_mutation is not None:
         before_provider_mutation(f"{phase}_schedule_trigger")
-    api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/schedule.runManually",
-        method="POST",
-        payload={"scheduleId": schedule_id},
-        timeout_seconds=schedule_timeout_seconds,
-    )
-    wait_result = api.wait_for_dokploy_schedule_deployment(
+    wait_result = api.trigger_dokploy_schedule_and_wait(
         host=host,
         token=token,
         schedule_id=schedule_id,
         before_key=api.deployment_key(latest_schedule_deployment),
-        timeout_seconds=schedule_timeout_seconds,
+        execution_timeout_seconds=schedule_timeout_seconds,
     )
     deployment_id = api.deployment_key_from_wait_result(wait_result)
     if not deployment_id:
@@ -2071,6 +2068,21 @@ def require_odoo_module_update_readback_evidence(evidence: Mapping[str, str]) ->
         raise OdooPostDeployReadbackFailure(
             "Odoo module install/update evidence did not prove the current runtime update: "
             + ", ".join(missing_markers),
+            evidence=evidence,
+        )
+
+
+def require_odoo_restore_readback_evidence(evidence: Mapping[str, str]) -> None:
+    """Refuse to record an upstream restore as passed without the script's success marker."""
+    if evidence.get("odoo_restore_failure_logged") == "true":
+        raise OdooPostDeployReadbackFailure(
+            "Odoo upstream restore logged a restore failure; the restore is recorded as failed.",
+            evidence=evidence,
+        )
+    if evidence.get("log_available") != "true" or evidence.get("odoo_restore_completed") != "true":
+        raise OdooPostDeployReadbackFailure(
+            "Odoo upstream restore evidence did not prove the restore completed: "
+            "odoo_restore_completed",
             evidence=evidence,
         )
 
@@ -2283,6 +2295,9 @@ def _build_dokploy_data_workflow_script(
     module_update_modules_configured = "1" if required_update_modules.strip() else "0"
     readback_marker_patterns = "|".join(sorted(ODOO_POST_DEPLOY_READBACK_MARKERS))
     shopify_store_key_guard_program = _SHOPIFY_STORE_KEY_GUARD_PROGRAM
+    restore_failure_grep_arguments = " ".join(
+        f"-e {shlex.quote(pattern)}" for pattern in ODOO_RESTORE_FAILURE_LOG_PATTERNS
+    )
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -2303,6 +2318,8 @@ web_was_running=0
 shopify_store_key_guard_passed=0
 web_restart_blocked=0
 module_update_modules_configured={module_update_modules_configured}
+restore_mode={"1" if workflow_mode == "restore" else "0"}
+restore_completed=0
 
 resolve_single_running_container() {{
     local service_name="$1"
@@ -2374,6 +2391,9 @@ enforce_shopify_store_key_guard() {{
 exit_trap() {{
     local exit_status="$?"
     trap - EXIT
+    if [ "${{restore_mode}}" = "1" ] && [ "${{restore_completed}}" != "1" ]; then
+        echo "odoo_restore_completed=false"
+    fi
     if [ "${{web_restart_blocked}}" != "1" ] \
         && [ "${{web_was_running}}" = "1" ] \
         && [ "${{shopify_store_key_guard_passed}}" != "1" ] \
@@ -2512,12 +2532,22 @@ echo "Odoo {workflow_label} readback markers:"
 grep -E '^({readback_marker_patterns})=' "$workflow_output_file" \
     | sort -u \
     || true
+restore_failure_logged=0
+if [ "${{restore_mode}}" = "1" ] \
+    && grep -Fq {restore_failure_grep_arguments} -- "$workflow_output_file"; then
+    restore_failure_logged=1
+fi
 rm -f "$workflow_output_file"
 if [ "$workflow_exit_status" -ne 0 ]; then
     exit "$workflow_exit_status"
 fi
 if [ "$workflow_output_status" -ne 0 ]; then
     exit "$workflow_output_status"
+fi
+if [ "${{restore_failure_logged}}" = "1" ]; then
+    echo "odoo_restore_failure_logged=true"
+    echo "Odoo restore logged a restore failure but exited 0; failing the restore." >&2
+    exit 1
 fi
 echo "odoo_module_update_image_match=true"
 echo "odoo_module_update_modules_configured=true"
@@ -2528,6 +2558,10 @@ if ! enforce_shopify_store_key_guard; then
     exit 1
 fi
 
+if [ "${{restore_mode}}" = "1" ]; then
+    restore_completed=1
+    echo "odoo_restore_completed=true"
+fi
 start_web_container
 trap - EXIT
 """

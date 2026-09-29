@@ -532,7 +532,8 @@ jobs:
           poll-result-path: operation.status
           poll-result-statuses: pending,running
           poll-interval-ms: 15000
-          poll-timeout-ms: 3600000
+          # Covers the bounded upstream-restore execution budget plus deploy and verification.
+          poll-timeout-ms: 10800000
           fail-result-paths: ""
           response-output-file: odoo-target-replacement-apply.json
 

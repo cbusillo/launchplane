@@ -3,7 +3,7 @@ import json
 import unittest
 from pathlib import Path
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import click
 
@@ -49,6 +49,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
+    OdooStableTargetReplacementApplyResult,
     OdooStableTargetReplacementRequest,
 )
 from control_plane.dokploy import JsonObject, JsonValue
@@ -88,6 +89,24 @@ _UPSTREAM_RESTORE_ENV = {
     "OPENUPGRADE_TARGET_VERSION": "19.0",
     "OPENUPGRADE_SCRIPTS_PATH": "/opt/openupgrade/scripts",
 }
+
+
+def _opw_website_override_record() -> OdooInstanceOverrideRecord:
+    return OdooInstanceOverrideRecord(
+        context="opw",
+        instance="prod",
+        source_label="test",
+        config_parameters=(),
+        website_bootstrap=OdooWebsiteBootstrapPayload(
+            tenant="opw",
+            name="Outboard Parts Warehouse",
+            canonical_url="https://opw-prod.shinycomputers.com",
+            homepage_url="/shop",
+            logo_path="addons/opw_custom/static/src/img/logo.png",
+            logo_alt="Outboard Parts Warehouse",
+        ),
+        updated_at="2026-09-28T00:00:00Z",
+    )
 
 
 class _Store:
@@ -2749,6 +2768,187 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         applied_env = control_plane_dokploy.parse_dokploy_env_text(persisted_env)
         for key, value in _UPSTREAM_RESTORE_ENV.items():
             self.assertEqual(applied_env.get(key), value)
+
+    def _apply_upstream_restore(
+        self,
+        *,
+        override_record: OdooInstanceOverrideRecord | None,
+        post_deploy_results: tuple[OdooPostDeployResult, ...],
+    ) -> tuple[OdooStableTargetReplacementApplyResult, Mock, Mock, _Store]:
+        profile = _opw_profile_with_prelaunch_policy(enabled=True)
+        manifest = _artifact_manifest(
+            artifact_id="artifact-opw-testing",
+            source_commit="0f9a123",
+            digest="sha256:opw",
+        ).model_copy(
+            update={
+                "image": ArtifactImageReference(
+                    repository="ghcr.io/cbusillo/odoo-tenant-opw", digest="sha256:opw"
+                )
+            }
+        )
+        store = _Store(
+            profile=profile,
+            target_record=_opw_target_record(),
+            target_id_record=_opw_target_id_record(),
+            inventory=EnvironmentInventory(
+                context="opw",
+                instance="prod",
+                artifact_identity=ArtifactIdentityReference(artifact_id="artifact-opw-testing"),
+                source_git_ref="0f9a123",
+                deploy=DeploymentEvidence(
+                    status="pass",
+                    target_type="compose",
+                    target_name="opw-prod",
+                    deploy_mode="dokploy-compose-api",
+                ),
+                updated_at="2026-05-10T00:00:00Z",
+                deployment_record_id="deployment-opw-prod",
+            ),
+            artifact_manifest=manifest,
+            odoo_instance_override_record=override_record,
+        )
+        persisted_env = ""
+        resolved_env = dict(_UPSTREAM_RESTORE_ENV)
+
+        def _fetch_target_payload(**_: object) -> JsonValue:
+            return {
+                "name": "opw-prod",
+                "sourceType": "raw",
+                "composePath": "docker-compose.yml",
+                "composeFile": "services: {}",
+                "env": persisted_env
+                or "\n".join(
+                    (
+                        *_DATABASE_ENV_LINES,
+                        "ODOO_DATA_VOLUME=opw_prod_odoo_data",
+                        "ODOO_LOG_VOLUME=opw_prod_odoo_logs",
+                        "ODOO_DB_VOLUME=opw_prod_odoo_db",
+                    )
+                ),
+            }
+
+        def _update_env(*, env_text: str, **_: object) -> None:
+            nonlocal persisted_env
+            persisted_env = env_text
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
+                side_effect=_fetch_target_payload,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-opw", "status": "success"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value=resolved_env,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.ensure_compose_web_domain_route"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.fetch_dokploy_converted_compose_file",
+                return_value=control_plane_dokploy.render_odoo_raw_compose_file(
+                    image_reference="ghcr.io/cbusillo/odoo-tenant-opw@sha256:opw",
+                    domain_hosts=("opw-prod.shinycomputers.com",),
+                    runtime_port=8069,
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.update_dokploy_target_env",
+                side_effect=_update_env,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.trigger_deployment"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.wait_for_target_deployment"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.execute_odoo_post_deploy",
+                side_effect=post_deploy_results,
+            ) as post_deploy,
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.verify_odoo_stable_readiness",
+                return_value=OdooVerificationResult(
+                    health_status="pass",
+                    canonical_status="pass",
+                    logo_status="pass",
+                    evidence=OdooVerificationEvidence(),
+                ),
+            ) as verify,
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.wait_for_runtime_identity_healthcheck_with_retry",
+                side_effect=_matching_runtime_identity_healthcheck,
+            ),
+        ):
+            result = execute_odoo_stable_target_replacement_apply(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=OdooStableTargetReplacementApplyRequest(
+                    product="odoo-tenant-opw",
+                    instance="prod",
+                    allow_empty_data=True,
+                    data_source_mode="upstream_restore",
+                    confirmation="restore opw upstream",
+                ),
+                dokploy_request=cast(DokployRequest, _request),
+            )
+
+        return result, post_deploy, verify, store
+
+    def test_restore_applies_website_bootstrap_before_verification(self) -> None:
+        passed = OdooPostDeployResult(
+            context="opw", instance="prod", phase="deploy", post_deploy_status="pass"
+        )
+        result, post_deploy, verify, _store = self._apply_upstream_restore(
+            override_record=_opw_website_override_record(),
+            post_deploy_results=(passed, passed),
+        )
+
+        self.assertEqual(result.deploy_status, "pass")
+        self.assertEqual(post_deploy.call_count, 2)
+        restore_call, bootstrap_call = post_deploy.call_args_list
+        self.assertTrue(restore_call.kwargs["run_destructive_restore"])
+        self.assertEqual(restore_call.kwargs["request"].phase, "restore")
+        self.assertFalse(bootstrap_call.kwargs["run_destructive_restore"])
+        self.assertEqual(bootstrap_call.kwargs["request"].phase, "deploy")
+        verify.assert_called_once()
+
+    def test_failed_website_bootstrap_after_restore_is_recorded_before_verification(
+        self,
+    ) -> None:
+        passed = OdooPostDeployResult(
+            context="opw", instance="prod", phase="restore", post_deploy_status="pass"
+        )
+        failed = OdooPostDeployResult(
+            context="opw",
+            instance="prod",
+            phase="deploy",
+            post_deploy_status="fail",
+            error_message="website bootstrap readback failed",
+        )
+        result, post_deploy, verify, store = self._apply_upstream_restore(
+            override_record=_opw_website_override_record(),
+            post_deploy_results=(passed, failed),
+        )
+
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertIn("deploy-phase post-deploy after restore failed", result.error_message)
+        self.assertIn("website bootstrap readback failed", result.error_message)
+        self.assertEqual(post_deploy.call_count, 2)
+        verify.assert_not_called()
+        self.assertEqual(store.deployment_records[-1].deploy.status, "fail")
+        self.assertEqual(store.environment_inventories, [])
 
     def test_apply_blocks_managed_runtime_secret_without_safety_policy(self) -> None:
         store = _Store(

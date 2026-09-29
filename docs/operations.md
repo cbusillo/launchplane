@@ -2530,10 +2530,42 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   guarded post-deploy schedule in destructive restore mode after image deploy so
   the devkit restore path performs restore sanitization, website bootstrap,
   admin normalization, and service-user API-key replacement before readiness
-  verification.
+  verification. Restore payloads leave out website bootstrap. When the lane's
+  Odoo override record applies on `deploy` and carries website bootstrap, the
+  target replacement then runs the non-destructive deploy-phase post-deploy,
+  without another restore, before health, canonical and logo verification. A
+  failure in either pass is recorded on the operation and the deployment
+  record.
+- Dokploy keeps `schedule.runManually` open until the job ends, so the trigger
+  request has its own short deadline
+  (`DEFAULT_DOKPLOY_SCHEDULE_TRIGGER_TIMEOUT_SECONDS`, 300 s). The execution
+  budget is separate. For an upstream restore it is the request's
+  `timeout_seconds` when set, otherwise the larger of 2 hours and the target's
+  deploy timeout. Other data workflows use the target's deploy timeout. When the trigger times out, fails with an
+  unclear outcome, or gets a 5xx, Launchplane reads back the schedule
+  deployment created after the trigger and watches that exact deployment ID to
+  a terminal state. It never sends a second trigger. The recorded causes are:
+  - `trigger_rejected`: a 4xx refusal with no new deployment. Nothing started.
+  - `trigger_outcome_unknown`: the read-back failed, found no new deployment,
+    or found several new deployments. Inspect the provider schedule before
+    any retry.
+  - `execution_timeout`: the exact deployment was still running when the
+    budget ran out. It was neither cancelled nor retried.
+- The target replacement apply workflow polls the operation for up to three
+  hours, which covers the restore budget plus deploy and verification.
 - Launchplane passes one typed payload to the Odoo settings apply path; legacy
   `ENV_OVERRIDE_*` values are migration input only, not the deploy-time
   settings contract.
+- A restore passes only with positive evidence. The schedule script prints
+  `odoo_restore_completed=true` after the workflow exits 0 and the Shopify guard
+  passes; every other exit prints `odoo_restore_completed=false`. If the
+  workflow output contains a restore-failure line (`Upstream restore failed`,
+  `Upstream capture or validation failed`, `Restore failed`, or
+  `pg_restore: error:`), the script fails the restore and prints
+  `odoo_restore_failure_logged=true`, even when the workflow exited 0.
+  Launchplane records the post-deploy, and so the target replacement, as failed
+  unless the schedule logs show that the restore completed and logged no
+  failure.
 - Secret-backed overrides are still not rendered into schedule scripts as
   plaintext. The payload references the already-present neutral
   `ODOO_OVERRIDE_SECRET__*` script-runner environment key for each managed
