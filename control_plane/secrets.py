@@ -76,6 +76,28 @@ class SecretReadStore(Protocol):
     def list_secret_audit_events(self, *, secret_id: str) -> tuple[SecretAuditEvent, ...]: ...
 
 
+class SecretBindingSelectionStore(Protocol):
+    """The reads needed to decide which binding supplies each key, without any secret value."""
+
+    def list_secret_records(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretRecord, ...]: ...
+
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]: ...
+
+
 class SecretWriteStore(SecretReadStore, Protocol):
     def find_secret_record(
         self,
@@ -359,7 +381,7 @@ def _scope_matches_record(
 
 
 def _binding_for_secret(
-    record_store: SecretReadStore,
+    record_store: SecretBindingSelectionStore,
     *,
     secret_id: str,
     integration: str | None = None,
@@ -481,6 +503,36 @@ def resolve_scoped_secret_values_for_integration_from_store(
 ) -> dict[str, tuple[str, SecretScope]]:
     """Return each effective binding value with the scope of the record that supplied it."""
 
+    resolved_values: dict[str, tuple[str, SecretScope]] = {}
+    for binding_key, (_binding, record) in resolve_effective_secret_bindings_from_store(
+        record_store=record_store,
+        integration=integration,
+        context_name=context_name,
+        instance_name=instance_name,
+        scopes=scopes,
+    ).items():
+        version = record_store.read_secret_version(record.current_version_id)
+        resolved_values[binding_key] = (
+            _decrypt_secret_value(version.ciphertext, version.key_id),
+            record.scope,
+        )
+    return resolved_values
+
+
+def resolve_effective_secret_bindings_from_store(
+    *,
+    record_store: SecretBindingSelectionStore,
+    integration: str,
+    context_name: str = "",
+    instance_name: str = "",
+    scopes: frozenset[SecretScope] | None = None,
+) -> dict[str, tuple[SecretBinding, SecretRecord]]:
+    """Return the binding, and its secret record, that supplies each key. Reads no value.
+
+    This is the one selection every value resolver above uses, so a caller that must know
+    whether a binding reaches a runtime asks the same question the delivery answers.
+    """
+
     candidate_records = [
         record
         for record in record_store.list_secret_records(integration=integration)
@@ -491,7 +543,7 @@ def resolve_scoped_secret_values_for_integration_from_store(
     candidate_records.sort(
         key=lambda record: (_scope_rank(record.scope), record.updated_at, record.secret_id)
     )
-    resolved_values: dict[str, tuple[str, SecretScope]] = {}
+    effective: dict[str, tuple[SecretBinding, SecretRecord]] = {}
     for record in candidate_records:
         binding = _binding_for_secret(
             record_store,
@@ -502,12 +554,8 @@ def resolve_scoped_secret_values_for_integration_from_store(
         )
         if binding is None:
             continue
-        version = record_store.read_secret_version(record.current_version_id)
-        resolved_values[binding.binding_key] = (
-            _decrypt_secret_value(version.ciphertext, version.key_id),
-            record.scope,
-        )
-    return resolved_values
+        effective[binding.binding_key] = (binding, record)
+    return effective
 
 
 def resolve_lane_worker_secret_values(
