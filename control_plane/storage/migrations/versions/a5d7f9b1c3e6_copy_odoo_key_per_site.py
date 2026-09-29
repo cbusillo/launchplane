@@ -5,7 +5,7 @@ site's environment no longer depends on a secret shared by every product. The
 global record stays for the paths that still read globals.
 
 Revision ID: a5d7f9b1c3e6
-Revises: f4c6e8a0b2d5
+Revises: a86c53aea47d
 """
 
 from collections.abc import Sequence
@@ -19,7 +19,7 @@ from control_plane.storage.worker_secret_migration import (
 )
 
 revision: str = "a5d7f9b1c3e6"
-down_revision: str | None = "f4c6e8a0b2d5"
+down_revision: str | None = "a86c53aea47d"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -9,7 +9,7 @@ import click
 from control_plane import runtime_platform_credentials
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
-from control_plane.contracts.secret_record import SecretScope
+from control_plane.contracts.secret_record import SecretBinding, SecretScope
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.dokploy import source as dokploy_source
@@ -115,6 +115,38 @@ def resolve_runtime_environment_values(
     )
 
 
+class SiteSecretDeliveryStore(
+    control_plane_secrets.SecretBindingSelectionStore, RuntimeEnvironmentRecordStore, Protocol
+):
+    pass
+
+
+def site_delivered_secret_bindings_from_store(
+    *, record_store: SiteSecretDeliveryStore, context_name: str, instance_name: str
+) -> dict[str, SecretBinding]:
+    """The binding whose value ``resolve_site_runtime_environment`` delivers under each key.
+
+    It makes the same selection as the lane's runtime delivery (integration, scopes and
+    retired provider keys) without reading any value, so a setting that points at a
+    binding can be checked against what the lane's container will actually receive.
+    """
+    selected = control_plane_secrets.resolve_effective_secret_bindings_from_store(
+        record_store=record_store,
+        integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+        context_name=context_name,
+        instance_name=instance_name,
+        scopes=site_secret_scopes(instance_name),
+    )
+    retired_keys = retired_provider_keys_from_store(
+        record_store=record_store, context_name=context_name, instance_name=instance_name
+    )
+    return {
+        binding_key: binding
+        for binding_key, (binding, _record) in selected.items()
+        if binding_key not in retired_keys
+    }
+
+
 @dataclass(frozen=True)
 class SiteRuntimeEnvironment:
     """A site lane's environment after retirement and the platform-credential policy."""
@@ -126,10 +158,17 @@ class SiteRuntimeEnvironment:
     withheld_launchplane_keys: tuple[str, ...] = ()
 
 
-def _site_secret_scopes(instance_name: str) -> frozenset[SecretScope]:
+_SITE_SHARED_AND_LANE_SECRET_SCOPES: frozenset[SecretScope] = frozenset(
+    {"context", "context_instance"}
+)
+_LANE_ONLY_SECRET_SCOPES: frozenset[SecretScope] = frozenset({"context_instance"})
+
+
+def site_secret_scopes(instance_name: str) -> frozenset[SecretScope]:
+    """The managed-secret scopes a site lane's runtime receives."""
     if runtime_key_safety_environment_class(instance_name) in {"prod", "testing"}:
-        return frozenset({"context", "context_instance"})
-    return frozenset({"context_instance"})
+        return _SITE_SHARED_AND_LANE_SECRET_SCOPES
+    return _LANE_ONLY_SECRET_SCOPES
 
 
 def resolve_site_runtime_environment(
@@ -176,7 +215,7 @@ def resolve_site_runtime_environment(
     secret_values = control_plane_secrets.resolve_site_secret_values(
         context_name=context_name,
         instance_name=instance_name,
-        include_site_shared="context" in _site_secret_scopes(instance_name),
+        include_site_shared="context" in site_secret_scopes(instance_name),
         database_url=database_url,
     )
     values.update(secret_values)
@@ -194,7 +233,7 @@ def resolve_site_runtime_environment(
                 instance_name=instance_name,
                 database_url=database_url,
                 include_global=False,
-                secret_scopes=_site_secret_scopes(instance_name),
+                secret_scopes=site_secret_scopes(instance_name),
             )
         except click.ClickException:
             # Without attribution nothing can be withheld as Launchplane's own, so

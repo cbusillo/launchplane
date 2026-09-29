@@ -8,6 +8,10 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
+from control_plane.contracts.runtime_environment_record import (
+    RuntimeEnvironmentRecord,
+    RuntimeEnvironmentScope,
+)
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.contracts.secret_record import SecretScope
 from control_plane.http_routes.support import (
@@ -119,6 +123,32 @@ class SecretStatusListResponse(BaseModel):
     context: str
     instance: str
     secrets: tuple[SecretStatusReadModel, ...]
+
+
+class RuntimeSettingNames(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scope: RuntimeEnvironmentScope
+    context: str
+    instance: str
+    keys: tuple[str, ...]
+    updated_at: str
+
+
+class RuntimeSettingNamesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    context: str
+    instance: str
+    settings: tuple[RuntimeSettingNames, ...]
+
+
+class RuntimeSettingNamesStore(Protocol):
+    def list_runtime_environment_records(
+        self, *, scope: str = "", context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
 
 
 class RuntimeKeySafetyPolicyResponse(BaseModel):
@@ -654,6 +684,85 @@ def register_managed_secret_read_routes(
             secrets=statuses,
         )
 
+    def list_runtime_setting_names_for_context(
+        *,
+        context: str,
+        instance: str,
+        identity: LaunchplaneIdentity,
+        record_store: object,
+    ) -> RuntimeSettingNamesResponse:
+        """List plain runtime setting names that can apply to a context or lane; never values."""
+        trace_id = dependencies.next_trace_id()
+        if not dependencies.authorization_allows(
+            identity=identity,
+            action="secret.list",
+            product=LAUNCHPLANE_SERVICE_CONTEXT,
+            context=context,
+            target=AuthorizationTarget(
+                scope="instance" if instance else "context",
+                instances=(instance,) if instance else (),
+            ),
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot list runtime setting names for the requested context.",
+            )
+        if not callable(getattr(record_store, "list_runtime_environment_records", None)):
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Runtime setting names require database storage.",
+            )
+        store = cast(RuntimeSettingNamesStore, record_store)
+        records = (
+            *store.list_runtime_environment_records(scope="global"),
+            *store.list_runtime_environment_records(scope="context", context_name=context),
+            *(
+                store.list_runtime_environment_records(
+                    scope="instance", context_name=context, instance_name=instance
+                )
+                if instance
+                else ()
+            ),
+        )
+        return RuntimeSettingNamesResponse(
+            trace_id=trace_id,
+            context=context,
+            instance=instance,
+            settings=tuple(
+                RuntimeSettingNames(
+                    scope=record.scope,
+                    context=record.context,
+                    instance=record.instance,
+                    keys=tuple(sorted(record.env)),
+                    updated_at=record.updated_at,
+                )
+                for record in records
+            ),
+        )
+
+    def list_context_runtime_setting_names(
+        context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+    ) -> RuntimeSettingNamesResponse:
+        return list_runtime_setting_names_for_context(
+            context=context, instance="", identity=identity, record_store=record_store
+        )
+
+    def list_instance_runtime_setting_names(
+        context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        instance: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+    ) -> RuntimeSettingNamesResponse:
+        return list_runtime_setting_names_for_context(
+            context=context, instance=instance, identity=identity, record_store=record_store
+        )
+
     def list_context_secret_statuses(
         context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
@@ -739,6 +848,29 @@ def register_managed_secret_read_routes(
             code: {"model": dependencies.error_response_model} for code in (401, 403, 404, 503)
         },
     )
+    for route_path, endpoint, operation_id in (
+        (
+            "/v1/contexts/{context}/runtime-settings",
+            list_context_runtime_setting_names,
+            "list_context_runtime_setting_names",
+        ),
+        (
+            "/v1/contexts/{context}/instances/{instance}/runtime-settings",
+            list_instance_runtime_setting_names,
+            "list_instance_runtime_setting_names",
+        ),
+    ):
+        app.add_api_route(
+            route_path,
+            endpoint,
+            methods=["GET"],
+            response_model=RuntimeSettingNamesResponse,
+            operation_id=operation_id,
+            summary="List plain runtime setting names for a context or lane, never values",
+            responses={
+                code: {"model": dependencies.error_response_model} for code in (401, 403, 503)
+            },
+        )
     app.add_api_route(
         "/v1/contexts/{context}/secrets",
         list_context_secret_statuses,

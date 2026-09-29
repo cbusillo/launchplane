@@ -2431,7 +2431,16 @@ context only, and `context_instance` has both context and instance.
   - Each binding must exist, be configured, be scoped to the exact lane, and use
     the post-deploy transport key: `ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN`
     and `ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__WEBHOOK_KEY`. Create the secrets
-    first through product-config with those binding keys.
+    first through product-config, under integration `runtime_environment` and
+    scope `context_instance`, with those binding keys.
+  - Each binding must also be the one the lane's runtime delivery puts in its
+    container: the same selection `resolve_site_runtime_environment` makes
+    (integration `runtime_environment`, the lane's secret scopes, and its
+    retired provider keys removed). A binding under another integration, under
+    a retired key, or shadowed by another binding for the same key is refused
+    with `secret_binding_not_delivered`. Odoo refuses an override whose secret
+    is missing from its environment at startup, so accepting one would stop the
+    lane's web container.
   - Dry-run needs `product_config.plan`, and apply needs `product_config.apply`,
     both instance-scoped. Terminal agent credentials are refused. Dry-run
     returns a redacted diff and `plan_sha256`. Apply requires that digest as
