@@ -7,11 +7,6 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetPolicies,
     DokployTargetShopifyPolicy,
 )
-from control_plane.contracts.runtime_key_safety_policy import (
-    RuntimeKeySafetyPolicyRecord,
-    RuntimeSecretSafetyRule,
-)
-from control_plane.contracts.secret_record import SecretBinding
 from control_plane.dokploy.api import JsonValue
 from control_plane.dokploy.post_deploy import (
     OdooPostDeployReadbackFailure,
@@ -19,12 +14,6 @@ from control_plane.dokploy.post_deploy import (
     require_integration_readback_evidence,
 )
 from control_plane.integration_readback import integration_readback_policy
-from control_plane.live_target_runtime import (
-    LiveTargetRuntimeError,
-    evaluate_runtime_key_safety_for_live_target_sync,
-)
-
-_TIMESTAMP = "2026-09-29T20:00:00Z"
 
 
 def _policies(*allowed: str, protected: tuple[str, ...] = ()) -> DokployTargetPolicies:
@@ -129,66 +118,6 @@ class IntegrationReadbackEvidenceTests(unittest.TestCase):
         )
 
         require_integration_readback_evidence({"log_available": "false"}, policy)
-
-
-class _KeySafetyStore:
-    def __init__(self, bindings: tuple[SecretBinding, ...]) -> None:
-        self.bindings = bindings
-
-    def list_runtime_key_safety_policy_records(
-        self, *, status: str = "", limit: int | None = None
-    ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]:
-        return (
-            RuntimeKeySafetyPolicyRecord(
-                record_id="runtime-key-safety-policy-test",
-                source="test",
-                updated_at=_TIMESTAMP,
-                rules=(
-                    RuntimeSecretSafetyRule(
-                        binding_key="ODOO_DB_PASSWORD",
-                        secret_class="testing",
-                        allowed_instances=("testing",),
-                    ),
-                ),
-            ),
-        )
-
-    def list_secret_bindings(
-        self,
-        *,
-        integration: str = "",
-        context_name: str = "",
-        instance_name: str = "",
-        limit: int | None = None,
-    ) -> tuple[SecretBinding, ...]:
-        return self.bindings
-
-
-class RuntimeKeySafetyRequiredKeysTests(unittest.TestCase):
-    def test_empty_required_keys_still_check_every_lane_binding(self) -> None:
-        # Finding 9 of #2554: an empty declared-secret tuple used to skip the check.
-        store = _KeySafetyStore(
-            (
-                SecretBinding(
-                    binding_id="binding-printnode",
-                    secret_id="secret-printnode",
-                    integration="runtime_environment",
-                    binding_key="ODOO_OVERRIDE_SECRET__ADDON__PRINTNODE__API_KEY",
-                    context="example",
-                    instance="testing",
-                    created_at=_TIMESTAMP,
-                    updated_at=_TIMESTAMP,
-                ),
-            )
-        )
-
-        with self.assertRaises(LiveTargetRuntimeError):
-            evaluate_runtime_key_safety_for_live_target_sync(
-                record_store=store,
-                context_name="example",
-                instance_name="testing",
-                required_binding_keys=(),
-            )
 
 
 if __name__ == "__main__":

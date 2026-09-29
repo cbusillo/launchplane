@@ -251,15 +251,18 @@ database_name = sys.argv[1]
 spec = json.loads(base64.b64decode(sys.argv[2]))
 allowed_integrations = set(spec["allowed_integrations"])
 
+# Trims every kind of whitespace, as Python's str.strip() does; btrim() trims only spaces.
+TRIMMED_VALUE_SQL = "regexp_replace(coalesce(value, ''), '^[[:space:]]+|[[:space:]]+$', '', 'g')"
 STORE_KEY_HANDLE_SQL = (
-    "rtrim(split_part(regexp_replace(lower(btrim(value)), '^[a-z]+://', ''), '/', 1), '.')"
+    "rtrim(split_part(regexp_replace(lower(" + TRIMMED_VALUE_SQL + "), '^[a-z]+://', ''), '/', 1), '.')"
 )
 
 
 def present_config_parameters(cursor, keys):
     cursor.execute(
-        "SELECT key FROM ir_config_parameter"
-        " WHERE key = ANY(%s) AND btrim(coalesce(value, '')) <> ''",
+        "SELECT key FROM ir_config_parameter WHERE key = ANY(%s) AND "
+        + TRIMMED_VALUE_SQL
+        + " <> ''",
         (list(keys),),
     )
     return sorted(row[0] for row in cursor.fetchall())

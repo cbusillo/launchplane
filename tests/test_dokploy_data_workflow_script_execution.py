@@ -406,11 +406,14 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
             "HOME": str(self.root),
         }
 
-    def _run(self, script: str, **fake_environment: str) -> ScriptRun:
+    def _run(
+        self, script: str, *, web_status: str = "running", **fake_environment: str
+    ) -> ScriptRun:
         log_path = self.root / "docker.log"
         log_path.unlink(missing_ok=True)
         for state_file in self.root.glob("*.state"):
             state_file.unlink()
+        (self.root / f"{WEB_CONTAINER_ID}.state").write_text(web_status)
         script_path = self.root / "script.sh"
         script_path.write_text(script, encoding="utf-8")
         completed = subprocess.run(
@@ -535,6 +538,30 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         )
 
         self.assert_refused_and_web_stopped(run, "shopify/shopify.shop_url_key:protected")
+
+    def test_web_left_stopped_by_a_refusal_starts_once_the_readback_passes(self) -> None:
+        cleared = self._run(_render_script(), web_status="exited", FAKE_ODOO_DB=_fake_database())
+        still_refused = self._run(
+            _render_script(),
+            web_status="exited",
+            FAKE_ODOO_DB=_fake_database(config={"printnode.api_key": PRODUCTION_VALUE}),
+        )
+
+        self.assertEqual(cleared.returncode, 0, cleared.stdout + cleared.stderr)
+        self.assertTrue(cleared.web_restarted, cleared.docker_log)
+        self.assertLess(
+            cleared.docker_log.index("exec readback -i"),
+            cleared.docker_log.index(f"start {WEB_CONTAINER_ID}"),
+        )
+        self.assertNotEqual(still_refused.returncode, 0)
+        self.assertFalse(still_refused.web_restarted, still_refused.docker_log)
+
+    def test_stopped_web_without_a_readback_still_fails(self) -> None:
+        run = self._run(_render_script(instance="prod"), web_status="exited")
+
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("Expected a running web container", run.stderr)
+        self.assertFalse(run.web_restarted, run.docker_log)
 
     def test_dev_store_with_shopify_allowance_passes(self) -> None:
         run = self._run(

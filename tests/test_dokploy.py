@@ -4772,7 +4772,7 @@ actions = ["launchplane_service_deploy.execute"]
         self.assertIn("trap exit_trap EXIT", script)
         self.assertIn("exit_trap() {", script)
         self.assertIn('local exit_status="$?"', script)
-        self.assertIn('if [ "${web_was_running}" != "1" ]; then', script)
+        self.assertIn('if [ "${start_web_after_workflow}" != "1" ]; then', script)
         self.assertIn('docker start "${web_container_id}" >/dev/null || true', script)
         self.assertIn("workflow_output_file=$(mktemp)", script)
         self.assertIn('workflow_pipeline_status=("${PIPESTATUS[@]}")', script)

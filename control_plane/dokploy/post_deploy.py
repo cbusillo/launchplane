@@ -2314,7 +2314,7 @@ integration_readback_required={"1" if readback_policy.required else "0"}
 integration_readback_spec={shlex.quote(readback_policy.encoded_spec())}
 clear_stale_lock={"1" if clear_stale_lock else "0"}
 data_workflow_lock_path={quoted_lock_path}
-web_was_running=0
+start_web_after_workflow=0
 readback_succeeded=0
 web_restart_blocked=0
 module_update_modules_configured={module_update_modules_configured}
@@ -2359,7 +2359,7 @@ ensure_running() {{
 }}
 
 start_web_container() {{
-    if [ "${{web_was_running}}" != "1" ]; then
+    if [ "${{start_web_after_workflow}}" != "1" ]; then
         return
     fi
     local current_status
@@ -2396,7 +2396,7 @@ exit_trap() {{
         echo "odoo_restore_completed=false"
     fi
     if [ "${{web_restart_blocked}}" != "1" ] \
-        && [ "${{web_was_running}}" = "1" ] \
+        && [ "${{start_web_after_workflow}}" = "1" ] \
         && [ "${{readback_succeeded}}" != "1" ] \
         && [ "${{integration_readback_required}}" = "1" ]; then
         # The workflow failed before the read-back ran; the database may already
@@ -2415,7 +2415,7 @@ exit_trap() {{
 
 database_container_id=$(resolve_single_container_any_state "database")
 script_runner_container_id=$(resolve_single_running_container "script-runner")
-web_container_id=$(resolve_single_running_container "web")
+web_container_id=$(resolve_single_container_any_state "web")
 
 ensure_running "${{database_container_id}}" "database"
 web_image_id=$(docker inspect -f '{{{{.Image}}}}' "${{web_container_id}}")
@@ -2444,9 +2444,17 @@ trap exit_trap EXIT
 
 web_status=$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}")
 if [ "${{web_status}}" = "running" ]; then
-    web_was_running=1
+    start_web_after_workflow=1
     echo "Stopping web container ${{web_container_id}}"
     docker stop "${{web_container_id}}" >/dev/null
+elif [ "${{integration_readback_required}}" = "1" ]; then
+    # An earlier read-back refusal leaves web stopped. Once the setting is cleared
+    # or allowed, this run brings web back only if the read-back passes.
+    start_web_after_workflow=1
+    echo "Web container ${{web_container_id}} is stopped; it starts only after the integration read-back passes."
+else
+    echo "Expected a running web container in project '${{compose_project}}'." >&2
+    exit 1
 fi
 
 if [ "${{#required_workflow_environment_keys[@]}}" -gt 0 ]; then

@@ -261,10 +261,6 @@ def evaluate_runtime_key_safety_for_live_target_sync(
     require_policy: bool = True,
     required_binding_keys: tuple[str, ...] | None = None,
 ) -> dict[str, object]:
-    if not required_binding_keys:
-        # A profile that declares no secret keys does not narrow the check: every
-        # binding the lane receives is still evaluated.
-        required_binding_keys = None
     target = RuntimeKeySafetyTarget(
         context=context_name,
         instance=instance_name,

@@ -2525,7 +2525,11 @@ context only, and `context_instance` has both context and instance.
   - A lane's protected Shopify store keys are refused even with a `shopify`
     allowance, and are checked on production too.
   - To clear a refusal: empty the setting in the lane's database, or record the
-    allowance that explains it, then rerun the deploy.
+    allowance that explains it, then rerun the deploy. The rerun finds web
+    stopped and starts it only if the read-back passes.
+  - A provider redeploy that runs before the schedule (a changed target
+    environment, or target replacement's deploy) still starts web before the
+    read-back stops it again; see #2616.
 - `odoo-overrides put-addon-setting --allow-direct-db-mutation` writes
   addon-shaped Odoo override intent such as Authentik or Shopify settings for a
   context and instance. Use it only for explicit local/bootstrap repair.
