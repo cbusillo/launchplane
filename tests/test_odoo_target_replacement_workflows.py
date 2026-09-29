@@ -7,8 +7,8 @@ from tests.support.workflows import launchplane_request_action_reference, load_w
 
 
 _LAUNCHPLANE_REQUEST = launchplane_request_action_reference()
-_PLAN_WORKER_SHA = "e605d8ab9ec26950247233c4237d65ea8b44a6d6"
-_APPLY_WORKER_SHA = "480c9280b1ae3610f05547192783da2230dc7ff5"
+_PLAN_WORKER_SHA = "0e396ff37312b1b7d7fe26dd21516b39e2ae6588"
+_APPLY_WORKER_SHA = "0e396ff37312b1b7d7fe26dd21516b39e2ae6588"
 
 
 class OdooTargetReplacementWorkflowTests(unittest.TestCase):
