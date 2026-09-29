@@ -2727,7 +2727,6 @@ def _run_compose_post_deploy_update(
             env_file=env_file,
             workflow_environment_overrides=workflow_environment_overrides,
             required_workflow_environment_keys=required_workflow_environment_keys,
-            protected_shopify_store_keys=protected_shopify_store_keys,
         )
     except click.ClickException as error:
         if odoo_override_record is not None:
