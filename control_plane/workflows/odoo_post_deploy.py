@@ -165,6 +165,7 @@ def execute_odoo_post_deploy(
     run_destructive_restore: bool = False,
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     provider_operation_title: str = "",
+    schedule_execution_timeout_seconds: int | None = None,
 ) -> OdooPostDeployResult:
     typed_record_store = _require_record_store(record_store)
     odoo_override_record = _read_odoo_instance_override_record(
@@ -244,6 +245,7 @@ def execute_odoo_post_deploy(
                 run_destructive_restore=run_destructive_restore,
                 before_provider_mutation=provider_effect_checkpoint,
                 deployment_title=provider_operation_title,
+                schedule_execution_timeout_seconds=schedule_execution_timeout_seconds,
             )
             or {}
         )

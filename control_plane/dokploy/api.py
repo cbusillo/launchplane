@@ -4,6 +4,7 @@ import time
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -15,6 +16,16 @@ from control_plane import runtime_platform_credentials
 
 
 DEFAULT_DOKPLOY_LOG_LINE_COUNT = 200
+# Dokploy keeps `schedule.runManually` open until the job ends. This deadline
+# only bounds that request; how long the job may run is a separate execution
+# budget, observed by polling the exact provider deployment.
+DEFAULT_DOKPLOY_SCHEDULE_TRIGGER_TIMEOUT_SECONDS = 300
+_DOKPLOY_SCHEDULE_READBACK_GRACE_SECONDS = 30
+_DOKPLOY_SCHEDULE_READBACK_INTERVAL_SECONDS = 3
+_DOKPLOY_SCHEDULE_OBSERVATION_INTERVAL_SECONDS = 10
+# Tolerated clock difference between Launchplane and the provider when matching
+# a provider deployment to the trigger that started it.
+_DOKPLOY_SCHEDULE_START_CLOCK_SKEW_SECONDS = 120
 MAX_DOKPLOY_LOG_LINE_COUNT = 1000
 _DOKPLOY_SCHEDULE_DIAGNOSTIC_LINE_COUNT = 20
 _MAX_DOKPLOY_ERROR_DETAIL_LENGTH = 2000
@@ -1012,6 +1023,267 @@ def wait_for_dokploy_schedule_deployment(
     )
 
 
+def trigger_dokploy_schedule_and_wait(
+    *,
+    host: str,
+    token: str,
+    schedule_id: str,
+    before_key: str,
+    execution_timeout_seconds: int,
+    trigger_timeout_seconds: int = DEFAULT_DOKPLOY_SCHEDULE_TRIGGER_TIMEOUT_SECONDS,
+    readback_grace_seconds: float = _DOKPLOY_SCHEDULE_READBACK_GRACE_SECONDS,
+    readback_interval_seconds: float = _DOKPLOY_SCHEDULE_READBACK_INTERVAL_SECONDS,
+    observation_interval_seconds: float = _DOKPLOY_SCHEDULE_OBSERVATION_INTERVAL_SECONDS,
+) -> str:
+    """Trigger a schedule exactly once and wait for the provider job it started.
+
+    The trigger request has its own short deadline. When that request times
+    out or its outcome is otherwise unclear, the provider job may already be
+    running: this reads back the schedule deployment created by this trigger
+    and observes that exact deployment within the execution budget. It never
+    sends a second trigger. A definite rejection with no new deployment is
+    reported as not started; an unclear outcome that read-back cannot resolve
+    is reported as unknown.
+    """
+    if execution_timeout_seconds < 1:
+        raise ValueError("Dokploy schedule execution timeout must be positive.")
+    started_monotonic = time.monotonic()
+    trigger_started_at = time.time()
+    try:
+        dokploy_request(
+            host=host,
+            token=token,
+            path="/api/schedule.runManually",
+            method="POST",
+            payload={"scheduleId": schedule_id},
+            timeout_seconds=max(1, min(trigger_timeout_seconds, execution_timeout_seconds)),
+        )
+    except DokployRequestFailed as error:
+        if error.remote_command_failed:
+            # The provider answered: the job ran and its command exited non-zero.
+            raise
+        rejected = _is_definite_trigger_rejection(error)
+        deployment = _read_back_triggered_schedule_deployment(
+            host=host,
+            token=token,
+            schedule_id=schedule_id,
+            before_key=before_key,
+            trigger_started_at=trigger_started_at,
+            grace_seconds=0 if rejected else readback_grace_seconds,
+            interval_seconds=readback_interval_seconds,
+            trigger_error=error,
+        )
+        if deployment is None:
+            raise DokployScheduleExecutionFailed(
+                schedule_id=schedule_id,
+                deployment_id="",
+                deployment_status="not_started" if rejected else "unknown",
+                cause="trigger_rejected" if rejected else "trigger_outcome_unknown",
+                provider_detail=_bounded_provider_detail(str(error))
+                + (
+                    ""
+                    if rejected
+                    else " No provider deployment for this trigger was found; it was not retried."
+                ),
+            ) from error
+        remaining_seconds = execution_timeout_seconds - (time.monotonic() - started_monotonic)
+        return wait_for_exact_dokploy_schedule_deployment(
+            host=host,
+            token=token,
+            schedule_id=schedule_id,
+            deployment_id=deployment_key(deployment),
+            timeout_seconds=max(1, int(remaining_seconds)),
+            interval_seconds=observation_interval_seconds,
+            trigger_detail=_bounded_provider_detail(str(error)),
+        )
+    remaining_seconds = execution_timeout_seconds - (time.monotonic() - started_monotonic)
+    return wait_for_dokploy_schedule_deployment(
+        host=host,
+        token=token,
+        schedule_id=schedule_id,
+        before_key=before_key,
+        timeout_seconds=max(1, int(remaining_seconds)),
+    )
+
+
+def wait_for_exact_dokploy_schedule_deployment(
+    *,
+    host: str,
+    token: str,
+    schedule_id: str,
+    deployment_id: str,
+    timeout_seconds: int,
+    interval_seconds: float = _DOKPLOY_SCHEDULE_OBSERVATION_INTERVAL_SECONDS,
+    trigger_detail: str = "",
+) -> str:
+    """Observe one known schedule deployment until it is terminal or the budget ends."""
+    normalized_deployment_id = deployment_id.strip()
+    if not normalized_deployment_id:
+        raise click.ClickException("Dokploy schedule observation requires a deployment id.")
+    detail_prefix = f"{trigger_detail} " if trigger_detail else ""
+    start_time = time.monotonic()
+    last_status = ""
+    while True:
+        try:
+            deployment = _schedule_deployment_by_key(
+                host=host,
+                token=token,
+                schedule_id=schedule_id,
+                deployment_id=normalized_deployment_id,
+            )
+        except click.ClickException:
+            # A failed read is not a job outcome; keep observing within budget.
+            deployment = None
+        if deployment is not None:
+            last_status = _deployment_status(deployment)
+            if last_status in _DEPLOYMENT_SUCCESS_STATUSES:
+                return f"deployment={normalized_deployment_id} status={last_status}"
+            if last_status in _DEPLOYMENT_FAILURE_STATUSES:
+                raise DokployDeploymentFailed(
+                    deployment_id=normalized_deployment_id,
+                    deployment_status=last_status,
+                    message_prefix="Dokploy schedule deployment failed",
+                )
+        if time.monotonic() - start_time >= timeout_seconds:
+            break
+        time.sleep(interval_seconds)
+    raise DokployScheduleExecutionFailed(
+        schedule_id=schedule_id,
+        deployment_id=normalized_deployment_id,
+        deployment_status=last_status or "unknown",
+        cause="execution_timeout",
+        provider_detail=(
+            f"{detail_prefix}The provider job did not finish within {timeout_seconds} seconds; "
+            "it was neither cancelled nor retried."
+        ).strip(),
+    )
+
+
+def _is_definite_trigger_rejection(error: DokployRequestFailed) -> bool:
+    """A 4xx answer (other than a retryable one) means the provider refused the trigger."""
+    return (
+        error.status_code is not None
+        and 400 <= error.status_code < 500
+        and error.status_code not in {408, 425, 429}
+    )
+
+
+def _read_back_triggered_schedule_deployment(
+    *,
+    host: str,
+    token: str,
+    schedule_id: str,
+    before_key: str,
+    trigger_started_at: float,
+    grace_seconds: float,
+    interval_seconds: float,
+    trigger_error: DokployRequestFailed,
+) -> JsonObject | None:
+    """Find the one deployment this trigger created, or fail closed as unknown."""
+    deadline = time.monotonic() + grace_seconds
+    while True:
+        try:
+            payload = dokploy_request(
+                host=host,
+                token=token,
+                path="/api/deployment.allByType",
+                query={"id": schedule_id, "type": "schedule"},
+            )
+        except click.ClickException as read_error:
+            raise DokployScheduleExecutionFailed(
+                schedule_id=schedule_id,
+                deployment_id="",
+                deployment_status="unknown",
+                cause="trigger_outcome_unknown",
+                provider_detail=_bounded_provider_detail(
+                    f"{trigger_error} Read-back failed: {read_error.message} "
+                    "The trigger was not retried."
+                ),
+            ) from trigger_error
+        candidates = _triggered_schedule_deployment_candidates(
+            deployments=extract_deployments(payload),
+            before_key=before_key,
+            trigger_started_at=trigger_started_at,
+        )
+        if len(candidates) > 1:
+            candidate_ids = ", ".join(sorted(deployment_key(item) for item in candidates))
+            raise DokployScheduleExecutionFailed(
+                schedule_id=schedule_id,
+                deployment_id="",
+                deployment_status="unknown",
+                cause="trigger_outcome_unknown",
+                provider_detail=_bounded_provider_detail(
+                    f"{trigger_error} Read-back found several new deployments ({candidate_ids}); "
+                    "none was chosen and the trigger was not retried."
+                ),
+            ) from trigger_error
+        if candidates:
+            return candidates[0]
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(interval_seconds)
+
+
+def _triggered_schedule_deployment_candidates(
+    *,
+    deployments: list[JsonObject],
+    before_key: str,
+    trigger_started_at: float,
+) -> list[JsonObject]:
+    new_deployments = [
+        deployment
+        for deployment in deployments
+        if deployment_key(deployment) and deployment_key(deployment) != before_key
+    ]
+    earliest_start = trigger_started_at - _DOKPLOY_SCHEDULE_START_CLOCK_SKEW_SECONDS
+    dated = [(deployment, _deployment_created_at(deployment)) for deployment in new_deployments]
+    if any(created_at is not None for _deployment, created_at in dated):
+        return [
+            deployment
+            for deployment, created_at in dated
+            if created_at is not None and created_at >= earliest_start
+        ]
+    # Without creation times, only the latest deployment can belong to this trigger.
+    latest = _latest_deployment_from_list(deployments)
+    if latest is None or deployment_key(latest) in {"", before_key}:
+        return []
+    return [latest]
+
+
+def _deployment_created_at(deployment: JsonObject) -> float | None:
+    for key_name in ("createdAt", "created_at", "startedAt", "started_at"):
+        raw_value = deployment.get(key_name)
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            continue
+        try:
+            parsed = datetime.fromisoformat(raw_value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    return None
+
+
+def _schedule_deployment_by_key(
+    *, host: str, token: str, schedule_id: str, deployment_id: str
+) -> JsonObject | None:
+    payload = dokploy_request(
+        host=host,
+        token=token,
+        path="/api/deployment.allByType",
+        query={"id": schedule_id, "type": "schedule"},
+    )
+    for deployment in extract_deployments(payload):
+        if deployment_key(deployment) == deployment_id:
+            return deployment
+    return None
+
+
+def _bounded_provider_detail(detail: str) -> str:
+    return redact_dokploy_log_line(detail).strip()[:_MAX_DOKPLOY_ERROR_DETAIL_LENGTH]
+
+
 def run_dokploy_schedule(
     *,
     host: str,
@@ -1026,14 +1298,24 @@ def run_dokploy_schedule(
     )
     before_key = deployment_key(latest_before)
     try:
-        dokploy_request(
+        return trigger_dokploy_schedule_and_wait(
             host=host,
             token=token,
-            path="/api/schedule.runManually",
-            method="POST",
-            payload={"scheduleId": schedule_id},
-            timeout_seconds=timeout_seconds,
+            schedule_id=schedule_id,
+            before_key=before_key,
+            execution_timeout_seconds=timeout_seconds,
         )
+    except DokployScheduleExecutionFailed as error:
+        if not error.deployment_id:
+            raise
+        raise _schedule_execution_failure(
+            host=host,
+            token=token,
+            schedule_id=schedule_id,
+            deployment={"deploymentId": error.deployment_id, "status": error.deployment_status},
+            cause=error.cause,
+            provider_detail=error.provider_detail,
+        ) from error
     except DokployRequestFailed as error:
         deployment = _latest_new_schedule_deployment(
             host=host,
@@ -1050,15 +1332,6 @@ def run_dokploy_schedule(
             cause=cause,
             provider_detail=str(error),
         ) from error
-
-    try:
-        return wait_for_dokploy_schedule_deployment(
-            host=host,
-            token=token,
-            schedule_id=schedule_id,
-            before_key=before_key,
-            timeout_seconds=timeout_seconds,
-        )
     except DokployDeploymentFailed as error:
         deployment = _latest_new_schedule_deployment(
             host=host,

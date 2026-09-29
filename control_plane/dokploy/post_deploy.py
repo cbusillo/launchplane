@@ -73,6 +73,10 @@ ODOO_UPSTREAM_RESTORE_WORKFLOW_ENV_KEYS = (
     "ODOO_UPSTREAM_FILESTORE_PATH",
 )
 DEFAULT_DATA_WORKFLOW_LOCK_PATH = "/volumes/data/.data_workflow_in_progress"
+# An upstream restore copies a production database and filestore and may run an
+# OpenUpgrade migration; OPW's first fresh copy took 22 minutes. The execution
+# budget stays bounded and larger than an ordinary deploy timeout.
+DEFAULT_ODOO_UPSTREAM_RESTORE_EXECUTION_TIMEOUT_SECONDS = 2 * 60 * 60
 DEFAULT_ODOO_BACKUP_ROOT = "/volumes/data/backups/launchplane"
 ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
     {
@@ -340,6 +344,20 @@ OdooBackupRestorePhase = Literal[
 ]
 
 
+def resolve_data_workflow_execution_timeout_seconds(
+    *,
+    deploy_timeout_seconds: int,
+    run_destructive_restore: bool,
+    requested_timeout_seconds: int | None = None,
+) -> int:
+    """Return how long a data-workflow schedule job may run once triggered."""
+    if requested_timeout_seconds is not None:
+        return requested_timeout_seconds
+    if run_destructive_restore:
+        return max(deploy_timeout_seconds, DEFAULT_ODOO_UPSTREAM_RESTORE_EXECUTION_TIMEOUT_SECONDS)
+    return deploy_timeout_seconds
+
+
 def run_compose_post_deploy_update(
     *,
     host: str,
@@ -352,6 +370,7 @@ def run_compose_post_deploy_update(
     run_destructive_restore: bool = False,
     before_provider_mutation: Callable[[str], None] | None = None,
     deployment_title: str = "",
+    schedule_execution_timeout_seconds: int | None = None,
 ) -> dict[str, str]:
     compose_id = target_definition.target_id.strip()
     compose_name = (
@@ -428,6 +447,11 @@ def run_compose_post_deploy_update(
         )
     schedule_timeout_seconds = (
         target_definition.deploy_timeout_seconds or DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
+    )
+    resolved_schedule_execution_timeout_seconds = resolve_data_workflow_execution_timeout_seconds(
+        deploy_timeout_seconds=schedule_timeout_seconds,
+        run_destructive_restore=run_destructive_restore,
+        requested_timeout_seconds=schedule_execution_timeout_seconds,
     )
     if desired_env_map != current_env_map:
         if before_provider_mutation is not None:
@@ -586,21 +610,13 @@ def run_compose_post_deploy_update(
     )
     if before_provider_mutation is not None:
         before_provider_mutation("post_deploy_schedule_trigger")
-    api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/schedule.runManually",
-        method="POST",
-        payload={"scheduleId": schedule_id},
-        timeout_seconds=schedule_timeout_seconds,
-    )
     completed_schedule_deployment_key = api.deployment_key_from_wait_result(
-        api.wait_for_dokploy_schedule_deployment(
+        api.trigger_dokploy_schedule_and_wait(
             host=host,
             token=token,
             schedule_id=schedule_id,
             before_key=api.deployment_key(latest_schedule_deployment),
-            timeout_seconds=schedule_timeout_seconds,
+            execution_timeout_seconds=resolved_schedule_execution_timeout_seconds,
         )
     )
     if not completed_schedule_deployment_key:
@@ -801,21 +817,13 @@ def run_compose_odoo_stable_bootstrap(
         token=token,
         schedule_id=schedule_id,
     )
-    api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/schedule.runManually",
-        method="POST",
-        payload={"scheduleId": schedule_id},
-        timeout_seconds=schedule_timeout_seconds,
-    )
     completed_schedule_deployment_key = api.deployment_key_from_wait_result(
-        api.wait_for_dokploy_schedule_deployment(
+        api.trigger_dokploy_schedule_and_wait(
             host=host,
             token=token,
             schedule_id=schedule_id,
             before_key=api.deployment_key(latest_schedule_deployment),
-            timeout_seconds=schedule_timeout_seconds,
+            execution_timeout_seconds=schedule_timeout_seconds,
         )
     )
     if not completed_schedule_deployment_key:
@@ -934,20 +942,12 @@ def run_compose_odoo_backup_gate(
         token=token,
         schedule_id=schedule_id,
     )
-    api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/schedule.runManually",
-        method="POST",
-        payload={"scheduleId": schedule_id},
-        timeout_seconds=schedule_timeout_seconds,
-    )
-    wait_result = api.wait_for_dokploy_schedule_deployment(
+    wait_result = api.trigger_dokploy_schedule_and_wait(
         host=host,
         token=token,
         schedule_id=schedule_id,
         before_key=api.deployment_key(latest_schedule_deployment),
-        timeout_seconds=schedule_timeout_seconds,
+        execution_timeout_seconds=schedule_timeout_seconds,
     )
     deployment_id = api.deployment_key_from_wait_result(wait_result)
     if not deployment_id:
@@ -1075,20 +1075,12 @@ def run_compose_odoo_backup_verification(
         token=token,
         schedule_id=schedule_id,
     )
-    api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/schedule.runManually",
-        method="POST",
-        payload={"scheduleId": schedule_id},
-        timeout_seconds=schedule_timeout_seconds,
-    )
-    wait_result = api.wait_for_dokploy_schedule_deployment(
+    wait_result = api.trigger_dokploy_schedule_and_wait(
         host=host,
         token=token,
         schedule_id=schedule_id,
         before_key=api.deployment_key(latest_schedule_deployment),
-        timeout_seconds=schedule_timeout_seconds,
+        execution_timeout_seconds=schedule_timeout_seconds,
     )
     deployment_id = api.deployment_key_from_wait_result(wait_result)
     if not deployment_id:
@@ -1965,20 +1957,12 @@ def _run_compose_odoo_backup_restore_phase(
     )
     if before_provider_mutation is not None:
         before_provider_mutation(f"{phase}_schedule_trigger")
-    api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/schedule.runManually",
-        method="POST",
-        payload={"scheduleId": schedule_id},
-        timeout_seconds=schedule_timeout_seconds,
-    )
-    wait_result = api.wait_for_dokploy_schedule_deployment(
+    wait_result = api.trigger_dokploy_schedule_and_wait(
         host=host,
         token=token,
         schedule_id=schedule_id,
         before_key=api.deployment_key(latest_schedule_deployment),
-        timeout_seconds=schedule_timeout_seconds,
+        execution_timeout_seconds=schedule_timeout_seconds,
     )
     deployment_id = api.deployment_key_from_wait_result(wait_result)
     if not deployment_id:
