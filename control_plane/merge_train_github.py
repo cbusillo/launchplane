@@ -2801,8 +2801,33 @@ def _list_check_runs(
         page += 1
     return {
         "total_count": total_count if total_count is not None else len(check_runs),
-        "check_runs": check_runs,
+        "check_runs": _latest_check_runs(check_runs),
     }
+
+
+def _latest_check_runs(check_runs: list[object]) -> list[object]:
+    """Keep only the most recent run of each check, as GitHub's own merge box does.
+
+    A rerun is a new check run on the same commit; the superseded run must not
+    decide the result. GitHub issues increasing ids, so the highest id wins.
+    """
+    latest: dict[tuple[str, object], dict[str, object]] = {}
+    for item in check_runs:
+        check_run = _json_object(item, "GitHub check run")
+        app = check_run.get("app")
+        app_id = app.get("id") if isinstance(app, dict) else None
+        key = (str(check_run.get("name") or "").casefold(), app_id)
+        current = latest.get(key)
+        if current is None or _check_run_order(check_run) > _check_run_order(current):
+            latest[key] = check_run
+    return list(latest.values())
+
+
+def _check_run_order(check_run: dict[str, object]) -> int:
+    check_run_id = check_run.get("id")
+    if isinstance(check_run_id, int) and not isinstance(check_run_id, bool):
+        return check_run_id
+    return -1
 
 
 def _check_run_status(check_run: dict[str, object]) -> MergeTrainCheckStatus:
