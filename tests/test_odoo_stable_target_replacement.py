@@ -53,6 +53,8 @@ from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementRequest,
 )
 from control_plane.dokploy import JsonObject, JsonValue
+from control_plane import runtime_platform_credentials
+from control_plane.runtime_environments import SiteRuntimeEnvironment
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 from control_plane.workflows.odoo_stable_target_replacement import (
     DokployRequest,
@@ -73,11 +75,16 @@ from control_plane.workflows.odoo_verification import (
 )
 
 
+def _site_environment(values: dict[str, str]) -> SiteRuntimeEnvironment:
+    return SiteRuntimeEnvironment(values=values, secret_keys=frozenset())
+
+
 _DATABASE_ENV_LINES = (
     "ODOO_DB_NAME=test_db",
     "ODOO_DB_USER=test_user",
     "ODOO_DB_PASSWORD=test_password",
 )
+
 _UPSTREAM_RESTORE_ENV = {
     "ODOO_FILESTORE_PATH": "/volumes/data/filestore",
     "ODOO_UPSTREAM_HOST": "source.example.test",
@@ -915,8 +922,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value={},
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment({}),
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
@@ -962,8 +969,17 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value={"DOKPLOY_TOKEN": "record-deploy-token"},
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_site_runtime_environment",
+                side_effect=runtime_platform_credentials.PlatformCredentialRefusedError(
+                    target="cm/testing",
+                    findings=(
+                        runtime_platform_credentials.PlatformCredentialFinding(
+                            key="DOKPLOY_TOKEN",
+                            reason="platform_credential_key",
+                            source="lane record",
+                        ),
+                    ),
+                ),
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
@@ -1711,8 +1727,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value={"ODOO_WORKERS": "2"},
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment({"ODOO_WORKERS": "2"}),
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source",
@@ -2063,8 +2079,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value={},
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment({}),
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
@@ -2213,8 +2229,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value={},
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment({}),
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
@@ -2374,8 +2390,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value={},
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment({}),
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source",
@@ -2560,8 +2576,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value={},
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment({}),
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source",
@@ -2679,8 +2695,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={"deploymentId": "deploy-opw", "status": "success"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value=resolved_env,
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment(resolved_env),
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
@@ -2846,8 +2862,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={"deploymentId": "deploy-opw", "status": "success"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value=resolved_env,
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment(resolved_env),
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
@@ -2998,8 +3014,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value={"ODOO_DB_PASSWORD": "managed-secret-value"},
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment({"ODOO_DB_PASSWORD": "managed-secret-value"}),
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
@@ -3090,8 +3106,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value={"ODOO_DB_PASSWORD": "managed-secret-value"},
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment({"ODOO_DB_PASSWORD": "managed-secret-value"}),
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
@@ -3183,8 +3199,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value={"ODOO_DB_PASSWORD": "managed-secret-value"},
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment({"ODOO_DB_PASSWORD": "managed-secret-value"}),
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
@@ -3277,8 +3293,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         return_value={"deploymentId": "deploy-123", "status": "success"},
                     ),
                     patch(
-                        "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
-                        return_value={key: ""} if declared else {},
+                        "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_site_runtime_environment",
+                        return_value=_site_environment({key: ""} if declared else {}),
                     ),
                     patch(
                         "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
@@ -3456,12 +3472,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value={
-                    "ODOO_DB_PASSWORD": "managed-secret-value",
-                    "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": worker_private_key,
-                    "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": worker_known_hosts,
-                },
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment(
+                    {
+                        "ODOO_DB_PASSWORD": "managed-secret-value",
+                        "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": worker_private_key,
+                        "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": worker_known_hosts,
+                    }
+                ),
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
