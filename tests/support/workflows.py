@@ -31,7 +31,7 @@ LAUNCHPLANE_REQUEST_USES = (
 )
 TIMING_SNAPSHOT_ARTIFACT = "unittest-timing-snapshot"
 TIMING_SNAPSHOT_PATH = "${{ runner.temp }}/unittest-timing-snapshot"
-TIMING_SNAPSHOT_HISTORY = '"${RUNNER_TEMP}/unittest-timing-snapshot/history.json"'
+TIMING_SNAPSHOT_PLAN = '"${RUNNER_TEMP}/unittest-timing-snapshot/plan.json"'
 
 
 def launchplane_request_action_reference(repo_root: Path = Path(".")) -> str:
@@ -673,6 +673,15 @@ def check_unittest_timing_snapshot(workflow: Workflow) -> tuple[WorkflowInvarian
             invariant,
             "snapshot id must include run id and attempt",
         )
+    plan_step = workflow.step_named("test_timing_snapshot", "Plan unittest shards")
+    checker.require(plan_step is not None, invariant, "missing Plan unittest shards step")
+    if plan_step is not None:
+        checker.require(
+            '"${snapshot_directory}/history.json"' in plan_step.run
+            and '"${snapshot_directory}/plan.json"' in plan_step.run,
+            invariant,
+            "the shard plan must be computed once from the frozen timings",
+        )
     upload_snapshot = workflow.step_named("test_timing_snapshot", "Upload unittest timing snapshot")
     checker.require(
         upload_snapshot is not None, invariant, "missing Upload unittest timing snapshot step"
@@ -696,7 +705,7 @@ def check_unittest_timing_snapshot(workflow: Workflow) -> tuple[WorkflowInvarian
         "UNITTEST_MAX_TESTS_PER_TARGET": "20",
         "UNITTEST_MAX_SECONDS_PER_TARGET": "30",
     }
-    for job_id in ("test_shards", "test"):
+    for job_id in ("test_timing_snapshot", "test_shards", "test"):
         job_env = _mapping_value(workflow.job(job_id).get("env"))
         for key, expected_value in expected_unittest_env.items():
             checker.require(
@@ -718,7 +727,6 @@ def check_unittest_timing_snapshot(workflow: Workflow) -> tuple[WorkflowInvarian
     )
     for step_name in (
         "Download unittest timing snapshot",
-        "Show unit test shard plan",
         "Run unit test shard",
     ):
         step = workflow.step_named("test_shards", step_name)
@@ -732,9 +740,9 @@ def check_unittest_timing_snapshot(workflow: Workflow) -> tuple[WorkflowInvarian
             )
         if step is not None and step_name != "Download unittest timing snapshot":
             checker.require(
-                TIMING_SNAPSHOT_HISTORY in step.run,
+                TIMING_SNAPSHOT_PLAN in step.run,
                 invariant,
-                f"{step_name!r} must read the frozen timing snapshot",
+                f"{step_name!r} must run its slice of the shared shard plan",
             )
     upload_shard = workflow.step_named("test_shards", "Upload unittest timings")
     checker.require(upload_shard is not None, invariant, "missing Upload unittest timings step")
@@ -758,9 +766,9 @@ def check_unittest_timing_snapshot(workflow: Workflow) -> tuple[WorkflowInvarian
     )
     if aggregate_step is not None:
         checker.require(
-            TIMING_SNAPSHOT_HISTORY in aggregate_step.run,
+            TIMING_SNAPSHOT_PLAN in aggregate_step.run,
             invariant,
-            "aggregate must read the same frozen timing snapshot",
+            "aggregate must check coverage against the same shard plan",
         )
     save_step = workflow.step_named("test", "Save unittest timings")
     checker.require(save_step is not None, invariant, "missing Save unittest timings step")
