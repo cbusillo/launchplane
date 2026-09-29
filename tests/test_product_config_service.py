@@ -3,7 +3,12 @@ from __future__ import annotations
 import unittest
 
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
-from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretClass,
+    RuntimeSecretSafetyRule,
+)
 from control_plane.contracts.secret_record import (
     SecretAuditEvent,
     SecretBinding,
@@ -14,8 +19,10 @@ from control_plane.product_config import ProductConfigError
 from control_plane.product_config_service import (
     apply_product_config_service_request,
     product_config_service_error,
+    product_config_write_prerequisites,
 )
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
+from tests.support.profiles import _generic_site_profile_payload
 
 
 class _FailingProductConfigStore:
@@ -142,6 +149,75 @@ class ProductConfigServiceTests(unittest.TestCase):
         self.assertEqual(error.status_code, 400)
         self.assertEqual(error.code, "runtime_key_safety_failed")
         self.assertEqual(error.message, "Product config runtime key-safety gate failed.")
+
+
+class _ReadinessStore:
+    def __init__(self, bindings: tuple[SecretBinding, ...]) -> None:
+        self.bindings = bindings
+
+    def list_runtime_key_safety_policy_records(
+        self, *, status: str = "", limit: int | None = None
+    ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]:
+        return (
+            RuntimeKeySafetyPolicyRecord(
+                record_id="runtime-key-safety-policy-test",
+                source="test",
+                updated_at="2026-09-29T00:00:00Z",
+                rules=(
+                    RuntimeSecretSafetyRule(binding_key="UNRELATED", secret_class="shared_safe"),
+                ),
+            ),
+        )
+
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]:
+        return self.bindings
+
+
+def _testing_integration_secret_readiness(declared_class: RuntimeSecretClass | None) -> bool:
+    payload = _generic_site_profile_payload()
+    payload["expected_config"] = {
+        "managed_secret_bindings": [
+            {
+                "binding_key": "SHOPIFY_ACCESS_TOKEN",
+                "context": "example-site",
+                "instance": "testing",
+            }
+        ]
+    }
+    profile = LaunchplaneProductProfileRecord.model_validate(payload)
+    lane = next(candidate for candidate in profile.lanes if candidate.instance == "testing")
+    store = _ReadinessStore(
+        (
+            SecretBinding(
+                binding_id="binding-shopify",
+                secret_id="secret-shopify",
+                integration="runtime_environment",
+                binding_key="SHOPIFY_ACCESS_TOKEN",
+                context="example-site",
+                instance="testing",
+                declared_secret_class=declared_class,
+                created_at="2026-09-29T00:00:00Z",
+                updated_at="2026-09-29T00:00:00Z",
+            ),
+        )
+    )
+    return product_config_write_prerequisites(
+        store, profile=profile, lane=lane
+    ).runtime_key_safety_ready
+
+
+class ProductConfigReadinessTests(unittest.TestCase):
+    def test_readiness_uses_the_declared_class_of_the_stored_lane_binding(self) -> None:
+        self.assertTrue(_testing_integration_secret_readiness("testing"))
+        self.assertFalse(_testing_integration_secret_readiness(None))
+        self.assertFalse(_testing_integration_secret_readiness("prod_only"))
 
 
 if __name__ == "__main__":

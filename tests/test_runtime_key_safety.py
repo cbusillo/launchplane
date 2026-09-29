@@ -548,6 +548,7 @@ class RuntimeKeySafetyTests(unittest.TestCase):
             "PRINTNODE_API_KEY",
             "REPAIRSHOPR_API_KEY",
             "FISHBOWL_PASSWORD",
+            "RESEND_API_KEY",
         ):
             for instance, environment_class in lanes:
                 with self.subTest(binding_key=binding_key, instance=instance):
