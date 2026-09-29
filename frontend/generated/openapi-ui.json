@@ -6490,6 +6490,16 @@
             "title": "Schema Version",
             "type": "integer"
           },
+          "source_build": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArtifactSourceBuild"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "source_commit": {
             "title": "Source Commit",
             "type": "string"
@@ -6507,6 +6517,7 @@
           "odoo_install_modules",
           "openupgrade_inputs",
           "schema_version",
+          "source_build",
           "source_commit"
         ],
         "title": "ArtifactIdentityManifest",
@@ -6666,6 +6677,81 @@
           "repository"
         ],
         "title": "ArtifactPythonPackageSource",
+        "type": "object"
+      },
+      "ArtifactSourceBuild": {
+        "additionalProperties": false,
+        "description": "GitHub build run Launchplane verified for this artifact (docs/artifact-provenance.md).",
+        "properties": {
+          "event": {
+            "enum": [
+              "push",
+              "pull_request"
+            ],
+            "title": "Event",
+            "type": "string"
+          },
+          "github_artifact_id": {
+            "title": "Github Artifact Id",
+            "type": "integer"
+          },
+          "manifest_artifact_id": {
+            "title": "Manifest Artifact Id",
+            "type": "string"
+          },
+          "pull_request_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pull Request Number"
+          },
+          "purpose": {
+            "enum": [
+              "release",
+              "preview"
+            ],
+            "title": "Purpose",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "run_attempt": {
+            "title": "Run Attempt",
+            "type": "integer"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "integer"
+          },
+          "workflow_path": {
+            "title": "Workflow Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event",
+          "github_artifact_id",
+          "manifest_artifact_id",
+          "pull_request_number",
+          "purpose",
+          "repository",
+          "repository_id",
+          "run_attempt",
+          "run_id",
+          "workflow_path"
+        ],
+        "title": "ArtifactSourceBuild",
         "type": "object"
       },
       "ArtifactUvLockProvenance": {
