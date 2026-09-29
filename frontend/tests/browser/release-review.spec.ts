@@ -7,6 +7,14 @@ test("Owner cannot accept undisclosed shared component changes", async ({ page }
   await expect(page.getByRole("button", { name: "Record operator approval override" })).toHaveCount(0);
 });
 
+test("An unavailable checklist names its reason code and trace ID", async ({ page }) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=empty");
+  await expect(page.getByText("Production has no recorded deployed version.", { exact: false })).toBeVisible();
+  await expect(page.locator("code", { hasText: "production_identity_missing" })).toBeVisible();
+  await expect(page.locator("code", { hasText: "fixture-release-review" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Accept release" })).toHaveCount(0);
+});
+
 test("Owner reviews the complete release and can request changes after accepting", async ({ page }, testInfo) => {
   const mutations: string[] = [];
   const errors: string[] = [];

@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 from urllib.parse import urlsplit
@@ -14,6 +16,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.release_review import (
     ReleaseChecklist,
+    ReleaseEvidenceReason,
     ReleaseReviewDecisionRecord,
     ReleaseReviewStatus,
     ReleaseVersion,
@@ -53,6 +56,33 @@ RELEASE_RECORD_PENDING = (
     "The decision is saved, but the release record could not be published. Try recording it again."
 )
 
+RELEASE_EVIDENCE_MESSAGES: dict[ReleaseEvidenceReason, str] = {
+    "testing_lane_missing": "This product has no testing lane to release from.",
+    "source_control_access_unavailable": "Launchplane cannot read this product's source control.",
+    "production_identity_missing": "Production has no recorded deployed version.",
+    "candidate_identity_missing": "Testing has no recorded deployed version.",
+    "release_record_missing": "A release record Launchplane needs is missing.",
+    "github_read_failed": "Reading this release's changes from GitHub failed.",
+}
+
+_LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(eq=False)
+class ReleaseEvidenceUnavailable(ValueError):
+    """The release checklist cannot be compiled, for one fixed, public-safe reason."""
+
+    code: ReleaseEvidenceReason
+
+    def __post_init__(self) -> None:
+        super().__init__(RELEASE_EVIDENCE_MESSAGES[self.code])
+
+
+def _identity_missing(instance: str) -> ReleaseEvidenceUnavailable:
+    return ReleaseEvidenceUnavailable(
+        "production_identity_missing" if instance == "prod" else "candidate_identity_missing"
+    )
+
 
 def checklist_digest(checklist: ReleaseChecklist) -> str:
     payload = checklist.model_dump(mode="json")
@@ -69,12 +99,19 @@ def release_version(
 ) -> ReleaseVersion:
     lane = next((lane for lane in profile.lanes if lane.instance == instance), None)
     if lane is None:
-        raise ValueError(f"Product has no {instance} lane.")
+        if instance == "testing":
+            raise ReleaseEvidenceUnavailable("testing_lane_missing")
+        raise _identity_missing(instance)
     if profile.driver_id == "odoo":
-        release = store.read_release_tuple_record(context_name=lane.context, channel_name=instance)
+        try:
+            release = store.read_release_tuple_record(
+                context_name=lane.context, channel_name=instance
+            )
+            artifact = store.read_artifact_manifest(release.artifact_id)
+        except FileNotFoundError as error:
+            raise ReleaseEvidenceUnavailable("release_record_missing") from error
         if release.context != lane.context or release.channel != instance:
-            raise ValueError("Release tuple does not belong to the requested lane.")
-        artifact = store.read_artifact_manifest(release.artifact_id)
+            raise _identity_missing(instance)
 
         def repository_key(value: str) -> str:
             if value.startswith("git@github.com:"):
@@ -96,20 +133,36 @@ def release_version(
             if repository_key(selector.repository) != repository_key(profile.repository)
         )
         shared_digest = hashlib.sha256(json.dumps([sources, selectors]).encode()).hexdigest()
-        return ReleaseVersion(
-            artifact_id=release.artifact_id,
-            source_commit=artifact.source_commit,
-            shared_addons_digest=shared_digest,
+        try:
+            return ReleaseVersion(
+                artifact_id=release.artifact_id,
+                source_commit=artifact.source_commit,
+                shared_addons_digest=shared_digest,
+            )
+        except ValueError as error:
+            raise _identity_missing(instance) from error
+    try:
+        inventory = store.read_environment_inventory(
+            context_name=lane.context, instance_name=instance
         )
-    inventory = store.read_environment_inventory(context_name=lane.context, instance_name=instance)
-    if inventory.context != lane.context or inventory.instance != instance:
-        raise ValueError("Environment inventory does not belong to the requested lane.")
+    except FileNotFoundError as error:
+        raise ReleaseEvidenceUnavailable("release_record_missing") from error
     identity = inventory.runtime_identity
-    if identity is None or inventory.deploy.status != "pass":
-        raise ValueError("Release requires a successfully deployed runtime identity.")
-    if identity.product != profile.product or identity.instance != instance:
-        raise ValueError("Runtime identity does not belong to the requested product lane.")
-    return ReleaseVersion(artifact_id=identity.artifact_id, source_commit=identity.source_git_ref)
+    if (
+        inventory.context != lane.context
+        or inventory.instance != instance
+        or identity is None
+        or inventory.deploy.status != "pass"
+        or identity.product != profile.product
+        or identity.instance != instance
+    ):
+        raise _identity_missing(instance)
+    try:
+        return ReleaseVersion(
+            artifact_id=identity.artifact_id, source_commit=identity.source_git_ref
+        )
+    except ValueError as error:
+        raise _identity_missing(instance) from error
 
 
 def build_release_review(
@@ -118,12 +171,15 @@ def build_release_review(
     production = release_version(store=store, profile=profile, instance="prod")
     candidate = release_version(store=store, profile=profile, instance="testing")
     lane = next(lane for lane in profile.lanes if lane.instance == "testing")
-    items, untracked = read_release_changes(
-        repository=profile.repository,
-        production_commit=production.source_commit,
-        candidate_commit=candidate.source_commit,
-        read=read,
-    )
+    try:
+        items, untracked = read_release_changes(
+            repository=profile.repository,
+            production_commit=production.source_commit,
+            candidate_commit=candidate.source_commit,
+            read=read,
+        )
+    except (ValueError, click.ClickException) as error:
+        raise ReleaseEvidenceUnavailable("github_read_failed") from error
     annotated = []
     for item in items:
         decisions = store.list_product_review_decision_records(
@@ -217,34 +273,67 @@ def checklist_blockers(checklist: ReleaseChecklist) -> tuple[str, ...]:
     return tuple(blockers)
 
 
+def unavailable_release_review(code: ReleaseEvidenceReason) -> ReleaseReviewStatus:
+    return ReleaseReviewStatus(
+        blockers=(
+            f"The current release checklist is unavailable. {RELEASE_EVIDENCE_MESSAGES[code]}",
+        ),
+        unavailable_reason=code,
+    )
+
+
 def current_release_review(
     *,
     control_plane_root: Path,
     record_store: object,
     profile: LaunchplaneProductProfileRecord,
     include_prelaunch: bool = False,
+    trace_id: str = "",
 ) -> ReleaseReviewStatus:
     if profile.production_use == "prelaunch" and not include_prelaunch:
         return ReleaseReviewStatus(required=False, approved=True)
     try:
-        lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+        lane = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
+        if lane is None:
+            raise ReleaseEvidenceUnavailable("testing_lane_missing")
         token = resolve_launchplane_github_token(
             control_plane_root=control_plane_root, context_name=lane.context
         )
         if not token:
-            raise ValueError("Release checklist source-control access is unavailable.")
+            raise ReleaseEvidenceUnavailable("source_control_access_unavailable")
         return build_release_review(
             store=cast(ReleaseReviewStore, record_store),
             profile=profile,
             read=lambda path: github_api_request(path=path, token=token),
         )
-    except (AttributeError, FileNotFoundError, StopIteration, ValueError, click.ClickException):
-        # Provider errors may contain private URLs. Keep refusal evidence bounded.
-        return ReleaseReviewStatus(
-            blockers=(
-                "The current release checklist is unavailable. Verify testing, production and source-control evidence.",
-            )
+    # Provider errors may contain private URLs: log and return only the fixed code.
+    except ReleaseEvidenceUnavailable as error:
+        return _unavailable(profile=profile, code=error.code, trace_id=trace_id, error=error)
+    except click.ClickException as error:
+        return _unavailable(
+            profile=profile, code="github_read_failed", trace_id=trace_id, error=error
         )
+    except (AttributeError, FileNotFoundError, ValueError) as error:
+        return _unavailable(
+            profile=profile, code="release_record_missing", trace_id=trace_id, error=error
+        )
+
+
+def _unavailable(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    code: ReleaseEvidenceReason,
+    trace_id: str,
+    error: BaseException,
+) -> ReleaseReviewStatus:
+    _LOGGER.warning(
+        "release checklist unavailable product=%s reason=%s trace_id=%s error_type=%s",
+        profile.product,
+        code,
+        trace_id or "-",
+        type(error.__cause__ or error).__name__,
+    )
+    return unavailable_release_review(code)
 
 
 def require_release_approval(

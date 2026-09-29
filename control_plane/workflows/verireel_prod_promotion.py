@@ -11,6 +11,7 @@ from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deploy_target import DeployTargetCategory
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetType
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     BackupGateEvidence,
@@ -41,6 +42,8 @@ from control_plane.workflows.verireel_billing_recovery_schedule import (
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
+from control_plane.workflows.inventory import build_environment_inventory
+from control_plane.workflows.ship import utc_now_timestamp
 
 
 class VeriReelProdPromotionStore(Protocol):
@@ -51,6 +54,10 @@ class VeriReelProdPromotionStore(Protocol):
     def write_deployment_record(self, record: DeploymentRecord) -> Path | None: ...
 
     def write_promotion_record(self, record: PromotionRecord) -> Path | None: ...
+
+    def write_promotion_evidence_records(
+        self, *, promotion_record: PromotionRecord, inventory: EnvironmentInventory
+    ) -> object: ...
 
 
 class VeriReelProdPromotionRequest(BaseModel):
@@ -1112,7 +1119,19 @@ def execute_verireel_prod_promotion(
         health_result=health_result,
         target_fields=target_fields,
     )
-    record_store.write_promotion_record(promotion_record)
+    if deployment_record is None or deployment_record.deploy.status != "pass":
+        record_store.write_promotion_record(promotion_record)
+    else:
+        # Production now runs this deployment; release review reads prod's identity here.
+        record_store.write_promotion_evidence_records(
+            promotion_record=promotion_record,
+            inventory=build_environment_inventory(
+                deployment_record=deployment_record,
+                updated_at=utc_now_timestamp(),
+                promotion_record_id=promotion_record.record_id,
+                promoted_from_instance=promotion_record.from_instance,
+            ),
+        )
     return _build_result(
         promotion_record_id=request.promotion_record_id,
         deployment_record_id=deployment_result.deployment_record_id,

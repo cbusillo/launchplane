@@ -93,6 +93,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
         </details> : null}
       </> : null}
       {response.review.blockers.length ? <ul>{response.review.blockers.map(blocker => <li key={blocker}>{blocker}</li>)}</ul> : null}
+      {response.review.unavailable_reason ? <p className="owner-review-state">Reason code <code>{response.review.unavailable_reason}</code> · Trace ID <code>{response.trace_id}</code></p> : null}
       {checklist && response.viewer_is_owner ? <section className="owner-review-action" aria-label="Owner release decision">
         <h3>Your release decision</h3>
         <p><strong>Accept release</strong> records your approval for the proposed version to become production. Deployment happens later.</p>

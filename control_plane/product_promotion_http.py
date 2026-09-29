@@ -287,6 +287,7 @@ def build_product_promotion_status(
     workflow_credentials_ready: Callable[[str], bool],
     now: datetime | None = None,
     control_plane_root: Path = Path("."),
+    trace_id: str = "",
 ) -> tuple[LaunchplaneProductProfileRecord, ProductLaneProfile, ProductPromotionStatus]:
     profile, destination_lane = resolve_product_promotion_target(
         record_store=record_store,
@@ -313,6 +314,7 @@ def build_product_promotion_status(
         control_plane_root=control_plane_root,
         record_store=record_store,
         profile=profile,
+        trace_id=trace_id,
     )
     common_blockers = _common_promotion_blockers(
         record_store=record_store,

@@ -30,7 +30,7 @@ from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity,
 class ReleaseReviewRouteDependencies:
     common: ReadRouteDependencies
     read_github_human_browser_mutation_identity: Callable[..., GitHubHumanIdentity]
-    current_review: Callable[[object, LaunchplaneProductProfileRecord], ReleaseReviewStatus]
+    current_review: Callable[[object, LaunchplaneProductProfileRecord, str], ReleaseReviewStatus]
     publish_decision: Callable[[LaunchplaneProductProfileRecord, ReleaseReviewDecisionRecord], str]
 
 
@@ -140,7 +140,7 @@ def register_release_review_routes(
             viewer_is_owner=isinstance(identity, GitHubHumanIdentity)
             and viewer_is_product_owner(profile=profile, identity=identity),
             can_override=can_override(profile, identity),
-            review=dependencies.current_review(store, profile),
+            review=dependencies.current_review(store, profile, trace_id),
         )
 
     def read_release_review(
