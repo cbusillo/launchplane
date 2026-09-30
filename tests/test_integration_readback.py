@@ -73,12 +73,16 @@ class IntegrationReadbackPolicyTests(unittest.TestCase):
         self.assertTrue(protected.required)
         self.assertEqual(protected.protected_shopify_store_handles, ("example-store",))
 
-    def test_preview_is_left_to_the_preview_driver(self) -> None:
+    def test_preview_gets_the_full_check_with_no_inherited_allowance(self) -> None:
+        # The preview driver builds the preview's target definition without the
+        # template lane's policies, so a template's pre_live allowance never applies.
         policy = integration_readback_policy(
-            instance_name="testing", policies=_policies(), workflow_mode="maintenance", preview=True
+            instance_name="pr-45", policies=DokployTargetPolicies(), workflow_mode="maintenance"
         )
 
-        self.assertFalse(policy.required)
+        self.assertTrue(policy.required)
+        self.assertIn("shopify", _integrations(policy.families))
+        self.assertEqual(policy.allowed_integrations, ())
 
 
 class IntegrationReadbackEvidenceTests(unittest.TestCase):
