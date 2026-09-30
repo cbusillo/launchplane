@@ -40,6 +40,10 @@ from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationGuard,
     read_active_authz_policy_record,
 )
+from control_plane.launchplane_reconcile_authorization import (
+    TESTING_INSTANCE,
+    launchplane_reconcile_authorization_allows,
+)
 from control_plane.workflows.odoo_stable_bootstrap import (
     OdooStableBootstrapStore,
     execute_odoo_stable_bootstrap,
@@ -59,6 +63,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     execute_odoo_stable_target_replacement_apply,
 )
 from control_plane.product_reconcile import (
+    PRODUCT_RECONCILE_LEASE_SECONDS,
     PRODUCT_RECONCILE_SWEEP_SECONDS,
     ProductReconcileStore,
     request_product_reconcile_sweep,
@@ -495,11 +500,13 @@ def run_odoo_stable_operation_worker_once(
         reconciled = run_product_reconcile_once(
             record_store=cast(ProductReconcileStore, record_store),
             lease_owner=normalized_lease_owner,
-            lease_seconds=lease_seconds,
+            lease_seconds=max(lease_seconds, PRODUCT_RECONCILE_LEASE_SECONDS),
+            control_plane_root=control_plane_root_path,
         )
         if reconciled is not None:
             return OdooStableOperationWorkerResult(
-                status="worked",
+                # A reconcile left pending (busy lane, moved PR) waits one poll, not a spin.
+                status="idle" if reconciled.state == "pending" else "worked",
                 operation_kind="product_reconcile",
                 operation_id=reconciled.target_key,
                 recovered_operation_ids=recovered_operation_ids,
@@ -1241,6 +1248,16 @@ def _execute_target_replacement_operation(
     authorization_guard = DurableOperationAuthorizationGuard(
         authorization=operation.authorization,
         policy_record_reader=lambda: read_active_authz_policy_record(record_store),
+        reconcile_grant_allows=lambda authorization: (
+            operation.request.instance == TESTING_INSTANCE
+            and launchplane_reconcile_authorization_allows(
+                authorization=authorization,
+                product=operation.product,
+                context=operation.context,
+                instances=(operation.instance,),
+                record_store=record_store,
+            )
+        ),
     )
     try:
         authorization_guard.authorize_execution()

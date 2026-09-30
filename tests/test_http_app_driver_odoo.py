@@ -5579,6 +5579,58 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
                 "cm-target-replacement",
             )
 
+    async def test_odoo_target_replacement_apply_never_takes_a_reconcile_grant_from_a_request(
+        self,
+    ) -> None:
+        reconcile_grant = {
+            "grant": "launchplane_reconcile",
+            "caller": {
+                "identity_type": "launchplane_reconcile",
+                "subject": "launchplane-reconciler",
+            },
+        }
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            supplied_payloads = (
+                {**self._payload(), "authorization": reconcile_grant},
+                {
+                    **self._payload(),
+                    "replacement": {
+                        **cast(dict[str, object], self._payload()["replacement"]),
+                        **reconcile_grant,
+                    },
+                },
+            )
+            refused = [
+                await _post_odoo_target_replacement_apply(
+                    app, payload, idempotency_key=f"supplied-grant-{index}"
+                )
+                for index, payload in enumerate(supplied_payloads)
+            ]
+            refused_operations = store.list_odoo_stable_target_replacement_operation_records()
+            accepted = await _post_odoo_target_replacement_apply(
+                app, self._payload(), idempotency_key="server-side-grant"
+            )
+            (operation,) = store.list_odoo_stable_target_replacement_operation_records()
+            openapi_text = json.dumps(app.openapi())
+
+        self.assertEqual([response.status_code for response in refused], [400, 400])
+        self.assertEqual(refused_operations, ())
+        self.assertEqual(accepted.status_code, 202)
+        assert operation.authorization is not None
+        self.assertEqual(operation.authorization.grant, "policy_rule")
+        self.assertEqual(operation.authorization.caller.identity_type, "github_actions")
+        # No route's request or response schema can carry the grant or its identity.
+        self.assertNotIn("launchplane_reconcile", openapi_text)
+        self.assertNotIn("DurableOperationAuthorization", openapi_text)
+
     async def test_odoo_target_replacement_apply_rejects_stale_current_artifact(
         self,
     ) -> None:
