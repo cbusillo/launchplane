@@ -84,11 +84,12 @@ def _odoo_web_command(*, hold_until_integration_readback: bool) -> str:
     if not hold_until_integration_readback:
         return _ODOO_WEB_START_COMMAND
     # Web applies the instance overrides payload when it starts, so it waits until the
-    # data-workflow schedule has passed the read-back for this exact payload. `$$` is
-    # Compose's escape for a `$` the container shell expands.
+    # data-workflow schedule has passed the read-back for this database and this exact
+    # payload. `$$` is Compose's escape for a `$` the container shell expands.
     passed = INTEGRATION_READBACK_PASSED_PATH
     return (
-        'expected=$$(printf %s "$${ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64:-}"'
+        "expected=$$(printf '%s\\n%s' \"$${ODOO_DB_NAME:-}\" "
+        '"$${ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64:-}"'
         ' | sha256sum | cut -d " " -f 1); '
         f'if [ "$$(cat {passed} 2>/dev/null)" != "$$expected" ]; then '
         'echo "[launchplane] web waits for the integration read-back to pass"; fi; '

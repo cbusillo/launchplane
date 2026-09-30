@@ -2325,6 +2325,7 @@ clear_stale_lock={"1" if clear_stale_lock else "0"}
 data_workflow_lock_path={quoted_lock_path}
 integration_readback_passed_path={shlex.quote(INTEGRATION_READBACK_PASSED_PATH) if hold_web_until_integration_readback else "''"}
 start_web_after_workflow=0
+workflow_completed=0
 readback_succeeded=0
 web_restart_blocked=0
 module_update_modules_configured={module_update_modules_configured}
@@ -2368,20 +2369,24 @@ ensure_running() {{
     fi
 }}
 
-# The lane's web command waits until this file holds the SHA-256 of its overrides
-# payload (see render_odoo_raw_compose_file). It is written only after the read-back
-# passed, for the payload this workflow applied, so a later provider deploy with a
-# different payload, or any restart after a refusal, keeps web waiting.
+# The lane's web command waits until this file holds the SHA-256 of its database name
+# and overrides payload (see render_odoo_raw_compose_file). It is written only when
+# this workflow completed, and so applied the payload, and the read-back then passed.
+# A later provider deploy with another database or payload, a failed workflow, or any
+# restart after a refusal keeps web waiting.
 record_integration_readback_passed() {{
-    if [ -z "${{integration_readback_passed_path}}" ] || [ "${{readback_succeeded}}" != "1" ]; then
+    if [ -z "${{integration_readback_passed_path}}" ] \
+        || [ "${{workflow_completed}}" != "1" ] \
+        || [ "${{readback_succeeded}}" != "1" ]; then
         return 0
     fi
-    local checked_payload checked_payload_sha256
+    local checked_payload checked_sha256
     checked_payload=$(docker exec "${{workflow_environment[@]}}" "${{script_runner_container_id}}" \
         printenv ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64 || true)
-    checked_payload_sha256=$(printf %s "${{checked_payload}}" | sha256sum | cut -d " " -f 1)
+    checked_sha256=$(printf '%s\\n%s' "${{database_name}}" "${{checked_payload}}" \
+        | sha256sum | cut -d " " -f 1)
     docker exec -u root "${{script_runner_container_id}}" \
-        sh -c 'printf %s "$1" > "$2"' _ "${{checked_payload_sha256}}" "${{integration_readback_passed_path}}"
+        sh -c 'printf %s "$1" > "$2"' _ "${{checked_sha256}}" "${{integration_readback_passed_path}}"
     echo "integration_readback_passed_recorded=true"
 }}
 
@@ -2593,6 +2598,7 @@ fi
 echo "odoo_module_update_image_match=true"
 echo "odoo_module_update_modules_configured=true"
 echo "odoo_module_update_completed=true"
+workflow_completed=1
 
 if ! enforce_integration_readback; then
     web_restart_blocked=1

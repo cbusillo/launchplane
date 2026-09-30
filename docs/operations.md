@@ -2529,10 +2529,12 @@ context only, and `context_instance` has both context and instance.
     stopped and starts it only if the read-back passes.
   - Web on a held lane (every Odoo lane that is not production, previews
     included) waits before it starts until the schedule has passed the read-back
-    for the instance overrides payload web is about to apply. The schedule
-    removes `/volumes/data/.launchplane_integration_readback_passed` before its
-    workflow and writes the payload's SHA-256 there only after the read-back
-    passes. So a provider deploy that runs before the schedule (a ship deploy, a
+    for the database and the instance overrides payload web is about to apply.
+    The schedule removes `/volumes/data/.launchplane_integration_readback_passed`
+    before its workflow and writes their SHA-256 there only when the workflow
+    completed (so it applied the payload) and the read-back then passed. A failed
+    workflow leaves web waiting even when the database reads clean. So a provider
+    deploy that runs before the schedule (a ship deploy, a
     changed target environment, target replacement, a preview refresh) or any
     restart after a refusal leaves web waiting instead of serving. A backup
     restore removes the file too, because the restored database has not been

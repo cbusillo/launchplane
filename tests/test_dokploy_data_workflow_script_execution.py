@@ -470,7 +470,9 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.assertIn(f"Leaving web container {WEB_CONTAINER_ID} stopped", run.stderr)
         self.assertNotIn(PRODUCTION_VALUE, run.stdout + run.stderr)
 
-    def _held_web_starts(self, *, overrides_payload: str) -> bool:
+    def _held_web_starts(
+        self, *, overrides_payload: str, database_name: str = "example_testing"
+    ) -> bool:
         """Run the held web command from the rendered compose file, as the container would."""
         compose_file = render_odoo_raw_compose_file(
             image_reference="ghcr.io/example/odoo@sha256:" + "a" * 64,
@@ -495,6 +497,7 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
                 text=True,
                 env={
                     "PATH": os.environ.get("PATH", ""),
+                    "ODOO_DB_NAME": database_name,
                     "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64": overrides_payload,
                 },
                 timeout=3,
@@ -517,8 +520,27 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
             run.docker_log.index(f"start {WEB_CONTAINER_ID}"),
         )
         self.assertTrue(self._held_web_starts(overrides_payload="payload-a"))
-        # A provider deploy with a changed payload starts web before any read-back.
+        # A provider deploy that changes the payload or the database starts web before
+        # any read-back of it.
         self.assertFalse(self._held_web_starts(overrides_payload="payload-b"))
+        self.assertFalse(
+            self._held_web_starts(overrides_payload="payload-a", database_name="other_db")
+        )
+
+    def test_failed_workflow_never_releases_held_web(self) -> None:
+        # The workflow may fail before it applies a new payload; the clean database
+        # then says nothing about the payload web would apply when it starts.
+        run = self._run(
+            _render_script(),
+            FAKE_CONTAINER_PAYLOAD="payload-a",
+            FAKE_WORKFLOW_EXIT="7",
+            FAKE_ODOO_DB=_fake_database(),
+        )
+
+        self.assertEqual(run.returncode, 7)
+        self.assertIn("integration_readback_ok=true", run.stdout.splitlines())
+        self.assertNotIn("write readback-passed", run.docker_log)
+        self.assertFalse(self._held_web_starts(overrides_payload="payload-a"))
 
     def test_refusal_clears_an_earlier_pass_so_restarted_web_stays_held(self) -> None:
         passed = self._run(
