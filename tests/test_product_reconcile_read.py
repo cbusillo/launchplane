@@ -4,6 +4,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.odoo_stable_target_replacement_operation import (
+    build_odoo_stable_target_replacement_operation_id,
+)
 from control_plane.contracts.product_reconcile import (
     ProductReconcileRequestRecord,
     ProductReconcileTarget,
@@ -20,6 +23,13 @@ _COMMIT = "cdd8f4a0d68be3575389fdffbcd6ef138ca13cc9"
 _DIGEST = "sha256:" + "d5da36c3" * 8
 _PLAN_ID = "odoo-preview-plan-" + "4be1" * 16
 _DELIVERY_ID = "7d0e5c10-9e8f-11f0-8a2b-3c1d2e4f5a6b"
+_OPERATION_ID = build_odoo_stable_target_replacement_operation_id(
+    product="cm",
+    context="cm",
+    instance="testing",
+    created_at="2026-09-30T18:48:00Z",
+    idempotency_key="reconcile",
+)
 # Shapes a secret can take in text the reconciler saves from GitHub, providers and builds.
 _SECRETS = (
     "hunter2-db-password",
@@ -48,6 +58,7 @@ def _write_request(store: PostgresRecordStore, *, product: str, number: int) -> 
             "head_sha": _COMMIT,
             "desired_image_digest": _DIGEST,
             "preview_plan_id": _PLAN_ID,
+            "last_failed_operation_id": _OPERATION_ID,
             "token_id": _SECRETS[1],
             "omitted_integration_credential_keys": ["ODOO_SMTP_PASSWORD"],
             "detail": f"ODOO_SMTP_PASSWORD={_SECRETS[0]} with token {_SECRETS[1]}",
@@ -101,6 +112,8 @@ class ProductReconcileRequestsRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan["head_sha"], _COMMIT)
         self.assertEqual(plan["desired_image_digest"], _DIGEST)
         self.assertEqual(plan["preview_plan_id"], _PLAN_ID)
+        self.assertEqual(plan["last_failed_operation_id"], _OPERATION_ID)
+        self.assertEqual(plan["token_id"], "[redacted-token]")
         self.assertNotIn(_DELIVERY_ID, str(plan["provider"]))
         self.assertEqual(plan["omitted_integration_credential_keys"], ["ODOO_SMTP_PASSWORD"])
         self.assertIn("ODOO_SMTP_PASSWORD=[redacted]", plan["detail"])

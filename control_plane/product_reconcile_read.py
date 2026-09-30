@@ -26,7 +26,7 @@ _MAX_ITEMS = 50
 _IDENTIFIER_PATTERN = re.compile(r"^(?:[0-9a-f]{40}|sha256:[0-9a-f]{64})$")
 _RECORDED_ID_PATTERN = re.compile(
     r"^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-    r"|[a-z][a-z0-9]*(?:-[a-z0-9]+)*-[0-9a-f]{16,64})$"
+    r"|[a-z][A-Za-z0-9]*(?:[-.][A-Za-z0-9]+)*-[0-9a-f]{16,64})$"
 )
 _KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 _REDACTED = "[redacted]"
