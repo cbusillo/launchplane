@@ -20158,9 +20158,11 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def list_product_reconcile_requests(
-        self, *, state: str = "", limit: int = 100
+        self, *, state: str = "", product: str = "", limit: int = 100
     ) -> tuple[ProductReconcileRequestRecord, ...]:
         filters: list[object] = []
+        if product:
+            filters.append(LaunchplaneProductReconcileRequestRow.product == product)
         if state:
             if state not in PRODUCT_RECONCILE_REQUEST_STATES:
                 raise ValueError(f"Unknown product reconcile request state: {state!r}")
