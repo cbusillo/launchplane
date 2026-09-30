@@ -383,6 +383,7 @@ def run_compose_post_deploy_update(
     workflow_environment_overrides: Mapping[str, str] | None = None,
     required_workflow_environment_keys: tuple[str, ...] = (),
     run_destructive_restore: bool = False,
+    bootstrap_missing_database: bool = False,
     before_provider_mutation: Callable[[str], None] | None = None,
     deployment_title: str = "",
     schedule_execution_timeout_seconds: int | None = None,
@@ -599,6 +600,7 @@ def run_compose_post_deploy_update(
         hold_web_until_integration_readback=web_held_until_integration_readback(
             target_definition.instance
         ),
+        bootstrap_missing_database=bootstrap_missing_database and not run_destructive_restore,
     )
     schedule_payload: api.JsonObject = {
         "name": schedule_name,
@@ -2266,7 +2268,17 @@ def _build_dokploy_data_workflow_script(
     required_workflow_environment_keys: tuple[str, ...] = (),
     readback_policy: IntegrationReadbackPolicy,
     hold_web_until_integration_readback: bool,
+    bootstrap_missing_database: bool = False,
 ) -> str:
+    """The schedule's bash script.
+
+    With ``bootstrap_missing_database`` (a new preview), a maintenance run whose database
+    does not exist yet runs the devkit bootstrap instead, which creates it. Web cannot
+    create it: it waits for the read-back, which needs the database. The bootstrap drops
+    an existing database, so it runs only after the probe finds none.
+    """
+    if bootstrap_missing_database and workflow_mode != "maintenance":
+        raise ValueError("Only a maintenance run can bootstrap a missing database.")
     normalized_filestore_path = filestore_path.strip() or "/volumes/data/filestore"
     quoted_compose_app_name = shlex.quote(compose_app_name)
     quoted_database_name = shlex.quote(database_name)
@@ -2329,6 +2341,7 @@ web_restart_blocked=0
 module_update_modules_configured={module_update_modules_configured}
 restore_mode={"1" if workflow_mode == "restore" else "0"}
 restore_completed=0
+bootstrap_missing_database={"1" if bootstrap_missing_database else "0"}
 
 resolve_single_running_container() {{
     local service_name="$1"
@@ -2463,6 +2476,26 @@ if [ "${{module_update_modules_configured}}" != "1" ]; then
     exit 1
 fi
 echo "odoo_module_update_modules_configured=true"
+if [ "${{bootstrap_missing_database}}" = "1" ]; then
+    # The database container may have just started; wait for it before asking.
+    database_present=$(docker exec -i "${{database_container_id}}" sh -c '
+        for attempt in $(seq 1 30); do
+            pg_isready -q -U "$POSTGRES_USER" && break
+            sleep 2
+        done
+        psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres
+    ' _ "${{database_name}}" <<'SQL'
+SELECT count(*) FROM pg_database WHERE datname = :'database_name';
+SQL
+    )
+    if [ "${{database_present}}" = "0" ]; then
+        echo "Database ${{database_name}} does not exist yet; bootstrapping it."
+        workflow_arguments=(--bootstrap)
+    elif [ "${{database_present}}" != "1" ]; then
+        echo "Could not tell whether database ${{database_name}} exists." >&2
+        exit 1
+    fi
+fi
 workflow_uid=$(docker exec "${{script_runner_container_id}}" id -u)
 workflow_gid=$(docker exec "${{script_runner_container_id}}" id -g)
 

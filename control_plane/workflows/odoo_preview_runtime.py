@@ -1655,6 +1655,7 @@ def _execute_refresh(
             ),
             env_file=None,
             workflow_environment_overrides=runtime_override_environment,
+            bootstrap_missing_database=True,
             before_provider_mutation=checkpoint_provider_effect,
             deployment_title=provider_operation_title,
         )
