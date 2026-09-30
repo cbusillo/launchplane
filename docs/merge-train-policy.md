@@ -1049,12 +1049,13 @@ execution or alter the scheduler policy.
 The GitHub Actions scheduler in `.github/workflows/merge-train-runner.yml` reads
 authorized policy targets from the native FastAPI
 `GET /v1/work-graph/merge-train/policy-targets` route on every scheduled run.
-Exactly one target may have `scheduler.enabled = true`;
-zero enabled targets make the scheduled pass a successful no-op, and multiple
-enabled targets fail closed until an operator narrows the DB-backed scheduler
-intent. The scheduler then uses the admission route before every worker call and
-writes at most one Launchplane worker result per pass; the five-minute schedule
-is the retry loop. Manual dispatch remains explicit and uses workflow inputs for
+Each target with `scheduler.enabled = true` gets its own run job in that pass
+(at most four run at once), using that target's `runner_mode` and `mutate`.
+Trains are independent per repository and base branch, so one target's failure
+does not stop the others. Zero enabled targets make the scheduled pass a
+successful no-op. Each run job uses the admission route before its worker call
+and writes at most one Launchplane worker result per pass; the five-minute
+schedule is the retry loop. Manual dispatch remains explicit and uses workflow inputs for
 repository, base branch, runner mode, mutation, and phase-specific commands.
 Controller-mode mutate runs and manually dispatched batch-candidate,
 stack-collapse, or batch-landing phases render conservative PR feedback payloads
@@ -1075,7 +1076,7 @@ should have low-risk candidate pull requests whose checks and labels make the
 expected train behavior easy to inspect.
 
 To opt a repository into observation, import an active merge-train policy record
-with exactly one repository policy whose scheduler is enabled:
+with the scheduler enabled on each repository policy to observe:
 
 ```toml
 [policies.scheduler]
