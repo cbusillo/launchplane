@@ -45,6 +45,8 @@ from control_plane.github_payload import required_positive_int
 from control_plane.github_payload import required_string_text
 from control_plane.github_response_headers import GitHubResponseHeadersObserver
 from control_plane.github_response_headers import notify_github_quota_response_headers
+from control_plane.merge_train_dependency_updates import DependencyUpdateClass
+from control_plane.merge_train_dependency_updates import classify_dependency_update
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train import MergeTrainMergeableState
@@ -1932,6 +1934,15 @@ class GitHubMergeTrainSnapshotReader:
             username=_required_text(user.get("login"), "GitHub pull request user requires login."),
             author_association=str(source.get("author_association") or ""),
         )
+        dependency_update_class = (
+            self._dependency_update_class(
+                repository_path=repository_path,
+                pull_request_number=pull_request_number,
+                author_id=actor_id,
+            )
+            if str(user.get("type") or "") == "Bot"
+            else None
+        )
         return MergeTrainPullRequestSnapshot(
             number=pull_request_number,
             url=str(source.get("html_url") or "").strip(),
@@ -1955,7 +1966,29 @@ class GitHubMergeTrainSnapshotReader:
                 repository_path=repository_path, head_sha=head_sha
             ),
             branch_update_required=_branch_update_required(source),
+            dependency_update_class=dependency_update_class,
         )
+
+    def _dependency_update_class(
+        self, *, repository_path: str, pull_request_number: int, author_id: int
+    ) -> DependencyUpdateClass:
+        payload = self.transport.request(
+            method="GET",
+            path=f"/repos/{repository_path}/pulls/{pull_request_number}/commits?per_page=100",
+        )
+        if not isinstance(payload, list) or not payload or len(payload) >= 100:
+            return "needs_review"
+        messages: list[str] = []
+        for item in payload:
+            commit = _json_object(item, "GitHub pull request commit")
+            author = commit.get("author")
+            # Every commit must come from the pull request's own author; anyone
+            # else pushing to the branch sends the update to agent review.
+            if not isinstance(author, dict) or author.get("id") != author_id:
+                return "needs_review"
+            detail = _json_object(commit.get("commit"), "GitHub pull request commit detail")
+            messages.append(str(detail.get("message") or ""))
+        return classify_dependency_update(messages)
 
     def _actor_role_for_pull_request(
         self, *, repository_path: str, username: str, author_association: str

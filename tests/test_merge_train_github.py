@@ -43,6 +43,8 @@ from control_plane.merge_train_structural_provenance import (
     evaluate_merge_train_structural_candidate,
 )
 
+from tests.test_merge_train_dependency_updates import INDIRECT_PATCH
+
 
 class _ReadOnlyMergeTrainTransport(RecordingMergeTrainGitHubTransport):
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
@@ -2746,6 +2748,36 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
 
         self.assertEqual(snapshot.pull_requests[0].actor_role, "unknown")
 
+    def test_snapshot_reader_classifies_dependency_updates_from_bot_commits(self) -> None:
+        own_commit = _github_commit(49699333, INDIRECT_PATCH)
+        cases = (
+            ([own_commit], "patch_or_minor"),
+            ([own_commit, _github_commit(1234, "fix: tweak the lockfile")], "needs_review"),
+        )
+        for commits, expected in cases:
+            with self.subTest(expected=expected):
+                pull_request = _github_pull_request(16, author_association="CONTRIBUTOR")
+                pull_request["user"] = {"id": 49699333, "login": "dependabot[bot]", "type": "Bot"}
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _github_branch(),
+                        [pull_request],
+                        pull_request,
+                        MergeTrainGitHubError("permission not found", status_code=404),
+                        commits,
+                        _combined_status(),
+                        {"check_runs": [_check_run("completed", "success")]},
+                    )
+                )
+
+                snapshot = GitHubMergeTrainSnapshotReader(
+                    transport=transport
+                ).read_merge_train_snapshot(
+                    repository="cbusillo/sellyouroutboard", base_branch="main"
+                )
+
+                self.assertEqual(snapshot.pull_requests[0].dependency_update_class, expected)
+
     def test_snapshot_reader_paginates_check_runs_before_computing_status(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
@@ -2913,6 +2945,10 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
                 repository="cbusillo/sellyouroutboard", base_branch="main"
             )
+
+
+def _github_commit(author_id: int, message: str) -> dict[str, object]:
+    return {"author": {"id": author_id}, "commit": {"message": message}}
 
 
 def _github_pull_request(
