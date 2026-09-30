@@ -1798,6 +1798,10 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
         wait_deploy.assert_called_once()
         module_update.assert_called_once()
+        # The read-back runs as a preview lane with no allowances of its own.
+        preview_target = module_update.call_args.kwargs["target_definition"]
+        self.assertEqual(preview_target.instance, "pr-45")
+        self.assertEqual(preview_target.policies.integration_allowances, ())
         self.assertEqual(
             module_update.call_args.kwargs["workflow_environment_overrides"],
             {
