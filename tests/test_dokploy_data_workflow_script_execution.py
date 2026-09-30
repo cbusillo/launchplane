@@ -8,6 +8,7 @@ against a fake ``psycopg2``, and reproduces Docker's stdin behaviour: without
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -22,7 +23,9 @@ from unittest.mock import patch
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
+from control_plane.integration_readback import INTEGRATION_FAMILIES
 from control_plane.contracts.dokploy_target_record import (
+    DokployTargetIntegrationAllowance,
     DokployTargetPolicies,
     DokployTargetShopifyPolicy,
 )
@@ -30,6 +33,7 @@ from control_plane.contracts.dokploy_target_record import (
 PROTECTED_STORE_KEY = "example-production-store"
 DEV_STORE_KEY = "example-dev-store"
 WEB_CONTAINER_ID = "web-id"
+PRODUCTION_VALUE = "production-secret-value"
 
 _FAKE_DOCKER = """\
 import os
@@ -97,7 +101,7 @@ def main(argv):
         print(os.environ.get("FAKE_WORKFLOW_OUTPUT", "workflow ran"))
         return int(os.environ.get("FAKE_WORKFLOW_EXIT", "0"))
     if program[:2] == ["python3", "-"]:
-        log("exec guard" + (" -i" if interactive else ""))
+        log("exec readback" + (" -i" if interactive else ""))
         environment = dict(os.environ)
         environment["PYTHONPATH"] = str(state_dir / "modules")
         # Docker attaches the caller's stdin only with -i.
@@ -112,30 +116,65 @@ def main(argv):
 sys.exit(main(sys.argv[1:]))
 """
 
+# Stands in for PostgreSQL: FAKE_ODOO_DB describes ir_config_parameter values and,
+# per table, whether any row matches the catalog's "configured" predicate. A table
+# missing from "tables" does not exist. The real SQL is proved separately against
+# PostgreSQL; this fake only has to answer the program's four query shapes.
 _FAKE_PSYCOPG2 = """\
+import json
 import os
 
 
+def _store_handle(value):
+    handle = value.strip().lower()
+    if "://" in handle:
+        handle = handle.split("://", 1)[1]
+    handle = handle.split("/", 1)[0].rstrip(".")
+    if handle.endswith(".myshopify.com"):
+        handle = handle[: -len(".myshopify.com")]
+    return handle
+
+
 class _Cursor:
+    def __init__(self, database):
+        self.database = database
+        self.rows = []
+
     def __enter__(self):
         return self
 
     def __exit__(self, *exc_info):
         return False
 
-    def execute(self, query, params):
-        self.key = params[0]
+    def execute(self, query, params=None):
+        config = self.database.get("config", {})
+        tables = self.database.get("tables", {})
+        if query.startswith("SELECT key FROM ir_config_parameter"):
+            self.rows = [(key,) for key in params[0] if str(config.get(key) or "").strip()]
+        elif query.startswith("SELECT to_regclass"):
+            self.rows = [(params[0] in tables,)]
+        elif "key = 'shopify.shop_url_key'" in query:
+            value = str(config.get("shopify.shop_url_key") or "")
+            self.rows = [(bool(value) and _store_handle(value) in params[0],)]
+        elif query.startswith("SELECT EXISTS (SELECT 1 FROM "):
+            table = query[len("SELECT EXISTS (SELECT 1 FROM "):].split(" ", 1)[0]
+            self.rows = [(bool(tables[table]),)]
+        else:
+            raise AssertionError("unexpected query: " + query)
 
     def fetchone(self):
-        if self.key != "shopify.shop_url_key":
-            return None
-        value = os.environ.get("FAKE_SHOPIFY_STORE_KEY")
-        return None if value is None else (value,)
+        return self.rows[0]
+
+    def fetchall(self):
+        return list(self.rows)
 
 
 class _Connection:
+    def __init__(self, database):
+        self.database = database
+
     def cursor(self):
-        return _Cursor()
+        return _Cursor(self.database)
 
     def close(self):
         pass
@@ -144,8 +183,14 @@ class _Connection:
 def connect(**_kwargs):
     if os.environ.get("FAKE_DB_UNREACHABLE"):
         raise RuntimeError("database unreachable")
-    return _Connection()
+    return _Connection(json.loads(os.environ.get("FAKE_ODOO_DB") or "{}"))
 """
+
+
+def _fake_database(
+    config: dict[str, str] | None = None, tables: dict[str, bool] | None = None
+) -> str:
+    return json.dumps({"config": config or {}, "tables": tables or {}})
 
 
 @dataclass(frozen=True)
@@ -158,6 +203,10 @@ class ScriptRun:
     @property
     def web_restarted(self) -> bool:
         return f"start {WEB_CONTAINER_ID}" in self.docker_log
+
+    @property
+    def readback_ran(self) -> bool:
+        return "exec readback -i" in self.docker_log
 
 
 def _modern_bash() -> str | None:
@@ -173,7 +222,23 @@ def _modern_bash() -> str | None:
 BASH = _modern_bash()
 
 
-def _render_script(protected_store_keys: tuple[str, ...]) -> str:
+def _policies(
+    *, protected_store_keys: tuple[str, ...] = (), allowed: tuple[str, ...] = ()
+) -> DokployTargetPolicies:
+    return DokployTargetPolicies(
+        shopify=DokployTargetShopifyPolicy(protected_store_keys=protected_store_keys),
+        integration_allowances=tuple(
+            DokployTargetIntegrationAllowance(
+                integration=integration, kind="dev_store", reason="Test allowance."
+            )
+            for integration in allowed
+        ),
+    )
+
+
+def _render_script(
+    policies: DokployTargetPolicies | None = None, *, instance: str = "testing"
+) -> str:
     """Render the schedule script through the stable bootstrap entrypoint."""
     schedule_payloads: list[dict[str, object]] = []
 
@@ -183,18 +248,16 @@ def _render_script(protected_store_keys: tuple[str, ...]) -> str:
 
     target_definition = control_plane_dokploy.DokployTargetDefinition(
         context="example",
-        instance="testing",
+        instance=instance,
         target_id="compose-123",
-        target_name="example-testing",
-        policies=DokployTargetPolicies(
-            shopify=DokployTargetShopifyPolicy(protected_store_keys=protected_store_keys)
-        ),
+        target_name=f"example-{instance}",
+        policies=policies or _policies(),
     )
     with (
         patch(
             "control_plane.dokploy.api.fetch_dokploy_target_payload",
             return_value={
-                "name": "example-testing",
+                "name": f"example-{instance}",
                 "env": textwrap.dedent(
                     """\
                     ODOO_DB_NAME=example_testing
@@ -202,7 +265,7 @@ def _render_script(protected_store_keys: tuple[str, ...]) -> str:
                     ODOO_INSTALL_MODULES=base
                     """
                 ),
-                "appName": "example-testing-app",
+                "appName": f"example-{instance}-app",
                 "serverId": "server-123",
             },
         ),
@@ -221,6 +284,7 @@ def _render_script(protected_store_keys: tuple[str, ...]) -> str:
                         "odoo_module_update_image_match=true",
                         "odoo_module_update_modules_configured=true",
                         "odoo_module_update_completed=true",
+                        "integration_readback_ok=true",
                     ],
                 },
             ),
@@ -236,14 +300,13 @@ def _render_script(protected_store_keys: tuple[str, ...]) -> str:
             token="secret-token",
             target_definition=target_definition,
             env_file=None,
-            protected_shopify_store_keys=protected_store_keys,
         )
     if len(schedule_payloads) != 1:
         raise AssertionError(f"expected one schedule upsert, got {len(schedule_payloads)}")
     return cast(str, schedule_payloads[0]["script"])
 
 
-def _render_restore_script() -> str:
+def _render_restore_script(policies: DokployTargetPolicies | None = None) -> str:
     """Render the schedule script through the destructive-restore post-deploy entrypoint."""
     schedule_payloads: list[dict[str, object]] = []
 
@@ -256,6 +319,7 @@ def _render_restore_script() -> str:
         instance="testing",
         target_id="compose-123",
         target_name="example-testing",
+        policies=policies or _policies(),
     )
     with (
         patch(
@@ -290,7 +354,16 @@ def _render_restore_script() -> str:
             "control_plane.dokploy.api.latest_deployment_for_schedule",
             side_effect=(
                 {"deploymentId": "schedule-before"},
-                {"deploymentId": "schedule-after", "logs": ["odoo_restore_completed=true"]},
+                {
+                    "deploymentId": "schedule-after",
+                    "logs": [
+                        "odoo_restore_completed=true",
+                        "odoo_module_update_image_match=true",
+                        "odoo_module_update_modules_configured=true",
+                        "odoo_module_update_completed=true",
+                        "integration_readback_ok=true",
+                    ],
+                },
             ),
         ),
         patch(
@@ -333,7 +406,14 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
             "HOME": str(self.root),
         }
 
-    def _run(self, script: str, **fake_environment: str) -> ScriptRun:
+    def _run(
+        self, script: str, *, web_status: str = "running", **fake_environment: str
+    ) -> ScriptRun:
+        log_path = self.root / "docker.log"
+        log_path.unlink(missing_ok=True)
+        for state_file in self.root.glob("*.state"):
+            state_file.unlink()
+        (self.root / f"{WEB_CONTAINER_ID}.state").write_text(web_status)
         script_path = self.root / "script.sh"
         script_path.write_text(script, encoding="utf-8")
         completed = subprocess.run(
@@ -343,9 +423,23 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
             env={**self.base_environment, **fake_environment},
             timeout=60,
         )
-        log_path = self.root / "docker.log"
         docker_log = tuple(log_path.read_text().splitlines()) if log_path.exists() else ()
         return ScriptRun(completed.returncode, completed.stdout, completed.stderr, docker_log)
+
+    def assert_refused_and_web_stopped(self, run: ScriptRun, *entries: str) -> None:
+        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertTrue(run.readback_ran, run.docker_log)
+        self.assertIn(f"stop {WEB_CONTAINER_ID}", run.docker_log)
+        self.assertFalse(run.web_restarted, run.docker_log)
+        self.assertIn("integration_readback_ok=false", run.stdout.splitlines())
+        for entry in entries:
+            integration, _, setting = entry.partition("/")
+            self.assertIn(
+                f"Integration read-back refused: integration={integration} setting={setting}",
+                run.stderr,
+            )
+        self.assertIn(f"Leaving web container {WEB_CONTAINER_ID} stopped", run.stderr)
+        self.assertNotIn(PRODUCTION_VALUE, run.stdout + run.stderr)
 
     def test_fake_docker_runs_an_empty_program_without_dash_i(self) -> None:
         # Mirrors the reproduction on the testing script-runner: a stdin
@@ -367,76 +461,153 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.assertEqual(without_i.returncode, 0)
         self.assertEqual(with_i.returncode, 3)
 
-    def test_protected_store_key_fails_and_leaves_web_stopped(self) -> None:
-        # Regression for #2557: this fails if the guard's docker exec loses -i,
-        # because the empty program would exit 0 and web would restart.
-        run = self._run(
-            _render_script((PROTECTED_STORE_KEY,)),
-            FAKE_SHOPIFY_STORE_KEY=PROTECTED_STORE_KEY.upper(),
+    def test_each_family_setting_fails_and_leaves_web_stopped(self) -> None:
+        # A restored production copy on a testing lane with no allowance. This also
+        # fails if the read-back's docker exec loses -i (#2557): the empty program
+        # would exit 0 and web would restart.
+        script = _render_restore_script()
+        for family in INTEGRATION_FAMILIES:
+            settings = [
+                *(
+                    (f"{family.integration}/{key}", _fake_database(config={key: PRODUCTION_VALUE}))
+                    for key in family.config_parameters
+                ),
+                *(
+                    (
+                        f"{family.integration}/{table.table}",
+                        _fake_database(tables={table.table: True}),
+                    )
+                    for table in family.tables
+                ),
+            ]
+            self.assertTrue(settings, family.integration)
+            for entry, database in settings:
+                with self.subTest(setting=entry):
+                    run = self._run(script, FAKE_ODOO_DB=database)
+
+                    self.assert_refused_and_web_stopped(run, entry)
+                    self.assertIn(f"integration_readback_refused={entry}", run.stdout)
+
+    def test_allowance_passes_the_matching_integration_only(self) -> None:
+        database = _fake_database(
+            config={"printnode.api_key": PRODUCTION_VALUE, "shopify.api_token": PRODUCTION_VALUE}
         )
 
-        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
-        self.assertIn("exec guard -i", run.docker_log)
-        self.assertIn(f"stop {WEB_CONTAINER_ID}", run.docker_log)
-        self.assertFalse(run.web_restarted, run.docker_log)
-        self.assertIn("Protected Shopify store key is not allowed", run.stderr)
-        self.assertIn("shopify_store_key_guard_refused", run.stdout)
-        self.assertNotIn("shopify_store_key_guard_pass", run.stdout)
-        self.assertIn(f"Leaving web container {WEB_CONTAINER_ID} stopped", run.stderr)
+        allowed = self._run(
+            _render_script(_policies(allowed=("printnode", "shopify"))), FAKE_ODOO_DB=database
+        )
+        partly_allowed = self._run(
+            _render_script(_policies(allowed=("printnode",))), FAKE_ODOO_DB=database
+        )
 
-    def test_unprotected_store_key_passes_and_restarts_web(self) -> None:
+        self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
+        self.assertIn("integration_readback_ok=true", allowed.stdout.splitlines())
+        self.assertIn(
+            "integration_readback_allowed=shopify/shopify.api_token,printnode/printnode.api_key",
+            allowed.stdout.splitlines(),
+        )
+        self.assertTrue(allowed.web_restarted, allowed.docker_log)
+        self.assert_refused_and_web_stopped(partly_allowed, "shopify/shopify.api_token")
+        self.assertNotIn("printnode.api_key setting", partly_allowed.stderr)
+
+    def test_empty_settings_pass_and_restart_web(self) -> None:
         run = self._run(
-            _render_script((PROTECTED_STORE_KEY,)),
-            FAKE_SHOPIFY_STORE_KEY=DEV_STORE_KEY,
+            _render_script(),
+            FAKE_ODOO_DB=_fake_database(
+                config={"printnode.api_key": "  ", "shopify.api_version": "2026-07"},
+                tables={"ir_mail_server": False, "payment_provider": False},
+            ),
         )
 
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-        self.assertIn(
-            f"shopify_store_key_guard_pass db=example_testing value={DEV_STORE_KEY}", run.stdout
-        )
+        self.assertIn("integration_readback_ok=true", run.stdout.splitlines())
         self.assertTrue(run.web_restarted, run.docker_log)
         self.assertLess(
-            run.docker_log.index("exec guard -i"), run.docker_log.index(f"start {WEB_CONTAINER_ID}")
+            run.docker_log.index("exec readback -i"),
+            run.docker_log.index(f"start {WEB_CONTAINER_ID}"),
         )
 
+    def test_protected_store_key_fails_even_with_a_shopify_allowance(self) -> None:
+        run = self._run(
+            _render_script(
+                _policies(protected_store_keys=(PROTECTED_STORE_KEY,), allowed=("shopify",))
+            ),
+            FAKE_ODOO_DB=_fake_database(
+                config={"shopify.shop_url_key": f"{PROTECTED_STORE_KEY.upper()}.myshopify.com"}
+            ),
+        )
+
+        self.assert_refused_and_web_stopped(run, "shopify/shopify.shop_url_key:protected")
+
+    def test_web_left_stopped_by_a_refusal_starts_once_the_readback_passes(self) -> None:
+        cleared = self._run(_render_script(), web_status="exited", FAKE_ODOO_DB=_fake_database())
+        still_refused = self._run(
+            _render_script(),
+            web_status="exited",
+            FAKE_ODOO_DB=_fake_database(config={"printnode.api_key": PRODUCTION_VALUE}),
+        )
+
+        self.assertEqual(cleared.returncode, 0, cleared.stdout + cleared.stderr)
+        self.assertTrue(cleared.web_restarted, cleared.docker_log)
+        self.assertLess(
+            cleared.docker_log.index("exec readback -i"),
+            cleared.docker_log.index(f"start {WEB_CONTAINER_ID}"),
+        )
+        self.assertNotEqual(still_refused.returncode, 0)
+        self.assertFalse(still_refused.web_restarted, still_refused.docker_log)
+
+    def test_stopped_web_without_a_readback_still_fails(self) -> None:
+        run = self._run(_render_script(instance="prod"), web_status="exited")
+
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("Expected a running web container", run.stderr)
+        self.assertFalse(run.web_restarted, run.docker_log)
+
+    def test_dev_store_with_shopify_allowance_passes(self) -> None:
+        run = self._run(
+            _render_script(
+                _policies(protected_store_keys=(PROTECTED_STORE_KEY,), allowed=("shopify",))
+            ),
+            FAKE_ODOO_DB=_fake_database(config={"shopify.shop_url_key": DEV_STORE_KEY}),
+        )
+
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertTrue(run.web_restarted, run.docker_log)
+
     def test_unreadable_database_fails_closed_and_leaves_web_stopped(self) -> None:
-        run = self._run(_render_script((PROTECTED_STORE_KEY,)), FAKE_DB_UNREACHABLE="1")
+        run = self._run(_render_script(), FAKE_DB_UNREACHABLE="1")
 
         self.assertNotEqual(run.returncode, 0)
         self.assertFalse(run.web_restarted, run.docker_log)
-        self.assertIn("shopify_store_key_guard_refused", run.stdout)
+        self.assertIn("integration_readback_ok=false", run.stdout.splitlines())
 
-    def test_workflow_failure_with_protected_key_leaves_web_stopped(self) -> None:
+    def test_workflow_failure_with_refused_setting_leaves_web_stopped(self) -> None:
         run = self._run(
-            _render_script((PROTECTED_STORE_KEY,)),
+            _render_script(),
             FAKE_WORKFLOW_EXIT="7",
-            FAKE_SHOPIFY_STORE_KEY=PROTECTED_STORE_KEY,
+            FAKE_ODOO_DB=_fake_database(config={"printnode.api_key": PRODUCTION_VALUE}),
         )
 
         self.assertEqual(run.returncode, 7)
-        self.assertIn("exec guard -i", run.docker_log)
+        self.assertTrue(run.readback_ran, run.docker_log)
         self.assertFalse(run.web_restarted, run.docker_log)
 
-    def test_workflow_failure_with_unprotected_key_restarts_web(self) -> None:
-        run = self._run(
-            _render_script((PROTECTED_STORE_KEY,)),
-            FAKE_WORKFLOW_EXIT="7",
-            FAKE_SHOPIFY_STORE_KEY=DEV_STORE_KEY,
-        )
+    def test_workflow_failure_with_clean_database_restarts_web(self) -> None:
+        run = self._run(_render_script(), FAKE_WORKFLOW_EXIT="7", FAKE_ODOO_DB=_fake_database())
 
         self.assertEqual(run.returncode, 7)
-        self.assertIn("shopify_store_key_guard_pass", run.stdout)
+        self.assertIn("integration_readback_ok=true", run.stdout.splitlines())
         self.assertTrue(run.web_restarted, run.docker_log)
 
-    def test_lane_without_protected_keys_keeps_restart_on_failure(self) -> None:
+    def test_production_lane_without_protected_keys_skips_the_readback(self) -> None:
         run = self._run(
-            _render_script(()),
+            _render_script(instance="prod"),
             FAKE_WORKFLOW_EXIT="7",
-            FAKE_SHOPIFY_STORE_KEY=PROTECTED_STORE_KEY,
+            FAKE_ODOO_DB=_fake_database(config={"printnode.api_key": PRODUCTION_VALUE}),
         )
 
         self.assertEqual(run.returncode, 7)
-        self.assertNotIn("exec guard -i", run.docker_log)
+        self.assertFalse(run.readback_ran, run.docker_log)
         self.assertTrue(run.web_restarted, run.docker_log)
 
     def test_successful_restore_prints_the_completion_marker(self) -> None:
@@ -475,7 +646,7 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
                 self.assertNotIn("odoo_restore_completed=true", lines)
 
     def test_maintenance_does_not_print_restore_markers(self) -> None:
-        run = self._run(_render_script(()), FAKE_WORKFLOW_OUTPUT="Upstream restore failed (x).")
+        run = self._run(_render_script(), FAKE_WORKFLOW_OUTPUT="Upstream restore failed (x).")
 
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertNotIn("odoo_restore_completed", run.stdout)

@@ -22,6 +22,15 @@ from control_plane.dokploy.source import (
     DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS,
     DokployTargetDefinition,
 )
+from control_plane.integration_readback import (
+    INTEGRATION_READBACK_CHECKED_MARKER,
+    INTEGRATION_READBACK_OK_MARKER,
+    INTEGRATION_READBACK_PROGRAM,
+    IntegrationReadbackPolicy,
+    integration_readback_marker_is_safe,
+    integration_readback_policy,
+    integration_readback_refusal_detail,
+)
 
 
 DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME = "platform-data-workflow"
@@ -98,9 +107,12 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         "website_bootstrap_applied",
         "odoo_restore_completed",
         "odoo_restore_failure_logged",
+        INTEGRATION_READBACK_OK_MARKER,
     }
 )
-ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS = frozenset({"website_bootstrap_website_id"})
+ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS = frozenset(
+    {"website_bootstrap_website_id", INTEGRATION_READBACK_CHECKED_MARKER}
+)
 ODOO_POST_DEPLOY_READBACK_MARKERS = (
     ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS | ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
 )
@@ -274,6 +286,8 @@ class OdooPostDeployReadbackFailure(click.ClickException):
 def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
     if key in ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS:
         return value in {"true", "false"}
+    if integration_readback_marker_is_safe(key, value):
+        return True
     return (
         key in ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
         and value.isascii()
@@ -366,8 +380,8 @@ def run_compose_post_deploy_update(
     env_file: Path | None,
     workflow_environment_overrides: Mapping[str, str] | None = None,
     required_workflow_environment_keys: tuple[str, ...] = (),
-    protected_shopify_store_keys: tuple[str, ...] = (),
     run_destructive_restore: bool = False,
+    preview: bool = False,
     before_provider_mutation: Callable[[str], None] | None = None,
     deployment_title: str = "",
     schedule_execution_timeout_seconds: int | None = None,
@@ -562,17 +576,26 @@ def run_compose_post_deploy_update(
             "Dokploy-managed post-deploy update already has a running schedule deployment for "
             f"{target_definition.context}/{target_definition.instance}."
         )
+    workflow_mode: Literal["maintenance", "restore"] = (
+        "restore" if run_destructive_restore else "maintenance"
+    )
+    readback_policy = integration_readback_policy(
+        instance_name=target_definition.instance,
+        policies=target_definition.policies,
+        workflow_mode=workflow_mode,
+        preview=preview,
+    )
     schedule_script = _build_dokploy_data_workflow_script(
         compose_app_name=compose_app_name,
         database_name=database_name,
         filestore_path=filestore_path,
         clear_stale_lock=_should_clear_stale_data_workflow_lock(existing_schedule),
         data_workflow_lock_path=data_workflow_lock_path,
-        workflow_mode="restore" if run_destructive_restore else "maintenance",
+        workflow_mode=workflow_mode,
         required_update_modules=required_update_modules,
         workflow_environment_overrides=resolved_workflow_environment_overrides,
         required_workflow_environment_keys=resolved_required_workflow_environment_keys,
-        protected_shopify_store_keys=protected_shopify_store_keys,
+        readback_policy=readback_policy,
     )
     schedule_payload: api.JsonObject = {
         "name": schedule_name,
@@ -638,13 +661,15 @@ def run_compose_post_deploy_update(
     )
     if run_destructive_restore:
         require_odoo_restore_readback_evidence(evidence)
-    if require_company_email:
+    if require_company_email or readback_policy.required:
         require_odoo_module_update_readback_evidence(evidence)
+    if require_company_email:
         if evidence.get("website_bootstrap_company_email_matches") != "true":
             raise OdooPostDeployReadbackFailure(
                 "Odoo post-deploy did not prove the requested website company sender was saved.",
                 evidence=evidence,
             )
+    require_integration_readback_evidence(evidence, readback_policy)
     return evidence
 
 
@@ -656,7 +681,6 @@ def run_compose_odoo_stable_bootstrap(
     env_file: Path | None,
     workflow_environment_overrides: Mapping[str, str] | None = None,
     required_workflow_environment_keys: tuple[str, ...] = (),
-    protected_shopify_store_keys: tuple[str, ...] = (),
     timeout_seconds: int | None = None,
 ) -> None:
     compose_id = target_definition.target_id.strip()
@@ -773,6 +797,11 @@ def run_compose_odoo_stable_bootstrap(
             "Dokploy-managed Odoo bootstrap already has a running schedule deployment for "
             f"{target_definition.context}/{target_definition.instance}."
         )
+    readback_policy = integration_readback_policy(
+        instance_name=target_definition.instance,
+        policies=target_definition.policies,
+        workflow_mode="bootstrap",
+    )
     schedule_script = _build_dokploy_data_workflow_script(
         compose_app_name=compose_app_name,
         database_name=database_name,
@@ -783,7 +812,7 @@ def run_compose_odoo_stable_bootstrap(
         required_update_modules=required_update_modules,
         workflow_environment_overrides=resolved_workflow_environment_overrides,
         required_workflow_environment_keys=resolved_required_workflow_environment_keys,
-        protected_shopify_store_keys=protected_shopify_store_keys,
+        readback_policy=readback_policy,
     )
     schedule_payload: api.JsonObject = {
         "name": DOKPLOY_ODOO_BOOTSTRAP_SCHEDULE_NAME,
@@ -846,6 +875,7 @@ def run_compose_odoo_stable_bootstrap(
         deployment=completed_schedule_deployment,
     )
     require_odoo_module_update_readback_evidence(readback_evidence)
+    require_integration_readback_evidence(readback_evidence, readback_policy)
 
 
 def run_compose_odoo_backup_gate(
@@ -2087,6 +2117,23 @@ def require_odoo_restore_readback_evidence(evidence: Mapping[str, str]) -> None:
         )
 
 
+def require_integration_readback_evidence(
+    evidence: Mapping[str, str], policy: IntegrationReadbackPolicy
+) -> None:
+    """Refuse success unless the schedule proved the integration read-back passed."""
+    if not policy.required:
+        return
+    if (
+        evidence.get("log_available") != "true"
+        or evidence.get(INTEGRATION_READBACK_OK_MARKER) != "true"
+    ):
+        raise OdooPostDeployReadbackFailure(
+            "Odoo integration read-back did not prove this lane holds only allowed "
+            f"integration settings: {integration_readback_refusal_detail(evidence)}.",
+            evidence=evidence,
+        )
+
+
 def require_odoo_website_bootstrap_readback_evidence(evidence: Mapping[str, str]) -> None:
     if evidence.get("log_available") != "true":
         raise click.ClickException(
@@ -2200,48 +2247,6 @@ def compose_data_workflow_is_quiescent(
     return not _has_running_schedule_deployment(schedule)
 
 
-# TODO(#2554): shopify.api_token and shopify.webhook_key are production
-# credentials too, but no protected-value source exists for them yet: target
-# policies carry only protected store keys. Compare them here once #2554 adds a
-# supported source for a lane's protected integration keys.
-_SHOPIFY_STORE_KEY_GUARD_PROGRAM = """import os
-import sys
-
-import psycopg2
-
-database_name = sys.argv[1]
-protected_store_keys = {value.strip().lower() for value in sys.argv[2:] if value.strip()}
-
-connection = psycopg2.connect(
-    host=(os.environ.get("ODOO_DB_HOST") or "database").strip(),
-    port=(os.environ.get("ODOO_DB_PORT") or "5432").strip(),
-    user=(os.environ.get("ODOO_DB_USER") or "odoo").strip(),
-    password=os.environ.get("ODOO_DB_PASSWORD") or "",
-    dbname=database_name,
-)
-try:
-    with connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT value FROM ir_config_parameter WHERE key = %s LIMIT 1",
-            ("shopify.shop_url_key",),
-        )
-        row = cursor.fetchone()
-finally:
-    connection.close()
-
-current_store_key = str(row[0]).strip() if row and row[0] is not None else ""
-normalized_store_key = current_store_key.lower()
-if normalized_store_key in protected_store_keys:
-    protected_list = ", ".join(sorted(protected_store_keys))
-    raise SystemExit(
-        "Protected Shopify store key is not allowed on this Dokploy lane. "
-        f"db={database_name} current={current_store_key or '<empty>'} protected={protected_list}"
-    )
-
-print(f"shopify_store_key_guard_pass db={database_name} value={current_store_key or '<empty>'}")
-"""
-
-
 def _build_dokploy_data_workflow_script(
     *,
     compose_app_name: str,
@@ -2253,7 +2258,7 @@ def _build_dokploy_data_workflow_script(
     required_update_modules: str = "",
     workflow_environment_overrides: Mapping[str, str] | None = None,
     required_workflow_environment_keys: tuple[str, ...] = (),
-    protected_shopify_store_keys: tuple[str, ...] = (),
+    readback_policy: IntegrationReadbackPolicy,
 ) -> str:
     normalized_filestore_path = filestore_path.strip() or "/volumes/data/filestore"
     quoted_compose_app_name = shlex.quote(compose_app_name)
@@ -2276,10 +2281,6 @@ def _build_dokploy_data_workflow_script(
     required_workflow_environment_lines = _render_required_environment_key_lines(
         effective_required_workflow_environment_keys
     )
-    protected_shopify_store_key_lines = _render_bash_array_assignment_lines(
-        "protected_shopify_store_keys",
-        protected_shopify_store_keys,
-    )
     workflow_arguments_by_mode = {
         "maintenance": "--post-deploy-maintenance",
         "bootstrap": "--bootstrap",
@@ -2294,7 +2295,6 @@ def _build_dokploy_data_workflow_script(
     workflow_label = workflow_label_by_mode[workflow_mode]
     module_update_modules_configured = "1" if required_update_modules.strip() else "0"
     readback_marker_patterns = "|".join(sorted(ODOO_POST_DEPLOY_READBACK_MARKERS))
-    shopify_store_key_guard_program = _SHOPIFY_STORE_KEY_GUARD_PROGRAM
     restore_failure_grep_arguments = " ".join(
         f"-e {shlex.quote(pattern)}" for pattern in ODOO_RESTORE_FAILURE_LOG_PATTERNS
     )
@@ -2310,12 +2310,12 @@ workflow_environment=()
 {workflow_environment_lines}
 required_workflow_environment_keys=()
 {required_workflow_environment_lines}
-protected_shopify_store_keys=()
-{protected_shopify_store_key_lines}
+integration_readback_required={"1" if readback_policy.required else "0"}
+integration_readback_spec={shlex.quote(readback_policy.encoded_spec())}
 clear_stale_lock={"1" if clear_stale_lock else "0"}
 data_workflow_lock_path={quoted_lock_path}
-web_was_running=0
-shopify_store_key_guard_passed=0
+start_web_after_workflow=0
+readback_succeeded=0
 web_restart_blocked=0
 module_update_modules_configured={module_update_modules_configured}
 restore_mode={"1" if workflow_mode == "restore" else "0"}
@@ -2359,7 +2359,7 @@ ensure_running() {{
 }}
 
 start_web_container() {{
-    if [ "${{web_was_running}}" != "1" ]; then
+    if [ "${{start_web_after_workflow}}" != "1" ]; then
         return
     fi
     local current_status
@@ -2370,22 +2370,23 @@ start_web_container() {{
     fi
 }}
 
-# Reads shopify.shop_url_key from the database and fails when it is one of the
-# lane's protected store keys. `docker exec -i` is required: without it Docker
-# does not attach stdin, python3 reads an empty program and exits 0.
-enforce_shopify_store_key_guard() {{
-    if [ "${{#protected_shopify_store_keys[@]}}" -eq 0 ]; then
+# Checks the database's integration settings against the lane's allowances and
+# protected Shopify store keys; see control_plane/integration_readback.py.
+# `docker exec -i` is required: without it Docker does not attach stdin, python3
+# reads an empty program and exits 0.
+enforce_integration_readback() {{
+    if [ "${{integration_readback_required}}" != "1" ]; then
         return 0
     fi
-    echo "Checking protected Shopify store keys for ${{database_name}}"
-    local guard_status=0
-    docker exec -i "${{script_runner_container_id}}" python3 - "${{database_name}}" "${{protected_shopify_store_keys[@]}}" <<'PY' || guard_status=$?
-{shopify_store_key_guard_program}PY
-    if [ "${{guard_status}}" -ne 0 ]; then
-        echo "shopify_store_key_guard_refused db=${{database_name}} exit_status=${{guard_status}}"
-        return "${{guard_status}}"
+    echo "Checking integration settings for ${{database_name}}"
+    local readback_status=0
+    docker exec -i "${{script_runner_container_id}}" python3 - "${{database_name}}" "${{integration_readback_spec}}" <<'PY' || readback_status=$?
+{INTEGRATION_READBACK_PROGRAM}PY
+    if [ "${{readback_status}}" -ne 0 ]; then
+        echo "integration_readback_ok=false"
+        return "${{readback_status}}"
     fi
-    shopify_store_key_guard_passed=1
+    readback_succeeded=1
 }}
 
 exit_trap() {{
@@ -2395,17 +2396,17 @@ exit_trap() {{
         echo "odoo_restore_completed=false"
     fi
     if [ "${{web_restart_blocked}}" != "1" ] \
-        && [ "${{web_was_running}}" = "1" ] \
-        && [ "${{shopify_store_key_guard_passed}}" != "1" ] \
-        && [ "${{#protected_shopify_store_keys[@]}}" -gt 0 ]; then
-        # The workflow failed before the guard ran; the database may already
-        # hold restored data, so web only comes back if the guard passes now.
-        if ! enforce_shopify_store_key_guard; then
+        && [ "${{start_web_after_workflow}}" = "1" ] \
+        && [ "${{readback_succeeded}}" != "1" ] \
+        && [ "${{integration_readback_required}}" = "1" ]; then
+        # The workflow failed before the read-back ran; the database may already
+        # hold restored data, so web only comes back if the read-back passes now.
+        if ! enforce_integration_readback; then
             web_restart_blocked=1
         fi
     fi
     if [ "${{web_restart_blocked}}" = "1" ]; then
-        echo "Leaving web container ${{web_container_id}} stopped: the Shopify protected store key guard did not pass." >&2
+        echo "Leaving web container ${{web_container_id}} stopped: the integration read-back did not pass." >&2
         exit "${{exit_status}}"
     fi
     start_web_container
@@ -2414,7 +2415,7 @@ exit_trap() {{
 
 database_container_id=$(resolve_single_container_any_state "database")
 script_runner_container_id=$(resolve_single_running_container "script-runner")
-web_container_id=$(resolve_single_running_container "web")
+web_container_id=$(resolve_single_container_any_state "web")
 
 ensure_running "${{database_container_id}}" "database"
 web_image_id=$(docker inspect -f '{{{{.Image}}}}' "${{web_container_id}}")
@@ -2443,9 +2444,17 @@ trap exit_trap EXIT
 
 web_status=$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}")
 if [ "${{web_status}}" = "running" ]; then
-    web_was_running=1
+    start_web_after_workflow=1
     echo "Stopping web container ${{web_container_id}}"
     docker stop "${{web_container_id}}" >/dev/null
+elif [ "${{integration_readback_required}}" = "1" ]; then
+    # An earlier read-back refusal leaves web stopped. Once the setting is cleared
+    # or allowed, this run brings web back only if the read-back passes.
+    start_web_after_workflow=1
+    echo "Web container ${{web_container_id}} is stopped; it starts only after the integration read-back passes."
+else
+    echo "Expected a running web container in project '${{compose_project}}'." >&2
+    exit 1
 fi
 
 if [ "${{#required_workflow_environment_keys[@]}}" -gt 0 ]; then
@@ -2553,7 +2562,7 @@ echo "odoo_module_update_image_match=true"
 echo "odoo_module_update_modules_configured=true"
 echo "odoo_module_update_completed=true"
 
-if ! enforce_shopify_store_key_guard; then
+if ! enforce_integration_readback; then
     web_restart_blocked=1
     exit 1
 fi
@@ -4599,16 +4608,6 @@ def _render_required_environment_key_lines(environment_keys: tuple[str, ...]) ->
                 f"Invalid required post-deploy workflow environment key: {normalized_key!r}."
             )
         lines.append(f"required_workflow_environment_keys+=({shlex.quote(normalized_key)})")
-    return "\n".join(lines)
-
-
-def _render_bash_array_assignment_lines(array_name: str, values: tuple[str, ...]) -> str:
-    lines: list[str] = []
-    for raw_value in values:
-        normalized_value = raw_value.strip()
-        if not normalized_value:
-            raise click.ClickException(f"{array_name} values must be non-empty.")
-        lines.append(f"{array_name}+=({shlex.quote(normalized_value)})")
     return "\n".join(lines)
 
 
