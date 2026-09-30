@@ -10,24 +10,21 @@ events for the product's repository, verifies the build, and deploys it.
 
 Launchplane receives the webhook of the GitHub App its merge train already
 uses (the App is installed on every product repository). One receiver,
-`POST /v1/github/app-webhook`, handles:
+`POST /v1/github/app-webhook`, takes `workflow_run` and `pull_request`
+deliveries. Everything else is acknowledged and ignored.
 
-- `workflow_run` with action `completed`, for the product's
-  `.github/workflows/build.yml`:
-  - `push` on the default branch: a **release** build, so deploy it to testing;
-  - `pull_request`: a **preview** build, so apply that PR's preview if the PR
-    carries the product's preview label.
-- `pull_request`:
-  - `closed`, or the preview label removed: destroy the preview;
-  - the preview label added: apply the preview from the PR head's verified
-    build, if one exists.
+Events carry no instructions. An event only says which target to look at
+again:
 
-Everything else is acknowledged and ignored.
+- a completed `workflow_run` of the product's `.github/workflows/build.yml`
+  from a `push`: the product's **testing** target;
+- a completed build from a `pull_request`, or a PR opened, reopened,
+  synchronized, labeled, unlabeled or closed: that PR's **preview** target.
 
-The webhook body is a hint only. Launchplane re-reads every fact it acts on
-through the GitHub API with the product's read-only build-provenance token
-(`verify_build_artifact`). A forged or replayed delivery can at most cause a
-check that fails or repeats work that is already done.
+Launchplane re-reads every fact it acts on through the GitHub API with the
+product's read-only build-provenance token (`verify_build_artifact`). A
+forged or replayed delivery can at most cause a reconcile that finds nothing
+to do.
 
 ## Receiving
 
@@ -36,53 +33,84 @@ check that fails or repeats work that is already done.
    else.
 2. Map `repository.id` to exactly one product profile by its recorded
    `repository_id`. An unknown repository is ignored.
-3. Record the delivery by `X-GitHub-Delivery` and return `202` at once. A
-   repeated delivery id does nothing.
-4. Queue one **product event** operation (product, kind, commit, PR number).
-   The existing Odoo worker claims it; the webhook request never waits on a
-   deploy.
+3. In one transaction, record the delivery by `X-GitHub-Delivery` and
+   request a reconcile of the target. Only then return `202`. A repeated
+   delivery id does nothing. A crash before the commit returns an error, and
+   GitHub redelivers.
 
-## Working a product event
+There is at most one pending reconcile per target. A new request for a
+target that already has one pending is folded into it, so bursts of events,
+redeliveries and the sweep cost one reconcile.
 
-- **release:** verify the build, `record_verified_build_artifact`, then queue
-  the stable target replacement for the product's testing lane with that
-  artifact. That operation already runs Odoo post-deploy, so there is no
-  separate post-deploy step. If testing already runs this artifact, stop.
-- **preview apply:** verify the build for the PR's current head, then run the
-  existing preview apply with the verified manifest. The manifest is not
-  recorded in the artifact store. The preview's slug and URL come from the
-  product profile as today. Post the result on the PR.
-- **preview destroy:** the existing destroy.
+## Reconciling
+
+The existing Odoo worker claims pending reconciles. Each one reads current
+state and makes the target match it, under the target's existing mutation
+reservation. The webhook request never waits on a deploy.
+
+- **testing:** the desired artifact is the newest commit on the default
+  branch's first-parent history that has a verified release build. A late
+  build of an older commit is never desired while a newer one exists, so it
+  cannot replace a newer deploy.
+  - If testing already runs the desired artifact, stop.
+  - Otherwise, `record_verified_build_artifact` and queue the stable target
+    replacement for the testing lane. Its idempotency key is the lane plus
+    the artifact id, so a crashed or repeated reconcile can't queue it twice.
+  - That operation already runs Odoo post-deploy, so there is no separate
+    post-deploy step.
+  - If the lane is busy, the reconcile stays pending and runs again after it.
+- **preview:** read the PR now.
+  - If it's open, carries the product's preview label, and its current head
+    has a verified preview build, the desired state is a preview running
+    that build. Otherwise the desired state is no preview.
+  - Compare the desired state with the preview record's verified build (run
+    id and attempt), not just whether a preview exists, then apply or
+    destroy.
+  - The manifest is not recorded in the artifact store. The preview's slug
+    and URL come from the product profile as today. Post the result on the
+    PR.
+  - Read the PR state again just before the provider change; if it moved,
+    the reconcile runs again.
 
 The preview apply orchestration now lives inside the HTTP app factory. It
 moves to a module the worker can call, with no change in behavior.
 
+## Bounded work
+
+A PR author controls that PR's build, so its uploads are untrusted input.
+
+- The manifest archive download stops at 2 MiB.
+- The unpacked manifest is read with a 2 MiB cap, so a compression bomb
+  fails without being expanded.
+- One worker handles one reconcile at a time per product.
+- A target whose reconcile fails is retried with backoff and stays visible
+  as failing.
+
 ## Who the work runs as
 
 Every queued deploy today carries a caller identity with a matching grant
-rule, re-checked before it runs. Event-driven work has no outside caller:
-Launchplane decides to act from its own records and GitHub's.
+rule, re-checked before it runs. Reconciles have no outside caller:
+Launchplane acts from its own records and GitHub's.
 
-Proposal: a built-in `launchplane_service` identity for work Launchplane
-starts itself. It is scoped to exactly these event-driven operations on
-products that name the repository, and it needs no grant rule. Anything a
-person or another agent starts still needs its grant. This is the direction
-change the owner approved on 2026-09-30, "Launchplane needs no grant to act on
-its own records", and it is decided before this is built.
+Proposal: an internal-only authorization variant, `launchplane_reconcile`,
+that the worker attaches to the operations it queues itself. It covers only:
+
+- the testing lane's stable target replacement;
+- a product's own PR previews.
+
+A request can never select this variant. Every route still requires its
+normal caller identity and grant, and the worker's re-check accepts the
+variant only for these operation kinds and destinations. Anything a person
+or another agent starts still needs its grant. This is the direction change
+the owner approved on 2026-09-30, "Launchplane needs no grant to act on its
+own records", and it is decided before this is built.
 
 ## Catch-up sweep
 
-A worker loop every 30 minutes covers missed deliveries. For each product
-with a `repository_id`, it looks at:
-
-- the default branch tip's successful build: if testing does not run it,
-  queue a release event;
-- open PRs with the preview label whose head has a successful build and no
-  current preview: queue a preview apply;
-- previews whose PR is closed or unlabeled: queue a destroy.
-
-The sweep reuses the same product event operation, so an event and the
-sweep cannot double-deploy.
+Every 30 minutes the worker requests a reconcile of every product's testing
+target, and of every preview target with an open labeled PR or an existing
+preview record. Reconciling is idempotent, so the sweep runs the same code as
+the events, and a missed or out-of-order event is corrected within one sweep.
 
 ## Owner steps
 
