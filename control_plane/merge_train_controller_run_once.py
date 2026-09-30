@@ -1781,6 +1781,7 @@ def _advance_active_candidate_record(
             transport=transport,
             repository=request.repository,
             base_branch=request.base_branch,
+            merge_method=repository_policy.merge_method,
             recorded_at=recorded_at,
             trace_id=trace_id,
             mutate=request.mutate,
@@ -2748,6 +2749,7 @@ def try_reflow_failed_merge_train_candidate(
     github_client: GitHubMergeTrainClient,
     repository: str,
     base_branch: str,
+    merge_method: str,
     recorded_at: str,
     trace_id: str,
     mutate: bool,
@@ -2794,7 +2796,17 @@ def try_reflow_failed_merge_train_candidate(
         base_sha=snapshot.base_sha,
     )
     if queue_unchanged and active_candidate_record.candidate.candidate_sha:
-        return None
+        return _reobserve_failed_merge_train_candidate(
+            candidate_store=candidate_store,
+            active_candidate_record=active_candidate_record,
+            github_client=github_client,
+            merge_method=merge_method,
+            repository=repository,
+            base_branch=base_branch,
+            recorded_at=recorded_at,
+            trace_id=trace_id,
+            mutate=mutate,
+        )
     candidate = build_merge_train_batch_candidate(
         ordinary_job_binding=active_candidate_record.ordinary_job_binding,
         dry_run_result=dry_run_result,
@@ -2825,6 +2837,75 @@ def try_reflow_failed_merge_train_candidate(
                 repository=repository,
                 base_branch=base_branch,
                 batch_id=active_candidate_record.candidate.batch_id,
+                replacement_record_id=candidate_record.record_id,
+            )
+        except Exception:
+            _supersede_merge_train_batch_candidate_record(
+                record_store=candidate_store,
+                record=candidate_record,
+            )
+            raise
+        result["merge_train_batch_candidate_record_id"] = candidate_record.record_id
+    return result
+
+
+def _reobserve_failed_merge_train_candidate(
+    *,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    active_candidate_record: MergeTrainBatchCandidateRecord,
+    github_client: GitHubMergeTrainClient,
+    merge_method: str,
+    repository: str,
+    base_branch: str,
+    recorded_at: str,
+    trace_id: str,
+    mutate: bool,
+) -> dict[str, object] | None:
+    """Let an unchanged candidate recover when its failed checks pass on a re-run.
+
+    Only a candidate that failed on check evidence is re-read, at its recorded
+    SHA. A failed service batch PR is closed and never reopened, so a
+    multi-entry merge batch stays failed until its queue changes.
+    """
+    candidate = active_candidate_record.candidate
+    if candidate.required_checks_status != "fail":
+        return None
+    if (
+        active_candidate_record.ordinary_job_binding is None
+        and len(candidate.entries) > 1
+        and merge_method == "merge"
+    ):
+        return None
+    try:
+        observed_candidate = github_client.observe_batch_candidate_checks(candidate=candidate)
+    except MergeTrainGitHubError:
+        return None
+    if observed_candidate.required_checks_status == "fail":
+        return None
+    result: dict[str, object] = {
+        "repository": repository,
+        "base_branch": base_branch,
+        "mode": "observe_candidate" if mutate else "dry-run",
+        "controller_action": "observe_candidate",
+        "superseded_merge_train_batch_candidate_record_id": active_candidate_record.record_id,
+        "candidate": observed_candidate.model_dump(mode="json"),
+    }
+    if mutate:
+        candidate_record = build_merge_train_batch_candidate_record(
+            ordinary_job_binding=active_candidate_record.ordinary_job_binding,
+            candidate=observed_candidate,
+            source=f"service:controller:candidate-reobserve:{trace_id}",
+            updated_at=recorded_at,
+        )
+        candidate_store.write_merge_train_batch_candidate_record(candidate_record)
+        # Progress ranks a failed record above a passed one in the same batch,
+        # so the failed records must be retired for the new evidence to count.
+        try:
+            _supersede_active_merge_train_batch_candidate_records(
+                record_store=candidate_store,
+                repository=repository,
+                base_branch=base_branch,
+                batch_id=candidate.batch_id,
                 replacement_record_id=candidate_record.record_id,
             )
         except Exception:
