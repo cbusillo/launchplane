@@ -948,10 +948,11 @@ Validate the operator UI shell with browser navigation or `GET /ui`. Do not use
 `HEAD /ui` as the only availability check, because static app-shell fallback
 behavior can differ between request methods.
 
-`POST /v1/every-code/github-webhook` and
-`POST /v1/manager-preview-approval/github-webhook` are the only unauthenticated
-write routes. They trust request bodies through route-specific GitHub webhook
-HMAC verification instead of OIDC. Before buffering or HMAC processing, the
+`POST /v1/every-code/github-webhook`,
+`POST /v1/manager-preview-approval/github-webhook`, and
+`POST /v1/github/app-webhook` are the only unauthenticated write routes. They
+trust request bodies through route-specific GitHub webhook HMAC verification
+instead of OIDC. Before buffering or HMAC processing, the
 ASGI boundary requires exactly
 one unsigned-decimal `Content-Length`, rejects transfer-encoded or missing-length
 requests, caps both declared and observed body bytes at 2 MiB, and rejects a
@@ -991,6 +992,20 @@ uncertainty on such a relevant delivery returns retryable `503` with no
 evidence; exact GitHub redelivery or the existing signed replay-envelope tooling
 is the reconcile path. Evidence conflicts return `409`. Responses expose only
 capture status, not policy actor IDs or logins.
+
+`POST /v1/github/app-webhook` receives Launchplane's own GitHub App deliveries
+(design: issue #2605). It verifies `X-Hub-Signature-256` with the managed
+`github_app_webhook` secret (see [secrets.md](secrets.md)) before parsing, maps
+`repository.id` to exactly one product profile `repository_id`, and in one
+transaction records the `X-GitHub-Delivery` id and folds a reconcile request
+for the chosen target: a completed `.github/workflows/build.yml`
+`workflow_run` from `push` selects the product's testing target; one from
+`pull_request`, or a PR `opened`/`reopened`/`synchronize`/`labeled`/
+`unlabeled`/`closed` delivery, selects that PR's preview target. Each target
+has at most one request row; new requests fold into it. A repeated delivery id
+changes nothing. Other events, unknown or ambiguous repositories, and `ping`
+return `202` and record nothing. The body only chooses the target; the future
+reconcile worker re-reads every fact from GitHub.
 
 The manager-preview webhook uses
 `LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET`, accepts signed
