@@ -38,6 +38,15 @@ provider effect was attempted for the blocked entry and the controller lease is
 released cleanly. Earlier entries in a multi-PR batch may already be merged; the
 returned landing plan identifies their persisted status.
 
+When a controller call keeps returning `merge_train_controller_lease_held`
+because an earlier call is still running, read the service log before calling
+again. Any GitHub API request taking 5s or more logs `Slow GitHub API request`.
+A controller call taking 60s or more logs `Slow operation`, with its trace ID,
+its GitHub request count and time, and its slowest request. To see where a
+running call is waiting, send the web process `SIGUSR1`, for example
+`docker kill --signal=USR1 <container>`. It writes every thread's stack to
+stderr and does not stop the service.
+
 ## Retired Approval Policies
 
 Change-impact and product-Owner policy endpoints are removed. Do not repair

@@ -22,6 +22,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Res
 from fastapi.datastructures import DefaultPlaceholder
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
+from control_plane.github_request_timing import github_request_tally
 from control_plane.http_routes.owner_secret_inputs import (
     OwnerSecretInputDependencies,
     register_owner_secret_input_routes,
@@ -871,6 +872,15 @@ STARLETTE_HTTP_EXCEPTION: Any = getattr(fastapi_exceptions, "StarletteHTTPExcept
 
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _run_merge_train_controller_with_github_tally(
+    *, operation: str, **kwargs: Any
+) -> MergeTrainControllerRunOnceResult:
+    # Runs in the worker thread, so the tally sees this call's GitHub requests only.
+    with github_request_tally(operation):
+        return execute_merge_train_controller_run_once(**kwargs)
+
 
 _ODOO_STABLE_BOOTSTRAP_OPERATION_CANCEL_ROUTE = (
     "/v1/drivers/odoo/stable-bootstrap/operations/{operation_id}/cancel"
@@ -5979,7 +5989,11 @@ def create_launchplane_fastapi_app(
             )
             # A landing can take minutes of GitHub calls; keep the event loop free.
             controller_result = await run_in_threadpool(
-                execute_merge_train_controller_run_once,
+                _run_merge_train_controller_with_github_tally,
+                operation=(
+                    f"merge-train controller {controller_request.repository}"
+                    f"@{controller_request.base_branch} trace {trace_id}"
+                ),
                 request=controller_request,
                 policy=policy_record.policy,
                 policy_sha256=policy_record.policy_sha256,
