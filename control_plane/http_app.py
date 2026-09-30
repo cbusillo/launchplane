@@ -67,6 +67,9 @@ from control_plane import (
     product_prelaunch_rebuild_policy as control_plane_product_prelaunch_rebuild_policy,
 )
 from control_plane import product_preview_tls as control_plane_product_preview_tls
+from control_plane import (
+    product_repository_identity as control_plane_product_repository_identity,
+)
 from control_plane import product_stable_lane_repair as control_plane_product_stable_lane_repair
 from control_plane import product_retirement as control_plane_product_retirement
 from control_plane import (
@@ -520,6 +523,7 @@ from control_plane.odoo_post_deploy_http import (
 )
 from control_plane import odoo_addon_settings_override as control_plane_odoo_addon_settings
 from control_plane import integration_allowances as control_plane_integration_allowances
+from control_plane import testing_lane_hold as control_plane_testing_lane_hold
 from control_plane.odoo_app_maintenance_http import (
     ODOO_APP_MAINTENANCE_ROUTE as _ODOO_APP_MAINTENANCE_ROUTE,
     OdooAppMaintenanceEnvelope,
@@ -912,8 +916,20 @@ _PRODUCT_CONFIG_MAX_BODY_BYTES = 2 * 1024 * 1024
 _PRODUCT_HEALTH_MONITORING_MAX_BODY_BYTES = 64 * 1024
 _PRODUCT_PRELAUNCH_REBUILD_POLICY_MAX_BODY_BYTES = 64 * 1024
 _PRODUCT_STABLE_LANE_REPAIR_MAX_BODY_BYTES = 64 * 1024
+_PRODUCT_REPOSITORY_IDENTITY_MAX_BODY_BYTES = 16 * 1024
 _ODOO_ADDON_SETTINGS_MAX_BODY_BYTES = 16 * 1024
 _INTEGRATION_ALLOWANCES_MAX_BODY_BYTES = 16 * 1024
+_INTEGRATION_ALLOWANCES_DENIED_MESSAGE = (
+    "Workflow cannot read or change integration allowances for the requested product/context."
+)
+_INTEGRATION_ALLOWANCES_NOT_FOUND_MESSAGE = (
+    "Odoo product lane was not found for the requested allowances."
+)
+_TESTING_HOLD_MAX_BODY_BYTES = 8 * 1024
+_TESTING_HOLD_DENIED_MESSAGE = (
+    "Workflow cannot read or change the testing hold for the requested product/context."
+)
+_TESTING_HOLD_NOT_FOUND_MESSAGE = "Odoo product lane was not found for the requested testing hold."
 _PRODUCT_OWNER_SETTING_MAX_BODY_BYTES = 16 * 1024
 _SECRET_REENCRYPT_MAX_BODY_BYTES = 64 * 1024
 _TENANT_REPOSITORY_CLASSIFICATION_MAX_BODY_BYTES = 64 * 1024
@@ -948,6 +964,7 @@ _AUTHZ_POLICY_RECOVERY_DIAGNOSTIC_ROUTE = (
 _PRODUCT_HEALTH_MONITORING_APPLY_ROUTE = "/v1/product-profiles/health-monitoring/apply"
 _PRODUCT_PRELAUNCH_REBUILD_POLICY_APPLY_ROUTE = "/v1/product-profiles/prelaunch-rebuild/apply"
 _PRODUCT_STABLE_LANE_REPAIR_APPLY_ROUTE = "/v1/product-profiles/stable-lane-repair/apply"
+_PRODUCT_REPOSITORY_IDENTITY_APPLY_ROUTE = "/v1/product-profiles/repository-identity/apply"
 _PRODUCT_OWNER_SETTING_ROUTE = "/v1/product-profiles/{product}/owner"
 _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     **{
@@ -996,6 +1013,12 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
         True,
         True,
     ),
+    _PRODUCT_REPOSITORY_IDENTITY_APPLY_ROUTE: (
+        "Product repository identity",
+        _PRODUCT_REPOSITORY_IDENTITY_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
     control_plane_odoo_addon_settings.ODOO_ADDON_SETTINGS_APPLY_ROUTE: (
         "Odoo addon settings",
         _ODOO_ADDON_SETTINGS_MAX_BODY_BYTES,
@@ -1005,6 +1028,12 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     control_plane_integration_allowances.INTEGRATION_ALLOWANCES_APPLY_ROUTE: (
         "Integration allowances",
         _INTEGRATION_ALLOWANCES_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    control_plane_testing_lane_hold.TESTING_HOLD_APPLY_ROUTE: (
+        "Testing hold",
+        _TESTING_HOLD_MAX_BODY_BYTES,
         True,
         True,
     ),
@@ -7404,7 +7433,7 @@ def create_launchplane_fastapi_app(
         )
         return response
 
-    def _authorize_integration_allowances(
+    def _authorize_lane_product_config(
         *,
         identity: LaunchplaneIdentity,
         action: str,
@@ -7412,6 +7441,7 @@ def create_launchplane_fastapi_app(
         context: str,
         instance: str,
         trace_id: str,
+        denied_message: str,
     ) -> None:
         if isinstance(identity, TerminalAgentIdentity):
             raise _launchplane_http_error(
@@ -7431,14 +7461,17 @@ def create_launchplane_fastapi_app(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message=(
-                    "Workflow cannot read or change integration allowances for the requested"
-                    " product/context."
-                ),
+                message=denied_message,
             )
 
-    def _require_integration_allowances_lane(
-        *, record_store: object, product: str, context: str, instance: str, trace_id: str
+    def _require_lane_product_config_lane(
+        *,
+        record_store: object,
+        product: str,
+        context: str,
+        instance: str,
+        trace_id: str,
+        not_found_message: str,
     ) -> None:
         # Authorization names a product; storage selects by context and instance, so
         # prove the product owns the lane before reading or writing it.
@@ -7451,7 +7484,7 @@ def create_launchplane_fastapi_app(
                 status_code=404,
                 trace_id=trace_id,
                 code="not_found",
-                message="Odoo product lane was not found for the requested allowances.",
+                message=not_found_message,
             ) from error
         except OdooPostDeployProductMismatchError as error:
             raise _launchplane_http_error(
@@ -7486,20 +7519,22 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Integration allowances read requires product, context and instance.",
             )
-        _authorize_integration_allowances(
+        _authorize_lane_product_config(
             identity=identity,
             action="product_config.plan",
             product=product,
             context=context,
             instance=instance,
             trace_id=trace_id,
+            denied_message=_INTEGRATION_ALLOWANCES_DENIED_MESSAGE,
         )
-        _require_integration_allowances_lane(
+        _require_lane_product_config_lane(
             record_store=record_store,
             product=product,
             context=context,
             instance=instance,
             trace_id=trace_id,
+            not_found_message=_INTEGRATION_ALLOWANCES_NOT_FOUND_MESSAGE,
         )
         try:
             result = control_plane_integration_allowances.read_integration_allowances(
@@ -7559,7 +7594,7 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Integration allowances request failed validation.",
             ) from error
-        _authorize_integration_allowances(
+        _authorize_lane_product_config(
             identity=identity,
             action=(
                 "product_config.apply"
@@ -7570,13 +7605,15 @@ def create_launchplane_fastapi_app(
             context=allowances_request.context,
             instance=allowances_request.instance,
             trace_id=trace_id,
+            denied_message=_INTEGRATION_ALLOWANCES_DENIED_MESSAGE,
         )
-        _require_integration_allowances_lane(
+        _require_lane_product_config_lane(
             record_store=record_store,
             product=allowances_request.product,
             context=allowances_request.context,
             instance=allowances_request.instance,
             trace_id=trace_id,
+            not_found_message=_INTEGRATION_ALLOWANCES_NOT_FOUND_MESSAGE,
         )
         typed_store = cast(
             control_plane_integration_allowances.IntegrationAllowancesStore, record_store
@@ -7656,6 +7693,191 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="invalid_request",
                 message="Integration allowances request failed validation.",
+            ) from error
+        response = accepted_evidence_response(
+            trace_id=trace_id, records=records, result=applied_plan.model_dump(mode="json")
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=route_path,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    async def read_testing_hold(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        product: Annotated[str, Query()] = "",
+        context: Annotated[str, Query()] = "",
+        instance: Annotated[str, Query()] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        product = product.strip()
+        context = context.strip().lower()
+        instance = instance.strip().lower()
+        if not (product and context and instance):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Testing hold read requires product, context and instance.",
+            )
+        _authorize_lane_product_config(
+            identity=identity,
+            action="product_config.plan",
+            product=product,
+            context=context,
+            instance=instance,
+            trace_id=trace_id,
+            denied_message=_TESTING_HOLD_DENIED_MESSAGE,
+        )
+        _require_lane_product_config_lane(
+            record_store=record_store,
+            product=product,
+            context=context,
+            instance=instance,
+            trace_id=trace_id,
+            not_found_message=_TESTING_HOLD_NOT_FOUND_MESSAGE,
+        )
+        try:
+            result = control_plane_testing_lane_hold.read_testing_hold(
+                record_store=cast(control_plane_testing_lane_hold.TestingHoldStore, record_store),
+                product=product,
+                context=context,
+                instance=instance,
+            )
+        except control_plane_testing_lane_hold.TestingHoldRefusal as error:
+            raise _launchplane_http_error(
+                status_code=404 if error.code == "target_record_missing" else 409,
+                trace_id=trace_id,
+                code=f"testing_hold_{error.code}",
+                message=str(error),
+            ) from error
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={"product_profile": product, "context": context, "instance": instance},
+            result=result.model_dump(mode="json"),
+        )
+
+    async def apply_testing_hold(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        route_path = control_plane_testing_lane_hold.TESTING_HOLD_APPLY_ROUTE
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Testing hold request failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Testing hold request failed validation.",
+            )
+        try:
+            hold_request = control_plane_testing_lane_hold.TestingHoldApplyRequest.model_validate(
+                raw_payload
+            )
+        except ValidationError as error:
+            # Never echo pydantic input: a reason could carry pasted material.
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Testing hold request failed validation.",
+            ) from error
+        _authorize_lane_product_config(
+            identity=identity,
+            action=(
+                "product_config.apply" if hold_request.mode == "apply" else "product_config.plan"
+            ),
+            product=hold_request.product,
+            context=hold_request.context,
+            instance=hold_request.instance,
+            trace_id=trace_id,
+            denied_message=_TESTING_HOLD_DENIED_MESSAGE,
+        )
+        _require_lane_product_config_lane(
+            record_store=record_store,
+            product=hold_request.product,
+            context=hold_request.context,
+            instance=hold_request.instance,
+            trace_id=trace_id,
+            not_found_message=_TESTING_HOLD_NOT_FOUND_MESSAGE,
+        )
+        typed_store = cast(control_plane_testing_lane_hold.TestingHoldStore, record_store)
+        actor = launchplane_identity_actor(identity)
+        records = {
+            "product_profile": hold_request.product,
+            "context": hold_request.context,
+            "instance": hold_request.instance,
+        }
+        if hold_request.mode == "dry-run":
+            try:
+                plan, _replacement = control_plane_testing_lane_hold.build_testing_hold_plan(
+                    record_store=typed_store, request=hold_request, actor=actor
+                )
+            except control_plane_testing_lane_hold.TestingHoldRefusal as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code=f"testing_hold_{error.code}",
+                    message=str(error),
+                ) from error
+            return accepted_evidence_response(
+                trace_id=trace_id, records=records, result=plan.model_dump(mode="json")
+            )
+
+        if not idempotency_key.strip():
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Testing hold apply requires an Idempotency-Key header.",
+            )
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=True,
+            request_payload=raw_payload,
+        )
+        if replay_response is not None:
+            return replay_response
+        try:
+            applied_plan = control_plane_testing_lane_hold.apply_testing_hold_plan(
+                record_store=typed_store, request=hold_request, actor=actor
+            )
+        except control_plane_testing_lane_hold.TestingHoldRefusal as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=f"testing_hold_{error.code}",
+                message=str(error),
+            ) from error
+        except control_plane_testing_lane_hold.TestingHoldStale as error:
+            raise _launchplane_http_error(
+                status_code=409, trace_id=trace_id, code="stale", message=str(error)
             ) from error
         response = accepted_evidence_response(
             trace_id=trace_id, records=records, result=applied_plan.model_dump(mode="json")
@@ -12961,6 +13183,291 @@ def create_launchplane_fastapi_app(
         )
         return response
 
+    async def apply_product_repository_identity(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        route_path = _PRODUCT_REPOSITORY_IDENTITY_APPLY_ROUTE
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Product repository identity request failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Product repository identity request failed validation.",
+            )
+        try:
+            identity_request = control_plane_product_repository_identity.ProductRepositoryIdentityApplyRequest.model_validate(
+                raw_payload
+            )
+        except ValidationError as error:
+            # Never echo pydantic input: the reason text is operator-supplied.
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Product repository identity request failed validation.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="product_profile.write",
+            product=identity_request.product,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot record the product repository identity.",
+            )
+        normalized_idempotency_key = idempotency_key.strip()
+        if identity_request.mode == "apply" and not normalized_idempotency_key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message=(
+                    "Product repository identity apply requests require an Idempotency-Key header."
+                ),
+            )
+        database_store = require_product_repository_identity_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+        payload_fingerprint = ""
+
+        def prepare_product_repository_identity_mutation() -> AcceptedEvidenceResponse | None:
+            preflight = database_store.prepare_db_only_mutation(
+                scope=idempotency_scope(identity),
+                route_path=route_path,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint=payload_fingerprint,
+            )
+            if preflight.status in {"missing", "released"}:
+                return None
+            if preflight.record is None:
+                raise RuntimeError(
+                    "Product repository identity mutation preflight requires evidence."
+                )
+            if preflight.status == "replayed":
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=preflight.record,
+                    route_path=route_path,
+                )
+            if preflight.status == "conflict":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different "
+                        "Launchplane request payload on this route."
+                    ),
+                )
+            if preflight.status == "in_progress":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_in_progress",
+                    message=(
+                        "A matching product repository identity mutation is already running. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                )
+            if preflight.status == "reconcile_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message=(
+                        "The product repository identity mutation requires reconciliation "
+                        "before retry."
+                    ),
+                )
+            raise RuntimeError(
+                "Unsupported product repository identity mutation preflight status: "
+                f"{preflight.status}"
+            )
+
+        if identity_request.mode == "apply":
+            payload_fingerprint = idempotency_request_fingerprint(
+                route_path=route_path,
+                payload=raw_payload,
+            )
+            replay_response = prepare_product_repository_identity_mutation()
+            if replay_response is not None:
+                return replay_response
+        try:
+            profile = database_store.read_product_profile_record(identity_request.product)
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"Product profile {identity_request.product} was not found.",
+            ) from error
+        try:
+            plan = control_plane_product_repository_identity.build_product_repository_identity_plan(
+                profile=profile,
+                request=identity_request,
+                all_profiles=database_store.list_product_profile_records(),
+                inventory_records=database_store.list_repository_inventory_records(),
+            )
+        except control_plane_product_repository_identity.ProductRepositoryIdentityRefusal as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=error.code,
+                message=str(error),
+            ) from error
+        records = {
+            "product_profile": identity_request.product,
+            "repository_inventory": plan.inventory_record_id,
+        }
+        if identity_request.mode == "dry-run":
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records=records,
+                result=plan.model_dump(mode="json", exclude_none=True),
+            )
+        if identity_request.reviewed_plan_sha256 != plan.plan_sha256:
+            replay_response = prepare_product_repository_identity_mutation()
+            if replay_response is not None:
+                return replay_response
+            # A retried apply whose first attempt wrote but lost its receipt finds the
+            # profile already holding exactly the inventory identity: report it
+            # unchanged instead of refusing it as stale.
+            if plan.changed:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="stale",
+                    message=(
+                        "Reviewed product repository identity plan no longer matches the "
+                        "stored profile or repository inventory."
+                    ),
+                )
+        replacement_profile = profile
+        profile_updated_at_after = profile.updated_at
+        if plan.changed:
+            try:
+                replacement_profile = control_plane_product_repository_identity.updated_product_repository_identity_profile(
+                    profile=profile,
+                    plan=plan,
+                    updated_at=utc_now_timestamp(),
+                )
+            except ValueError as error:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="invalid_product_profile",
+                    message="Updated product profile failed validation.",
+                ) from error
+            profile_updated_at_after = replacement_profile.updated_at
+        applied_plan = plan.model_copy(
+            update={"applied": True, "profile_updated_at_after": profile_updated_at_after}
+        )
+        receipt = accepted_evidence_response(
+            trace_id=trace_id,
+            records=records,
+            result=applied_plan.model_dump(mode="json", exclude_none=True),
+        )
+        mutation = DbOnlyMutationRequest(
+            scope=idempotency_scope(identity),
+            route_path=route_path,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint=payload_fingerprint,
+            lease_owner=trace_id,
+            response_status_code=202,
+            response_trace_id=trace_id,
+            response_payload=receipt.model_dump(mode="json", exclude_none=True),
+            lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
+        )
+        write_result = database_store.compare_and_write_product_profile_record(
+            expected_record=profile,
+            replacement_record=replacement_profile,
+            mutation=mutation,
+        )
+        if write_result.status == "replayed":
+            if write_result.idempotency_record is None:
+                raise RuntimeError("Replayed product profile write requires evidence.")
+            return replay_idempotent_response(
+                trace_id=trace_id,
+                stored_record=write_result.idempotency_record,
+                route_path=route_path,
+            )
+        if write_result.status == "idempotency_conflict":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="idempotency_key_reused",
+                message=(
+                    "Idempotency-Key was already used for a different "
+                    "Launchplane request payload on this route."
+                ),
+            )
+        if write_result.status == "missing":
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=(
+                    "Product profile disappeared before the repository identity could be recorded."
+                ),
+            )
+        if write_result.status == "changed":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="stale",
+                message=(
+                    "Product profile changed while applying the reviewed repository identity plan."
+                ),
+            )
+        if write_result.status == "reservation_in_progress":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="mutation_in_progress",
+                message=(
+                    "A matching product repository identity mutation is already running. "
+                    "Retry with the same Idempotency-Key."
+                ),
+            )
+        if write_result.status == "reconciliation_required":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="mutation_reconciliation_required",
+                message=(
+                    "The product repository identity mutation requires reconciliation before retry."
+                ),
+            )
+        stored_profile = database_store.read_product_profile_record(identity_request.product)
+        read_back = control_plane_product_repository_identity.read_back_identity(stored_profile)
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records=records,
+            result=applied_plan.model_copy(
+                update={
+                    "read_back": read_back,
+                    "read_back_matches": read_back == plan.identity_after,
+                }
+            ).model_dump(mode="json", exclude_none=True),
+        )
+
     async def apply_product_stable_lane_repair(
         request: Request,
         identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
@@ -13299,6 +13806,20 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="database_required",
                 message="Product preview TLS writes require Launchplane database storage.",
+            )
+        return record_store
+
+    def require_product_repository_identity_database_store(
+        *, record_store: object, trace_id: str
+    ) -> PostgresRecordStore:
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message=(
+                    "Product repository identity writes require Launchplane database storage."
+                ),
             )
         return record_store
 
@@ -24275,6 +24796,54 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        control_plane_testing_lane_hold.TESTING_HOLD_ROUTE,
+        read_testing_hold,
+        methods=["GET"],
+        status_code=200,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="read_testing_hold",
+        summary="Read a testing lane's staff-testing hold",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        control_plane_testing_lane_hold.TESTING_HOLD_APPLY_ROUTE,
+        apply_testing_hold,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": _openapi_model_schema(
+                            control_plane_testing_lane_hold.TestingHoldApplyRequest
+                        )
+                    }
+                },
+            }
+        },
+        operation_id="apply_testing_hold",
+        summary="Dry-run or apply a testing lane's staff-testing hold",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            413: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
         _ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
         write_odoo_website_bootstrap_override,
         methods=["POST"],
@@ -25257,6 +25826,38 @@ def create_launchplane_fastapi_app(
             403: {"model": LaunchplaneErrorResponse},
             404: {"model": LaunchplaneErrorResponse},
             409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PRODUCT_REPOSITORY_IDENTITY_APPLY_ROUTE,
+        apply_product_repository_identity,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": _openapi_model_schema(
+                            control_plane_product_repository_identity.ProductRepositoryIdentityApplyRequest
+                        )
+                    }
+                },
+            }
+        },
+        operation_id="apply_product_repository_identity",
+        summary="Plan or apply a product profile's GitHub repository identity",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            413: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
     )

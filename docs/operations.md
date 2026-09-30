@@ -1599,6 +1599,16 @@ local `gh` authentication. Verify the configured actor with a token-scoped
 GitHub `/user` API read outside Launchplane, and never print or paste the token
 itself into logs, issues, or records.
 
+Record a product profile's immutable GitHub repository identity at its
+event-driven switch-over with the deployed service route
+`POST /v1/product-profiles/repository-identity/apply`, not a whole-profile
+`POST /v1/product-profiles` rewrite. Make sure the repository is tracked in the
+repository inventory first. Run `mode=dry-run` with the product and a reason,
+review the before/after identity, the inventory record it came from, and the
+plan SHA-256, then apply with that SHA-256 and an `Idempotency-Key`. Confirm
+`read_back_matches` is `true`. The caller needs a target-product-scoped
+`product_profile.write` grant.
+
 Use the manual Product Preview TLS workflow for a bounded change to an
 Odoo-driver product profile's preview certificate policy. Run `mode=dry-run`
 first with the target product, requested `none` or `letsencrypt` value, and an
@@ -2550,6 +2560,16 @@ context only, and `context_instance` has both context and instance.
     restore removes the file too, because the restored database has not been
     checked. The web log says `web waits for the integration read-back to pass`
     while it waits; the next deploy's schedule releases it.
+- While site staff test on a product's testing lane, the site operator holds it
+  so a merge doesn't deploy mid-session; see
+  [event-driven deploys](event-driven-deploys.md#staff-testing-hold). Read the
+  hold with `GET /v1/product-config/testing-hold` (query `product`, `context`,
+  `instance`; needs `product_config.plan`). Set or lift it with
+  `POST /v1/product-config/testing-hold/apply` (`hold`, `reason`). It follows
+  the allowances route above: the same actions, dry-run digest, reviewed apply,
+  `Idempotency-Key`, lane ownership check, stale refusal and read-back. It
+  refuses any lane but `testing` (`testing_hold_not_testing_lane`) and a lane
+  with no tracked target record.
 - `odoo-overrides put-addon-setting --allow-direct-db-mutation` writes
   addon-shaped Odoo override intent such as Authentik or Shopify settings for a
   context and instance. Use it only for explicit local/bootstrap repair.

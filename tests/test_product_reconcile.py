@@ -9,6 +9,11 @@ from typing import cast
 from unittest.mock import patch
 
 from control_plane.build_provenance import BUILD_WORKFLOW_PATH
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetPolicies,
+    DokployTargetRecord,
+    DokployTargetStaffTestingHold,
+)
 from control_plane.contracts.odoo_preview_runtime_plan import OdooPreviewRuntimePlan
 from control_plane.contracts.odoo_stable_target_replacement import (
     LAUNCHPLANE_REQUIRED_ODOO_MODULES,
@@ -47,6 +52,12 @@ from control_plane.product_reconcile import (
     run_product_reconcile_once,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.testing_lane_hold import (
+    STAFF_TESTING_HOLD_CANCELLATION_REASON,
+    TestingHoldApplyRequest,
+    apply_testing_hold_plan,
+    build_testing_hold_plan,
+)
 from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsRequest,
     OdooPreviewApplyInputsResult,
@@ -332,6 +343,45 @@ class ProductReconcileTestCase(unittest.TestCase):
                 ),
             )
         )
+
+    def hold_testing(self) -> None:
+        self.store.write_dokploy_target_record(
+            DokployTargetRecord(
+                context="cm",
+                instance="testing",
+                policies=DokployTargetPolicies(
+                    staff_testing_hold=DokployTargetStaffTestingHold(
+                        reason="Staff are testing checkout.",
+                        recorded_by="site-operator",
+                        recorded_at="2026-09-30T09:00:00Z",
+                    )
+                ),
+                updated_at="2026-09-30T09:00:00Z",
+            )
+        )
+
+    def lift_testing_hold(self) -> None:
+        """Lift the hold the way the operator route does; it requests the testing reconcile."""
+        payload: dict[str, object] = {
+            "product": "site",
+            "context": "cm",
+            "instance": "testing",
+            "hold": False,
+            "reason": "Staff testing finished.",
+        }
+        plan, _ = build_testing_hold_plan(
+            record_store=self.store,
+            request=TestingHoldApplyRequest.model_validate(payload),
+            actor="site-operator",
+        )
+        lifted = apply_testing_hold_plan(
+            record_store=self.store,
+            request=TestingHoldApplyRequest.model_validate(
+                {**payload, "mode": "apply", "reviewed_plan_sha256": plan.plan_sha256}
+            ),
+            actor="site-operator",
+        )
+        self.assertTrue(lifted.reconcile_requested)
 
     def snapshot(self) -> tuple[object, ...]:
         return (
@@ -629,6 +679,83 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
 
 
+class ProductReconcileStaffTestingHoldTests(ProductReconcileTestCase):
+    def test_held_testing_lane_waits_and_lifting_the_hold_deploys(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.hold_testing()
+        self.request()
+
+        held = self.reconcile()
+
+        self.assertEqual(
+            (held["action"], held["held"], held["reason"]), ("wait", True, "staff_testing")
+        )
+        self.assertEqual(held["desired_artifact_id"], "artifact-cm-run-20-1")
+        self.assertEqual(
+            (held["hold_reason"], held["hold_recorded_by"]),
+            ("Staff are testing checkout.", "site-operator"),
+        )
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
+        self.assertEqual(self.store.list_artifact_manifests(), ())
+
+        self.lift_testing_hold()
+        deployed = self.reconcile()
+
+        self.assertEqual((deployed["action"], deployed["held"]), ("deploy", False))
+        (operation,) = self.store.list_odoo_stable_target_replacement_operation_records()
+        self.assertEqual(deployed["queued_operation_id"], operation.operation_id)
+        self.assertEqual(operation.request.artifact_id, "artifact-cm-run-20-1")
+
+    def test_hold_leaves_a_testing_lane_that_already_runs_the_build_alone(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.store.write_release_tuple_record(
+            ReleaseTupleRecord(
+                tuple_id="cm-testing-current",
+                context="cm",
+                channel="testing",
+                artifact_id="artifact-cm-run-20-1",
+                repo_shas={"site": DEPLOYABLE},
+                image_repository=IMAGE_REPOSITORY,
+                image_digest=_digest(DEPLOYABLE),
+                provenance="ship",
+                minted_at="2026-09-29T09:00:00Z",
+            )
+        )
+        self.hold_testing()
+        self.request()
+
+        plan = self.reconcile()
+
+        self.assertEqual(
+            (plan["action"], plan["reason"], plan["held"]), ("none", "already_deployed", False)
+        )
+
+    def test_deploy_cancelled_by_the_hold_is_not_a_failed_attempt(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        first = cast(str, self.reconcile()["queued_operation_id"])
+        # Staff start testing after the deploy was queued but before the worker ran it.
+        self.hold_testing()
+        with patch(
+            "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_stable_target_replacement_apply"
+        ) as execute:
+            run_odoo_stable_operation_worker_once(
+                record_store=self.store, control_plane_root_path=self.root, lease_owner="worker-a"
+            )
+        execute.assert_not_called()
+        cancelled = self.store.read_odoo_stable_target_replacement_operation_record(first)
+        self.assertEqual(cancelled.status, "cancelled")
+
+        self.lift_testing_hold()
+        redeployed = self.reconcile()
+
+        second = cast(str, redeployed["queued_operation_id"])
+        self.assertNotEqual(second, first)
+        self.assertNotIn("last_failed_operation_id", redeployed)
+        retry = self.store.read_odoo_stable_target_replacement_operation_record(second)
+        self.assertTrue(retry.idempotency_key.endswith(f":after-{first}"))
+
+
 class _MinuteClock(datetime):
     """Each plan is issued a minute after the last; lifecycle order is by issue time."""
 
@@ -830,6 +957,17 @@ class ProductReconcileGrantTests(ProductReconcileTestCase):
         finished = self.run_replacement(self.replacement())
 
         self.assertEqual((finished.status, finished.error_code), ("pass", ""))
+
+    def test_reconcile_grant_replacement_is_cancelled_while_testing_is_held(self) -> None:
+        self.hold_testing()
+
+        finished = self.run_replacement(self.replacement())
+
+        self.assertEqual((finished.status, finished.phase), ("cancelled", "cancelled"))
+        assert finished.cancellation is not None
+        self.assertEqual(finished.cancellation.reason, STAFF_TESTING_HOLD_CANCELLATION_REASON)
+        self.assertEqual(finished.cancellation.caller.identity_type, "launchplane_reconcile")
+        self.assertIsNone(finished.result)
 
     def test_reconcile_grant_is_refused_for_other_destinations(self) -> None:
         self.store.write_product_profile_record(

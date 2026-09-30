@@ -36,6 +36,7 @@ from control_plane.build_provenance import (
     verify_build_artifact,
 )
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
@@ -101,6 +102,11 @@ from control_plane.odoo_target_replacement_apply_http import (
     resolve_odoo_target_replacement_apply_lane,
 )
 from control_plane.provider_operations import DurableProviderOperationStore
+from control_plane.testing_lane_hold import (
+    STAFF_TESTING_HOLD_REASON,
+    is_staff_testing_hold_cancellation,
+    read_staff_testing_hold,
+)
 from control_plane.workflows.launchplane import PreviewMutationRecordStore, find_preview_record
 from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsRequest,
@@ -167,6 +173,10 @@ class ProductReconcileStore(Protocol):
     ) -> tuple[PreviewRecord, ...]: ...
 
     def read_preview_generation_record(self, generation_id: str) -> PreviewGenerationRecord: ...
+
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord: ...
 
 
 TransportFactory = Callable[[object, LaunchplaneProductProfileRecord], BuildProvenanceTransport]
@@ -277,6 +287,18 @@ def reconcile_testing_target(
     ):
         # Only the Odoo testing deploy runs on Launchplane's reconcile grant today.
         plan.update(held=True, reason="no_reconcile_deploy_for_driver")
+        return ReconcileOutcome(plan)
+    hold = read_staff_testing_hold(record_store=record_store, context=lane.context)
+    if hold is not None:
+        # Site staff are testing: nothing is recorded or queued until the hold is lifted.
+        plan.update(
+            action="wait",
+            held=True,
+            reason=STAFF_TESTING_HOLD_REASON,
+            hold_reason=hold.reason,
+            hold_recorded_by=hold.recorded_by,
+            hold_recorded_at=hold.recorded_at,
+        )
         return ReconcileOutcome(plan)
     manifest = record_verified_build_artifact(
         record_store=cast(VerifiedArtifactStore, record_store), verified=desired
@@ -427,7 +449,7 @@ def _next_testing_attempt(
                 return _TestingAttempt(
                     idempotency_key=key, deployed_operation_id=existing.operation_id
                 )
-        else:
+        elif not is_staff_testing_hold_cancellation(existing):
             failed_attempts += 1
             last_failed_operation_id = existing.operation_id
         # A passed attempt that testing no longer runs was rolled back: deploy again.
