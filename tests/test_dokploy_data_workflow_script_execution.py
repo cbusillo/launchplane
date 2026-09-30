@@ -125,8 +125,17 @@ def main(argv):
         passed_path.write_text(program[-2])
         log("write readback-passed")
         return 0
+    if program[:2] == ["sh", "-c"] and "psql" in program[2]:
+        log("probe database")
+        answer = os.environ.get("FAKE_DATABASE_PRESENT", "1")
+        if answer == "error":
+            print("psql: error: connection refused", file=sys.stderr)
+            return 2
+        print(answer)
+        return 0
     if program[:2] == ["python3", "-u"]:
         log("exec workflow")
+        log("workflow arguments " + " ".join(program[3:]))
         print(os.environ.get("FAKE_WORKFLOW_OUTPUT", "workflow ran"))
         return int(os.environ.get("FAKE_WORKFLOW_EXIT", "0"))
     if program[:2] == ["python3", "-"]:
@@ -337,6 +346,20 @@ def _render_script(
 
 def _render_restore_script(policies: DokployTargetPolicies | None = None) -> str:
     """Render the schedule script through the destructive-restore post-deploy entrypoint."""
+    return _render_post_deploy_script(policies, run_destructive_restore=True)
+
+
+def _render_preview_script() -> str:
+    """Render the schedule script the way an Odoo preview refresh runs it."""
+    return _render_post_deploy_script(None, bootstrap_missing_database=True)
+
+
+def _render_post_deploy_script(
+    policies: DokployTargetPolicies | None,
+    *,
+    run_destructive_restore: bool = False,
+    bootstrap_missing_database: bool = False,
+) -> str:
     schedule_payloads: list[dict[str, object]] = []
 
     def capture_schedule_payload(**kwargs: object) -> dict[str, str]:
@@ -406,7 +429,8 @@ def _render_restore_script(policies: DokployTargetPolicies | None = None) -> str
             token="secret-token",
             target_definition=target_definition,
             env_file=None,
-            run_destructive_restore=True,
+            run_destructive_restore=run_destructive_restore,
+            bootstrap_missing_database=bootstrap_missing_database,
         )
     if len(schedule_payloads) != 1:
         raise AssertionError(f"expected one schedule upsert, got {len(schedule_payloads)}")
@@ -526,6 +550,49 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.assertFalse(
             self._held_web_starts(overrides_payload="payload-a", database_name="other_db")
         )
+
+    def test_new_preview_bootstraps_its_missing_database_then_releases_web(self) -> None:
+        run = self._run(
+            _render_preview_script(),
+            FAKE_DATABASE_PRESENT="0",
+            FAKE_CONTAINER_PAYLOAD="payload-a",
+            FAKE_ODOO_DB=_fake_database(),
+        )
+
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("workflow arguments --bootstrap", run.docker_log)
+        self.assertIn("odoo_module_update_completed=true", run.stdout.splitlines())
+        self.assertTrue(run.readback_ran, run.docker_log)
+        self.assertTrue(self._held_web_starts(overrides_payload="payload-a"))
+
+    def test_preview_with_a_database_runs_maintenance(self) -> None:
+        run = self._run(
+            _render_preview_script(),
+            FAKE_DATABASE_PRESENT="1",
+            FAKE_CONTAINER_PAYLOAD="payload-a",
+            FAKE_ODOO_DB=_fake_database(),
+        )
+
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("workflow arguments --post-deploy-maintenance", run.docker_log)
+
+    def test_unanswered_database_probe_stops_before_touching_web(self) -> None:
+        run = self._run(_render_preview_script(), FAKE_DATABASE_PRESENT="error")
+
+        self.assertNotEqual(run.returncode, 0)
+        self.assertNotIn("exec workflow", run.docker_log)
+        self.assertNotIn(f"stop {WEB_CONTAINER_ID}", run.docker_log)
+
+    def test_stable_lanes_never_probe_or_bootstrap_on_deploy(self) -> None:
+        run = self._run(
+            _render_restore_script(),
+            FAKE_DATABASE_PRESENT="0",
+            FAKE_ODOO_DB=_fake_database(),
+        )
+
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertNotIn("probe database", run.docker_log)
+        self.assertNotIn("workflow arguments --bootstrap", run.docker_log)
 
     def test_failed_workflow_never_releases_held_web(self) -> None:
         # The workflow may fail before it applies a new payload; the clean database
