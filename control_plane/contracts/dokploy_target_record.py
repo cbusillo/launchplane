@@ -71,11 +71,31 @@ class DokployTargetIntegrationAllowance(BaseModel):
         return self
 
 
+class DokployTargetStaffTestingHold(BaseModel):
+    """Site staff are testing on this lane: event-driven deploys wait until it is lifted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str
+    recorded_by: str = ""
+    recorded_at: str = ""
+
+    @model_validator(mode="after")
+    def _validate_hold(self) -> "DokployTargetStaffTestingHold":
+        self.reason = self.reason.strip()
+        self.recorded_by = self.recorded_by.strip()
+        self.recorded_at = self.recorded_at.strip()
+        if not self.reason:
+            raise ValueError("A staff-testing hold requires a reason.")
+        return self
+
+
 class DokployTargetPolicies(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     shopify: DokployTargetShopifyPolicy = Field(default_factory=DokployTargetShopifyPolicy)
     integration_allowances: tuple[DokployTargetIntegrationAllowance, ...] = ()
+    staff_testing_hold: DokployTargetStaffTestingHold | None = None
 
     @model_validator(mode="after")
     def _validate_unique_allowances(self) -> "DokployTargetPolicies":
