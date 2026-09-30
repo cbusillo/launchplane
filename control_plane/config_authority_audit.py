@@ -3281,11 +3281,31 @@ def _is_ingress_route_option_literal(*, path: str, key: str, value: object) -> b
     }
 
 
+def _is_runs_on_mechanic_selector(value_text: str) -> bool:
+    """Accept the JSON runner-selector form of the allowed runs-on mechanic values."""
+    try:
+        selector = json.loads(value_text)
+    except ValueError:
+        return False
+    if isinstance(selector, str):
+        return selector in WORKFLOW_RUNS_ON_MECHANIC_VALUES
+    return (
+        isinstance(selector, list)
+        and bool(selector)
+        and all(
+            isinstance(label, str) and label in WORKFLOW_RUNS_ON_MECHANIC_VALUES
+            for label in selector
+        )
+    )
+
+
 def _is_workflow_mechanic_key_value(*, key: str, value: object) -> bool:
     key_text = key.upper().replace(".", "_").replace("-", "_")
     value_text = _string_value(value).strip()
     if key_text == "RUNS_ON":
-        return value_text in WORKFLOW_RUNS_ON_MECHANIC_VALUES
+        return value_text in WORKFLOW_RUNS_ON_MECHANIC_VALUES or _is_runs_on_mechanic_selector(
+            value_text
+        )
     if key_text == "ID_TOKEN" and value_text == "write":
         return True
     if key_text == "GROUP" and "${{ inputs." in value_text and "${{ vars." not in value_text:
