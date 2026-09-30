@@ -1358,22 +1358,28 @@ records what it decided and did as `last_plan`:
   `allow_empty_data`, existing data, the artifact and its commit) under
   idempotency scope `launchplane-reconcile:<product>` and key
   `launchplane-reconcile:<product>:<context>:testing:<artifact id>`; the plan
-  names `queued_operation_id`. A repeated reconcile finds the same operation. A
-  lane with another active operation leaves the request `pending`
-  (`deferred: lane_busy`).
+  names `queued_operation_id`. A repeated reconcile finds the same operation,
+  including one awaiting provider reconciliation. When that attempt ended
+  (`fail`, `cancelled`, or `pass` while testing no longer runs the artifact),
+  the next attempt's key appends `:after-<previous operation id>`, and the plan
+  names `last_failed_operation_id`. After three failed attempts of one artifact
+  the request is `failed`. A lane with another active operation leaves the
+  request `pending` (`deferred: lane_busy`).
 - preview: `apply`, `destroy`, `wait` (open and labeled but no verified build
   yet), or `none`. An apply or destroy issues the preview plan the inputs route
   would and runs it through the durable preview operation under reservation
   scope `launchplane-reconcile:<product>`. Its key is the product, PR, verified
   build run and attempt (or `destroy`), and the preview record's current
   lifecycle state, so a crashed or repeated reconcile replays the operation and
-  a later lifecycle step is a new one. The PR is read again just before the
-  provider change; if it moved, the request returns to `pending`
-  (`deferred: pull_request_moved`). A blocked plan or a failed provider result
+  a later lifecycle step is a new one. After the reservation is held and just
+  before the provider apply, the PR is read again; if it closed, lost its label,
+  or moved its head, the reservation is released with no provider effect and
+  the request returns to `pending` (`deferred: pull_request_moved`). A blocked plan or a failed provider result
   records the request `failed` with the plan.
 
-Both run on the `launchplane_reconcile` grant (see Durable Operation
-Authorization). A product whose driver is not Odoo keeps `held: true` plans.
+The testing replacement carries the `launchplane_reconcile` grant (see Durable
+Operation Authorization); a preview runs in-process after a direct check that
+it is the product's own preview in its preview context. A product whose driver is not Odoo keeps `held: true` plans.
 Only the lease owner completes a request; one folded in during the run returns
 it to `pending`, and a deferred request folds itself in the same way. Every 30
 minutes each worker also requests the testing target of every active product
@@ -1727,8 +1733,7 @@ state/
   (active, Odoo, `repository_id`, testing lane in the recorded context); every
   other operation kind or destination fails with
   `operation_authorization_reconcile_refused`, and policy-rule checks never
-  accept it. The reconciler checks the same way before a preview apply or
-  destroy in the product's own preview context.
+  accept it.
 - A worker re-evaluates the recorded caller and the same managed rule against
   the current active policy after claim and again immediately before the first
   provider mutation. A later policy revision may authorize execution only when

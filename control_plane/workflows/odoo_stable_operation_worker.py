@@ -1252,7 +1252,6 @@ def _execute_target_replacement_operation(
             operation.request.instance == TESTING_INSTANCE
             and launchplane_reconcile_authorization_allows(
                 authorization=authorization,
-                operation="odoo_testing_target_replacement",
                 product=operation.product,
                 context=operation.context,
                 instances=(operation.instance,),

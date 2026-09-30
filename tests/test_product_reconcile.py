@@ -489,6 +489,83 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
             self.store.list_odoo_stable_target_replacement_operation_records(), (busy,)
         )
 
+    def finish(self, operation_id: str, status: str) -> None:
+        operation = self.store.read_odoo_stable_target_replacement_operation_record(operation_id)
+        changes: dict[str, object] = {"status": status, "phase": "failed"}
+        if status == "pass":
+            changes.update(phase="completed", finished_at="2026-09-30T12:00:00Z")
+        elif status == "fail":
+            changes.update(finished_at="2026-09-30T12:00:00Z", error_message="deploy failed")
+        else:
+            changes.update(error_code="provider_outcome_unknown", error_message="unknown")
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            OdooStableTargetReplacementOperationRecord.model_validate(
+                {**operation.model_dump(mode="json"), **changes}
+            )
+        )
+
+    def test_failed_testing_deploy_is_retried_once_per_reconcile(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        first = cast(str, self.reconcile()["queued_operation_id"])
+        self.finish(first, "fail")
+
+        self.request()
+        retried = self.reconcile()
+        self.request()
+        repeated = self.reconcile()
+
+        second = cast(str, retried["queued_operation_id"])
+        self.assertNotEqual(second, first)
+        self.assertEqual(retried["last_failed_operation_id"], first)
+        self.assertEqual(repeated["queued_operation_id"], second)
+        operations = self.store.list_odoo_stable_target_replacement_operation_records()
+        self.assertEqual(len(operations), 2)
+        (retry,) = (operation for operation in operations if operation.operation_id == second)
+        self.assertTrue(retry.idempotency_key.endswith(f":after-{first}"))
+
+    def test_testing_is_redeployed_after_a_rollback(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        first = cast(str, self.reconcile()["queued_operation_id"])
+        # It passed, but testing no longer runs it (the release still names another build).
+        self.finish(first, "pass")
+
+        self.request()
+        redeployed = self.reconcile()
+
+        self.assertNotEqual(redeployed["queued_operation_id"], first)
+        self.assertNotIn("last_failed_operation_id", redeployed)
+
+    def test_uncertain_testing_deploy_is_not_bypassed(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        first = cast(str, self.reconcile()["queued_operation_id"])
+        self.finish(first, "reconciliation_required")
+
+        self.request()
+        plan = self.reconcile()
+
+        self.assertEqual(
+            (plan["queued_operation_id"], plan["queued_operation_status"]),
+            (first, "reconciliation_required"),
+        )
+        self.assertEqual(len(self.store.list_odoo_stable_target_replacement_operation_records()), 1)
+
+    def test_testing_deploy_stops_after_three_failed_attempts(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        for _attempt in range(3):
+            self.request()
+            self.finish(cast(str, self.reconcile()["queued_operation_id"]), "fail")
+        self.request()
+
+        with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+            completed = self.run_once()
+
+        self.assertEqual(completed.state, "failed")
+        self.assertIn("failed 3 times", completed.last_error)
+        self.assertEqual(len(self.store.list_odoo_stable_target_replacement_operation_records()), 3)
+
     def test_testing_is_left_alone_when_the_release_already_has_that_digest(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
         self.store.write_release_tuple_record(
@@ -610,6 +687,35 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(self.store.list_preview_records(), ())
 
 
+class ProductReconcilePreviewRaceTests(ProductReconcileTestCase):
+    def test_a_pr_closed_while_the_plan_is_prepared_never_reaches_the_provider(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        build_inputs = self.provider.build_inputs
+
+        def close_while_preparing(**kwargs: object) -> dict[str, object]:
+            self.github.pull_request["state"] = "closed"
+            return build_inputs(**kwargs)  # type: ignore[arg-type]
+
+        self.provider.build_inputs = close_while_preparing  # type: ignore[method-assign]
+        self.request("preview", 5)
+
+        completed = self.run_once()
+
+        self.assertEqual(completed.state, "pending")
+        self.assertEqual(completed.last_plan["deferred"], "pull_request_moved")
+        self.assertEqual(self.provider.applied, [])
+        reservation = self.store.read_idempotency_record(
+            scope="launchplane-reconcile:site",
+            route_path=ODOO_PREVIEW_APPLY_ROUTE,
+            idempotency_key=cast(str, completed.last_plan["preview_plan_id"]),
+        )
+        self.assertTrue(reservation is None or reservation.state != "completed")
+        self.assertEqual(self.store.list_preview_records(), ())
+
+        # Next time round the closed PR has no preview to make.
+        self.assertEqual(self.reconcile()["action"], "none")
+
+
 class ProductReconcileGrantTests(ProductReconcileTestCase):
     """The worker runs a reconcile-granted operation only on the product's own testing lane."""
 
@@ -639,13 +745,10 @@ class ProductReconcileGrantTests(ProductReconcileTestCase):
             request=OdooStableTargetReplacementApplyRequest(
                 product=product, instance=instance, allow_empty_data=True
             ),
+            # A forged or stale record: the builder itself only ever names testing.
             authorization=build_launchplane_reconcile_authorization(
-                operation="odoo_testing_target_replacement",
-                product=product,
-                context=context,
-                instances=(instance,),
-                authorized_at="2026-09-30T00:00:00Z",
-            ),
+                product=product, context=context, authorized_at="2026-09-30T00:00:00Z"
+            ).model_copy(update={"instances": (instance,)}),
             status="pending",
             phase="created",
             created_at="2026-09-30T00:00:00Z",
@@ -717,11 +820,7 @@ class ProductReconcileGrantTests(ProductReconcileTestCase):
             instances=("testing",),
             authorized_at="2026-09-30T00:00:00Z",
             caller=build_launchplane_reconcile_authorization(
-                operation="odoo_testing_target_replacement",
-                product="site",
-                context="cm",
-                instances=("testing",),
-                authorized_at="2026-09-30T00:00:00Z",
+                product="site", context="cm", authorized_at="2026-09-30T00:00:00Z"
             ).caller,
         )
         self.store.write_odoo_stable_bootstrap_operation_record(

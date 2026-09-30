@@ -57,6 +57,11 @@ reservation. The webhook request never waits on a deploy.
   - Otherwise, `record_verified_build_artifact` and queue the stable target
     replacement for the testing lane. Its idempotency key is the lane plus
     the artifact id, so a crashed or repeated reconcile can't queue it twice.
+  - An active attempt (including one awaiting provider reconciliation) is
+    reported, never bypassed. When the last attempt ended (failed, cancelled,
+    or passed but rolled back) and testing still differs, the next attempt's
+    key names the attempt before it. After three failed attempts of one
+    artifact the reconcile fails until a newer build.
   - That operation already runs Odoo post-deploy, so there is no separate
     post-deploy step.
   - If the lane is busy, the reconcile stays pending and runs again after it.
@@ -72,8 +77,10 @@ reservation. The webhook request never waits on a deploy.
   - The manifest is not recorded in the artifact store. The preview's slug
     and URL come from the product profile as today. Post the result on the
     PR.
-  - Read the PR state again just before the provider change; if it moved,
-    the reconcile runs again.
+  - Read the PR state again after taking the preview's reservation and just
+    before the provider apply; if it closed, lost its label, or moved its
+    head, the reservation is released with no provider effect and the
+    reconcile runs again.
   - The apply or destroy issues the same service plan as the preview inputs
     route and runs it through `run_odoo_preview_apply_operation`, under
     reservation scope `launchplane-reconcile:<product>`. Its key is the PR,
@@ -101,18 +108,19 @@ Operations the reconciler starts carry the `launchplane_reconcile` grant
 instead: caller identity type `launchplane_reconcile`, subject
 `launchplane-reconciler`, and no managed rule or policy fields. Only
 `control_plane/launchplane_reconcile_authorization.py` builds it, called from
-the reconciler. It covers only:
+the reconciler. It is stored only on the stable target replacement of a
+product's own testing lane, the one operation it queues for later.
 
-- the stable target replacement of a product's own testing lane;
-- a product's own PR previews, in its preview context.
+A preview apply or destroy runs in-process, so it carries no grant: the
+reconciler checks directly that the destination is the product's own preview,
+in its preview context, before it runs.
 
 No request can supply it: route payloads forbid unknown fields, no request or
 response schema carries a durable authorization, and each route builds its
 authorization from the verified caller. Before the testing replacement runs,
 the worker re-reads the product profile and accepts the grant only for that
 product's testing lane in the recorded context; any other operation kind,
-instance, context, or product fails closed. The reconciler checks the preview
-destination the same way before it applies or destroys. The grant does not
+instance, context, or product fails closed. The grant does not
 replace operator approval at a stop boundary, a site owner's release approval,
 or a backup gate.
 

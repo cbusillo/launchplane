@@ -56,6 +56,9 @@ from control_plane.workflows.odoo_preview_runtime import (
 ExecuteOdooPreviewApply = Callable[..., dict[str, object]]
 ObserveOdooPreviewApply = Callable[..., tuple[str, dict[str, object] | None, bool]]
 OdooPreviewSupersessionQuiescenceCheck = Callable[..., bool]
+# Runs after the reservation is held and before the provider apply; raising
+# releases the reservation with no provider effect and re-raises to the caller.
+OdooPreviewPreMutationGuard = Callable[[], None]
 
 
 def _string_value(value: Any) -> str:
@@ -76,8 +79,10 @@ class OdooPreviewProviderMutationAdapter:
         deployment_record_id: str,
         execute_apply: ExecuteOdooPreviewApply = execute_odoo_preview_apply_result,
         observe_apply: ObserveOdooPreviewApply = observe_odoo_preview_apply_result,
+        pre_mutation_guard: OdooPreviewPreMutationGuard | None = None,
     ) -> None:
         self._control_plane_root = control_plane_root
+        self._pre_mutation_guard = pre_mutation_guard
         self._record_store = record_store
         self._profile = profile
         self._apply_request = apply_request
@@ -178,6 +183,11 @@ class OdooPreviewProviderMutationAdapter:
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
+        if self._pre_mutation_guard is not None:
+            try:
+                self._pre_mutation_guard()
+            except Exception as error:
+                raise ProviderMutationRejectedError(error) from error
         try:
             driver_result = self._execute_apply(
                 control_plane_root_path=self._control_plane_root,
@@ -274,6 +284,7 @@ def prepare_odoo_preview_apply_operation(
     supersession_is_quiescent: OdooPreviewSupersessionQuiescenceCheck = (
         odoo_preview_supersession_is_quiescent
     ),
+    pre_mutation_guard: OdooPreviewPreMutationGuard | None = None,
 ) -> OdooPreviewApplyOperation:
     """Build the adapter and supersession policy for a service-issued plan.
 
@@ -297,6 +308,7 @@ def prepare_odoo_preview_apply_operation(
         ),
         execute_apply=execute_apply,
         observe_apply=observe_apply,
+        pre_mutation_guard=pre_mutation_guard,
     )
     target_supersession = ProviderTargetSupersession(
         response_status_code=409,
@@ -345,6 +357,7 @@ def run_odoo_preview_apply_operation(
     supersession_is_quiescent: OdooPreviewSupersessionQuiescenceCheck = (
         odoo_preview_supersession_is_quiescent
     ),
+    pre_mutation_guard: OdooPreviewPreMutationGuard | None = None,
 ) -> DurableProviderOperationResult:
     """Run a service-issued Odoo preview apply/destroy durably, in-process.
 
@@ -365,4 +378,5 @@ def run_odoo_preview_apply_operation(
         execute_apply=execute_apply,
         observe_apply=observe_apply,
         supersession_is_quiescent=supersession_is_quiescent,
+        pre_mutation_guard=pre_mutation_guard,
     ).run(store)

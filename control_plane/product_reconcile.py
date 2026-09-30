@@ -50,6 +50,10 @@ from control_plane.contracts.product_reconcile import (
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
 )
+from control_plane.contracts.odoo_stable_target_replacement_operation import (
+    ODOO_STABLE_TARGET_REPLACEMENT_TERMINAL_OPERATION_STATUSES,
+    OdooStableTargetReplacementOperationRecord,
+)
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.github_app_identity import (
     GitHubAppIdentity,
@@ -59,7 +63,7 @@ from control_plane.github_app_identity import (
 from control_plane.launchplane_reconcile_authorization import (
     TESTING_INSTANCE,
     build_launchplane_reconcile_authorization,
-    launchplane_reconcile_authorization_allows,
+    launchplane_reconcile_preview_destination_allowed,
 )
 from control_plane.merge_train_github_token import MERGE_TRAIN_GITHUB_APP_SECRET_INTEGRATION
 from control_plane.merge_train_policy_source import (
@@ -92,6 +96,8 @@ from control_plane.odoo_target_replacement_apply_http import (
     OdooTargetReplacementApplyProductMismatchError,
     OdooTargetReplacementApplyRouteDependencyError,
     enqueue_odoo_target_replacement_apply_operation,
+    find_odoo_target_replacement_apply_operation_by_idempotency_key,
+    odoo_target_replacement_apply_operation_store,
     resolve_odoo_target_replacement_apply_lane,
 )
 from control_plane.provider_operations import DurableProviderOperationStore
@@ -106,6 +112,8 @@ PRODUCT_RECONCILE_SWEEP_SECONDS = 30 * 60
 # request is reclaimed after this, well inside one sweep.
 PRODUCT_RECONCILE_LEASE_SECONDS = 20 * 60
 RECONCILE_SOURCE = "launchplane-reconcile"
+TESTING_DEPLOY_MAX_FAILED_ATTEMPTS = 3
+TESTING_DEPLOY_MAX_ATTEMPT_CHAIN = 20
 PREVIEW_APPLY_TIMEOUT_SECONDS = 600
 TESTING_BUILD_RUN_PAGE_SIZE = 50
 TESTING_VERIFY_LIMIT = 3
@@ -286,26 +294,48 @@ def reconcile_testing_target(
             source_git_ref=manifest.source_commit,
         ),
     )
-    created_at = _utc_now()
-    idempotency_key = (
-        f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:{TESTING_INSTANCE}:"
-        f"{manifest.artifact_id}"
+    idempotency_scope = reconcile_reservation_scope(profile.product)
+    attempt = _next_testing_attempt(
+        record_store=record_store,
+        base_key=(
+            f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:{TESTING_INSTANCE}:"
+            f"{manifest.artifact_id}"
+        ),
+        idempotency_scope=idempotency_scope,
     )
+    if attempt.last_failed_operation_id:
+        plan["last_failed_operation_id"] = attempt.last_failed_operation_id
+    if attempt.active is not None:
+        # Includes an operation awaiting provider reconciliation: it is never bypassed.
+        plan.update(
+            held=False,
+            queued_operation_id=attempt.active.operation_id,
+            queued_operation_status=attempt.active.status,
+        )
+        return ReconcileOutcome(plan)
+    if attempt.failed_attempts >= TESTING_DEPLOY_MAX_FAILED_ATTEMPTS:
+        plan["held"] = False
+        return ReconcileOutcome(
+            plan,
+            error=(
+                f"The testing deploy of {manifest.artifact_id} failed "
+                f"{attempt.failed_attempts} times (last {attempt.last_failed_operation_id}); "
+                "Launchplane stops retrying it until a newer build."
+            ),
+        )
+    created_at = _utc_now()
+    idempotency_key = attempt.idempotency_key
     try:
         _records, operation = enqueue_odoo_target_replacement_apply_operation(
             record_store=record_store,
             request=envelope,
             context=lane.context,
             idempotency_key=idempotency_key,
-            idempotency_scope=reconcile_reservation_scope(profile.product),
+            idempotency_scope=idempotency_scope,
             request_fingerprint=_fingerprint(envelope.model_dump(mode="json")),
             created_at=created_at,
             authorization=build_launchplane_reconcile_authorization(
-                operation="odoo_testing_target_replacement",
-                product=profile.product,
-                context=lane.context,
-                instances=(TESTING_INSTANCE,),
-                authorized_at=created_at,
+                product=profile.product, context=lane.context, authorized_at=created_at
             ),
         )
     except OdooTargetReplacementApplyOperationActiveError as error:
@@ -324,6 +354,55 @@ def reconcile_testing_target(
         queued_operation_status=str(operation.get("status") or ""),
     )
     return ReconcileOutcome(plan)
+
+
+@dataclass(frozen=True)
+class _TestingAttempt:
+    idempotency_key: str
+    active: OdooStableTargetReplacementOperationRecord | None = None
+    failed_attempts: int = 0
+    last_failed_operation_id: str = ""
+
+
+def _next_testing_attempt(
+    *, record_store: object, base_key: str, idempotency_scope: str
+) -> _TestingAttempt:
+    """Follow this artifact's earlier attempts to the active one or the next key.
+
+    Each retry's key names the terminal attempt before it, so a crashed or
+    repeated reconcile finds the same attempt instead of queueing another.
+    """
+    operation_store = odoo_target_replacement_apply_operation_store(record_store)
+    key = base_key
+    failed_attempts = 0
+    last_failed_operation_id = ""
+    for _ in range(TESTING_DEPLOY_MAX_ATTEMPT_CHAIN):
+        existing = find_odoo_target_replacement_apply_operation_by_idempotency_key(
+            operation_store=operation_store,
+            idempotency_key=key,
+            idempotency_scope=idempotency_scope,
+        )
+        if existing is None:
+            return _TestingAttempt(
+                idempotency_key=key,
+                failed_attempts=failed_attempts,
+                last_failed_operation_id=last_failed_operation_id,
+            )
+        if existing.status not in ODOO_STABLE_TARGET_REPLACEMENT_TERMINAL_OPERATION_STATUSES:
+            return _TestingAttempt(
+                idempotency_key=key,
+                active=existing,
+                failed_attempts=failed_attempts,
+                last_failed_operation_id=last_failed_operation_id,
+            )
+        if existing.status != "pass":
+            failed_attempts += 1
+            last_failed_operation_id = existing.operation_id
+        # A passed attempt that testing no longer runs was rolled back: deploy again.
+        key = f"{base_key}:after-{existing.operation_id}"
+    raise ProductReconcileError(
+        f"The testing deploy has more than {TESTING_DEPLOY_MAX_ATTEMPT_CHAIN} attempts."
+    )
 
 
 def _plan_testing_target(
@@ -390,19 +469,12 @@ def reconcile_preview_target(
     if not product_profile_uses_odoo_driver(profile):
         plan.update(held=True, reason="no_reconcile_preview_for_driver")
         return ReconcileOutcome(plan)
-    if decision.observed and _pull_request_moved(
-        transport=transport,
-        profile=profile,
-        pull_request_number=pull_request_number,
-        observed=decision.observed,
-    ):
-        plan.update(held=False, deferred="pull_request_moved")
-        return ReconcileOutcome(plan, deferred=True)
     if control_plane_root is None:
         raise ProductReconcileError("A preview reconcile needs the control-plane root.")
     return _run_preview_operation(
         record_store=record_store,
         profile=profile,
+        transport=transport,
         decision=decision,
         pull_request_number=pull_request_number,
         control_plane_root=control_plane_root,
@@ -484,10 +556,15 @@ def _plan_preview_target(
     )
 
 
+class _PullRequestMovedError(Exception):
+    """The PR changed after the plan; nothing reached the provider."""
+
+
 def _run_preview_operation(
     *,
     record_store: ProductReconcileStore,
     profile: LaunchplaneProductProfileRecord,
+    transport: BuildProvenanceTransport,
     decision: _PreviewDecision,
     pull_request_number: int,
     control_plane_root: Path,
@@ -513,6 +590,18 @@ def _run_preview_operation(
     plan_id = build_odoo_preview_plan_id(scope=reservation_scope, idempotency_key=operation_key)
     plan.update(preview_operation_key=operation_key, preview_plan_id=plan_id)
     database_url = getattr(record_store, "database_url", None)
+
+    def pre_mutation_guard() -> None:
+        # Holding the reservation, just before the provider apply: a PR that closed,
+        # lost its label, or moved its head since the plan releases with no effect.
+        if decision.observed and _pull_request_moved(
+            transport=transport,
+            profile=profile,
+            pull_request_number=pull_request_number,
+            observed=decision.observed,
+        ):
+            raise _PullRequestMovedError
+
     try:
         inputs = preview_hooks.build_inputs(
             control_plane_root=control_plane_root,
@@ -549,23 +638,14 @@ def _run_preview_operation(
             ),
         )
         validate_odoo_preview_profile_authority(profile=profile, issued_plan=issued_plan)
-        authorization = build_launchplane_reconcile_authorization(
-            operation="odoo_preview_apply",
+        if not launchplane_reconcile_preview_destination_allowed(
+            record_store=record_store,
             product=profile.product,
             context=issued_plan.context,
-            instances=(issued_plan.preview_slug,),
-            authorized_at=_utc_now(),
-        )
-        if not launchplane_reconcile_authorization_allows(
-            authorization=authorization,
-            operation="odoo_preview_apply",
-            product=profile.product,
-            context=profile.preview.context,
-            instances=(issued_plan.preview_slug,),
-            record_store=record_store,
+            preview_slug=issued_plan.preview_slug,
         ):
             raise ProductReconcileError(
-                "Launchplane's reconcile grant does not cover this preview destination."
+                "Launchplane's reconcile may not change this preview destination."
             )
         plan.update(preview_slug=issued_plan.preview_slug, preview_url=issued_plan.preview_url)
         result = run_odoo_preview_apply_operation(
@@ -581,6 +661,7 @@ def _run_preview_operation(
             trace_id=f"{RECONCILE_SOURCE}-{uuid4().hex}",
             execute_apply=preview_hooks.execute_apply,
             observe_apply=preview_hooks.observe_apply,
+            pre_mutation_guard=pre_mutation_guard,
         )
         plan["preview_operation_status"] = result.status
         if result.status in {"in_progress", "target_busy"}:
@@ -603,6 +684,9 @@ def _run_preview_operation(
             issued_plan=issued_plan,
             records=records if isinstance(records, dict) else {},
         )
+    except _PullRequestMovedError:
+        plan["deferred"] = "pull_request_moved"
+        return ReconcileOutcome(plan, deferred=True)
     except (OdooPreviewPlanProvenanceError, OdooPreviewApplyConfigError) as error:
         return ReconcileOutcome(plan, error=f"The preview {operation} was refused: {error}")
     except (FileNotFoundError, ValueError, click.ClickException) as error:

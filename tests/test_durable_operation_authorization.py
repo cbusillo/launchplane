@@ -523,11 +523,7 @@ class DurableOperationAuthorizationTests(unittest.TestCase):
 class LaunchplaneReconcileGrantContractTests(unittest.TestCase):
     def _grant(self) -> DurableOperationAuthorization:
         return build_launchplane_reconcile_authorization(
-            operation="odoo_testing_target_replacement",
-            product="odoo-tenant-cm",
-            context="cm",
-            instances=("testing",),
-            authorized_at="2026-09-30T00:00:00Z",
+            product="odoo-tenant-cm", context="cm", authorized_at="2026-09-30T00:00:00Z"
         )
 
     def test_reconcile_grant_carries_no_policy_rule_and_round_trips(self) -> None:
