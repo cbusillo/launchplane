@@ -385,9 +385,11 @@ class MergeTrainPolicy(BaseModel):
             raise ValueError("merge train policy requires at least one repository policy")
         seen_keys: set[str] = set()
         for repository_policy in self.policies:
-            if repository_policy.policy_key in seen_keys:
+            # Unique ignoring repository casing, because lookups ignore it too.
+            key = f"{repository_policy.repository.casefold()}:{repository_policy.base_branch}"
+            if key in seen_keys:
                 raise ValueError("merge train policies must be unique by repository/base_branch")
-            seen_keys.add(repository_policy.policy_key)
+            seen_keys.add(key)
         return self
 
     @property
@@ -403,9 +405,11 @@ class MergeTrainPolicy(BaseModel):
         normalized_base_branch = _normalize_required_value(
             base_branch, "merge train policy lookup requires base_branch"
         )
+        # GitHub repository names are case-insensitive, and train records store
+        # them lowercased while the policy keeps the repository's own casing.
         for repository_policy in self.policies:
             if (
-                repository_policy.repository == normalized_repository
+                repository_policy.repository.casefold() == normalized_repository.casefold()
                 and repository_policy.base_branch == normalized_base_branch
             ):
                 return repository_policy

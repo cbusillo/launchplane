@@ -15,6 +15,7 @@ from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.http_app_test_support import _post_merge_train_controller_run_once
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
+from tests.test_http_app_merge_train import _LowercaseRepositorySnapshotReader
 from tests.support.auth import _StubVerifier
 from tests.support.merge_train import (
     _AdmissionInvokingMergeTrainGitHubClient,
@@ -227,6 +228,61 @@ class MergeAdmissionEvidenceFailureHttpTests(unittest.IsolatedAsyncioTestCase):
             ("idle", "clean", ""),
         )
         self.assertEqual(controller_state.last_phase, "admit_pull_request")
+
+    async def test_admission_for_a_mixed_case_repository_reaches_evidence(self) -> None:
+        # Admission must find the policy and the queue for a repository whose
+        # policy casing differs from GitHub's lowercase names (cbusillo/BD_to_AVP).
+        repository = "cbusillo/Mixed_Case_Repo"
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "test-token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(
+                state_dir, policy=build_test_merge_train_policy_record(repository=repository)
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            api = _EvidenceApi(
+                [
+                    {"filename": "private/path.py", "status": "modified"},
+                    {"filename": "private/path.py", "status": "modified"},
+                ],
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+                repository_evidence_provider=api.provider(),
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _LowercaseRepositorySnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_admission_live.GitHubMergeTrainSnapshotReader",
+                    _LowercaseRepositorySnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _AdmissionInvokingMergeTrainGitHubClient,
+                ),
+            ):
+                responses = [
+                    await _post_merge_train_controller_run_once(
+                        app,
+                        {
+                            "schema_version": 1,
+                            "repository": repository,
+                            "base_branch": "main",
+                            "mutate": True,
+                        },
+                    )
+                    for _ in range(5)
+                ]
+        result = responses[-1].json()["result"]
+        self.assertEqual(result["controller_action"], "block")
+        self.assertEqual(result["blocking_reason"]["code"], "repository_evidence_unavailable")
 
     async def test_admission_reads_evidence_with_the_policy_credential(self) -> None:
         with (

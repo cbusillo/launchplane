@@ -41,7 +41,7 @@ def ordinary_candidate_is_exact_landing_dependency(
             binding=binding,
             batch_id=candidate.batch_id,
         )
-        and landing_plan.repository == candidate.repository
+        and landing_plan.repository.casefold() == candidate.repository.casefold()
         and landing_plan.base_branch == candidate.base_branch
         and landing_plan.batch_id == candidate.batch_id
         and landing_plan.candidate_ref == candidate.candidate_ref
@@ -227,8 +227,8 @@ def _common_identity_mismatch(
         return "structural_provenance_missing"
     landing_plan = landing_plan_record.landing_plan
     if (
-        candidate.repository != evaluation.repository
-        or landing_plan.repository != evaluation.repository
+        candidate.repository.casefold() != evaluation.repository.casefold()
+        or landing_plan.repository.casefold() != evaluation.repository.casefold()
     ):
         return "structural_repository_mismatch"
     if (
@@ -396,7 +396,7 @@ def _stack_root_reason(
         or plan.root_pull_request_number != proof.root_pull_request_number
         or plan.root_initial_head_sha != proof.original_root_head_sha
         or stack_collapse_expected_root_head_sha(plan) != proof.collapsed_root_head_sha
-        or plan.repository != evaluation.repository
+        or plan.repository.casefold() != evaluation.repository.casefold()
         or plan.base_branch != evaluation.base_branch
         or plan.policy_key != evaluation.policy_key
         or plan.policy_sha256 != evaluation.policy_sha256

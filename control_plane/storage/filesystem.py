@@ -2354,7 +2354,7 @@ class FilesystemRecordStore:
                 MergeTrainControllerStateRecord,
                 "launchplane_merge_train_controller_states",
             )
-            if (not repository or record.repository == repository)
+            if (not repository or record.repository == repository.lower())
             and (not base_branch or record.base_branch == base_branch)
             and (not status or record.status == status)
         ]

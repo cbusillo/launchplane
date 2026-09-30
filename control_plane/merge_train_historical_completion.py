@@ -494,7 +494,7 @@ def read_historical_completion_snapshot(
     if candidate.ordinary_job_binding is not None or candidate_plan.stack_collapse_root is not None:
         raise HistoricalCompletionAssessmentFailure("unsupported", "stack_batch_unsupported")
     if (
-        candidate_plan.repository != plan.repository
+        candidate_plan.repository.casefold() != plan.repository.casefold()
         or candidate_plan.base_branch != plan.base_branch
         or candidate_plan.policy_key != plan.policy_key
         or candidate_plan.policy_sha256 != plan.policy_sha256
