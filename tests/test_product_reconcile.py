@@ -210,6 +210,7 @@ class FakePreviewProvider:
 
     def __init__(self) -> None:
         self.applied: list[tuple[str, int]] = []
+        self.omitted_integration_credential_keys: tuple[str, ...] = ()
 
     def hooks(self) -> PreviewProviderHooks:
         return PreviewProviderHooks(
@@ -259,6 +260,7 @@ class FakePreviewProvider:
                 compose_name=f"cm-odoo-preview-{slug}",
                 summary="ready",
             ),
+            omitted_integration_credential_keys=self.omitted_integration_credential_keys,
             source=request.source,
         ).model_dump(mode="json")
 
@@ -835,6 +837,16 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(self.reconcile()["action"], "apply")
         self.assertEqual(self.provider.applied, [("refresh", 5), ("destroy", 5), ("refresh", 5)])
         self.assertEqual(self.store.list_preview_records()[0].state, "active")
+
+    def test_preview_plan_records_the_credentials_the_preview_leaves_out(self) -> None:
+        self.provider.omitted_integration_credential_keys = ("ODOO_SMTP_PASSWORD",)
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+
+        applied = self.reconcile()
+
+        self.assertEqual(applied["preview_result_status"], "pass")
+        self.assertEqual(applied["omitted_integration_credential_keys"], ["ODOO_SMTP_PASSWORD"])
 
     def test_preview_is_not_changed_while_it_waits_or_has_nothing_to_do(self) -> None:
         cases: tuple[tuple[str, dict[str, object], bool, bool, str], ...] = (

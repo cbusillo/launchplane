@@ -386,7 +386,9 @@ decryption key state denies the reveal or resolution.
   classification and it needs no policy rule. An explicit rule for the key
   still applies when one exists. Preview targets never get this: previews copy
   template-lane values, and their check retargets the template's bindings to
-  the preview, so a copied lane secret still needs an explicit rule.
+  the preview, so a copied lane secret still needs an explicit rule. An Odoo
+  preview receives a copied integration credential without such a rule as an
+  empty value and its plan lists the key name instead of refusing to start.
 - The writer of a secret stored for one exact lane can declare its class with
   `secret_class` on a product-config secret entry (scope `context_instance`
   only). Launchplane stores it on the binding as `declared_secret_class`, and

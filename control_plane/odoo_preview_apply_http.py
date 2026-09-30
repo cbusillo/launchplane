@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
@@ -56,6 +57,7 @@ from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsRequest,
     OdooPreviewDokployApplyRequest,
     OdooPreviewDokployApplyResult,
+    OdooPreviewDokployDryRunPlan,
     build_odoo_preview_apply_inputs,
     execute_odoo_preview_dokploy_apply,
     observe_odoo_preview_dokploy_apply,
@@ -90,22 +92,11 @@ class OdooPreviewPlanProvenanceError(ValueError):
 
 
 class OdooPreviewApplyConfigError(click.ClickException):
-    def __init__(
-        self,
-        *,
-        context: str,
-        instance: str,
-        missing_keys: tuple[str, ...] = (),
-        refused_keys: tuple[str, ...] = (),
-        code: str = "odoo_preview_runtime_config_incomplete",
-        message: str = "Odoo preview apply runtime environment is incomplete.",
-    ) -> None:
-        super().__init__(message)
+    def __init__(self, *, context: str, instance: str, missing_keys: tuple[str, ...]) -> None:
+        super().__init__("Odoo preview apply runtime environment is incomplete.")
         self.context = context
         self.instance = instance
         self.missing_keys = tuple(sorted(missing_keys))
-        self.refused_keys = tuple(sorted(refused_keys))
-        self.code = code
 
 
 class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
@@ -159,14 +150,46 @@ def build_odoo_preview_apply_inputs_result(
     request: OdooPreviewApplyInputsRequest,
     database_url: str | None,
 ) -> dict[str, object]:
-    driver_result = build_odoo_preview_apply_inputs(
+    return _build_odoo_preview_apply_inputs(
+        control_plane_root=control_plane_root,
+        record_store=record_store,
+        profile=profile,
+        request=request,
+        database_url=database_url,
+    ).model_dump(mode="json")
+
+
+def _build_odoo_preview_apply_inputs(
+    *,
+    control_plane_root: Path,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    request: OdooPreviewApplyInputsRequest,
+    database_url: str | None,
+) -> OdooPreviewApplyInputsResult:
+    result = build_odoo_preview_apply_inputs(
         control_plane_root=control_plane_root,
         record_store=cast(Any, record_store),
         profile=profile,
         request=request,
         database_url=database_url,
     )
-    return driver_result.model_dump(mode="json")
+    if result.status != "ready" or result.operation != "refresh":
+        return result
+    try:
+        environment = _odoo_preview_service_environment(
+            control_plane_root_path=control_plane_root,
+            record_store=record_store,
+            profile=profile,
+            plan=result.dry_run_plan,
+            database_url=database_url,
+        )
+    except (FileNotFoundError, ValueError, click.ClickException):
+        # Apply resolves the same environment before any provider change and refuses
+        # there with the details, so the plan only lists what it can resolve now.
+        return result
+    omitted_keys = environment.omitted_integration_credential_keys
+    return result.model_copy(update={"omitted_integration_credential_keys": omitted_keys})
 
 
 def build_odoo_preview_plan_id(*, scope: str, idempotency_key: str) -> str:
@@ -316,9 +339,9 @@ def refresh_odoo_preview_issued_plan(
             message="Odoo preview plan has expired; request fresh apply inputs.",
         )
     try:
-        current_plan = build_odoo_preview_apply_inputs(
+        current_plan = _build_odoo_preview_apply_inputs(
             control_plane_root=control_plane_root,
-            record_store=cast(Any, record_store),
+            record_store=record_store,
             profile=profile,
             request=issued_plan.plan_request,
             database_url=database_url,
@@ -370,13 +393,13 @@ def execute_odoo_preview_apply_result(
     )
     if current_request.apply.dry_run_plan.repository.strip() != profile.repository.strip():
         raise ValueError("Odoo preview apply repository does not match product profile.")
-    resolved_environment_values = _odoo_preview_service_environment_values(
+    resolved_environment_values = _odoo_preview_service_environment(
         control_plane_root_path=control_plane_root_path,
         record_store=record_store,
         profile=profile,
-        apply_request=current_request.apply,
+        plan=current_request.apply.dry_run_plan,
         database_url=database_url,
-    )
+    ).values
     resolved_runtime_identity = runtime_identity
     if current_request.apply.dry_run_plan.operation == "refresh":
         expected_runtime_identity = build_odoo_preview_runtime_identity(
@@ -904,17 +927,22 @@ def driver_result_contains_status(
     )
 
 
-def _odoo_preview_service_environment_values(
+@dataclass(frozen=True)
+class _OdooPreviewServiceEnvironment:
+    values: dict[str, str]
+    omitted_integration_credential_keys: tuple[str, ...] = ()
+
+
+def _odoo_preview_service_environment(
     *,
     control_plane_root_path: Path,
     record_store: object,
     profile: LaunchplaneProductProfileRecord,
-    apply_request: OdooPreviewDokployApplyRequest,
+    plan: OdooPreviewDokployDryRunPlan,
     database_url: str | None,
-) -> dict[str, str]:
-    plan = apply_request.dry_run_plan
+) -> _OdooPreviewServiceEnvironment:
     if plan.operation == "destroy":
-        return {}
+        return _OdooPreviewServiceEnvironment(values={})
     preview_profile = profile.preview
     template_instance = preview_profile.template_instance.strip()
     # The preview runs unmerged code, so it gets only the template lane's site
@@ -993,7 +1021,7 @@ def _odoo_preview_service_environment_values(
             instance=template_instance,
             missing_keys=missing_env_keys,
         )
-    _refuse_copied_integration_credentials(
+    omitted_keys = _copied_integration_credentials_to_omit(
         record_store=record_store,
         preview_context=preview_profile.context,
         preview_slug=plan.preview_slug,
@@ -1004,22 +1032,26 @@ def _odoo_preview_service_environment_values(
             if environment_values.get(key) == value
         },
     )
-    return environment_values
+    for key in omitted_keys:
+        environment_values[key] = ""
+    return _OdooPreviewServiceEnvironment(
+        values=environment_values, omitted_integration_credential_keys=omitted_keys
+    )
 
 
 # The preview runs unmerged code against whatever its copied environment reaches, so a
-# template-lane integration credential it keeps (including one inside a URL such as
-# SMTP_URL) needs a key-safety rule that allows previews. The template lane's own
+# template-lane integration credential (including one inside a URL such as SMTP_URL) is
+# left out unless a key-safety rule allows it on previews. The template lane's own
 # classification and integration allowances never carry over. The preview stack's own
 # database and admin credentials reach nothing outside it and are not checked here.
-def _refuse_copied_integration_credentials(
+def _copied_integration_credentials_to_omit(
     *,
     record_store: object,
     preview_context: str,
     preview_slug: str,
     template_instance: str,
     copied_values: dict[str, str],
-) -> None:
+) -> tuple[str, ...]:
     policy_store = cast(RuntimeKeySafetyPolicyReadStore, record_store)
     try:
         template_bindings = preview_template_runtime_bindings(
@@ -1034,26 +1066,15 @@ def _refuse_copied_integration_credentials(
     )
     try:
         policy_record = latest_active_runtime_key_safety_policy(policy_store)
-    except (AttributeError, ValueError) as error:
-        if not candidate_keys:
-            return
-        raise OdooPreviewApplyConfigError(
-            context=preview_context,
-            instance=template_instance,
-            refused_keys=candidate_keys,
-            code="odoo_preview_copied_integration_credential_refused",
-            message=(
-                "Odoo preview copies template-lane integration credentials and no "
-                "runtime key-safety policy is active."
-            ),
-        ) from error
+    except (AttributeError, ValueError):
+        return candidate_keys
     copied_keys = preview_copied_integration_credential_keys(
         copied_values,
         template_bindings=template_bindings,
         extra_integration_key_markers=policy_record.integration_key_markers,
     )
     if not copied_keys:
-        return
+        return ()
     evaluation = evaluate_preview_copied_runtime_key_safety(
         template_bindings=template_bindings,
         policy_record=policy_record,
@@ -1062,19 +1083,10 @@ def _refuse_copied_integration_credentials(
         copied_keys=copied_keys,
     )
     if evaluation.status == "pass":
-        return
-    raise OdooPreviewApplyConfigError(
-        context=preview_context,
-        instance=template_instance,
-        refused_keys=tuple(
-            {finding.binding_key for finding in evaluation.findings if finding.binding_key}
-        ),
-        code="odoo_preview_copied_integration_credential_refused",
-        message=(
-            "Odoo preview copies template-lane integration credentials that no "
-            "runtime key-safety rule allows on previews."
-        ),
-    )
+        return ()
+    refused_keys = {finding.binding_key for finding in evaluation.findings if finding.binding_key}
+    # A failure not tied to a key leaves every copied credential out.
+    return tuple(sorted(refused_keys)) if refused_keys else copied_keys
 
 
 def _odoo_preview_identifier(value: str, *, suffix: str) -> str:
