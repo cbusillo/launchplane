@@ -738,6 +738,29 @@ class RouteBindingEvidenceTests(unittest.TestCase):
         self.assertEqual(plan.status, "blocked")
         self.assertEqual(plan.findings[0].code, "provider_target_projection_conflict")
 
+    def test_reconcile_ignores_a_later_lane_setting_write_on_the_dokploy_target(self) -> None:
+        plan = plan_route_binding_reconcile(
+            record_store=_RouteBindingReconcileFakeStore(
+                provider_target=_provider_target_record(),
+                dokploy_target=_dokploy_target_record().model_copy(
+                    update={"updated_at": "2026-07-12T00:10:00Z"}
+                ),
+                edge_endpoints=(_edge_endpoint_record(),),
+                ingress_audits=(_ingress_audit_record(),),
+            ),
+            request=RouteBindingReconcileRequest(
+                product="example-product",
+                context="example-testing",
+                instance="web",
+                evaluated_at="2026-07-12T00:15:00Z",
+            ),
+        )
+
+        self.assertNotIn(
+            "provider_target_projection_conflict", [finding.code for finding in plan.findings]
+        )
+        self.assertNotEqual(plan.status, "blocked")
+
     def test_reconcile_fails_closed_when_edge_endpoint_evidence_is_ambiguous(self) -> None:
         plan = plan_route_binding_reconcile(
             record_store=_RouteBindingReconcileFakeStore(

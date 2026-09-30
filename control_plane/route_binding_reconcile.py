@@ -682,6 +682,8 @@ def _resolve_ingress_audit(
 
 
 def _provider_target_projection(record: ProviderTargetRecord) -> tuple[object, ...]:
+    # Identity only: a lane setting written to the Dokploy target record (a testing
+    # hold, an integration allowance) moves its updated_at without changing the target.
     return (
         record.context,
         record.instance,
@@ -691,7 +693,6 @@ def _provider_target_projection(record: ProviderTargetRecord) -> tuple[object, .
         record.display_name,
         record.provider_target_type,
         tuple(sorted(record.provider_evidence.items())),
-        record.updated_at,
     )
 
 
