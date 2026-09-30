@@ -32,6 +32,12 @@ _MERGE_TRAIN_TOKEN_PERMISSIONS = {
     "statuses": "read",
     "workflows": "write",
 }
+_BUILD_PROVENANCE_TOKEN_PERMISSIONS = {
+    "actions": "read",
+    "contents": "read",
+    "metadata": "read",
+    "pull_requests": "read",
+}
 _ORDINARY_AGENT_EFFECT_PERMISSION_CEILINGS: dict[str, dict[str, str]] = {
     "guarded_merge": {
         "contents": "write",
@@ -88,6 +94,7 @@ __all__ = [
     "GitHubAppIdentity",
     "GitHubAppInstallationToken",
     "GitHubAppInstallationInspection",
+    "mint_build_provenance_installation_token",
     "resolve_advisory_github_app_identity",
     "mint_repository_installation_token",
     "mint_merge_train_installation_token",
@@ -188,6 +195,34 @@ def mint_repository_installation_token(
         allowed_token_permissions=_ALLOWED_INSTALLATION_PERMISSIONS,
         identity_label="Launchplane advisory GitHub App",
         permission_boundary_label="advisory check projection",
+        api_request=api_request,
+        now=now,
+    )
+
+
+def mint_build_provenance_installation_token(
+    *,
+    identity: GitHubAppIdentity,
+    repository: str,
+    repository_id: str,
+    api_request: GitHubApiRequest = github_api_request,
+    now: datetime | None = None,
+) -> GitHubAppInstallationToken:
+    """Mint a read-only token for one product repository's build runs and artifacts."""
+    return _mint_repository_installation_token(
+        identity=identity,
+        repository=repository,
+        repository_id=repository_id,
+        requested_permissions={
+            key: value
+            for key, value in _BUILD_PROVENANCE_TOKEN_PERMISSIONS.items()
+            if key != "metadata"
+        },
+        required_installation_permissions=_BUILD_PROVENANCE_TOKEN_PERMISSIONS,
+        allowed_installation_permissions=None,
+        allowed_token_permissions=_BUILD_PROVENANCE_TOKEN_PERMISSIONS,
+        identity_label="Build provenance GitHub App",
+        permission_boundary_label="build provenance read",
         api_request=api_request,
         now=now,
     )
