@@ -184,7 +184,7 @@ def validate_stack_collapse_record_for_landing(
     policy_sha256: str,
 ) -> None:
     stack_collapse_plan = collapse_record.plan
-    if stack_collapse_plan.repository != landing_plan.repository:
+    if stack_collapse_plan.repository.casefold() != landing_plan.repository.casefold():
         raise ValueError("merge train stack collapse repository does not match landing plan")
     if stack_collapse_plan.base_branch != landing_plan.base_branch:
         raise ValueError("merge train stack collapse base branch does not match landing plan")

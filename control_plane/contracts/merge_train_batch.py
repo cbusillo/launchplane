@@ -120,7 +120,7 @@ class MergeTrainBatchCandidate(BaseModel):
                     "completed batch candidate requires complete structural provenance"
                 )
             if (
-                provenance.repository != self.repository
+                provenance.repository.casefold() != self.repository.casefold()
                 or provenance.base_branch != self.base_branch
                 or provenance.base_sha != self.base_sha
                 or provenance.policy_key != self.policy_key
@@ -387,7 +387,8 @@ class MergeTrainBatchLandingPlanRecord(BaseModel):
                 repository=self.landing_plan.repository,
                 base_branch=self.landing_plan.base_branch,
             )
-            or historical_completion.repository != self.landing_plan.repository
+            or historical_completion.repository.casefold()
+            != self.landing_plan.repository.casefold()
             or historical_completion.base_branch != self.landing_plan.base_branch
             or historical_completion.landing_plan_id != self.landing_plan.plan_id
             or historical_completion.batch_id != self.landing_plan.batch_id

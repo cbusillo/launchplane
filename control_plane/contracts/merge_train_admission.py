@@ -275,7 +275,10 @@ def build_merge_train_controller_admission_decision(
 def _validate_latest_run_scope(
     *, latest_run: MergeTrainRunRecord, repository: str, base_branch: str
 ) -> None:
-    if latest_run.repository != repository or latest_run.base_branch != base_branch:
+    if (
+        latest_run.repository.casefold() != repository.casefold()
+        or latest_run.base_branch != base_branch
+    ):
         raise ValueError(
             "latest merge train run scope does not match requested repository/base_branch"
         )

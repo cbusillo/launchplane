@@ -28,6 +28,7 @@ from control_plane.merge_admission import (
     MergeAdmissionEvaluation,
 )
 from control_plane.merge_train import MergeTrainDryRunSnapshot
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from control_plane.merge_train_controller_run_once import MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION
 from control_plane.merge_train_github import MergeTrainGitHubMergeRejectedError
 from control_plane.merge_train_github import MergeTrainGitHubStaleHeadError
@@ -93,6 +94,28 @@ from tests.support.merge_train import (
 )
 from tests.test_merge_readiness import _candidate, _evaluate
 from tests.test_merge_train_admission import _fenced_landing_record
+
+
+class _LowercaseRepositorySnapshotReader(_FakeMergeTrainSnapshotReader):
+    """Report pull-request repositories lowercased, as the GitHub adapter does."""
+
+    def read_merge_train_snapshot(
+        self, *, repository: str, base_branch: str
+    ) -> MergeTrainDryRunSnapshot:
+        snapshot = super().read_merge_train_snapshot(repository=repository, base_branch=base_branch)
+        return snapshot.model_copy(
+            update={
+                "pull_requests": tuple(
+                    pull_request.model_copy(
+                        update={
+                            "head_repository": pull_request.head_repository.lower(),
+                            "base_repository": pull_request.base_repository.lower(),
+                        }
+                    )
+                    for pull_request in snapshot.pull_requests
+                )
+            }
+        )
 
 
 class _FenceCapturingAdmissionEvaluator:
@@ -2398,6 +2421,62 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 for record in landing_records
             )
         )
+
+    async def test_advances_unstacked_batch_flow_for_a_mixed_case_repository(self) -> None:
+        # The policy keeps the repository's casing, GitHub reports lowercase
+        # repository names, and batch records store them lowercased. Every phase
+        # must still find its own records (cbusillo/BD_to_AVP, 2026-09-30).
+        repository = "cbusillo/Mixed_Case_Repo"
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(
+                state_dir, policy=build_test_merge_train_policy_record(repository=repository)
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _LowercaseRepositorySnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
+            ):
+                payloads = [
+                    (
+                        await _post_merge_train_controller_run_once(
+                            app,
+                            {
+                                "schema_version": 1,
+                                "repository": repository,
+                                "base_branch": "main",
+                                "mutate": True,
+                            },
+                        )
+                    ).json()
+                    for _ in range(5)
+                ]
+
+        self.assertEqual(
+            [payload["result"]["controller_action"] for payload in payloads],
+            [
+                "plan_candidate",
+                "build_candidate",
+                "observe_candidate",
+                "plan_landing",
+                "land_batch",
+            ],
+        )
+        self.assertEqual(payloads[4]["result"]["landing_plan"]["entries"][0]["status"], "merged")
 
     async def test_stale_landing_returns_accepted_result_and_replays_idempotently(self) -> None:
         class PartialLandingThenStale(_StaleLandingMergeTrainGitHubClient):

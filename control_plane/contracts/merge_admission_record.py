@@ -191,7 +191,7 @@ class MergeAdmissionRecord(BaseModel):
             raise ValueError("merge admission requires ready Level 2 evidence")
         target = self.readiness.target
         if (
-            target.repository != self.repository
+            target.repository.casefold() != self.repository.casefold()
             or target.base_branch != self.base_branch
             or target.pull_request_number != self.pull_request_number
             or target.queue_position != self.queue_position
@@ -524,7 +524,7 @@ def validate_merge_landing_outcome_for_admission(
         outcome.admission_id != admission.admission_id
         or outcome.admission_binding_sha256 != admission.admission_binding_sha256
         or outcome.attempt_id != admission.attempt_id
-        or outcome.repository != admission.repository
+        or outcome.repository.casefold() != admission.repository.casefold()
         or outcome.base_branch != admission.base_branch
         or outcome.pull_request_number != admission.pull_request_number
     ):
@@ -594,7 +594,7 @@ def validate_merge_admission_controller_fence(
     if (
         controller_state.status != "running"
         or controller_state.controller_key != admission.controller_key
-        or controller_state.repository != admission.repository
+        or controller_state.repository.casefold() != admission.repository.casefold()
         or controller_state.base_branch != admission.base_branch
         or controller_state.lease_owner != admission.lease_owner
         or _normalize_timestamp(controller_state.lease_acquired_at, "lease_acquired_at")
