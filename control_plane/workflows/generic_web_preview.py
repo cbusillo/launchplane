@@ -30,8 +30,9 @@ from control_plane.contracts.runtime_key_safety_policy import (
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.runtime_key_safety import (
     evaluate_preview_copied_runtime_key_safety,
-    is_credential_runtime_value,
+    is_preview_copied_credential,
     latest_active_runtime_key_safety_policy,
+    preview_template_runtime_bindings,
 )
 from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
 from control_plane.workflows.preview_desired_state import (
@@ -992,19 +993,6 @@ def _render_preview_env_text(
     )
 
 
-def _copied_credential_runtime_keys(
-    *, profile: LaunchplaneProductProfileRecord, template_application: JsonObject
-) -> tuple[str, ...]:
-    template_env = dokploy_api.parse_dokploy_env_text(str(template_application.get("env") or ""))
-    return tuple(
-        dict.fromkeys(
-            key
-            for key in profile.preview.copied_env_keys
-            if is_credential_runtime_value(key, template_env.get(key, ""))
-        )
-    )
-
-
 def _enforce_preview_copied_runtime_key_safety(
     *,
     record_store: GenericWebPreviewProfileStore,
@@ -1013,9 +1001,21 @@ def _enforce_preview_copied_runtime_key_safety(
     template_application: JsonObject,
     preview_slug: str,
 ) -> None:
-    required_binding_keys = _copied_credential_runtime_keys(
-        profile=profile,
-        template_application=template_application,
+    template_env = dokploy_api.parse_dokploy_env_text(str(template_application.get("env") or ""))
+    copied_values = {key: template_env.get(key, "") for key in profile.preview.copied_env_keys}
+    template_bindings = (
+        preview_template_runtime_bindings(
+            record_store=record_store,
+            template_context=template_lane.context,
+            template_instance=template_lane.instance,
+        )
+        if isinstance(record_store, GenericWebPreviewRuntimeKeySafetyStore)
+        else ()
+    )
+    required_binding_keys = tuple(
+        key
+        for key, value in copied_values.items()
+        if is_preview_copied_credential(key, value, template_bindings=template_bindings)
     )
     if not required_binding_keys:
         return
@@ -1034,10 +1034,8 @@ def _enforce_preview_copied_runtime_key_safety(
         ) from exc
 
     evaluation = evaluate_preview_copied_runtime_key_safety(
-        record_store=record_store,
+        template_bindings=template_bindings,
         policy_record=policy_record,
-        template_context=template_lane.context,
-        template_instance=template_lane.instance,
         preview_context=profile.preview.context,
         preview_slug=preview_slug,
         copied_keys=required_binding_keys,

@@ -27,6 +27,7 @@ from control_plane.contracts.promotion_record import (
     DeploymentEvidence,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.secret_record import SecretScope
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeSecretSafetyRule,
@@ -2315,22 +2316,41 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
             allowed_contexts=("cm",),
             allowed_instances=("prod",),
         )
+        lane_shopify: tuple[SecretScope, str] = ("context_instance", "SHOPIFY_API_TOKEN")
+        # Not secret-shaped by name; it is a credential because a managed secret delivers it.
+        lane_smtp_pass: tuple[SecretScope, str] = ("context_instance", "SMTP_PASS")
+        # A site-shared secret reaches the testing template and so the preview.
+        site_shopify: tuple[SecretScope, str] = ("context", "SHOPIFY_API_TOKEN")
         cases: tuple[
-            tuple[str, dict[str, str], tuple[RuntimeSecretSafetyRule, ...], list[str]], ...
+            tuple[
+                str,
+                dict[str, str],
+                tuple[tuple[SecretScope, str], ...],
+                tuple[RuntimeSecretSafetyRule, ...],
+                list[str],
+            ],
+            ...,
         ] = (
             (
                 "url_credential",
                 {"SMTP_URL": "smtp://mailer:template-pass@smtp.example"},
-                (unrelated_rule, preview_rule),
+                (),
+                (unrelated_rule,),
                 ["SMTP_URL"],
             ),
-            ("unruled_secret", {}, (unrelated_rule,), ["SHOPIFY_API_TOKEN"]),
-            ("preview_rule", {}, (unrelated_rule, preview_rule), []),
+            (
+                "unruled_secrets",
+                {},
+                (lane_shopify, lane_smtp_pass),
+                (unrelated_rule,),
+                ["SHOPIFY_API_TOKEN", "SMTP_PASS"],
+            ),
+            ("site_secret_with_preview_rule", {}, (site_shopify,), (preview_rule,), []),
         )
-        for name, template_env, rules, refused_keys in cases:
+        for name, template_env, secrets, rules, refused_keys in cases:
             with self.subTest(case=name):
                 response, apply_driver = await self._apply_odoo_preview_with_template(
-                    template_env=template_env, rules=rules
+                    template_env=template_env, secrets=secrets, rules=rules
                 )
                 if not refused_keys:
                     self.assertEqual(response.status_code, 202, response.text)
@@ -2349,6 +2369,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         self,
         *,
         template_env: dict[str, str],
+        secrets: tuple[tuple[SecretScope, str], ...],
         rules: tuple[RuntimeSecretSafetyRule, ...],
     ) -> tuple[_AsgiResponse, MagicMock]:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2429,18 +2450,19 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 ) as apply_driver,
             ):
-                control_plane_secrets.write_secret_value(
-                    record_store=store,
-                    scope="context_instance",
-                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-                    name="shopify-api-token",
-                    plaintext_value="template-shopify-token",
-                    binding_key="SHOPIFY_API_TOKEN",
-                    context_name="cm",
-                    instance_name="testing",
-                    actor="test",
-                    source_label="test",
-                )
+                for scope, binding_key in secrets:
+                    control_plane_secrets.write_secret_value(
+                        record_store=store,
+                        scope=scope,
+                        integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                        name=binding_key.lower().replace("_", "-"),
+                        plaintext_value="template-integration-secret",
+                        binding_key=binding_key,
+                        context_name="cm",
+                        instance_name="testing" if scope == "context_instance" else "",
+                        actor="test",
+                        source_label="test",
+                    )
                 response = await _post_odoo_preview_apply(
                     app, _odoo_preview_refresh_apply_payload(), idempotency_key=plan_id
                 )

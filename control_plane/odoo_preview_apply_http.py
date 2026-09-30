@@ -17,6 +17,7 @@ from control_plane.runtime_key_safety import (
     evaluate_preview_copied_runtime_key_safety,
     latest_active_runtime_key_safety_policy,
     preview_copied_integration_credential_keys,
+    preview_template_runtime_bindings,
 )
 from control_plane.contracts.artifact_dependency_provenance import (
     normalize_artifact_git_commit,
@@ -1019,9 +1020,19 @@ def _refuse_copied_integration_credentials(
     template_instance: str,
     copied_values: dict[str, str],
 ) -> None:
-    candidate_keys = preview_copied_integration_credential_keys(copied_values)
+    policy_store = cast(RuntimeKeySafetyPolicyReadStore, record_store)
     try:
-        policy_store = cast(RuntimeKeySafetyPolicyReadStore, record_store)
+        template_bindings = preview_template_runtime_bindings(
+            record_store=policy_store,
+            template_context=preview_context,
+            template_instance=template_instance,
+        )
+    except AttributeError:
+        template_bindings = ()
+    candidate_keys = preview_copied_integration_credential_keys(
+        copied_values, template_bindings=template_bindings
+    )
+    try:
         policy_record = latest_active_runtime_key_safety_policy(policy_store)
     except (AttributeError, ValueError) as error:
         if not candidate_keys:
@@ -1037,15 +1048,15 @@ def _refuse_copied_integration_credentials(
             ),
         ) from error
     copied_keys = preview_copied_integration_credential_keys(
-        copied_values, extra_integration_key_markers=policy_record.integration_key_markers
+        copied_values,
+        template_bindings=template_bindings,
+        extra_integration_key_markers=policy_record.integration_key_markers,
     )
     if not copied_keys:
         return
     evaluation = evaluate_preview_copied_runtime_key_safety(
-        record_store=policy_store,
+        template_bindings=template_bindings,
         policy_record=policy_record,
-        template_context=preview_context,
-        template_instance=template_instance,
         preview_context=preview_context,
         preview_slug=preview_slug,
         copied_keys=copied_keys,

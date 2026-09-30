@@ -129,12 +129,40 @@ def latest_active_runtime_key_safety_policy(
     return records[0]
 
 
-def evaluate_preview_copied_runtime_key_safety(
+def preview_template_runtime_bindings(
     *,
     record_store: RuntimeKeySafetyPolicyReadStore,
-    policy_record: RuntimeKeySafetyPolicyRecord,
     template_context: str,
     template_instance: str,
+) -> tuple[SecretBinding, ...]:
+    """The managed runtime bindings that deliver values to a preview's template lane.
+
+    A lane receives its own bindings and, per key, falls back to the site's
+    context-scoped binding, so both are read and the delivered one is kept.
+    """
+    template_target = RuntimeKeySafetyTarget(
+        context=template_context,
+        instance=template_instance,
+        environment_class=runtime_key_safety_environment_class(template_instance),
+    )
+    candidates = tuple(
+        binding
+        for binding in record_store.list_secret_bindings(
+            integration="runtime_environment", context_name=template_context, limit=None
+        )
+        if runtime_secret_binding_matches_target(binding=binding, target=template_target)
+    )
+    return tuple(
+        binding
+        for key_bindings in _bindings_by_binding_key(candidates).values()
+        for binding in _effective_bindings_for_target(key_bindings, target=template_target)
+    )
+
+
+def evaluate_preview_copied_runtime_key_safety(
+    *,
+    template_bindings: tuple[SecretBinding, ...],
+    policy_record: RuntimeKeySafetyPolicyRecord,
     preview_context: str,
     preview_slug: str,
     copied_keys: Iterable[str],
@@ -145,12 +173,6 @@ def evaluate_preview_copied_runtime_key_safety(
     policy rule that allows previews; the template lane's own classification and
     declared classes never carry over. A copied value with no managed binding fails.
     """
-    template_bindings = record_store.list_secret_bindings(
-        integration="runtime_environment",
-        context_name=template_context,
-        instance_name=template_instance,
-        limit=None,
-    )
     return evaluate_runtime_key_safety(
         target=RuntimeKeySafetyTarget(
             context=preview_context,
@@ -167,16 +189,30 @@ def evaluate_preview_copied_runtime_key_safety(
     )
 
 
+def is_preview_copied_credential(
+    key_name: str, value: str, *, template_bindings: tuple[SecretBinding, ...]
+) -> bool:
+    """A copied value is a credential when a managed secret delivers it or it looks like one."""
+    if not value.strip():
+        return False
+    return is_credential_runtime_value(key_name, value) or any(
+        binding.binding_key == key_name for binding in template_bindings
+    )
+
+
 def preview_copied_integration_credential_keys(
-    values: Mapping[str, str], *, extra_integration_key_markers: Iterable[str] = ()
+    values: Mapping[str, str],
+    *,
+    template_bindings: tuple[SecretBinding, ...],
+    extra_integration_key_markers: Iterable[str] = (),
 ) -> tuple[str, ...]:
     markers = tuple(extra_integration_key_markers)
     return tuple(
         sorted(
             key
             for key, value in values.items()
-            if is_credential_runtime_value(key, value)
-            and is_integration_runtime_key(key, extra_markers=markers)
+            if is_integration_runtime_key(key, extra_markers=markers)
+            and is_preview_copied_credential(key, value, template_bindings=template_bindings)
         )
     )
 
