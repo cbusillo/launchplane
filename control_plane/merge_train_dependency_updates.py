@@ -49,8 +49,9 @@ def _trailer_entries(body: str) -> list[tuple[str, dict[str, str]]]:
     entries: list[tuple[str, dict[str, str]]] = []
     for index, start in enumerate(starts):
         end = starts[index + 1].start() if index + 1 < len(starts) else len(body)
+        # Dependabot quotes YAML scalars that would otherwise parse as numbers ('2025.2').
         fields = {
-            match.group("key"): match.group("value")
+            match.group("key"): match.group("value").strip("'\"")
             for match in _ENTRY_FIELD.finditer(body, start.end(), end)
         }
         entries.append((start.group("name"), fields))

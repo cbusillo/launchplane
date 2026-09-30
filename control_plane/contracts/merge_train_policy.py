@@ -68,7 +68,7 @@ class MergeTrainEnqueuePolicy(BaseModel):
     allowed_actor_roles: tuple[MergeTrainActorRole, ...] = ("repo_owner", "repo_admin")
     trusted_automation_github_user_ids: tuple[PositiveInt, ...] = ()
     # Pull requests these identities open enqueue without the label when every
-    # update stays within one major version (merge_train_dependency_updates).
+    # named update stays within one major version (merge_train_dependency_updates).
     dependency_update_github_user_ids: tuple[PositiveInt, ...] = ()
 
     @model_validator(mode="after")

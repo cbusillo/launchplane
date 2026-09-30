@@ -60,6 +60,10 @@ if TYPE_CHECKING:
     from control_plane.tenant_admission_controller import TenantAdmissionTechnicalChecks
 
 
+# GitHub's own identity for commits it signs (web edits and Dependabot).
+_GITHUB_WEB_FLOW_USER_ID = 19864447
+
+
 class MergeTrainGitHubError(RuntimeError):
     def __init__(self, message: str, *, status_code: int | None = None) -> None:
         super().__init__(message)
@@ -1935,10 +1939,11 @@ class GitHubMergeTrainSnapshotReader:
             author_association=str(source.get("author_association") or ""),
         )
         dependency_update_class = (
-            self._dependency_update_class(
+            self._safe_dependency_update_class(
                 repository_path=repository_path,
                 pull_request_number=pull_request_number,
                 author_id=actor_id,
+                head_sha=head_sha,
             )
             if str(user.get("type") or "") == "Bot"
             else None
@@ -1969,8 +1974,22 @@ class GitHubMergeTrainSnapshotReader:
             dependency_update_class=dependency_update_class,
         )
 
+    def _safe_dependency_update_class(
+        self, *, repository_path: str, pull_request_number: int, author_id: int, head_sha: str
+    ) -> DependencyUpdateClass:
+        # A read failure only withholds label-free admission; it must not stop the train.
+        try:
+            return self._dependency_update_class(
+                repository_path=repository_path,
+                pull_request_number=pull_request_number,
+                author_id=author_id,
+                head_sha=head_sha,
+            )
+        except MergeTrainGitHubError:
+            return "needs_review"
+
     def _dependency_update_class(
-        self, *, repository_path: str, pull_request_number: int, author_id: int
+        self, *, repository_path: str, pull_request_number: int, author_id: int, head_sha: str
     ) -> DependencyUpdateClass:
         payload = self.transport.request(
             method="GET",
@@ -1978,17 +1997,53 @@ class GitHubMergeTrainSnapshotReader:
         )
         if not isinstance(payload, list) or not payload or len(payload) >= 100:
             return "needs_review"
+        commits = [_json_object(item, "GitHub pull request commit") for item in payload]
+        # The commits must be the ones this snapshot saw, not a newer push.
+        if commits[-1].get("sha") != head_sha:
+            return "needs_review"
         messages: list[str] = []
-        for item in payload:
-            commit = _json_object(item, "GitHub pull request commit")
+        for commit in commits:
+            # A commit author is only an email, so a collaborator can amend and
+            # keep it. Require the bot as author and a GitHub-signed commit.
             author = commit.get("author")
-            # Every commit must come from the pull request's own author; anyone
-            # else pushing to the branch sends the update to agent review.
-            if not isinstance(author, dict) or author.get("id") != author_id:
-                return "needs_review"
+            committer = commit.get("committer")
             detail = _json_object(commit.get("commit"), "GitHub pull request commit detail")
+            verification = detail.get("verification")
+            if (
+                not isinstance(author, dict)
+                or author.get("id") != author_id
+                or not isinstance(committer, dict)
+                or committer.get("id") != _GITHUB_WEB_FLOW_USER_ID
+                or not isinstance(verification, dict)
+                or verification.get("verified") is not True
+            ):
+                return "needs_review"
             messages.append(str(detail.get("message") or ""))
+        if self._force_pushed_by_other(
+            repository_path=repository_path,
+            pull_request_number=pull_request_number,
+            author_id=author_id,
+        ):
+            return "needs_review"
         return classify_dependency_update(messages)
+
+    def _force_pushed_by_other(
+        self, *, repository_path: str, pull_request_number: int, author_id: int
+    ) -> bool:
+        payload = self.transport.request(
+            method="GET",
+            path=f"/repos/{repository_path}/issues/{pull_request_number}/timeline?per_page=100",
+        )
+        if not isinstance(payload, list) or len(payload) >= 100:
+            return True
+        for item in payload:
+            event = _json_object(item, "GitHub pull request timeline event")
+            if event.get("event") != "head_ref_force_pushed":
+                continue
+            actor = event.get("actor")
+            if not isinstance(actor, dict) or actor.get("id") != author_id:
+                return True
+        return False
 
     def _actor_role_for_pull_request(
         self, *, repository_path: str, username: str, author_association: str

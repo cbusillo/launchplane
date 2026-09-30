@@ -78,6 +78,14 @@ class DependencyUpdateClassificationTests(unittest.TestCase):
             with self.subTest(message=message.splitlines()[0]):
                 self.assertEqual(classify_dependency_update([message]), "patch_or_minor")
 
+    def test_quoted_trailer_versions_still_match(self) -> None:
+        message = (
+            INDIRECT_PATCH.replace("5.0.9", "2025.1")
+            .replace("5.0.12", "2025.2")
+            .replace("dependency-version: 2025.2", "dependency-version: '2025.2'")
+        )
+        self.assertEqual(classify_dependency_update([message]), "patch_or_minor")
+
     def test_major_version_needs_review(self) -> None:
         self.assertEqual(classify_dependency_update([MAJOR]), "needs_review")
         self.assertEqual(

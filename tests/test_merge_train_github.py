@@ -2749,26 +2749,73 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
         self.assertEqual(snapshot.pull_requests[0].actor_role, "unknown")
 
     def test_snapshot_reader_classifies_dependency_updates_from_bot_commits(self) -> None:
-        own_commit = _github_commit(49699333, INDIRECT_PATCH)
-        cases = (
-            ([own_commit], "patch_or_minor"),
-            ([own_commit, _github_commit(1234, "fix: tweak the lockfile")], "needs_review"),
+        own = _github_commit(49699333, INDIRECT_PATCH, sha="head-16")
+        bot_push: list[dict[str, object]] = [
+            {"event": "head_ref_force_pushed", "actor": {"id": 49699333}}
+        ]
+        other_push: list[dict[str, object]] = [
+            {"event": "head_ref_force_pushed", "actor": {"id": 1234}}
+        ]
+        cases: tuple[
+            tuple[
+                str, list[dict[str, object]] | MergeTrainGitHubError, list[dict[str, object]], str
+            ],
+            ...,
+        ] = (
+            ("bot commit", [own], [], "patch_or_minor"),
+            ("bot rebased itself", [own], bot_push, "patch_or_minor"),
+            (
+                "another author added a commit",
+                [
+                    _github_commit(49699333, INDIRECT_PATCH, sha="c1"),
+                    _github_commit(1234, "fix: tweak", sha="head-16"),
+                ],
+                [],
+                "needs_review",
+            ),
+            (
+                "amended locally, bot author kept",
+                [_github_commit(49699333, INDIRECT_PATCH, sha="head-16", committer_id=1234)],
+                [],
+                "needs_review",
+            ),
+            (
+                "unsigned",
+                [_github_commit(49699333, INDIRECT_PATCH, sha="head-16", verified=False)],
+                [],
+                "needs_review",
+            ),
+            (
+                "commits are for a newer head",
+                [_github_commit(49699333, INDIRECT_PATCH, sha="newer")],
+                [],
+                "needs_review",
+            ),
+            ("force-pushed by someone else", [own], other_push, "needs_review"),
+            (
+                "commit read refused",
+                MergeTrainGitHubError("forbidden", status_code=403),
+                [],
+                "needs_review",
+            ),
         )
-        for commits, expected in cases:
-            with self.subTest(expected=expected):
+        for label, commits, timeline, expected in cases:
+            with self.subTest(label):
                 pull_request = _github_pull_request(16, author_association="CONTRIBUTOR")
                 pull_request["user"] = {"id": 49699333, "login": "dependabot[bot]", "type": "Bot"}
-                transport = RecordingMergeTrainGitHubTransport(
-                    responses=(
-                        _github_branch(),
-                        [pull_request],
-                        pull_request,
-                        MergeTrainGitHubError("permission not found", status_code=404),
-                        commits,
-                        _combined_status(),
-                        {"check_runs": [_check_run("completed", "success")]},
-                    )
+                responses: list[object] = [
+                    _github_branch(),
+                    [pull_request],
+                    pull_request,
+                    MergeTrainGitHubError("permission not found", status_code=404),
+                    commits,
+                ]
+                if expected == "patch_or_minor" or label == "force-pushed by someone else":
+                    responses.append(timeline)
+                responses.extend(
+                    [_combined_status(), {"check_runs": [_check_run("completed", "success")]}]
                 )
+                transport = RecordingMergeTrainGitHubTransport(responses=tuple(responses))
 
                 snapshot = GitHubMergeTrainSnapshotReader(
                     transport=transport
@@ -2947,8 +2994,20 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             )
 
 
-def _github_commit(author_id: int, message: str) -> dict[str, object]:
-    return {"author": {"id": author_id}, "commit": {"message": message}}
+def _github_commit(
+    author_id: int,
+    message: str,
+    *,
+    sha: str,
+    committer_id: int = 19864447,
+    verified: bool = True,
+) -> dict[str, object]:
+    return {
+        "sha": sha,
+        "author": {"id": author_id},
+        "committer": {"id": committer_id},
+        "commit": {"message": message, "verification": {"verified": verified}},
+    }
 
 
 def _github_pull_request(
