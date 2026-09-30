@@ -8116,6 +8116,31 @@ env_var = "GH_TOKEN"
         self.assertEqual(listed_records[0].candidate.entries[1].pull_request_number, 11)
         self.assertEqual(listed_records[0].candidate.required_checks_status, "pass")
 
+    def test_merge_train_batch_candidate_lookup_ignores_repository_casing(self) -> None:
+        # Batch records store the repository lowercased; the controller asks with
+        # the policy's own casing (cbusillo/BD_to_AVP re-planned forever).
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            sql_store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            sql_store.ensure_schema()
+            filesystem_store = FilesystemRecordStore(state_dir=root / "state")
+            record = _merge_train_batch_candidate_record()
+            found = []
+            for store in (sql_store, filesystem_store):
+                store.write_merge_train_batch_candidate_record(record)
+                found.append(
+                    store.list_merge_train_batch_candidate_records(
+                        repository="Example/Merge-Train-Repo", base_branch="main", status="active"
+                    )
+                )
+            sql_store.close()
+
+        self.assertEqual(
+            [[r.record_id for r in records] for records in found], [[record.record_id]] * 2
+        )
+
     def test_merge_train_controller_state_records_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(

@@ -18813,7 +18813,8 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> tuple[MergeTrainBatchCandidateRecord, ...]:
         filters: list[object] = []
         if repository:
-            filters.append(LaunchplaneMergeTrainBatchCandidateRow.repository == repository)
+            # Batch records store the repository lowercased; match any caller casing.
+            filters.append(LaunchplaneMergeTrainBatchCandidateRow.repository == repository.lower())
         if base_branch:
             filters.append(LaunchplaneMergeTrainBatchCandidateRow.base_branch == base_branch)
         if status:
@@ -18990,7 +18991,10 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> tuple[MergeTrainBatchLandingPlanRecord, ...]:
         filters: list[object] = []
         if repository:
-            filters.append(LaunchplaneMergeTrainBatchLandingPlanRow.repository == repository)
+            # Batch records store the repository lowercased; match any caller casing.
+            filters.append(
+                LaunchplaneMergeTrainBatchLandingPlanRow.repository == repository.lower()
+            )
         if base_branch:
             filters.append(LaunchplaneMergeTrainBatchLandingPlanRow.base_branch == base_branch)
         if status:
