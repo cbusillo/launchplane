@@ -70,6 +70,24 @@ def _provider_delivery_expectation(
 
 
 class MergeTrainPolicyTests(unittest.TestCase):
+    def test_repository_policy_lookup_ignores_repository_casing(self) -> None:
+        # Train records store the repository lowercased; the policy keeps its own
+        # casing (cbusillo/BD_to_AVP admission was refused as "not admitted").
+        policy = build_test_merge_train_policy(repository="Example/Mixed_Case_Repo")
+
+        found = policy.find_repository_policy(
+            repository="example/mixed_case_repo", base_branch="main"
+        )
+
+        self.assertEqual(found.repository, "Example/Mixed_Case_Repo")
+        with self.assertRaises(ValueError):
+            policy.find_repository_policy(repository="example/other_repo", base_branch="main")
+
+        payload = policy.model_dump(mode="json")
+        twin = dict(payload["policies"][0], repository="example/mixed_case_repo")
+        with self.assertRaisesRegex(ValueError, "unique by repository/base_branch"):
+            MergeTrainPolicy.model_validate({**payload, "policies": [payload["policies"][0], twin]})
+
     def test_token_source_preserves_stored_policy_and_requires_explicit_selection(self) -> None:
         legacy = build_test_merge_train_policy()
         payload = legacy.model_dump(mode="json")
