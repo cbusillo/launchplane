@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.integration_readback import web_held_until_integration_readback
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.odoo_preview_runtime_plan import (
@@ -1541,6 +1542,9 @@ def _execute_refresh(
             )
         compose_file = dokploy_compose.render_odoo_raw_compose_file(
             image_reference=request.image_reference,
+            hold_web_until_integration_readback=web_held_until_integration_readback(
+                plan.preview_slug
+            ),
             domain_hosts=(plan.domain_host,),
             runtime_port=plan.runtime_port,
             publish_host_ports=False,

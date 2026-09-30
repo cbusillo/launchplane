@@ -25,11 +25,13 @@ from control_plane.dokploy.source import (
 from control_plane.integration_readback import (
     INTEGRATION_READBACK_CHECKED_MARKER,
     INTEGRATION_READBACK_OK_MARKER,
+    INTEGRATION_READBACK_PASSED_PATH,
     INTEGRATION_READBACK_PROGRAM,
     IntegrationReadbackPolicy,
     integration_readback_marker_is_safe,
     integration_readback_policy,
     integration_readback_refusal_detail,
+    web_held_until_integration_readback,
 )
 
 
@@ -596,6 +598,9 @@ def run_compose_post_deploy_update(
         workflow_environment_overrides=resolved_workflow_environment_overrides,
         required_workflow_environment_keys=resolved_required_workflow_environment_keys,
         readback_policy=readback_policy,
+        hold_web_until_integration_readback=web_held_until_integration_readback(
+            target_definition.instance
+        ),
     )
     schedule_payload: api.JsonObject = {
         "name": schedule_name,
@@ -813,6 +818,9 @@ def run_compose_odoo_stable_bootstrap(
         workflow_environment_overrides=resolved_workflow_environment_overrides,
         required_workflow_environment_keys=resolved_required_workflow_environment_keys,
         readback_policy=readback_policy,
+        hold_web_until_integration_readback=web_held_until_integration_readback(
+            target_definition.instance
+        ),
     )
     schedule_payload: api.JsonObject = {
         "name": DOKPLOY_ODOO_BOOTSTRAP_SCHEDULE_NAME,
@@ -2259,6 +2267,7 @@ def _build_dokploy_data_workflow_script(
     workflow_environment_overrides: Mapping[str, str] | None = None,
     required_workflow_environment_keys: tuple[str, ...] = (),
     readback_policy: IntegrationReadbackPolicy,
+    hold_web_until_integration_readback: bool,
 ) -> str:
     normalized_filestore_path = filestore_path.strip() or "/volumes/data/filestore"
     quoted_compose_app_name = shlex.quote(compose_app_name)
@@ -2314,6 +2323,7 @@ integration_readback_required={"1" if readback_policy.required else "0"}
 integration_readback_spec={shlex.quote(readback_policy.encoded_spec())}
 clear_stale_lock={"1" if clear_stale_lock else "0"}
 data_workflow_lock_path={quoted_lock_path}
+integration_readback_passed_path={shlex.quote(INTEGRATION_READBACK_PASSED_PATH) if hold_web_until_integration_readback else "''"}
 start_web_after_workflow=0
 readback_succeeded=0
 web_restart_blocked=0
@@ -2358,10 +2368,28 @@ ensure_running() {{
     fi
 }}
 
+# The lane's web command waits until this file holds the SHA-256 of its overrides
+# payload (see render_odoo_raw_compose_file). It is written only after the read-back
+# passed, for the payload this workflow applied, so a later provider deploy with a
+# different payload, or any restart after a refusal, keeps web waiting.
+record_integration_readback_passed() {{
+    if [ -z "${{integration_readback_passed_path}}" ] || [ "${{readback_succeeded}}" != "1" ]; then
+        return 0
+    fi
+    local checked_payload checked_payload_sha256
+    checked_payload=$(docker exec "${{workflow_environment[@]}}" "${{script_runner_container_id}}" \
+        printenv ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64 || true)
+    checked_payload_sha256=$(printf %s "${{checked_payload}}" | sha256sum | cut -d " " -f 1)
+    docker exec -u root "${{script_runner_container_id}}" \
+        sh -c 'printf %s "$1" > "$2"' _ "${{checked_payload_sha256}}" "${{integration_readback_passed_path}}"
+    echo "integration_readback_passed_recorded=true"
+}}
+
 start_web_container() {{
     if [ "${{start_web_after_workflow}}" != "1" ]; then
         return
     fi
+    record_integration_readback_passed
     local current_status
     current_status=$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}" 2>/dev/null || true)
     if [ "${{current_status}}" != "running" ]; then
@@ -2455,6 +2483,10 @@ elif [ "${{integration_readback_required}}" = "1" ]; then
 else
     echo "Expected a running web container in project '${{compose_project}}'." >&2
     exit 1
+fi
+if [ -n "${{integration_readback_passed_path}}" ]; then
+    # This run may change the database, so web waits for this run's read-back.
+    docker exec -u root "${{script_runner_container_id}}" rm -f "${{integration_readback_passed_path}}"
 fi
 
 if [ "${{#required_workflow_environment_keys[@]}}" -gt 0 ]; then
@@ -3961,6 +3993,7 @@ def _build_dokploy_odoo_backup_restore_database_script(
             f"data_volume={shlex.quote(data_volume)}",
             f"log_volume={shlex.quote(log_volume)}",
             f"result_marker={shlex.quote(ODOO_BACKUP_RESTORE_RESULT_MARKER)}",
+            f"integration_readback_passed_path={shlex.quote(INTEGRATION_READBACK_PASSED_PATH)}",
             "",
         )
     )
@@ -4020,6 +4053,9 @@ require_mount "${database_container_id}" /var/lib/postgresql/data "${old_db_volu
 require_mount "${script_runner_container_id}" /volumes/data "${data_volume}"
 require_mount "${web_container_id}" /volumes/data "${data_volume}"
 require_mount "${web_container_id}" /volumes/logs "${log_volume}"
+# The restored database has not passed this lane's integration read-back, so a held
+# web waits for the next data-workflow run. Web on an unheld lane ignores the file.
+docker exec -u root "${script_runner_container_id}" rm -f "${integration_readback_passed_path}"
 
 if docker volume inspect "${new_db_volume}" >/dev/null 2>&1; then
     echo "Restore DB volume already exists; refusing to overwrite it." >&2

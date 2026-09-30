@@ -2527,9 +2527,17 @@ context only, and `context_instance` has both context and instance.
   - To clear a refusal: empty the setting in the lane's database, or record the
     allowance that explains it, then rerun the deploy. The rerun finds web
     stopped and starts it only if the read-back passes.
-  - A provider redeploy that runs before the schedule (a changed target
-    environment, or target replacement's deploy) still starts web before the
-    read-back stops it again; see #2616.
+  - Web on a held lane (every Odoo lane that is not production, previews
+    included) waits before it starts until the schedule has passed the read-back
+    for the instance overrides payload web is about to apply. The schedule
+    removes `/volumes/data/.launchplane_integration_readback_passed` before its
+    workflow and writes the payload's SHA-256 there only after the read-back
+    passes. So a provider deploy that runs before the schedule (a ship deploy, a
+    changed target environment, target replacement, a preview refresh) or any
+    restart after a refusal leaves web waiting instead of serving. A backup
+    restore removes the file too, because the restored database has not been
+    checked. The web log says `web waits for the integration read-back to pass`
+    while it waits; the next deploy's schedule releases it.
 - `odoo-overrides put-addon-setting --allow-direct-db-mutation` writes
   addon-shaped Odoo override intent such as Authentik or Shopify settings for a
   context and instance. Use it only for explicit local/bootstrap repair.

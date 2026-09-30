@@ -1699,6 +1699,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             },
         )
         rendered_compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            hold_web_until_integration_readback=False,
             image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:artifact",
             domain_hosts=("cm-testing.shinycomputers.com",),
             runtime_port=8069,
@@ -1804,6 +1805,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         )
         render_compose.assert_called_with(
             image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:artifact",
+            hold_web_until_integration_readback=True,
             domain_hosts=("cm-testing.shinycomputers.com",),
             runtime_port=8069,
         )
@@ -2091,6 +2093,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.fetch_dokploy_converted_compose_file",
                 return_value=control_plane_dokploy.render_odoo_raw_compose_file(
+                    hold_web_until_integration_readback=False,
                     image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:fresh",
                     domain_hosts=("cm-testing.shinycomputers.com",),
                     runtime_port=8069,
@@ -2164,6 +2167,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         )
         persisted_env = ""
         rendered_compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            hold_web_until_integration_readback=False,
             image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:artifact",
             domain_hosts=("cm-testing.shinycomputers.com",),
             runtime_port=8069,
@@ -2330,6 +2334,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         )
         persisted_env = ""
         rendered_compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            hold_web_until_integration_readback=False,
             image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:artifact",
             domain_hosts=("cm-testing.shinycomputers.com",),
             runtime_port=8069,
@@ -2541,6 +2546,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             ),
         )
         rendered_compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            hold_web_until_integration_readback=False,
             image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:artifact",
             domain_hosts=("cm-testing.shinycomputers.com",),
             runtime_port=8069,
@@ -2707,6 +2713,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.fetch_dokploy_converted_compose_file",
                 return_value=control_plane_dokploy.render_odoo_raw_compose_file(
+                    hold_web_until_integration_readback=False,
                     image_reference="ghcr.io/cbusillo/odoo-tenant-opw@sha256:opw",
                     domain_hosts=("opw-prod.shinycomputers.com",),
                     runtime_port=8069,
@@ -2874,6 +2881,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.fetch_dokploy_converted_compose_file",
                 return_value=control_plane_dokploy.render_odoo_raw_compose_file(
+                    hold_web_until_integration_readback=False,
                     image_reference="ghcr.io/cbusillo/odoo-tenant-opw@sha256:opw",
                     domain_hosts=("opw-prod.shinycomputers.com",),
                     runtime_port=8069,
@@ -3490,6 +3498,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.fetch_dokploy_converted_compose_file",
                 return_value=control_plane_dokploy.render_odoo_raw_compose_file(
+                    hold_web_until_integration_readback=False,
                     image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:artifact",
                     domain_hosts=("cm-testing.shinycomputers.com",),
                     runtime_port=8069,
