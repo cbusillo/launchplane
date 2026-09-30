@@ -13,7 +13,6 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
-from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -27,13 +26,13 @@ from control_plane.contracts.runtime_identity import (
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
-    RuntimeKeySafetyTarget,
 )
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.runtime_key_safety import (
-    evaluate_runtime_key_safety,
-    is_secret_shaped_runtime_key,
+    evaluate_preview_copied_runtime_key_safety,
+    is_preview_copied_credential,
     latest_active_runtime_key_safety_policy,
+    preview_template_runtime_bindings,
 )
 from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
 from control_plane.workflows.preview_desired_state import (
@@ -994,35 +993,6 @@ def _render_preview_env_text(
     )
 
 
-def _copied_secret_shaped_runtime_keys(
-    *, profile: LaunchplaneProductProfileRecord, template_application: JsonObject
-) -> tuple[str, ...]:
-    template_env = dokploy_api.parse_dokploy_env_text(str(template_application.get("env") or ""))
-    copied_keys: list[str] = []
-    for key in profile.preview.copied_env_keys:
-        value = template_env.get(key, "")
-        if value and is_secret_shaped_runtime_key(key.strip()):
-            copied_keys.append(key)
-    return tuple(dict.fromkeys(copied_keys))
-
-
-def _retarget_secret_bindings_for_preview_safety(
-    *,
-    secret_bindings: tuple[SecretBinding, ...],
-    preview_context: str,
-    preview_slug: str,
-) -> tuple[SecretBinding, ...]:
-    return tuple(
-        binding.model_copy(
-            update={
-                "context": preview_context,
-                "instance": preview_slug,
-            }
-        )
-        for binding in secret_bindings
-    )
-
-
 def _enforce_preview_copied_runtime_key_safety(
     *,
     record_store: GenericWebPreviewProfileStore,
@@ -1031,15 +1001,27 @@ def _enforce_preview_copied_runtime_key_safety(
     template_application: JsonObject,
     preview_slug: str,
 ) -> None:
-    required_binding_keys = _copied_secret_shaped_runtime_keys(
-        profile=profile,
-        template_application=template_application,
+    template_env = dokploy_api.parse_dokploy_env_text(str(template_application.get("env") or ""))
+    copied_values = {key: template_env.get(key, "") for key in profile.preview.copied_env_keys}
+    template_bindings = (
+        preview_template_runtime_bindings(
+            record_store=record_store,
+            template_context=template_lane.context,
+            template_instance=template_lane.instance,
+        )
+        if isinstance(record_store, GenericWebPreviewRuntimeKeySafetyStore)
+        else ()
+    )
+    required_binding_keys = tuple(
+        key
+        for key, value in copied_values.items()
+        if is_preview_copied_credential(key, value, template_bindings=template_bindings)
     )
     if not required_binding_keys:
         return
     if not isinstance(record_store, GenericWebPreviewRuntimeKeySafetyStore):
         raise click.ClickException(
-            "Generic web preview copied secret-shaped runtime keys require a "
+            "Generic web preview copied credential runtime keys require a "
             "runtime key-safety-capable record store."
         )
 
@@ -1047,29 +1029,16 @@ def _enforce_preview_copied_runtime_key_safety(
         policy_record = latest_active_runtime_key_safety_policy(record_store)
     except ValueError as exc:
         raise click.ClickException(
-            "Generic web preview copied secret-shaped runtime keys require an active "
+            "Generic web preview copied credential runtime keys require an active "
             "runtime key-safety policy."
         ) from exc
 
-    evaluation = evaluate_runtime_key_safety(
-        target=RuntimeKeySafetyTarget(
-            context=profile.preview.context,
-            instance=preview_slug,
-            environment_class="preview",
-        ),
-        required_binding_keys=required_binding_keys,
-        secret_bindings=_retarget_secret_bindings_for_preview_safety(
-            secret_bindings=record_store.list_secret_bindings(
-                integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-                context_name=template_lane.context,
-                instance_name=template_lane.instance,
-                limit=None,
-            ),
-            preview_context=profile.preview.context,
-            preview_slug=preview_slug,
-        ),
-        secret_rules=policy_record.rules,
-        integration_key_markers=policy_record.integration_key_markers,
+    evaluation = evaluate_preview_copied_runtime_key_safety(
+        template_bindings=template_bindings,
+        policy_record=policy_record,
+        preview_context=profile.preview.context,
+        preview_slug=preview_slug,
+        copied_keys=required_binding_keys,
     )
     if evaluation.status == "pass":
         return
