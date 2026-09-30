@@ -9,12 +9,13 @@ are never evidence. See docs/artifact-provenance.md.
 import io
 import json
 import zipfile
+from collections.abc import Iterator
 from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
@@ -167,7 +168,12 @@ def verify_build_artifact(
         run_id=run_id,
         run_attempt=run_attempt,
     )
-    manifest = ArtifactIdentityManifest.model_validate(manifest_payload)
+    try:
+        manifest = ArtifactIdentityManifest.model_validate(manifest_payload)
+    except ValidationError as error:
+        raise BuildProvenanceError(
+            "The build manifest is not a valid artifact manifest."
+        ) from error
     if manifest.schema_version != 2:
         raise BuildProvenanceError("The build manifest must be schema version 2.")
     if manifest.source_commit != commit:
@@ -288,6 +294,30 @@ def _require_first_parent(
     workflow. Following only first parents from the tip visits merge results
     and direct pushes, never a pull request's own commits.
     """
+    for sha in _first_parent_history(
+        transport=transport, repository_path=repository_path, default_branch=default_branch
+    ):
+        if sha == commit:
+            return
+    raise BuildProvenanceError(
+        f"{commit} is not on {default_branch}'s first-parent history within the checked range."
+    )
+
+
+def first_parent_history(
+    *, transport: BuildProvenanceTransport, repository: str, default_branch: str
+) -> Iterator[str]:
+    """Yield the default branch's first-parent commits from the tip, newest first, bounded."""
+    return _first_parent_history(
+        transport=transport,
+        repository_path=_repository_path(repository),
+        default_branch=default_branch,
+    )
+
+
+def _first_parent_history(
+    *, transport: BuildProvenanceTransport, repository_path: str, default_branch: str
+) -> Iterator[str]:
     parents: dict[str, str] = {}
     cursor = ""
     for page in range(1, FIRST_PARENT_PAGE_LIMIT + 1):
@@ -305,14 +335,10 @@ def _require_first_parent(
             if not cursor:
                 cursor = sha
         while cursor in parents:
-            if cursor == commit:
-                return
+            yield cursor
             cursor = parents[cursor]
         if not cursor or len(commits) < 100:
-            break
-    raise BuildProvenanceError(
-        f"{commit} is not on {default_branch}'s first-parent history within the checked range."
-    )
+            return
 
 
 def _download_manifest(
