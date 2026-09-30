@@ -288,6 +288,7 @@ from control_plane.http_routes.release_review import (
 from control_plane.release_review import current_release_review
 from control_plane.release_review_record import publish_release_decision
 from control_plane.trusted_maintenance_github_webhook import TRUSTED_MAINTENANCE_WEBHOOK_ROUTE
+from control_plane.github_app_webhook import GITHUB_APP_WEBHOOK_ROUTE
 from control_plane.provider_operations import (
     DurableProviderMutationAdapter,
     DurableProviderOperationResult,
@@ -868,6 +869,9 @@ EveryCodeGitHubWebhookHandler = Callable[
 TrustedMaintenanceGitHubWebhookHandler = Callable[
     [bytes, str, str, str, object, FilePath, str], tuple[int, dict[str, object]]
 ]
+GitHubAppWebhookHandler = Callable[
+    [bytes, str, str, str, object, FilePath, str], tuple[int, dict[str, object]]
+]
 
 
 Message = MutableMapping[str, Any]
@@ -960,6 +964,12 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     ),
     TRUSTED_MAINTENANCE_WEBHOOK_ROUTE: (
         "Trusted-maintenance GitHub webhook",
+        _GITHUB_WEBHOOK_MAX_BODY_BYTES,
+        False,
+        True,
+    ),
+    GITHUB_APP_WEBHOOK_ROUTE: (
+        "GitHub App webhook",
         _GITHUB_WEBHOOK_MAX_BODY_BYTES,
         False,
         True,
@@ -3949,6 +3959,7 @@ def create_launchplane_fastapi_app(
     trusted_maintenance_github_webhook_handler: (
         TrustedMaintenanceGitHubWebhookHandler | None
     ) = None,
+    github_app_webhook_handler: GitHubAppWebhookHandler | None = None,
     engineering_review_target_resolver: EngineeringReviewTargetResolver | None = None,
     owner_review_status_publisher: OwnerReviewStatusPublisher | None = None,
 ) -> FastAPI:
@@ -4868,6 +4879,32 @@ def create_launchplane_fastapi_app(
                 message=f"No Launchplane route for {TRUSTED_MAINTENANCE_WEBHOOK_ROUTE}.",
             )
         status_code, payload = trusted_maintenance_github_webhook_handler(
+            await request.body(),
+            x_github_event,
+            x_github_delivery,
+            x_hub_signature_256,
+            record_store,
+            resolved_control_plane_root,
+            trace_id,
+        )
+        return JSONResponse(status_code=status_code, content=payload)
+
+    async def handle_github_app_webhook(
+        request: Request,
+        x_github_event: Annotated[str, Header(alias="X-GitHub-Event")] = "",
+        x_github_delivery: Annotated[str, Header(alias="X-GitHub-Delivery")] = "",
+        x_hub_signature_256: Annotated[str, Header(alias="X-Hub-Signature-256")] = "",
+        record_store: object = Depends(get_record_store),
+    ) -> JSONResponse:
+        trace_id = next_trace_id()
+        if github_app_webhook_handler is None:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {GITHUB_APP_WEBHOOK_ROUTE}.",
+            )
+        status_code, payload = github_app_webhook_handler(
             await request.body(),
             x_github_event,
             x_github_delivery,
@@ -24651,6 +24688,21 @@ def create_launchplane_fastapi_app(
         status_code=202,
         operation_id="handle_trusted_maintenance_github_webhook",
         summary="Capture signed trusted-maintenance GitHub evidence",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            413: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+    app.add_api_route(
+        GITHUB_APP_WEBHOOK_ROUTE,
+        handle_github_app_webhook,
+        methods=["POST"],
+        status_code=202,
+        operation_id="handle_github_app_webhook",
+        summary="Record product reconcile requests from a signed GitHub App delivery",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
