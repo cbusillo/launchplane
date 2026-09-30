@@ -469,7 +469,14 @@ managed Launchplane and Enterprise addon roots into `ODOO_ADDONS_PATH` so a
 stale explicit runtime-environment value cannot override the compose default
 and make required module dependencies unavailable. Refresh then deploys the
 compose and runs the managed Odoo post-deploy maintenance schedule before any
-smoke check can pass. The schedule must prove that exactly one current web
+smoke check can pass. A new preview has no database yet, and its web container
+cannot create one, because it waits for the integration read-back and that
+needs the database. So the preview schedule first asks the preview's own
+Postgres whether the database exists. If it doesn't, the schedule runs the
+devkit bootstrap instead of maintenance, which creates and installs it. The
+bootstrap drops any existing database, so it runs only when that check says
+there is none. When the check gets no answer, the schedule stops before it
+touches web. Stable lanes never run this check. The schedule must prove that exactly one current web
 container and script-runner container use the same artifact image, that an
 explicit module list was configured, and that the install/update workflow
 completed. Launchplane passes the resolved filestore path explicitly to the
