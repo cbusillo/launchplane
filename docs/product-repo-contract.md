@@ -200,7 +200,10 @@ reference, and the dedicated workflow must contain
 exactly one such call. Product repositories should not carry a
 pinned Launchplane tool checkout or run `uv run launchplane ...` themselves.
 The dedicated workflow fails closed when the reusable call is absent, duplicated,
-mutable, mismatched, or mixed with another reusable workflow call.
+mutable, mismatched, or mixed with another reusable workflow call. The optional
+`runs_on` input takes a JSON-encoded runner selector (default
+`"ubuntu-latest"`) for product repositories that run the gate on their own
+runner.
 
 ## What Product Repos Own
 
@@ -582,7 +585,12 @@ jobs:
     uses: cbusillo/launchplane/.github/workflows/reusable-preview-request-notice.yml@<launchplane-sha>
 ```
 
-Both callers must pin the full reviewed Launchplane commit SHA. Production
+Both callers must pin the full reviewed Launchplane commit SHA. The notice
+workflow accepts an optional `runs_on` input, a JSON-encoded GitHub Actions
+runner selector that defaults to `"ubuntu-latest"`. It applies to the notice's
+own job and to the cleanup and feedback reusable workflows it calls, so a
+product repository can run the notice on its own runner, for example
+`runs_on: '["self-hosted", "<runner-label>"]'`. Production
 promotion, rollback, and other high-risk operations remain separate explicit
 workflows and are not part of the preview facade.
 

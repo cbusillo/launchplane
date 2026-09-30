@@ -117,6 +117,11 @@ name: Reusable Preview Feedback Status
         required: false
         default: ""
         type: string
+      runs_on:
+        description: JSON encoded GitHub Actions runner selector.
+        required: false
+        default: '"ubuntu-latest"'
+        type: string
     outputs:
       feedback_status:
         description: Preview feedback status returned by Launchplane.
@@ -140,7 +145,7 @@ jobs:
     outputs:
       failure_summary: ${{ steps.status.outputs.failure_summary }}
       status: ${{ steps.status.outputs.status }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
     steps:
       - name: Resolve preview feedback status
         id: status
@@ -280,3 +285,4 @@ jobs:
       timeout-ms: ${{ inputs['timeout-ms'] }}
       launchplane_url: ${{ inputs.launchplane_url }}
       launchplane_audience: ${{ inputs.launchplane_audience }}
+      runs_on: ${{ inputs.runs_on }}

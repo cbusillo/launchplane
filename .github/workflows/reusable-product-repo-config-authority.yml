@@ -18,13 +18,18 @@ name: Reusable Product Repo Config Authority
         description: Immutable Launchplane commit that contains this reusable workflow.
         required: true
         type: string
+      runs_on:
+        description: JSON encoded GitHub Actions runner selector.
+        required: false
+        default: '"ubuntu-latest"'
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   launchplane-config-authority:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
     steps:
       - name: Check out product repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

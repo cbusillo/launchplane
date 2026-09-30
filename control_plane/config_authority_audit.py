@@ -360,6 +360,7 @@ WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
     },
     ".github/workflows/reusable-generic-web-preview-lifecycle.yml": {
         "inputs.feedback_status.default": frozenset(("unsupported",)),
+        "inputs.runs_on.default": frozenset(('"ubuntu-latest"',)),
         "inputs.timeout-ms.default": frozenset(("1800000",)),
         "inputs.timeout-seconds.default": frozenset(("300",)),
     },
@@ -383,7 +384,17 @@ WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
         "inputs.timeout-seconds.default": frozenset(("null",)),
     },
     ".github/workflows/reusable-preview-feedback-status.yml": {
+        "inputs.runs_on.default": frozenset(('"ubuntu-latest"',)),
         "inputs.timeout-ms.default": frozenset(("300000",)),
+    },
+    ".github/workflows/reusable-preview-pr-feedback.yml": {
+        "inputs.runs_on.default": frozenset(('"ubuntu-latest"',)),
+    },
+    ".github/workflows/reusable-preview-request-notice.yml": {
+        "inputs.runs_on.default": frozenset(('"ubuntu-latest"',)),
+    },
+    ".github/workflows/reusable-product-repo-config-authority.yml": {
+        "inputs.runs_on.default": frozenset(('"ubuntu-latest"',)),
     },
     ".github/workflows/reusable-product-driver-prod-promotion.yml": {
         "inputs.driver.default": frozenset(("verireel",)),
@@ -1173,6 +1184,18 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
     ".github/workflows/reusable-preview-feedback-status.yml": {
         "launchplane_url": frozenset(("${{ inputs.launchplane_url }}",)),
         "preview_url": frozenset(("${{ inputs.preview_url }}",)),
+        "runs-on": frozenset(("${{ fromJSON(inputs.runs_on) }}",)),
+        "runs_on": frozenset(("${{ inputs.runs_on }}",)),
+    },
+    ".github/workflows/reusable-preview-pr-feedback.yml": {
+        "runs-on": frozenset(("${{ fromJSON(inputs.runs_on) }}",)),
+    },
+    ".github/workflows/reusable-preview-request-notice.yml": {
+        "runs-on": frozenset(("${{ fromJSON(inputs.runs_on) }}",)),
+        "runs_on": frozenset(("${{ inputs.runs_on }}",)),
+    },
+    ".github/workflows/reusable-product-repo-config-authority.yml": {
+        "runs-on": frozenset(("${{ fromJSON(inputs.runs_on) }}",)),
     },
     ".github/workflows/reusable-generic-web-preview-lifecycle.yml": {
         "anchor_pr_number": frozenset(
@@ -1214,6 +1237,7 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
                 "${{ steps.request.outputs.run_url }}",
             )
         ),
+        "runs-on": frozenset(("${{ fromJSON(inputs.runs_on) }}",)),
         "source": frozenset(("${{ needs.resolve.outputs.run_url }}",)),
     },
     ".github/workflows/reusable-generic-web-prod-rollback.yml": {
