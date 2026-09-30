@@ -184,6 +184,13 @@ class BuildProvenanceTests(unittest.TestCase):
             record_verified_build_artifact(record_store=record_store, verified=verified)
         record_store.write_artifact_manifest.assert_not_called()
 
+    def test_refuses_a_malformed_manifest_as_unverified(self) -> None:
+        github = FakeGitHub(runs=[_run()])
+        github.manifest = {"artifact_id": "not-a-manifest"}
+
+        with self.assertRaisesRegex(BuildProvenanceError, "not a valid artifact manifest"):
+            _verify(github)
+
     def test_record_refuses_a_preview_artifact(self) -> None:
         run = _run(event="pull_request", head_branch="feature")
         verified = _verify(FakeGitHub(runs=[run]), purpose="preview", pull_request_number=5)
