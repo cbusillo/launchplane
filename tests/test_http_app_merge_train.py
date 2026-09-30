@@ -1,3 +1,5 @@
+import asyncio
+import threading
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -30,6 +32,7 @@ from control_plane.merge_admission import (
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from control_plane.merge_train_controller_run_once import MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION
+from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.merge_train_github import MergeTrainGitHubMergeRejectedError
 from control_plane.merge_train_github import MergeTrainGitHubStaleHeadError
 from control_plane.merge_train_github import merge_train_construction_ref
@@ -2158,6 +2161,52 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["controller_action"], "update_branch")
         self.assertEqual(result["branch_update_result"]["status"], "updated")
         self.assertEqual(branch_updates, [(1, "head-1")])
+
+    async def test_a_slow_controller_run_does_not_block_other_requests(self) -> None:
+        controller_started = threading.Event()
+        release_controller = threading.Event()
+        controller_finished = threading.Event()
+
+        def slow_controller(**_: Any) -> Any:
+            controller_started.set()
+            release_controller.wait(10)
+            controller_finished.set()
+            raise MergeTrainGitHubError("slow controller test")
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.http_app.execute_merge_train_controller_run_once", slow_controller
+            ):
+                controller_request = asyncio.create_task(
+                    _post_merge_train_controller_run_once(
+                        app,
+                        {
+                            "schema_version": 1,
+                            "repository": "cbusillo/sellyouroutboard",
+                            "base_branch": "main",
+                            "mutate": True,
+                        },
+                    )
+                )
+                self.assertTrue(await asyncio.to_thread(controller_started.wait, 10))
+                health = await _asgi_get(app, "/v1/health")
+                served_while_controller_ran = not controller_finished.is_set()
+                release_controller.set()
+                await controller_request
+
+        self.assertEqual(health.status_code, 200)
+        self.assertTrue(served_while_controller_ran)
 
     async def test_controller_uses_only_the_declared_managed_token_source(self) -> None:
         for managed_token, expected_status in (
