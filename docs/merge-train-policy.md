@@ -255,6 +255,22 @@ reported as `trusted_automation` in controller dry-run output. The default list
 is empty, so existing owner/admin-only policies remain fail-closed and unchanged.
 Logins are diagnostic labels, not policy identity, because logins can be renamed.
 
+`dependency_update_github_user_ids` names dependency-update bots, for example
+Dependabot. Each id must also be in `trusted_automation_github_user_ids`. A pull
+request from one of them enqueues without the enqueue label only when every
+commit on it is authored by that bot and signed by GitHub (committer
+`web-flow`, verified), nobody else force-pushed the branch, the commits match the
+pull request head the train read, and every dependency the update names stays
+within one major version. Transitive lockfile changes are not classified; the
+pull request's required checks still gate them. The adapter derives that from Dependabot's
+`updated-dependencies` commit trailer and the "from X to Y" lines, because the
+trailer often omits `update-type`. A major version, a `0.x` minor bump, a
+changed version suffix, a non-version reference such as a commit SHA, an
+unparseable message, or a commit by anyone else leaves the pull request
+ineligible with `dependency update needs agent review`. The label still
+enqueues any trusted pull request as before. An empty list, the default, changes
+nothing and is omitted from the policy digest.
+
 ## Failure Semantics
 
 Policies using `pause_train` stop processing later queued pull requests after a
