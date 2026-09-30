@@ -595,9 +595,11 @@ def _stack_pull_request_reasons(
         reasons.append(f"pull request #{pull_request.number} is missing base ref")
     if not pull_request.head_repository or not pull_request.base_repository:
         reasons.append(f"pull request #{pull_request.number} is missing repository identity")
-    if pull_request.head_repository != snapshot.repository:
+    # GitHub repository names are case-insensitive, and the adapter lowercases them.
+    train_repository = snapshot.repository.casefold()
+    if pull_request.head_repository.casefold() != train_repository:
         reasons.append(f"pull request #{pull_request.number} is not from the train repository")
-    if pull_request.base_repository != snapshot.repository:
+    if pull_request.base_repository.casefold() != train_repository:
         reasons.append(f"pull request #{pull_request.number} does not target the train repository")
     if pull_request.head_ref == pull_request.base_ref:
         reasons.append(f"pull request #{pull_request.number} has identical head and base refs")
