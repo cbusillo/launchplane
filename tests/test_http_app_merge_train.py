@@ -3483,10 +3483,6 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ):
                 failed_response = await _post_merge_train_controller_run_once(app, request_payload)
-            with patch(
-                "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
-                _FakeMergeTrainSnapshotReader,
-            ):
                 terminal_response = await _post_merge_train_controller_run_once(
                     app, request_payload
                 )
@@ -3500,6 +3496,66 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             terminal_payload["records"]["merge_train_batch_candidate_record_id"],
             failed_payload["records"]["merge_train_batch_candidate_record_id"],
         )
+
+    async def test_recovers_failed_candidate_when_rerun_checks_pass(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
+            ):
+                await _post_merge_train_controller_run_once(app, request_payload)
+                await _post_merge_train_controller_run_once(app, request_payload)
+                with patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeFailingMergeTrainGitHubClient,
+                ):
+                    failed_response = await _post_merge_train_controller_run_once(
+                        app, request_payload
+                    )
+                # The failed check is re-run on the same candidate SHA and passes.
+                recovered_response = await _post_merge_train_controller_run_once(
+                    app, request_payload
+                )
+                landing_response = await _post_merge_train_controller_run_once(app, request_payload)
+
+        failed_payload = failed_response.json()
+        recovered_payload = recovered_response.json()
+        self.assertEqual(failed_payload["result"]["candidate"]["status"], "failed")
+        self.assertEqual(recovered_response.status_code, 202)
+        self.assertEqual(recovered_payload["result"]["controller_action"], "observe_candidate")
+        self.assertEqual(recovered_payload["result"]["candidate"]["status"], "passed")
+        self.assertEqual(
+            recovered_payload["result"]["candidate"]["candidate_sha"],
+            failed_payload["result"]["candidate"]["candidate_sha"],
+        )
+        self.assertEqual(
+            recovered_payload["result"]["superseded_merge_train_batch_candidate_record_id"],
+            failed_payload["records"]["merge_train_batch_candidate_record_id"],
+        )
+        self.assertEqual(landing_response.json()["result"]["controller_action"], "plan_landing")
 
     async def test_advances_stacked_batch_flow(self) -> None:
         class CollapsedRootWithIndependentPrSnapshotReader(

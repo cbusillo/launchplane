@@ -413,6 +413,10 @@ identity before waiting on checks, so a pending or failed check cannot hide a
 new source head. A manually closed batch PR is not automatically reopened.
 Change or remove the queued source entries to build a replacement; an unchanged
 failed candidate remains visibly failed rather than being rebuilt in a loop.
+It is never rebuilt, but a candidate that failed on check evidence is re-read at
+its recorded SHA on each controller call, so re-running the failed check lets it
+continue once the re-run is no longer failing. A multi-entry batch whose batch
+PR was closed on failure is not re-read, because that PR is never reopened.
 
 The landing plan binds `candidate_pull_request_number` into its immutable
 digest. The controller evaluates every constituent before appending the first
@@ -879,8 +883,12 @@ Controller actions have these retry/stop semantics:
   become `plan_candidate` for a superseding candidate. A failed candidate with
   no recorded candidate SHA never reached checks, so the controller may also
   supersede and replan it against the unchanged queue after a transient build
-  failure is repaired. Failed candidates with a recorded candidate SHA remain
-  terminal until the queue or base changes.
+  failure is repaired. Failed candidates with a recorded candidate SHA are not
+  rebuilt until the queue or base changes. If one failed on check evidence and a
+  re-run of the failed check at that SHA is now pending or passing, the controller
+  returns `observe_candidate`, retires the failed record, and continues from the
+  re-read evidence. Multi-entry merge batches, whose batch PR was closed on
+  failure, stay failed.
 - `plan_landing`: A passed candidate still matches the live eligible queue,
   recorded PR head SHAs, and base SHA and is ready for PR-native landing-plan
   creation. Mutate once, then call again.
