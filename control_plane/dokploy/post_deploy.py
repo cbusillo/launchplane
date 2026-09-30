@@ -383,7 +383,6 @@ def run_compose_post_deploy_update(
     workflow_environment_overrides: Mapping[str, str] | None = None,
     required_workflow_environment_keys: tuple[str, ...] = (),
     run_destructive_restore: bool = False,
-    preview: bool = False,
     before_provider_mutation: Callable[[str], None] | None = None,
     deployment_title: str = "",
     schedule_execution_timeout_seconds: int | None = None,
@@ -585,7 +584,6 @@ def run_compose_post_deploy_update(
         instance_name=target_definition.instance,
         policies=target_definition.policies,
         workflow_mode=workflow_mode,
-        preview=preview,
     )
     schedule_script = _build_dokploy_data_workflow_script(
         compose_app_name=compose_app_name,

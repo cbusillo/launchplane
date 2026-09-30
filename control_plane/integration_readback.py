@@ -179,16 +179,16 @@ def integration_readback_policy(
     instance_name: str,
     policies: DokployTargetPolicies,
     workflow_mode: IntegrationReadbackWorkflowMode,
-    preview: bool = False,
 ) -> IntegrationReadbackPolicy:
     """Build the read-back for a lane from its class and its target record policies.
 
     Production lanes hold real settings by design, so only the protected-store-key
-    check applies there. Previews are wired in by #2596. Every other lane, including
-    one whose instance name has no recognized class, gets the full check.
+    check applies there. Every other lane, including a preview and one whose instance
+    name has no recognized class, gets the full check. A preview's target definition
+    carries no allowances, so it never inherits its template lane's.
     """
     families: tuple[IntegrationFamily, ...] = ()
-    if not preview and runtime_key_safety_environment_class(instance_name) != "prod":
+    if runtime_key_safety_environment_class(instance_name) != "prod":
         families = tuple(
             family
             for family in INTEGRATION_FAMILIES

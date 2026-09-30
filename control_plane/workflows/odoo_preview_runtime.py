@@ -1651,8 +1651,6 @@ def _execute_refresh(
             workflow_environment_overrides=runtime_override_environment,
             before_provider_mutation=checkpoint_provider_effect,
             deployment_title=provider_operation_title,
-            # TODO(#2596): run the integration read-back on previews too.
-            preview=True,
         )
         dokploy_post_deploy.require_odoo_module_update_readback_evidence(
             module_install_update_evidence
