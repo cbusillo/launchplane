@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from collections.abc import Iterable
 from typing import Protocol
 
 import click
@@ -251,6 +252,35 @@ def runtime_env_live_target_delta(
     if retired_keys:
         result["retired_keys_present"] = retired_keys_present
     return result
+
+
+def transported_runtime_secret_keys(
+    *,
+    record_store: RuntimeKeySafetyPolicyReadStore,
+    context_name: str,
+    instance_name: str,
+    transported_keys: Iterable[str],
+) -> set[str]:
+    """Keys a deployment carries whose value comes from a managed secret for this lane.
+
+    A deployment can carry secrets the product profile doesn't declare, such as an
+    instance override's secret-backed addon setting, so key safety must cover these too.
+    """
+    target = RuntimeKeySafetyTarget(
+        context=context_name,
+        instance=instance_name,
+        environment_class=runtime_key_safety_environment_class(instance_name),
+    )
+    transported = set(transported_keys)
+    return {
+        binding.binding_key
+        for binding in record_store.list_secret_bindings(
+            integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+            limit=None,
+        )
+        if binding.binding_key in transported
+        and runtime_secret_binding_matches_target(binding=binding, target=target)
+    }
 
 
 def evaluate_runtime_key_safety_for_live_target_sync(
