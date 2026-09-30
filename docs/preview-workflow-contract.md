@@ -203,7 +203,11 @@ The reusable workflow owns the trusted event decision, cleanup lifecycle and
 feedback handoff, unsupported/cleared status selection, and failure summary.
 Product repos must not check out code, choose a checkout ref, render feedback
 markdown, build request payloads, or call `POST /v1/previews/pr-feedback`
-directly from their own trusted notice workflows.
+directly from their own trusted notice workflows. The notice, lifecycle, PR
+feedback, and feedback-status reusable workflows accept an optional `runs_on`
+input: a JSON-encoded runner selector that defaults to `"ubuntu-latest"`. The
+notice forwards it to the cleanup and feedback workflows it calls, so one caller
+input chooses the runner for every job in the notice run.
 
 After native generic-web provider teardown succeeds, the destroy route records
 the matching preview as `destroyed` and clears its active and serving generation

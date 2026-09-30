@@ -5420,6 +5420,64 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertNotIn("preview_url", thin_connector_keys)
         self.assertNotIn("idempotency-key", thin_connector_keys)
 
+    def test_cli_product_repo_gate_runs_on_selector_allows_only_mechanic_labels(self) -> None:
+        for runs_on, expected_status in (
+            ('["self-hosted"]', "pass"),
+            ('"ubuntu-latest"', "pass"),
+            ('["self-hosted","chris-testing"]', "fail"),
+            ('["chris-testing"]', "fail"),
+            ("[]", "fail"),
+        ):
+            with self.subTest(runs_on=runs_on), TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                _init_repo(root)
+                workflow = root / ".github" / "workflows" / "launchplane-preview-notice.yml"
+                workflow.parent.mkdir(parents=True)
+                workflow.write_text("name: Launchplane Preview Notice\n", encoding="utf-8")
+                _commit_all(root)
+                _git(root, "branch", "-M", "main")
+                _checkout_branch(root, "feature/notice-runner")
+                workflow.write_text(
+                    "---\n"
+                    "name: Launchplane Preview Notice\n\n"
+                    '"on":\n'
+                    "  pull_request_target:\n"
+                    "    types: [opened, closed]\n\n"
+                    "permissions:\n"
+                    "  contents: read\n\n"
+                    "jobs:\n"
+                    "  notice:\n"
+                    "    permissions:\n"
+                    "      contents: read\n"
+                    "      id-token: write\n"
+                    "    uses: cbusillo/launchplane/.github/workflows/"
+                    "reusable-preview-request-notice.yml@" + "a" * 40 + "\n"
+                    "    with:\n"
+                    f"      runs_on: '{runs_on}'\n",
+                    encoding="utf-8",
+                )
+                _commit_all(root)
+
+                result = CliRunner().invoke(
+                    CLI_MAIN,
+                    [
+                        "service",
+                        "audit-config-authority",
+                        "--control-plane-root",
+                        str(root),
+                        "--mode",
+                        "changed-files-gate",
+                        "--fail-on-findings",
+                        "--gate-profile",
+                        "product-repo",
+                    ],
+                )
+
+                payload = json.loads(result.output.split("Error:", 1)[0])
+                gate = cast("dict[str, object]", payload["gate"])
+                self.assertEqual(gate["status"], expected_status, result.output)
+                self.assertEqual(result.exit_code == 0, expected_status == "pass")
+
     def test_cli_product_repo_gate_rejects_compact_tool_checkout_without_binding(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
