@@ -2924,6 +2924,87 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             [1, 2],
         )
 
+    async def test_failed_candidate_does_not_block_a_behind_base_queue_head(self) -> None:
+        branch_updates: list[tuple[int, str]] = []
+
+        class BehindBaseReader(_FakeMergeTrainSnapshotReader):
+            def read_merge_train_snapshot(self, **kwargs: Any) -> Any:
+                snapshot = super().read_merge_train_snapshot(**kwargs)
+                (pull_request,) = snapshot.pull_requests
+                return snapshot.model_copy(
+                    update={
+                        "pull_requests": (
+                            pull_request.model_copy(update={"branch_update_required": True}),
+                        )
+                    }
+                )
+
+        class BranchUpdatingClient(_FakeMergeTrainGitHubClient):
+            def update_pull_request_branch(
+                self, *, repository: str, pull_request_number: int, expected_head_sha: str
+            ) -> None:
+                branch_updates.append((pull_request_number, expected_head_sha))
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
+            ):
+                await _post_merge_train_controller_run_once(app, request_payload)
+                await _post_merge_train_controller_run_once(app, request_payload)
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeFailingMergeTrainGitHubClient,
+                ),
+            ):
+                failed = await _post_merge_train_controller_run_once(app, request_payload)
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    BehindBaseReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    BranchUpdatingClient,
+                ),
+            ):
+                response = await _post_merge_train_controller_run_once(app, request_payload)
+
+        self.assertEqual(failed.json()["result"]["candidate"]["status"], "failed")
+        result = response.json()["result"]
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(result["controller_action"], "update_branch")
+        self.assertIn("superseded_merge_train_batch_candidate_record_id", result)
+        self.assertEqual(branch_updates, [(1, "head-1")])
+
     async def test_candidate_build_stops_when_fresh_queue_cannot_be_read(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,

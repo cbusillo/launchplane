@@ -2760,6 +2760,32 @@ def try_reflow_failed_merge_train_candidate(
     except Exception:
         return None
     dry_run_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
+    if (
+        dry_run_result.intended_next_action == "update_branch"
+        and mutate
+        and dry_run_result.selected_pr is not None
+    ):
+        # The queue head is behind its base; a failed candidate must not keep it
+        # from being refreshed. Retire the failed candidate, then update the branch.
+        _supersede_active_merge_train_batch_candidate_records(
+            record_store=candidate_store,
+            repository=repository,
+            base_branch=base_branch,
+            batch_id=active_candidate_record.candidate.batch_id,
+            replacement_record_id=None,
+        )
+        branch_update_result = apply_merge_train_branch_update_intent(
+            dry_run_result=dry_run_result, branch_client=github_client
+        )
+        return {
+            "repository": repository,
+            "base_branch": base_branch,
+            "mode": "update_branch",
+            "controller_action": "update_branch",
+            "superseded_merge_train_batch_candidate_record_id": active_candidate_record.record_id,
+            "dry_run_result": dry_run_result.model_dump(mode="json"),
+            "branch_update_result": branch_update_result.model_dump(mode="json"),
+        }
     if dry_run_result.intended_next_action != "merge":
         return None
     queue_unchanged = _merge_train_candidate_matches_dry_run_queue(
