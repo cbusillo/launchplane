@@ -23,6 +23,12 @@ verifies which repository and commit an artifact came from, and deploys it
 with the site's runtime settings and secrets. The artifact is the only handoff
 between them.
 
+Launchplane needs no grant to do its own job. Work it starts itself, such as
+verifying a build and bringing a site's previews and testing lane up to it,
+runs on Launchplane's own authority, limited to that work. Grants are for
+people and other agents. The stop boundaries still apply: a production
+release still waits for the operator or the site owner.
+
 Code and tests are upkeep. A change that deletes code or tests without losing
 a behavior needs no other reason. A test earns its place by catching a real
 regression, not by restating the code or its wording.
@@ -71,6 +77,8 @@ Launchplane by hand. Whatever blocks that run is the next piece of work.
 - the blanket authorization freeze; granting access is a stop boundary instead
 - product repositories calling Launchplane: workflow-identity grants, pinned
   reusable Launchplane workflows, and Launchplane-held build settings
+- grant rules for Launchplane's own work, such as a service identity that
+  needs a policy rule to deploy what Launchplane itself verified
 
 A retired concept comes back only through a direction change, in a shape that
 fits this file.
