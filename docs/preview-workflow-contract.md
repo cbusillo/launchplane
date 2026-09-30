@@ -496,8 +496,11 @@ loads the persisted result, requires the caller's dry-run plan and artifact to
 match exactly, rejects missing, mismatched, or expired provenance, and rebuilds
 the plan from current Launchplane records and current provider discovery before
 the first provider effect. Any changed profile, runtime routing, template target,
-environment id, or discovered preview target makes the plan stale and requires
-new apply inputs. Completed exact retries replay the stored apply response only
+environment id, discovered preview target, or set of blanked integration
+credentials makes the plan stale and requires new apply inputs. Ready refresh
+plans list in `omitted_integration_credential_keys` the template-lane
+integration credentials the preview receives as empty values because no
+runtime key-safety rule allows them on previews (key names only). Completed exact retries replay the stored apply response only
 while its stored lifecycle evidence remains the current preview owner. A changed
 product profile, missing legacy lifecycle evidence, newer serving generation, or
 newer destroy returns a conflict and does not publish ready/destroyed feedback.

@@ -382,11 +382,17 @@ class OdooPreviewApplyInputsResult(BaseModel):
     runtime_plan: OdooPreviewRuntimePlan
     dry_run_plan: OdooPreviewDokployDryRunPlan
     plan_provenance: OdooPreviewApplyPlanProvenance | None = None
+    # Template-lane integration credentials the preview receives blank because no
+    # key-safety rule allows them on previews. Key names only, never values.
+    omitted_integration_credential_keys: tuple[str, ...] = ()
     source: str
     error_message: str = ""
 
     @model_validator(mode="after")
     def _normalize_result(self) -> "OdooPreviewApplyInputsResult":
+        self.omitted_integration_credential_keys = tuple(
+            sorted(set(self.omitted_integration_credential_keys))
+        )
         self.product = _required_text(
             self.product, "Odoo preview apply inputs result requires product"
         )

@@ -1358,6 +1358,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                     env={
                         "ODOO_DB_USER": "odoo",
                         "DOKPLOY_ENVIRONMENT_ID": "env-cm-preview",
+                        "ODOO_SMTP_PASSWORD": "template-smtp-pass",
                     },
                     updated_at="2026-05-09T12:30:00Z",
                     source_label="test",
@@ -1438,6 +1439,9 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["plan_request"]["manifest"]["source_commit"], "abc123")
         self.assertTrue(result["plan_provenance"]["plan_id"].startswith("odoo-preview-plan-"))
         self.assertEqual(len(result["plan_provenance"]["plan_sha256"]), 64)
+        # No key-safety rule allows the testing lane's SMTP password on previews.
+        self.assertEqual(result["omitted_integration_credential_keys"], ["ODOO_SMTP_PASSWORD"])
+        self.assertNotIn("template-smtp-pass", response.text)
         self.assertNotIn("template-db-secret", json.dumps(response.json()))
 
     async def test_odoo_preview_apply_inputs_builds_destroy_for_discovered_target(
@@ -2299,11 +2303,12 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(applied_environment["ODOO_DB_PASSWORD"], "template-db-secret")
         self.assertEqual(launchplane_comment_token, "context-record-comment-token")
 
-    async def test_odoo_preview_refuses_copied_integration_credentials_without_a_preview_rule(
+    async def test_odoo_preview_blanks_copied_integration_credentials_without_a_preview_rule(
         self,
     ) -> None:
         # The template is a testing lane whose pre_live settings reach production
-        # services. Its classification never carries over to the preview.
+        # services. Its classification never carries over to the preview, so a copied
+        # integration credential no rule allows on previews reaches the preview blank.
         preview_rule = RuntimeSecretSafetyRule(
             binding_key="SHOPIFY_API_TOKEN",
             secret_class="non_prod",
@@ -2321,22 +2326,26 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         lane_smtp_pass: tuple[SecretScope, str] = ("context_instance", "SMTP_PASS")
         # A site-shared secret reaches the testing template and so the preview.
         site_shopify: tuple[SecretScope, str] = ("context", "SHOPIFY_API_TOKEN")
+        smtp_settings = {"ODOO_SMTP_PASSWORD": "template-pass", "ODOO_SMTP_HOST": "smtp.example"}
         cases: tuple[
             tuple[
                 str,
                 dict[str, str],
                 tuple[tuple[SecretScope, str], ...],
-                tuple[RuntimeSecretSafetyRule, ...],
+                tuple[RuntimeSecretSafetyRule, ...] | None,
+                list[str],
                 list[str],
             ],
             ...,
         ] = (
+            ("smtp_password", smtp_settings, (), (unrelated_rule,), ["ODOO_SMTP_PASSWORD"], []),
             (
                 "url_credential",
                 {"SMTP_URL": "smtp://mailer:template-pass@smtp.example"},
                 (),
                 (unrelated_rule,),
                 ["SMTP_URL"],
+                [],
             ),
             (
                 "unruled_secrets",
@@ -2344,33 +2353,55 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                 (lane_shopify, lane_smtp_pass),
                 (unrelated_rule,),
                 ["SHOPIFY_API_TOKEN", "SMTP_PASS"],
+                [],
             ),
-            ("site_secret_with_preview_rule", {}, (site_shopify,), (preview_rule,), []),
+            (
+                "site_secret_with_preview_rule",
+                {},
+                (site_shopify,),
+                (preview_rule,),
+                [],
+                ["SHOPIFY_API_TOKEN"],
+            ),
+            (
+                "no_active_policy",
+                smtp_settings,
+                (lane_shopify,),
+                None,
+                ["ODOO_SMTP_PASSWORD", "SHOPIFY_API_TOKEN"],
+                [],
+            ),
         )
-        for name, template_env, secrets, rules, refused_keys in cases:
+        for name, template_env, secrets, rules, blanked_keys, kept_keys in cases:
             with self.subTest(case=name):
                 response, apply_driver = await self._apply_odoo_preview_with_template(
                     template_env=template_env, secrets=secrets, rules=rules
                 )
-                if not refused_keys:
-                    self.assertEqual(response.status_code, 202, response.text)
-                    apply_driver.assert_called_once()
-                    continue
-                self.assertEqual(response.status_code, 400, response.text)
-                payload = response.json()
+                self.assertEqual(response.status_code, 202, response.text)
+                apply_driver.assert_called_once()
+                applied_environment = apply_driver.call_args.kwargs["request"].environment_values
                 self.assertEqual(
-                    payload["error"]["code"], "odoo_preview_copied_integration_credential_refused"
+                    {key: applied_environment.get(key) for key in blanked_keys},
+                    dict.fromkeys(blanked_keys, ""),
                 )
-                self.assertEqual(payload["details"]["refused_keys"], refused_keys)
-                self.assertNotIn("template-pass", response.text)
-                apply_driver.assert_not_called()
+                self.assertEqual(
+                    sorted(
+                        key
+                        for key, value in applied_environment.items()
+                        if "template-pass" in value or value == "template-integration-secret"
+                    ),
+                    kept_keys,
+                )
+                if "ODOO_SMTP_HOST" in template_env:
+                    self.assertEqual(applied_environment["ODOO_SMTP_HOST"], "smtp.example")
+                self.assertEqual(applied_environment["ODOO_DB_PASSWORD"], "template-db-secret")
 
     async def _apply_odoo_preview_with_template(
         self,
         *,
         template_env: dict[str, str],
         secrets: tuple[tuple[SecretScope, str], ...],
-        rules: tuple[RuntimeSecretSafetyRule, ...],
+        rules: tuple[RuntimeSecretSafetyRule, ...] | None,
     ) -> tuple[_AsgiResponse, MagicMock]:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -2387,15 +2418,16 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                     source_label="test",
                 )
             )
-            store.write_runtime_key_safety_policy_record(
-                RuntimeKeySafetyPolicyRecord(
-                    record_id="runtime-key-safety-policy-preview-test",
-                    status="active",
-                    source="test",
-                    updated_at="2026-05-09T12:32:00Z",
-                    rules=rules,
+            if rules is not None:
+                store.write_runtime_key_safety_policy_record(
+                    RuntimeKeySafetyPolicyRecord(
+                        record_id="runtime-key-safety-policy-preview-test",
+                        status="active",
+                        source="test",
+                        updated_at="2026-05-09T12:32:00Z",
+                        rules=rules,
+                    )
                 )
-            )
             identity = self._identity(
                 repository="cbusillo/launchplane",
                 workflow_ref=(

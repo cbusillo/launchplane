@@ -737,6 +737,10 @@ def _run_preview_operation(
                 "Launchplane's reconcile may not change this preview destination."
             )
         plan.update(preview_slug=issued_plan.preview_slug, preview_url=issued_plan.preview_url)
+        if issued_plan.omitted_integration_credential_keys:
+            plan["omitted_integration_credential_keys"] = list(
+                issued_plan.omitted_integration_credential_keys
+            )
         result = run_odoo_preview_apply_operation(
             store=cast(DurableProviderOperationStore, record_store),
             control_plane_root=control_plane_root,
