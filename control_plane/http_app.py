@@ -6099,9 +6099,18 @@ def create_launchplane_fastapi_app(
                     response=idempotent_response,
                 )
 
+            # Admission reads the pull request with the policy's own credential,
+            # the same one the rest of this train uses, so enrolling a repository
+            # never also needs the service-wide token to reach it.
             admission_evaluator = LiveMergeAdmissionEvaluator(
                 store=record_store,
-                repository_evidence_provider=resolved_repository_evidence_provider,
+                repository_evidence_provider=repository_evidence_provider
+                or GitHubRepositoryEvidenceProvider(
+                    control_plane_root=resolved_control_plane_root,
+                    github_token=lambda **_: token,
+                    github_api=github_api_request,
+                    token_context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ),
                 technical_check_client=GitHubMergeTrainClient(
                     transport=UrllibMergeTrainGitHubTransport(
                         token=token,
