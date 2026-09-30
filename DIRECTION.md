@@ -87,13 +87,15 @@ fits this file.
 
 - `Product repos never call Launchplane` proves the CM website's previews,
   testing deploys, and releases run from its own builds with no Launchplane
-  workflow, grant, or build setting referenced by its repository; ends if a
-  Launchplane change forces a product repository change, or a product change
-  needs a new Launchplane grant.
+  workflow, grant, or build setting referenced by its repository, except the
+  release workflows that `CM website live through Launchplane` replaces; ends
+  if a Launchplane change forces a product repository change, or a product
+  change needs a new Launchplane grant.
 - `CM website live through Launchplane` proves the journey once: owner
   approval at release is built, and three changes in a row go through with
-  Justin; ends if Justin has to use GitHub, the operator touches Launchplane
-  by hand, or the old approval code still decides a merge.
+  Justin, with the site's release workflows replaced; ends if Justin has to
+  use GitHub, the operator touches Launchplane by hand, or the old approval
+  code still decides a merge.
 - `Merge train that just works` proves an agent's merge lands in one pass
   without a wedge, a hand merge, or main going red on its own; ends if the
   friction log gains the same entry twice.
