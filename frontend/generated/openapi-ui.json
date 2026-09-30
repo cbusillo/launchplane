@@ -8010,13 +8010,24 @@
           },
           "shopify": {
             "$ref": "#/components/schemas/DokployTargetShopifyPolicy"
+          },
+          "staff_testing_hold": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DokployTargetStaffTestingHold"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "title": "DokployTargetPolicies",
         "type": "object",
         "required": [
           "integration_allowances",
-          "shopify"
+          "shopify",
+          "staff_testing_hold"
         ]
       },
       "DokployTargetRecord": {
@@ -8223,6 +8234,33 @@
         "required": [
           "protected_store_keys"
         ]
+      },
+      "DokployTargetStaffTestingHold": {
+        "additionalProperties": false,
+        "description": "Site staff are testing on this lane: event-driven deploys wait until it is lifted.",
+        "properties": {
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "recorded_at": {
+            "default": "",
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "recorded_by": {
+            "default": "",
+            "title": "Recorded By",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "recorded_at",
+          "recorded_by"
+        ],
+        "title": "DokployTargetStaffTestingHold",
+        "type": "object"
       },
       "DriverActionDescriptor": {
         "additionalProperties": false,

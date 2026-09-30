@@ -12,6 +12,11 @@ from click import ClickException
 from click.testing import CliRunner
 
 from control_plane.cli import main
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetPolicies,
+    DokployTargetRecord,
+    DokployTargetStaffTestingHold,
+)
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
 )
@@ -893,6 +898,54 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             self.assertEqual(operation.phase, "completed")
             self.assertEqual(operation.deployment_record_id, "deployment-cm-testing")
             self.assertEqual(operation.lease_owner, "worker-a")
+            execute_mock.assert_called_once()
+
+    def test_operator_target_replacement_runs_while_testing_is_held(self) -> None:
+        # The staff-testing hold stops Launchplane's own reconcile deploys, not an operator's.
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_dokploy_target_record(
+                DokployTargetRecord(
+                    context="cm",
+                    instance="testing",
+                    policies=DokployTargetPolicies(
+                        staff_testing_hold=DokployTargetStaffTestingHold(
+                            reason="Staff are testing checkout."
+                        )
+                    ),
+                    updated_at="2026-05-17T00:00:00Z",
+                )
+            )
+            store.write_odoo_stable_target_replacement_operation_record(
+                OdooStableTargetReplacementOperationRecord.model_validate(_replacement_payload())
+            )
+            result = OdooStableTargetReplacementApplyResult(
+                product="odoo-tenant-cm",
+                context="cm",
+                instance="testing",
+                strategy="recreate-in-place",
+                deployment_record_id="deployment-cm-testing",
+                deploy_status="pass",
+                post_deploy_status="pass",
+                health_status="pass",
+                canonical_status="pass",
+                logo_status="pass",
+                runtime_identity_injected=True,
+            )
+
+            with patch(
+                "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_stable_target_replacement_apply",
+                return_value=result,
+            ) as execute_mock:
+                run_odoo_stable_operation_worker_once(
+                    record_store=store, control_plane_root_path=root, lease_owner="worker-a"
+                )
+
+            operation = store.read_odoo_stable_target_replacement_operation_record(
+                "operation-cm-testing"
+            )
+            self.assertEqual(operation.status, "pass")
             execute_mock.assert_called_once()
 
     def test_worker_writes_failure_when_execution_raises(self) -> None:
