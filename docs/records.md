@@ -1987,6 +1987,10 @@ run` is the foreground loop intended for an external process supervisor, and
   lane may hold settings for; see the integration read-back in
   [operations](operations.md). The protected store keys stay an extra check on
   every lane that declares them, production included.
+- `policies.staff_testing_hold`, on a testing lane, holds Launchplane's
+  event-driven testing deploys while site staff test: a reason, who recorded it
+  and when. Absent means no hold; see
+  [event-driven deploys](event-driven-deploys.md#staff-testing-hold).
 - The operator write path for this record family is the Launchplane CLI,
   including `dokploy-targets list`, `show`,
   `put-shopify-protected-store-key`, and

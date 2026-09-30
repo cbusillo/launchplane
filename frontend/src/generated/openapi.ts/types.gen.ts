@@ -391,6 +391,7 @@ export type DokployTargetIntegrationAllowance = {
 export type DokployTargetPolicies = {
     integration_allowances: Array<DokployTargetIntegrationAllowance>;
     shopify: DokployTargetShopifyPolicy;
+    staff_testing_hold: DokployTargetStaffTestingHold | null;
 };
 
 export type DokployTargetRecord = {
@@ -425,6 +426,12 @@ export type DokployTargetRecord = {
 
 export type DokployTargetShopifyPolicy = {
     protected_store_keys: Array<string>;
+};
+
+export type DokployTargetStaffTestingHold = {
+    reason: string;
+    recorded_at: string;
+    recorded_by: string;
 };
 
 export type DriverActionDescriptor = {

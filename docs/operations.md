@@ -2550,6 +2550,16 @@ context only, and `context_instance` has both context and instance.
     restore removes the file too, because the restored database has not been
     checked. The web log says `web waits for the integration read-back to pass`
     while it waits; the next deploy's schedule releases it.
+- While site staff test on a product's testing lane, the site operator holds it
+  so a merge doesn't deploy mid-session; see
+  [event-driven deploys](event-driven-deploys.md#staff-testing-hold). Read the
+  hold with `GET /v1/product-config/testing-hold` (query `product`, `context`,
+  `instance`; needs `product_config.plan`). Set or lift it with
+  `POST /v1/product-config/testing-hold/apply` (`hold`, `reason`). It follows
+  the allowances route above: the same actions, dry-run digest, reviewed apply,
+  `Idempotency-Key`, lane ownership check, stale refusal and read-back. It
+  refuses any lane but `testing` (`testing_hold_not_testing_lane`) and a lane
+  with no tracked target record.
 - `odoo-overrides put-addon-setting --allow-direct-db-mutation` writes
   addon-shaped Odoo override intent such as Authentik or Shopify settings for a
   context and instance. Use it only for explicit local/bootstrap repair.
