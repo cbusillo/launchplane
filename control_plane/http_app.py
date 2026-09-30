@@ -6868,14 +6868,12 @@ def create_launchplane_fastapi_app(
                 content={
                     "status": "rejected",
                     "trace_id": trace_id,
-                    "error": {
-                        "code": "odoo_preview_runtime_config_incomplete",
-                        "message": "Odoo preview apply runtime environment is incomplete.",
-                    },
+                    "error": {"code": error.code, "message": error.message},
                     "details": {
                         "context": error.context,
                         "instance": error.instance,
                         "missing_keys": list(error.missing_keys),
+                        "refused_keys": list(error.refused_keys),
                     },
                 },
             )
