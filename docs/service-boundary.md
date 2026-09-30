@@ -3678,7 +3678,9 @@ redacted step evidence, compose/domain identifiers, status, and error summaries.
 If the service-side runtime contract is incomplete before any provider mutation,
 the route returns `odoo_preview_runtime_config_incomplete` with the affected
 context, instance, and missing key names only; it never returns runtime values or
-secret material.
+secret material. A template-lane integration credential that no key-safety rule
+allows on previews returns `odoo_preview_copied_integration_credential_refused`
+in the same envelope, with the key names under `refused_keys`.
 The preceding `preview-apply-inputs` call persists each ready plan with its
 normalized source/artifact request, canonical fingerprint, and 30-minute expiry.
 Its returned plan id is the only accepted apply idempotency key. Apply rejects

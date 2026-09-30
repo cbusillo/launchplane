@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
 from typing import Literal, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from click import ClickException
 
@@ -27,6 +27,10 @@ from control_plane.contracts.promotion_record import (
     DeploymentEvidence,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretSafetyRule,
+)
 from control_plane.contracts.runtime_identity import parse_runtime_identity_payload
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -71,6 +75,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     OdooStableTargetReplacementPlan,
 )
 from tests.http_app_test_support import (
+    _AsgiResponse,
     _asgi_get,
     _MissingProductReadStore,
     _post_odoo_app_maintenance,
@@ -1114,6 +1119,41 @@ class FastApiOdooArtifactPublishTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("404", route["responses"])
         self.assertIn("409", route["responses"])
         self.assertIn("503", route["responses"])
+
+
+def _odoo_preview_refresh_apply_payload() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "product": "odoo-tenant-cm",
+        "apply": {
+            "dry_run_plan": {
+                "status": "ready",
+                "operation": "refresh",
+                "product": "odoo-tenant-cm",
+                "repository": "cbusillo/odoo-tenant-cm",
+                "preview_slug": "pr-42",
+                "preview_url": "https://pr-42.cm-preview.example.test",
+                "domain_host": "pr-42.cm-preview.example.test",
+                "compose_ref": "${created.composeId:cm-odoo-preview-pr-42}",
+                "compose_name": "cm-odoo-preview-pr-42",
+                "environment_id": "env-cm-preview",
+                "template_compose_id": "compose-cm-testing",
+                "summary": "ready isolated Odoo preview apply",
+            },
+            "image_reference": _TEST_PREVIEW_IMAGE_REFERENCE,
+            "manifest": {
+                "artifact_id": "artifact-cm-preview",
+                "source_commit": _TEST_PREVIEW_HEAD_SHA,
+                "enterprise_base_digest": "sha256:enterprise",
+                "image": {
+                    "repository": "ghcr.io/cbusillo/odoo-tenant-cm",
+                    "digest": f"sha256:{_TEST_PREVIEW_IMAGE_DIGEST}",
+                },
+            },
+            "wait_for_deploy": False,
+            "smoke_check": False,
+        },
+    }
 
 
 class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
@@ -2244,38 +2284,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                 )
                 response = await _post_odoo_preview_apply(
                     app,
-                    {
-                        "schema_version": 1,
-                        "product": "odoo-tenant-cm",
-                        "apply": {
-                            "dry_run_plan": {
-                                "status": "ready",
-                                "operation": "refresh",
-                                "product": "odoo-tenant-cm",
-                                "repository": "cbusillo/odoo-tenant-cm",
-                                "preview_slug": "pr-42",
-                                "preview_url": "https://pr-42.cm-preview.example.test",
-                                "domain_host": "pr-42.cm-preview.example.test",
-                                "compose_ref": "${created.composeId:cm-odoo-preview-pr-42}",
-                                "compose_name": "cm-odoo-preview-pr-42",
-                                "environment_id": "env-cm-preview",
-                                "template_compose_id": "compose-cm-testing",
-                                "summary": "ready isolated Odoo preview apply",
-                            },
-                            "image_reference": _TEST_PREVIEW_IMAGE_REFERENCE,
-                            "manifest": {
-                                "artifact_id": "artifact-cm-preview",
-                                "source_commit": _TEST_PREVIEW_HEAD_SHA,
-                                "enterprise_base_digest": "sha256:enterprise",
-                                "image": {
-                                    "repository": "ghcr.io/cbusillo/odoo-tenant-cm",
-                                    "digest": f"sha256:{_TEST_PREVIEW_IMAGE_DIGEST}",
-                                },
-                            },
-                            "wait_for_deploy": False,
-                            "smoke_check": False,
-                        },
-                    },
+                    _odoo_preview_refresh_apply_payload(),
                     idempotency_key=plan_id,
                 )
                 launchplane_comment_token = resolve_launchplane_github_token(
@@ -2288,6 +2297,154 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("GH_TOKEN", applied_environment)
         self.assertEqual(applied_environment["ODOO_DB_PASSWORD"], "template-db-secret")
         self.assertEqual(launchplane_comment_token, "context-record-comment-token")
+
+    async def test_odoo_preview_refuses_copied_integration_credentials_without_a_preview_rule(
+        self,
+    ) -> None:
+        # The template is a testing lane whose pre_live settings reach production
+        # services. Its classification never carries over to the preview.
+        preview_rule = RuntimeSecretSafetyRule(
+            binding_key="SHOPIFY_API_TOKEN",
+            secret_class="non_prod",
+            allowed_contexts=("cm",),
+            allowed_instance_patterns=("pr-*",),
+        )
+        unrelated_rule = RuntimeSecretSafetyRule(
+            binding_key="STRIPE_SECRET_KEY",
+            secret_class="prod_only",
+            allowed_contexts=("cm",),
+            allowed_instances=("prod",),
+        )
+        cases: tuple[
+            tuple[str, dict[str, str], tuple[RuntimeSecretSafetyRule, ...], list[str]], ...
+        ] = (
+            (
+                "url_credential",
+                {"SMTP_URL": "smtp://mailer:template-pass@smtp.example"},
+                (unrelated_rule, preview_rule),
+                ["SMTP_URL"],
+            ),
+            ("unruled_secret", {}, (unrelated_rule,), ["SHOPIFY_API_TOKEN"]),
+            ("preview_rule", {}, (unrelated_rule, preview_rule), []),
+        )
+        for name, template_env, rules, refused_keys in cases:
+            with self.subTest(case=name):
+                response, apply_driver = await self._apply_odoo_preview_with_template(
+                    template_env=template_env, rules=rules
+                )
+                if not refused_keys:
+                    self.assertEqual(response.status_code, 202, response.text)
+                    apply_driver.assert_called_once()
+                    continue
+                self.assertEqual(response.status_code, 400, response.text)
+                payload = response.json()
+                self.assertEqual(
+                    payload["error"]["code"], "odoo_preview_copied_integration_credential_refused"
+                )
+                self.assertEqual(payload["details"]["refused_keys"], refused_keys)
+                self.assertNotIn("template-pass", response.text)
+                apply_driver.assert_not_called()
+
+    async def _apply_odoo_preview_with_template(
+        self,
+        *,
+        template_env: dict[str, str],
+        rules: tuple[RuntimeSecretSafetyRule, ...],
+    ) -> tuple[_AsgiResponse, MagicMock]:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = self._profile_store(database_url)
+            _write_odoo_preview_template_runtime_environment(store=store)
+            store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="instance",
+                    context="cm",
+                    instance="testing",
+                    env={"ODOO_DB_USER": "odoo", **template_env},
+                    updated_at="2026-05-09T12:31:00Z",
+                    source_label="test",
+                )
+            )
+            store.write_runtime_key_safety_policy_record(
+                RuntimeKeySafetyPolicyRecord(
+                    record_id="runtime-key-safety-policy-preview-test",
+                    status="active",
+                    source="test",
+                    updated_at="2026-05-09T12:32:00Z",
+                    rules=rules,
+                )
+            )
+            identity = self._identity(
+                repository="cbusillo/launchplane",
+                workflow_ref=(
+                    "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml@refs/heads/main"
+                ),
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(identity),
+                authz_policy=self._policy(
+                    actions=("odoo_preview_apply.execute",),
+                    repository="cbusillo/launchplane",
+                    workflow_ref=(
+                        "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml"
+                        "@refs/heads/main"
+                    ),
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            plan_id = self._store_issued_preview_plan(
+                store=store,
+                identity=identity,
+                payload=_ready_odoo_preview_apply_payload(include_manifest=True),
+            )
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                        "LAUNCHPLANE_DATABASE_URL": database_url,
+                    },
+                    clear=True,
+                ),
+                patch(
+                    "control_plane.odoo_preview_apply_http.refresh_odoo_preview_issued_plan",
+                    side_effect=lambda **kwargs: kwargs["request"],
+                ),
+                patch(
+                    "control_plane.odoo_preview_apply_http.execute_odoo_preview_dokploy_apply",
+                    return_value=OdooPreviewDokployApplyResult(
+                        status="pass",
+                        operation="refresh",
+                        product="odoo-tenant-cm",
+                        repository="cbusillo/odoo-tenant-cm",
+                        preview_slug="pr-42",
+                        preview_url="https://pr-42.cm-preview.example.test",
+                        domain_host="pr-42.cm-preview.example.test",
+                        compose_id="compose-cm-pr-42",
+                        compose_name="cm-odoo-preview-pr-42",
+                        created_compose=True,
+                        domain_id="domain-cm-pr-42",
+                    ),
+                ) as apply_driver,
+            ):
+                control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="context_instance",
+                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                    name="shopify-api-token",
+                    plaintext_value="template-shopify-token",
+                    binding_key="SHOPIFY_API_TOKEN",
+                    context_name="cm",
+                    instance_name="testing",
+                    actor="test",
+                    source_label="test",
+                )
+                response = await _post_odoo_preview_apply(
+                    app, _odoo_preview_refresh_apply_payload(), idempotency_key=plan_id
+                )
+        return response, apply_driver
 
     def test_odoo_preview_runtime_identity_rejects_non_exact_source_commit(self) -> None:
         payload = _ready_odoo_preview_apply_payload(include_manifest=True)

@@ -229,11 +229,18 @@ product workflow may pass the product key, source ref, run URL, and immutable
 image reference; it should not pass secret values or render a Dokploy env file.
 Launchplane live-target runtime sync delivers only the site's own environment
 for the lane (see `docs/secrets.md`) and records only key names and counts.
-Generic-web preview refresh applies the same rule to secret-shaped env keys
-copied from a template lane: the copied key must resolve to a managed runtime
-secret binding on the template lane and the active runtime key-safety policy
-must allow that binding for the preview target before Launchplane writes the
-preview app env.
+Generic-web preview refresh applies the same rule to credentials copied from a
+template lane: a secret-shaped key, or a value that embeds a password such as
+`SMTP_URL=smtp://user:password@host`. The copied key must resolve to a managed
+runtime secret binding on the template lane and the active runtime key-safety
+policy must allow that binding for the preview target before Launchplane writes
+the preview app env. Odoo preview apply checks the integration credentials it
+copies from the template lane (keys carrying an integration marker such as
+`SHOPIFY` or `SMTP`) the same way and refuses with
+`odoo_preview_copied_integration_credential_refused`, naming the keys, before
+any provider change. The template lane's own classification and declared secret
+classes never carry over to a preview; only a policy rule that allows previews
+does.
 
 Dokploy-owned persistent volumes are allowed for service state, but the volume
 mapping is provider target configuration, not product-repo lifecycle state.

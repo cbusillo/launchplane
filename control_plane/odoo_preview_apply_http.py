@@ -12,6 +12,12 @@ from control_plane import odoo_instance_overrides as control_plane_odoo_instance
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import runtime_platform_credentials
+from control_plane.runtime_key_safety import (
+    RuntimeKeySafetyPolicyReadStore,
+    evaluate_preview_copied_runtime_key_safety,
+    latest_active_runtime_key_safety_policy,
+    preview_copied_integration_credential_keys,
+)
 from control_plane.contracts.artifact_dependency_provenance import (
     normalize_artifact_git_commit,
     normalize_artifact_sha256_digest,
@@ -83,11 +89,22 @@ class OdooPreviewPlanProvenanceError(ValueError):
 
 
 class OdooPreviewApplyConfigError(click.ClickException):
-    def __init__(self, *, context: str, instance: str, missing_keys: tuple[str, ...]) -> None:
-        super().__init__("Odoo preview apply runtime environment is incomplete.")
+    def __init__(
+        self,
+        *,
+        context: str,
+        instance: str,
+        missing_keys: tuple[str, ...] = (),
+        refused_keys: tuple[str, ...] = (),
+        code: str = "odoo_preview_runtime_config_incomplete",
+        message: str = "Odoo preview apply runtime environment is incomplete.",
+    ) -> None:
+        super().__init__(message)
         self.context = context
         self.instance = instance
         self.missing_keys = tuple(sorted(missing_keys))
+        self.refused_keys = tuple(sorted(refused_keys))
+        self.code = code
 
 
 class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
@@ -902,7 +919,7 @@ def _odoo_preview_service_environment_values(
     # The preview runs unmerged code, so it gets only the template lane's site
     # environment: no global values, Launchplane's own context credentials (such as
     # the preview PR-comment token) withheld, other platform credentials refused.
-    environment_values = dict(
+    template_values = dict(
         control_plane_runtime_environments.resolve_site_runtime_environment(
             control_plane_root=control_plane_root_path,
             context_name=preview_profile.context,
@@ -910,6 +927,7 @@ def _odoo_preview_service_environment_values(
             database_url=database_url,
         ).values
     )
+    environment_values = dict(template_values)
     runtime_platform_credentials.refuse_platform_credentials(
         preview_profile.override_env,
         target=f"{profile.product} preview {plan.compose_name}",
@@ -974,7 +992,78 @@ def _odoo_preview_service_environment_values(
             instance=template_instance,
             missing_keys=missing_env_keys,
         )
+    _refuse_copied_integration_credentials(
+        record_store=record_store,
+        preview_context=preview_profile.context,
+        preview_slug=plan.preview_slug,
+        template_instance=template_instance,
+        copied_values={
+            key: value
+            for key, value in template_values.items()
+            if environment_values.get(key) == value
+        },
+    )
     return environment_values
+
+
+# The preview runs unmerged code against whatever its copied environment reaches, so a
+# template-lane integration credential it keeps (including one inside a URL such as
+# SMTP_URL) needs a key-safety rule that allows previews. The template lane's own
+# classification and integration allowances never carry over. The preview stack's own
+# database and admin credentials reach nothing outside it and are not checked here.
+def _refuse_copied_integration_credentials(
+    *,
+    record_store: object,
+    preview_context: str,
+    preview_slug: str,
+    template_instance: str,
+    copied_values: dict[str, str],
+) -> None:
+    candidate_keys = preview_copied_integration_credential_keys(copied_values)
+    try:
+        policy_store = cast(RuntimeKeySafetyPolicyReadStore, record_store)
+        policy_record = latest_active_runtime_key_safety_policy(policy_store)
+    except (AttributeError, ValueError) as error:
+        if not candidate_keys:
+            return
+        raise OdooPreviewApplyConfigError(
+            context=preview_context,
+            instance=template_instance,
+            refused_keys=candidate_keys,
+            code="odoo_preview_copied_integration_credential_refused",
+            message=(
+                "Odoo preview copies template-lane integration credentials and no "
+                "runtime key-safety policy is active."
+            ),
+        ) from error
+    copied_keys = preview_copied_integration_credential_keys(
+        copied_values, extra_integration_key_markers=policy_record.integration_key_markers
+    )
+    if not copied_keys:
+        return
+    evaluation = evaluate_preview_copied_runtime_key_safety(
+        record_store=policy_store,
+        policy_record=policy_record,
+        template_context=preview_context,
+        template_instance=template_instance,
+        preview_context=preview_context,
+        preview_slug=preview_slug,
+        copied_keys=copied_keys,
+    )
+    if evaluation.status == "pass":
+        return
+    raise OdooPreviewApplyConfigError(
+        context=preview_context,
+        instance=template_instance,
+        refused_keys=tuple(
+            {finding.binding_key for finding in evaluation.findings if finding.binding_key}
+        ),
+        code="odoo_preview_copied_integration_credential_refused",
+        message=(
+            "Odoo preview copies template-lane integration credentials that no "
+            "runtime key-safety rule allows on previews."
+        ),
+    )
 
 
 def _odoo_preview_identifier(value: str, *, suffix: str) -> str:
