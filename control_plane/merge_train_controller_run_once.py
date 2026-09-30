@@ -2959,7 +2959,8 @@ def _merge_train_stack_collapse_record_matches_landing_plan(
 def _merge_train_candidate_matches_dry_run_queue(
     *, candidate: MergeTrainBatchCandidate, dry_run_result: MergeTrainDryRunResult, base_sha: str
 ) -> bool:
-    if candidate.repository != dry_run_result.repository:
+    # Candidates store the repository lowercased; dry-run results keep the policy's casing.
+    if candidate.repository.casefold() != dry_run_result.repository.casefold():
         return False
     if candidate.base_branch != dry_run_result.base_branch:
         return False
