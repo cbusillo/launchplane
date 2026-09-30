@@ -27,6 +27,9 @@ from control_plane.runtime_key_safety import runtime_key_safety_environment_clas
 
 IntegrationReadbackWorkflowMode = Literal["maintenance", "bootstrap", "restore"]
 
+# Written to the lane's data volume by the data-workflow schedule once the read-back
+# passes. It holds the SHA-256 of the instance overrides payload the check ran with.
+INTEGRATION_READBACK_PASSED_PATH = "/volumes/data/.launchplane_integration_readback_passed"
 INTEGRATION_READBACK_OK_MARKER = "integration_readback_ok"
 INTEGRATION_READBACK_CHECKED_MARKER = "integration_readback_checked"
 INTEGRATION_READBACK_REFUSED_MARKER = "integration_readback_refused"
@@ -206,6 +209,16 @@ def integration_readback_policy(
             )
         ),
     )
+
+
+def web_held_until_integration_readback(instance_name: str) -> bool:
+    """Whether a lane's web waits for a passing read-back before it serves.
+
+    Every lane that gets the full read-back is held, so no provider deploy can start
+    web on a database or overrides payload the check has not passed. Production is
+    not held: it holds real settings by design.
+    """
+    return runtime_key_safety_environment_class(instance_name) != "prod"
 
 
 def integration_readback_marker_is_safe(key: str, value: str) -> bool:

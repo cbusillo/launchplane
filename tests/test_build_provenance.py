@@ -185,6 +185,13 @@ class BuildProvenanceTests(unittest.TestCase):
             record_verified_build_artifact(record_store=record_store, verified=verified)
         record_store.write_artifact_manifest.assert_not_called()
 
+    def test_refuses_a_malformed_manifest_as_unverified(self) -> None:
+        github = FakeGitHub(runs=[_run()])
+        github.manifest = {"artifact_id": "not-a-manifest"}
+
+        with self.assertRaisesRegex(BuildProvenanceError, "not a valid artifact manifest"):
+            _verify(github)
+
     def test_refuses_an_oversized_or_compression_bomb_manifest(self) -> None:
         github = FakeGitHub(runs=[_run()])
         github.manifest = {"padding": "0" * (MAX_MANIFEST_BYTES + 1)}

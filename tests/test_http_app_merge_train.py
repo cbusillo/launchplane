@@ -2076,6 +2076,69 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([entry["pull_request_number"] for entry in plan["entries"]], [1, 2])
         self.assertEqual(calls, ["batch_pr", "checks", "batch_pr"])
 
+    async def test_controller_refreshes_a_lone_behind_base_pull_request(self) -> None:
+        branch_updates: list[tuple[int, str]] = []
+
+        class BehindBaseReader(_FakeMergeTrainSnapshotReader):
+            def read_merge_train_snapshot(self, **kwargs: Any) -> Any:
+                snapshot = super().read_merge_train_snapshot(**kwargs)
+                (pull_request,) = snapshot.pull_requests
+                return snapshot.model_copy(
+                    update={
+                        "pull_requests": (
+                            pull_request.model_copy(update={"branch_update_required": True}),
+                        )
+                    }
+                )
+
+        class BranchUpdatingClient(_FakeMergeTrainGitHubClient):
+            def update_pull_request_branch(
+                self, *, repository: str, pull_request_number: int, expected_head_sha: str
+            ) -> None:
+                branch_updates.append((pull_request_number, expected_head_sha))
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            payload: dict[str, object] = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+            }
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    BehindBaseReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    BranchUpdatingClient,
+                ),
+            ):
+                dry_run = await _post_merge_train_controller_run_once(
+                    app, {**payload, "mutate": False}
+                )
+                mutated = await _post_merge_train_controller_run_once(
+                    app, {**payload, "mutate": True}
+                )
+
+        self.assertEqual(dry_run.status_code, 202, dry_run.text)
+        self.assertEqual(dry_run.json()["result"]["mode"], "dry-run")
+        self.assertEqual(mutated.status_code, 202, mutated.text)
+        result = mutated.json()["result"]
+        self.assertEqual(result["controller_action"], "update_branch")
+        self.assertEqual(result["branch_update_result"]["status"], "updated")
+        self.assertEqual(branch_updates, [(1, "head-1")])
+
     async def test_a_slow_controller_run_does_not_block_other_requests(self) -> None:
         controller_started = threading.Event()
         release_controller = threading.Event()

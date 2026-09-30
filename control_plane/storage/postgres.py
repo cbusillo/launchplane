@@ -33,6 +33,7 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    and_,
     create_engine,
     delete,
     desc,
@@ -437,6 +438,7 @@ from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.product_reconcile import (
     PRODUCT_RECONCILE_REQUEST_STATES,
     GitHubAppWebhookDeliveryRecord,
+    ProductReconcileLeaseLostError,
     ProductReconcileRequestRecord,
     ProductReconcileTarget,
 )
@@ -18813,7 +18815,8 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> tuple[MergeTrainBatchCandidateRecord, ...]:
         filters: list[object] = []
         if repository:
-            filters.append(LaunchplaneMergeTrainBatchCandidateRow.repository == repository)
+            # Batch records store the repository lowercased; match any caller casing.
+            filters.append(LaunchplaneMergeTrainBatchCandidateRow.repository == repository.lower())
         if base_branch:
             filters.append(LaunchplaneMergeTrainBatchCandidateRow.base_branch == base_branch)
         if status:
@@ -18990,7 +18993,10 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> tuple[MergeTrainBatchLandingPlanRecord, ...]:
         filters: list[object] = []
         if repository:
-            filters.append(LaunchplaneMergeTrainBatchLandingPlanRow.repository == repository)
+            # Batch records store the repository lowercased; match any caller casing.
+            filters.append(
+                LaunchplaneMergeTrainBatchLandingPlanRow.repository == repository.lower()
+            )
         if base_branch:
             filters.append(LaunchplaneMergeTrainBatchLandingPlanRow.base_branch == base_branch)
         if status:
@@ -20020,6 +20026,12 @@ class PostgresRecordStore(HumanSessionStore):
             record = ProductReconcileRequestRecord.model_validate(
                 {**existing.model_dump(), **changes}
             )
+        self._merge_product_reconcile_request_row(session, record)
+        return record
+
+    def _merge_product_reconcile_request_row(
+        self, session: Any, record: ProductReconcileRequestRecord
+    ) -> None:
         session.merge(
             LaunchplaneProductReconcileRequestRow(
                 target_key=record.target_key,
@@ -20028,10 +20040,115 @@ class PostgresRecordStore(HumanSessionStore):
                 state=record.state,
                 requested_at=record.requested_at,
                 updated_at=record.updated_at,
+                lease_expires_at=record.lease_expires_at,
                 payload=self._payload_dict(record),
             )
         )
-        return record
+
+    def claim_next_product_reconcile_request(
+        self, lease_owner: str, lease_seconds: int, *, now: str = ""
+    ) -> ProductReconcileRequestRecord | None:
+        """Claim the oldest pending request, or a running one whose lease expired."""
+
+        normalized_lease_owner = lease_owner.strip()
+        if not normalized_lease_owner:
+            raise ValueError("Product reconcile claim requires lease_owner.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            observed_at = now.strip() or self._database_mutation_timestamp(session)
+            lease_expires_at = self._mutation_lease_expiry(
+                observed_at=observed_at, lease_seconds=lease_seconds
+            )
+            row_model = LaunchplaneProductReconcileRequestRow
+            statement = (
+                select(row_model)
+                .where(
+                    or_(
+                        row_model.state == "pending",
+                        and_(
+                            row_model.state == "running",
+                            row_model.lease_expires_at < observed_at,
+                        ),
+                    )
+                )
+                .order_by(row_model.requested_at.asc(), row_model.target_key.asc())
+                .limit(20)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update(skip_locked=True)
+            for row in session.scalars(statement).all():
+                # A webhook fold holding this target's lock read the row before us; skip it
+                # rather than wait, so the fold's write cannot overwrite the claim.
+                if not self._try_lock_landing_authority(
+                    session, f"launchplane:product-reconcile:{row.target_key}"
+                ):
+                    continue
+                record = self._read_payload(
+                    model_type=ProductReconcileRequestRecord, payload=row.payload
+                )
+                claimed = record.model_copy(
+                    update={
+                        "state": "running",
+                        "updated_at": observed_at,
+                        "lease_owner": normalized_lease_owner,
+                        "lease_expires_at": lease_expires_at,
+                        "attempt": record.attempt + 1,
+                        "rerequested_while_running": False,
+                    }
+                )
+                self._merge_product_reconcile_request_row(session, claimed)
+                session.commit()
+                return claimed
+            session.rollback()
+            return None
+
+    def complete_product_reconcile_request(
+        self,
+        target_key: str,
+        lease_owner: str,
+        outcome: Literal["done", "failed"],
+        plan: dict[str, object],
+        error: str = "",
+        *,
+        now: str = "",
+    ) -> ProductReconcileRequestRecord:
+        """Finish a claimed request; a request folded in during the run makes it pending."""
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_landing_authority(session, f"launchplane:product-reconcile:{target_key}")
+            statement = select(LaunchplaneProductReconcileRequestRow).where(
+                LaunchplaneProductReconcileRequestRow.target_key == target_key
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(target_key)
+            record = self._read_payload(
+                model_type=ProductReconcileRequestRecord, payload=row.payload
+            )
+            if record.state != "running" or record.lease_owner != lease_owner.strip():
+                session.rollback()
+                raise ProductReconcileLeaseLostError(
+                    f"Product reconcile request {target_key} is not leased to {lease_owner}."
+                )
+            completed_at = now.strip() or self._database_mutation_timestamp(session)
+            completed = ProductReconcileRequestRecord.model_validate(
+                {
+                    **record.model_dump(),
+                    "state": "pending" if record.rerequested_while_running else outcome,
+                    "updated_at": completed_at,
+                    "lease_owner": "",
+                    "lease_expires_at": "",
+                    "rerequested_while_running": False,
+                    "last_plan": plan,
+                    "last_error": error if outcome == "failed" else "",
+                }
+            )
+            self._merge_product_reconcile_request_row(session, completed)
+            session.commit()
+            return completed
 
     def read_product_reconcile_request(self, target_key: str) -> ProductReconcileRequestRecord:
         return self._read_model(
