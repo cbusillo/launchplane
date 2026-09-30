@@ -139,6 +139,35 @@ class ArtifactBuildProvenance(BaseModel):
         return self
 
 
+BuildPurpose = Literal["release", "preview"]
+
+
+class ArtifactSourceBuild(BaseModel):
+    """GitHub build run Launchplane verified for this artifact (docs/artifact-provenance.md)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    repository: str
+    repository_id: str
+    workflow_path: str
+    event: Literal["push", "pull_request"]
+    purpose: BuildPurpose
+    pull_request_number: int | None = None
+    run_id: int
+    run_attempt: int
+    github_artifact_id: int
+    manifest_artifact_id: str
+
+    @model_validator(mode="after")
+    def _validate_source_build(self) -> "ArtifactSourceBuild":
+        expected_event = "push" if self.purpose == "release" else "pull_request"
+        if self.event != expected_event:
+            raise ValueError(f"a {self.purpose} artifact must come from a {expected_event} run")
+        if (self.purpose == "preview") != (self.pull_request_number is not None):
+            raise ValueError("only a preview artifact names its pull request")
+        return self
+
+
 class ArtifactIdentityManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", json_schema_extra=_artifact_manifest_json_schema)
 
@@ -154,6 +183,7 @@ class ArtifactIdentityManifest(BaseModel):
     build_provenance: ArtifactBuildProvenance = Field(default_factory=ArtifactBuildProvenance)
     dependency_provenance: ArtifactDependencyProvenance | None = None
     image: ArtifactImageReference
+    source_build: ArtifactSourceBuild | None = None
 
     @model_validator(mode="after")
     def _validate_manifest_version(self) -> "ArtifactIdentityManifest":

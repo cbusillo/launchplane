@@ -1076,11 +1076,13 @@ class OdooInstanceOverrideTests(unittest.TestCase):
     def test_post_deploy_update_renders_literal_odoo_overrides_and_marks_pass(self) -> None:
         def capture_post_deploy_update(**kwargs: object) -> None:
             workflow_environment_overrides = kwargs["workflow_environment_overrides"]
-            protected_shopify_store_keys = kwargs["protected_shopify_store_keys"]
+            target_definition = kwargs["target_definition"]
             assert isinstance(workflow_environment_overrides, dict)
-            assert isinstance(protected_shopify_store_keys, tuple)
+            assert isinstance(target_definition, DokployTargetDefinition)
             captured_workflow_environment.update(workflow_environment_overrides)
-            captured_protected_shopify_store_keys.extend(protected_shopify_store_keys)
+            captured_protected_shopify_store_keys.extend(
+                target_definition.policies.shopify.protected_store_keys
+            )
 
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(

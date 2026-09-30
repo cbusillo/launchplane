@@ -468,7 +468,6 @@ def execute_odoo_stable_bootstrap(
             env_file=env_file,
             workflow_environment_overrides=workflow_environment_overrides,
             required_workflow_environment_keys=required_workflow_environment_keys,
-            protected_shopify_store_keys=protected_shopify_store_keys,
             timeout_seconds=request.timeout_seconds,
         )
     except click.ClickException as error:

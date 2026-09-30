@@ -58,7 +58,15 @@ def _run_restore(log_lines: tuple[str, ...]) -> dict[str, str]:
 
 class RestoreReadbackTests(unittest.TestCase):
     def test_restore_passes_only_with_the_completion_marker(self) -> None:
-        evidence = _run_restore(("odoo_restore_completed=true",))
+        evidence = _run_restore(
+            (
+                "odoo_restore_completed=true",
+                "odoo_module_update_image_match=true",
+                "odoo_module_update_modules_configured=true",
+                "odoo_module_update_completed=true",
+                "integration_readback_ok=true",
+            )
+        )
 
         self.assertEqual(evidence["odoo_restore_completed"], "true")
 
