@@ -1328,6 +1328,20 @@ decision (`accepted` or `changes_requested` with its reason), the Owner's GitHub
 id and login, and `decided_at`. The newest record for a repository and pull
 request is the current decision. The record authorizes nothing.
 
+## Product Reconcile Request Records
+
+`launchplane_product_reconcile_requests` holds at most one row per target key
+(`<product>:testing` or `<product>:preview:<pr>`) with `state` `pending`,
+`running`, `done`, or `failed`. A new request folds into the row: a missing,
+`done`, or `failed` row becomes `pending` (a `done` row's `last_error` is
+cleared, a `failed` row's is kept); a `pending` row only counts it; a `running`
+row sets `rerequested_while_running`. `request_count`, `updated_at`, and the
+last delivery id are updated each time; `attempt` and lease fields belong to
+the reconcile worker. `launchplane_github_app_webhook_deliveries` keeps each
+processed GitHub App delivery id with its event, repository id, and target
+keys; recording a delivery and folding its requests is one transaction, and a
+known delivery id changes nothing.
+
 ## Preview PR Feedback Notification Records
 
 Preview PR feedback remediation records are stored under

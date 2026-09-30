@@ -528,6 +528,27 @@ class MergeTrainStackDiscoveryTests(unittest.TestCase):
         self.assertEqual(result.stack_order, (20,))
         self.assertEqual(result.unsupported_reasons, ())
 
+    def test_single_root_pr_matches_a_mixed_case_repository_name(self) -> None:
+        # Policy keeps the repository's own casing; the GitHub adapter lowercases
+        # pull-request repository names (cbusillo/BD_to_AVP on 2026-09-29).
+        snapshot = MergeTrainDryRunSnapshot(
+            repository="example/Mixed_Case_Repo",
+            base_branch="main",
+            pull_requests=(
+                _pull_request(
+                    21,
+                    head_ref="work/change",
+                    base_ref="main",
+                    repository="example/mixed_case_repo",
+                ),
+            ),
+        )
+
+        result = discover_merge_train_stack(snapshot=snapshot, root_pull_request_number=21)
+
+        self.assertEqual(result.status, "not_stacked")
+        self.assertEqual(result.unsupported_reasons, ())
+
     def test_rejects_ambiguous_sibling_stack_children(self) -> None:
         snapshot = MergeTrainDryRunSnapshot(
             repository="example/merge-train-repo",

@@ -2503,8 +2503,9 @@ context only, and `context_instance` has both context and instance.
     `stale`.
 - The integration read-back enforces the allowances. The deploy, restore, stable
   bootstrap and target replacement data-workflow schedules run it with web
-  stopped, before web starts again, on every Odoo lane that is not production.
-  Previews get it through #2596.
+  stopped, before web starts again, on every Odoo lane that is not production,
+  previews included. A preview has no allowances of its own and never inherits
+  its template lane's, so a `pre_live` setting copied into a preview is refused.
   - Code owns the integration families in `control_plane/integration_readback.py`:
     `shopify`, `printnode`, `fishbowl`, `repairshopr`, `cm_data`,
     `outgoing_mail`, `incoming_mail`, `payment`, `mapbox`, `unsplash`, `tenor`
