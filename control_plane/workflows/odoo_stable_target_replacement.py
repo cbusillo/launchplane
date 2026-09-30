@@ -1579,12 +1579,24 @@ def execute_odoo_stable_target_replacement_apply(
                     instance_name=plan.instance,
                 )
             )
+            # Check every secret this deployment carries, including ones the profile
+            # doesn't declare, such as an override's secret-backed addon setting.
+            transported_secret_keys = (
+                control_plane_live_target_runtime.transported_runtime_secret_keys(
+                    record_store=record_store,
+                    context_name=plan.context,
+                    instance_name=plan.instance,
+                    transported_keys=runtime_environment_values,
+                )
+            )
             runtime_key_safety = (
                 control_plane_live_target_runtime.evaluate_runtime_key_safety_for_live_target_sync(
                     record_store=record_store,
                     context_name=plan.context,
                     instance_name=plan.instance,
-                    required_binding_keys=tuple(sorted(runtime_secret_binding_keys)),
+                    required_binding_keys=tuple(
+                        sorted(runtime_secret_binding_keys | transported_secret_keys)
+                    ),
                 )
             )
         except control_plane_live_target_runtime.LiveTargetRuntimeError as error:

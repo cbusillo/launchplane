@@ -3228,6 +3228,117 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         update_env.assert_not_called()
         trigger_deploy.assert_not_called()
 
+    def test_apply_checks_an_override_secret_the_profile_does_not_declare(self) -> None:
+        # The replacement carries the override's secret-backed PrintNode key even though
+        # the product profile declares no runtime secret, so key safety must see it.
+        override_secret_key = "ODOO_OVERRIDE_SECRET__ADDON__PRINTNODE__API_KEY"
+        store = _Store(
+            target_record=_target_record(),
+            target_id_record=_target_id_record(),
+            inventory=_inventory(),
+            odoo_instance_override_record=OdooInstanceOverrideRecord(
+                context="cm",
+                instance="testing",
+                addon_settings=(
+                    OdooAddonSettingOverride(
+                        addon="printnode",
+                        setting="api_key",
+                        value=OdooOverrideValue(
+                            source="secret_binding",
+                            secret_binding_id="secret-printnode-api-key",
+                        ),
+                    ),
+                ),
+                updated_at="2026-09-30T05:00:00Z",
+            ),
+        )
+        store.secret_bindings = (
+            SecretBinding(
+                binding_id="secret-printnode-api-key",
+                secret_id="secret-printnode",
+                integration="runtime_environment",
+                binding_key=override_secret_key,
+                context="cm",
+                instance="testing",
+                status="configured",
+                created_at="2026-09-30T05:00:00Z",
+                updated_at="2026-09-30T05:00:00Z",
+            ),
+        )
+        store.runtime_key_safety_policy_records = (
+            RuntimeKeySafetyPolicyRecord(
+                record_id="runtime-key-safety-policy-test",
+                status="active",
+                source="test",
+                updated_at="2026-09-30T05:00:00Z",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="OTHER_PASSWORD",
+                        secret_class="testing",
+                        allowed_contexts=("cm",),
+                        allowed_instances=("testing",),
+                    ),
+                ),
+            ),
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
+                return_value={
+                    "name": "cm-testing",
+                    "sourceType": "raw",
+                    "composePath": "docker-compose.yml",
+                    "composeFile": "services: {}",
+                    "env": "\n".join(
+                        (
+                            *_DATABASE_ENV_LINES,
+                            "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                            "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                            "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                        )
+                    ),
+                },
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-123", "status": "success"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment({override_secret_key: "production-printnode-key"}),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
+            ) as sync_source,
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.update_dokploy_target_env"
+            ) as update_env,
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.trigger_deployment"
+            ) as trigger_deploy,
+        ):
+            result = execute_odoo_stable_target_replacement_apply(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=OdooStableTargetReplacementApplyRequest(
+                    product="odoo-tenant-cm", instance="testing"
+                ),
+                dokploy_request=cast(DokployRequest, _request),
+            )
+
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertIn("unclassified_binding", result.error_message)
+        self.assertIn(override_secret_key, result.error_message)
+        self.assertNotIn("production-printnode-key", result.error_message)
+        sync_source.assert_not_called()
+        update_env.assert_not_called()
+        trigger_deploy.assert_not_called()
+
     def test_apply_refuses_missing_or_undeclared_compose_inputs_before_provider_writes(
         self,
     ) -> None:
