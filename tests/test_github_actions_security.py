@@ -159,7 +159,6 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
     "actions/download-artifact": ActionClassification("GitHub-maintained", "artifact download"),
     "actions/github-script": ActionClassification("GitHub-maintained", "GitHub API interaction"),
     "actions/setup-node": ActionClassification("GitHub-maintained", "Node runtime bootstrap"),
-    "actions/setup-python": ActionClassification("GitHub-maintained", "Python runtime bootstrap"),
     "actions/upload-artifact": ActionClassification("GitHub-maintained", "artifact upload"),
     "astral-sh/setup-uv": ActionClassification("Third-party publisher", "Python tool bootstrap"),
     "cbusillo/launchplane/.github/actions/launchplane-request": ActionClassification(
