@@ -72,6 +72,11 @@ name: Reusable Generic Web Preview Lifecycle
         required: false
         default: ""
         type: string
+      runs_on:
+        description: JSON encoded GitHub Actions runner selector.
+        required: false
+        default: '"ubuntu-latest"'
+        type: string
     outputs:
       operation:
         description: Resolved preview operation.
@@ -115,7 +120,7 @@ jobs:
       product: ${{ steps.request.outputs.product }}
       run_url: ${{ steps.request.outputs.run_url }}
       timeout_seconds: ${{ steps.request.outputs.timeout_seconds }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
     steps:
       - name: Resolve Launchplane preview request
         id: request
@@ -217,7 +222,7 @@ jobs:
       preview_slug: ${{ steps.lp.outputs.preview_slug }}
       preview_url: ${{ steps.lp.outputs.preview_url }}
       refresh_status: ${{ steps.lp.outputs.refresh_status }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
     steps:
       - name: Request Launchplane generic-web preview refresh
         id: lp
@@ -299,7 +304,7 @@ jobs:
       destroy_status: ${{ steps.lp.outputs.destroy_status }}
       error_message: ${{ steps.lp.outputs.error_message }}
       preview_slug: ${{ steps.lp.outputs.preview_slug }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
     steps:
       - name: Request Launchplane generic-web preview destroy
         id: lp
@@ -345,7 +350,7 @@ jobs:
     outputs:
       error_message: ${{ steps.lp.outputs.error_message }}
       feedback_status: ${{ steps.lp.outputs.feedback_status }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
     steps:
       - name: Request Launchplane unsupported preview feedback
         id: lp
