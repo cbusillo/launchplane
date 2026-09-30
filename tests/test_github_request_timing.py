@@ -66,7 +66,7 @@ class GitHubRequestTimingTests(unittest.TestCase):
 class ThreadDumpSignalTests(unittest.TestCase):
     @unittest.skipUnless(hasattr(signal, "SIGUSR1"), "SIGUSR1 is POSIX-only")
     def test_sigusr1_dumps_every_thread_without_stopping_the_service(self) -> None:
-        with patch.object(service_bootstrap.faulthandler, "register") as register:
+        with patch("faulthandler.register") as register:
             service_bootstrap.register_thread_dump_signal()
         register.assert_called_once_with(signal.SIGUSR1, all_threads=True, chain=False)
 
