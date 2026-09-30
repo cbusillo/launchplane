@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 ProductReconcileTargetKind = Literal["testing", "preview"]
 ProductReconcileRequestState = Literal["pending", "running", "done", "failed"]
@@ -62,6 +62,7 @@ class ProductReconcileRequestRecord(BaseModel):
     lease_expires_at: str = ""
     attempt: int = Field(default=0, ge=0)
     last_error: str = ""
+    last_plan: dict[str, JsonValue] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_target(self) -> "ProductReconcileRequestRecord":
@@ -74,6 +75,10 @@ class ProductReconcileRequestRecord(BaseModel):
         if self.target_key != expected_key:
             raise ValueError("Product reconcile request target_key does not match its target.")
         return self
+
+
+class ProductReconcileLeaseLostError(RuntimeError):
+    """The caller no longer holds the reconcile request's lease."""
 
 
 class GitHubAppWebhookDeliveryRecord(BaseModel):

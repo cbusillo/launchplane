@@ -891,15 +891,17 @@ Controller actions have these retry/stop semantics:
   for that batch.
 - `block`: The selected PR is blocked by conflicts or failed checks. Stop and
   surface `dry_run_result.next_action_detail`.
-- `update_branch`: The selected PR needs a branch update before it can be
-  checked. Stop or use the lower-level recovery workflow deliberately.
+- `update_branch`: The selected PR is behind its base. A mutate call updates
+  the PR branch through GitHub with the expected head SHA and reports
+  `branch_update_result`; call again once the new head's checks pass. A dry-run
+  call changes nothing.
 - `wait_for_checks`: Required PR checks are pending. Stop and poll later.
 - `idle`: No eligible queued work exists. Stop.
 
 All controller calls are one-action calls. A caller that wants to drive the
 train should repeat `run-once` only after reading the returned action and should
 stop on terminal or attention states: `batch_landed`, `candidate_failed`,
-`stack_unsupported`, `block`, `update_branch`, `wait_for_checks`,
+`stack_unsupported`, `block`, `wait_for_checks`,
 `wait_for_root_checks`, and `idle`. A failed HTTP response with `status:
 "rejected"` is also terminal for that attempt. Public-safe helper summaries
 should include `error.code`, `trace_id`, and the retry/stop recommendation, not

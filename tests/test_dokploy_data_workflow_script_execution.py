@@ -23,7 +23,11 @@ from unittest.mock import patch
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
-from control_plane.integration_readback import INTEGRATION_FAMILIES
+from control_plane.dokploy.compose import render_odoo_raw_compose_file
+from control_plane.integration_readback import (
+    INTEGRATION_FAMILIES,
+    INTEGRATION_READBACK_PASSED_PATH,
+)
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetIntegrationAllowance,
     DokployTargetPolicies,
@@ -80,21 +84,46 @@ def main(argv):
         return 99
 
     interactive = False
+    exec_environment = {}
     index = 1
     while argv[index].startswith("-"):
         if argv[index] == "-i":
             interactive = True
             index += 1
-        elif argv[index] in ("-e", "-u"):
+        elif argv[index] == "-e":
+            key, _, value = argv[index + 1].partition("=")
+            exec_environment[key] = value
+            index += 2
+        elif argv[index] == "-u":
             index += 2
         else:
             print(f"fake docker: unsupported exec option {argv[index]!r}", file=sys.stderr)
             return 99
     program = argv[index + 1:]
+    passed_path = state_dir / "readback-passed"
     if program[:1] == ["id"]:
         print("1000")
         return 0
-    if program[:1] in (["rm"], ["/bin/bash"]):
+    if program[:1] == ["rm"]:
+        if program[-1].endswith("integration_readback_passed"):
+            passed_path.unlink(missing_ok=True)
+            log("rm readback-passed")
+        return 0
+    if program[:1] == ["/bin/bash"]:
+        return 0
+    if program[:1] == ["printenv"]:
+        # The container's own environment comes from the compose .env file.
+        container_environment = {}
+        if "FAKE_CONTAINER_PAYLOAD" in os.environ:
+            container_environment[program[1]] = os.environ["FAKE_CONTAINER_PAYLOAD"]
+        value = {**container_environment, **exec_environment}.get(program[1])
+        if value is None:
+            return 1
+        print(value)
+        return 0
+    if program[:2] == ["sh", "-c"] and program[-1].endswith("integration_readback_passed"):
+        passed_path.write_text(program[-2])
+        log("write readback-passed")
         return 0
     if program[:2] == ["python3", "-u"]:
         log("exec workflow")
@@ -440,6 +469,100 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
             )
         self.assertIn(f"Leaving web container {WEB_CONTAINER_ID} stopped", run.stderr)
         self.assertNotIn(PRODUCTION_VALUE, run.stdout + run.stderr)
+
+    def _held_web_starts(
+        self, *, overrides_payload: str, database_name: str = "example_testing"
+    ) -> bool:
+        """Run the held web command from the rendered compose file, as the container would."""
+        compose_file = render_odoo_raw_compose_file(
+            image_reference="ghcr.io/example/odoo@sha256:" + "a" * 64,
+            hold_web_until_integration_readback=True,
+        )
+        rendered = next(
+            line.strip()[2:]
+            for line in compose_file.splitlines()
+            if line.strip().startswith('- "expected=')
+        )
+        command = (
+            json.loads(rendered)
+            .replace("$$", "$")
+            .replace(INTEGRATION_READBACK_PASSED_PATH, str(self.root / "readback-passed"))
+        )
+        # Compose resolves the unset ODOO_WEB_COMMAND to the startup script.
+        command = command[: command.index("exec ${ODOO_WEB_COMMAND")] + "echo web-started"
+        try:
+            completed = subprocess.run(
+                ["/bin/sh", "-c", command],
+                capture_output=True,
+                text=True,
+                env={
+                    "PATH": os.environ.get("PATH", ""),
+                    "ODOO_DB_NAME": database_name,
+                    "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64": overrides_payload,
+                },
+                timeout=3,
+            )
+        except subprocess.TimeoutExpired:
+            return False
+        return "web-started" in completed.stdout
+
+    def test_passing_readback_releases_web_for_the_checked_payload_only(self) -> None:
+        run = self._run(
+            _render_script(), FAKE_CONTAINER_PAYLOAD="payload-a", FAKE_ODOO_DB=_fake_database()
+        )
+
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertLess(
+            run.docker_log.index("rm readback-passed"), run.docker_log.index("exec workflow")
+        )
+        self.assertLess(
+            run.docker_log.index("write readback-passed"),
+            run.docker_log.index(f"start {WEB_CONTAINER_ID}"),
+        )
+        self.assertTrue(self._held_web_starts(overrides_payload="payload-a"))
+        # A provider deploy that changes the payload or the database starts web before
+        # any read-back of it.
+        self.assertFalse(self._held_web_starts(overrides_payload="payload-b"))
+        self.assertFalse(
+            self._held_web_starts(overrides_payload="payload-a", database_name="other_db")
+        )
+
+    def test_failed_workflow_never_releases_held_web(self) -> None:
+        # The workflow may fail before it applies a new payload; the clean database
+        # then says nothing about the payload web would apply when it starts.
+        run = self._run(
+            _render_script(),
+            FAKE_CONTAINER_PAYLOAD="payload-a",
+            FAKE_WORKFLOW_EXIT="7",
+            FAKE_ODOO_DB=_fake_database(),
+        )
+
+        self.assertEqual(run.returncode, 7)
+        self.assertIn("integration_readback_ok=true", run.stdout.splitlines())
+        self.assertNotIn("write readback-passed", run.docker_log)
+        self.assertFalse(self._held_web_starts(overrides_payload="payload-a"))
+
+    def test_refusal_clears_an_earlier_pass_so_restarted_web_stays_held(self) -> None:
+        passed = self._run(
+            _render_script(), FAKE_CONTAINER_PAYLOAD="payload-a", FAKE_ODOO_DB=_fake_database()
+        )
+        refused = self._run(
+            _render_script(),
+            FAKE_CONTAINER_PAYLOAD="payload-a",
+            FAKE_ODOO_DB=_fake_database(config={"printnode.api_key": PRODUCTION_VALUE}),
+        )
+
+        self.assertEqual(passed.returncode, 0, passed.stdout + passed.stderr)
+        self.assert_refused_and_web_stopped(refused, "printnode/printnode.api_key")
+        self.assertNotIn("write readback-passed", refused.docker_log)
+        self.assertFalse(self._held_web_starts(overrides_payload="payload-a"))
+
+    def test_production_lane_never_touches_the_readback_pass(self) -> None:
+        run = self._run(_render_script(instance="prod"), FAKE_CONTAINER_PAYLOAD="payload-a")
+
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertNotIn("rm readback-passed", run.docker_log)
+        self.assertNotIn("write readback-passed", run.docker_log)
 
     def test_fake_docker_runs_an_empty_program_without_dash_i(self) -> None:
         # Mirrors the reproduction on the testing script-runner: a stdin

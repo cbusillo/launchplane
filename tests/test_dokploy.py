@@ -4321,6 +4321,7 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
 
     def test_render_odoo_raw_compose_file_pins_artifact_image_and_services(self) -> None:
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            hold_web_until_integration_readback=False,
             image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
             domain_hosts=("cm-testing.shinycomputers.com",),
             runtime_port=8069,
@@ -4398,6 +4399,7 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
 
     def test_render_odoo_raw_compose_file_adds_letsencrypt_resolver(self) -> None:
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            hold_web_until_integration_readback=False,
             image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
             domain_hosts=("pr-45.cm-preview.example.test",),
             domain_certificate_type="letsencrypt",
@@ -4410,7 +4412,8 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
 
     def test_render_odoo_raw_compose_file_serializes_image_as_yaml_scalar(self) -> None:
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
-            image_reference=("ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123\n  privileged: true")
+            hold_web_until_integration_readback=False,
+            image_reference=("ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123\n  privileged: true"),
         )
 
         self.assertIn(
@@ -4421,7 +4424,8 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
 
     def test_render_odoo_raw_compose_file_omits_traefik_labels_without_domains(self) -> None:
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
-            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123"
+            hold_web_until_integration_readback=False,
+            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
         )
 
         self.assertNotIn("traefik.http.routers", compose_file)
@@ -4431,6 +4435,7 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
 
     def test_render_odoo_raw_compose_file_normalizes_and_dedupes_domain_labels(self) -> None:
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            hold_web_until_integration_readback=False,
             image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
             domain_hosts=(
                 " CM-Testing.shinycomputers.com ",
@@ -4444,12 +4449,14 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
     def test_render_odoo_raw_compose_file_rejects_invalid_domain_label_host(self) -> None:
         with self.assertRaisesRegex(click.ClickException, "invalid domain host"):
             control_plane_dokploy.render_odoo_raw_compose_file(
+                hold_web_until_integration_readback=False,
                 image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
                 domain_hosts=("bad`host.example",),
             )
 
     def test_render_odoo_raw_compose_file_can_avoid_host_port_publishing(self) -> None:
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            hold_web_until_integration_readback=False,
             image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
             domain_hosts=("pr-45.cm-preview.example.test",),
             publish_host_ports=False,
@@ -4463,7 +4470,8 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
 
     def test_sync_dokploy_compose_raw_source_updates_and_verifies_hash(self) -> None:
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
-            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123"
+            hold_web_until_integration_readback=False,
+            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
         )
         update_payloads: list[dict[str, object]] = []
 
@@ -4726,6 +4734,7 @@ actions = ["launchplane_service_deploy.execute"]
 
     def test_build_dokploy_data_workflow_script_injects_workflow_environment(self) -> None:
         script = control_plane_dokploy._build_dokploy_data_workflow_script(
+            hold_web_until_integration_readback=False,
             compose_app_name="opw-prod",
             database_name="opw_prod",
             filestore_path="/volumes/data/filestore",

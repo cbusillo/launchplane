@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 import click
+from control_plane.integration_readback import web_held_until_integration_readback
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane import release_tuples as control_plane_release_tuples
@@ -3196,6 +3197,7 @@ def _sync_artifact_image_reference_for_target(
             target_domains = target_definition.domains
         compose_file = dokploy_compose.render_odoo_raw_compose_file(
             image_reference=desired_image_reference,
+            hold_web_until_integration_readback=web_held_until_integration_readback(instance_name),
             domain_hosts=target_domains,
         )
         runtime_source_evidence = dokploy_compose.sync_dokploy_compose_raw_source(
