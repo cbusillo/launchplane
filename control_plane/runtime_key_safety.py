@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from fnmatch import fnmatchcase
 from typing import Protocol
+from urllib.parse import urlsplit
 
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeEnvironmentClass,
@@ -52,6 +53,20 @@ DEFAULT_INTEGRATION_KEY_MARKERS = (
 def is_secret_shaped_runtime_key(key_name: str) -> bool:
     return any(
         key_part in SECRET_SHAPED_RUNTIME_KEY_PARTS for key_part in key_name.upper().split("_")
+    )
+
+
+def runtime_value_carries_credentials(value: str) -> bool:
+    """Whether a value embeds a password, as in ``smtp://user:password@host``."""
+    try:
+        return bool(urlsplit(value.strip()).password)
+    except ValueError:
+        return False
+
+
+def is_credential_runtime_value(key_name: str, value: str) -> bool:
+    return bool(value.strip()) and (
+        is_secret_shaped_runtime_key(key_name.strip()) or runtime_value_carries_credentials(value)
     )
 
 
@@ -112,6 +127,94 @@ def latest_active_runtime_key_safety_policy(
     if not records:
         raise ValueError("No active runtime key-safety policy record found.")
     return records[0]
+
+
+def preview_template_runtime_bindings(
+    *,
+    record_store: RuntimeKeySafetyPolicyReadStore,
+    template_context: str,
+    template_instance: str,
+) -> tuple[SecretBinding, ...]:
+    """The managed runtime bindings that deliver values to a preview's template lane.
+
+    A lane receives its own bindings and, per key, falls back to the site's
+    context-scoped binding, so both are read and the delivered one is kept.
+    """
+    template_target = RuntimeKeySafetyTarget(
+        context=template_context,
+        instance=template_instance,
+        environment_class=runtime_key_safety_environment_class(template_instance),
+    )
+    candidates = tuple(
+        binding
+        for binding in record_store.list_secret_bindings(
+            integration="runtime_environment", context_name=template_context, limit=None
+        )
+        if runtime_secret_binding_matches_target(binding=binding, target=template_target)
+    )
+    return tuple(
+        binding
+        for key_bindings in _bindings_by_binding_key(candidates).values()
+        for binding in _effective_bindings_for_target(key_bindings, target=template_target)
+    )
+
+
+def evaluate_preview_copied_runtime_key_safety(
+    *,
+    template_bindings: tuple[SecretBinding, ...],
+    policy_record: RuntimeKeySafetyPolicyRecord,
+    preview_context: str,
+    preview_slug: str,
+    copied_keys: Iterable[str],
+) -> RuntimeKeySafetyEvaluation:
+    """Check template-lane values a preview copies as if they were stored for the preview.
+
+    The template's bindings are retargeted to the preview, so each copied key needs a
+    policy rule that allows previews; the template lane's own classification and
+    declared classes never carry over. A copied value with no managed binding fails.
+    """
+    return evaluate_runtime_key_safety(
+        target=RuntimeKeySafetyTarget(
+            context=preview_context,
+            instance=preview_slug,
+            environment_class="preview",
+        ),
+        required_binding_keys=copied_keys,
+        secret_bindings=tuple(
+            binding.model_copy(update={"context": preview_context, "instance": preview_slug})
+            for binding in template_bindings
+        ),
+        secret_rules=policy_record.rules,
+        integration_key_markers=policy_record.integration_key_markers,
+    )
+
+
+def is_preview_copied_credential(
+    key_name: str, value: str, *, template_bindings: tuple[SecretBinding, ...]
+) -> bool:
+    """A copied value is a credential when a managed secret delivers it or it looks like one."""
+    if not value.strip():
+        return False
+    return is_credential_runtime_value(key_name, value) or any(
+        binding.binding_key == key_name for binding in template_bindings
+    )
+
+
+def preview_copied_integration_credential_keys(
+    values: Mapping[str, str],
+    *,
+    template_bindings: tuple[SecretBinding, ...],
+    extra_integration_key_markers: Iterable[str] = (),
+) -> tuple[str, ...]:
+    markers = tuple(extra_integration_key_markers)
+    return tuple(
+        sorted(
+            key
+            for key, value in values.items()
+            if is_integration_runtime_key(key, extra_markers=markers)
+            and is_preview_copied_credential(key, value, template_bindings=template_bindings)
+        )
+    )
 
 
 def runtime_secret_binding_matches_target(

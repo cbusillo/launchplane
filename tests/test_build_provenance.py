@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 from control_plane.build_provenance import (
     BUILD_WORKFLOW_PATH,
+    MAX_MANIFEST_BYTES,
     BuildProvenanceError,
     VerifiedBuildArtifact,
     record_verified_build_artifact,
@@ -65,7 +66,7 @@ class FakeGitHub:
 
     def get_bytes(self, path: str) -> bytes:
         archive = io.BytesIO()
-        with zipfile.ZipFile(archive, "w") as zip_file:
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
             zip_file.writestr("artifact-manifest.json", json.dumps(self.manifest))
         return archive.getvalue()
 
@@ -189,6 +190,13 @@ class BuildProvenanceTests(unittest.TestCase):
         github.manifest = {"artifact_id": "not-a-manifest"}
 
         with self.assertRaisesRegex(BuildProvenanceError, "not a valid artifact manifest"):
+            _verify(github)
+
+    def test_refuses_an_oversized_or_compression_bomb_manifest(self) -> None:
+        github = FakeGitHub(runs=[_run()])
+        github.manifest = {"padding": "0" * (MAX_MANIFEST_BYTES + 1)}
+
+        with self.assertRaisesRegex(BuildProvenanceError, "larger than allowed"):
             _verify(github)
 
     def test_record_refuses_a_preview_artifact(self) -> None:
