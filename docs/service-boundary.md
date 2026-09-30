@@ -2008,6 +2008,17 @@ Before authentication or JSON parsing, the ASGI boundary requires
 `application/json`, exactly one bounded `Content-Length`, no transfer encoding,
 and no more than 64 KiB of declared or observed request body.
 
+Repository identity apply
+(`POST /v1/product-profiles/repository-identity/apply`) is a field-bounded
+mutation that records only `repository_id` and `repository_owner_id`, copied
+from the current tracked repository inventory record for the profile's
+`repository`. It requires `product_profile.write` for the target product in the
+Launchplane service context, a 16 KiB JSON body, a reviewed plan SHA-256 and an
+`Idempotency-Key` for apply, and uses the same atomic profile compare-and-write
+with completed replay evidence as preview TLS, followed by a read-back. It never
+overwrites an identity that is already recorded. See
+[records.md](records.md#product-repository-identity).
+
 Preview TLS apply is a field-bounded mutation for Odoo-driver profiles and
 `preview.domain_certificate_type`. It requires
 `product_profile.preview_tls.apply` for the target product in the Launchplane
