@@ -996,8 +996,10 @@ capture status, not policy actor IDs or logins.
 `POST /v1/github/app-webhook` receives Launchplane's own GitHub App deliveries
 (design: issue #2605). It verifies `X-Hub-Signature-256` with the managed
 `github_app_webhook` secret (see [secrets.md](secrets.md)) before parsing, maps
-`repository.id` to exactly one product profile `repository_id`, and in one
-transaction records the `X-GitHub-Delivery` id and folds a reconcile request
+`repository.id` through the current tracked repository inventory record to its
+`repository` and then to exactly one active product profile with that
+`repository` (ids stored on the profile must agree with the inventory), and in
+one transaction records the `X-GitHub-Delivery` id and folds a reconcile request
 for the chosen target: a completed `.github/workflows/build.yml`
 `workflow_run` from `push` selects the product's testing target; one from
 `pull_request`, or a PR `opened`/`reopened`/`synchronize`/`labeled`/
@@ -2010,7 +2012,9 @@ and no more than 64 KiB of declared or observed request body.
 
 Repository identity apply
 (`POST /v1/product-profiles/repository-identity/apply`) is a field-bounded
-mutation that records only `repository_id` and `repository_owner_id`, copied
+mutation that records an optional cross-check copy of `repository_id` and
+`repository_owner_id` (the repository inventory is the authority, and the route
+is deleted in #2606), copied
 from the current tracked repository inventory record for the profile's
 `repository`. It requires `product_profile.write` for the target product in the
 Launchplane service context, a 16 KiB JSON body, a reviewed plan SHA-256 and an

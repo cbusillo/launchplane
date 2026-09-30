@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_reconcile import ProductReconcileTarget
+from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.github_app_webhook import (
     GitHubAppWebhookDependencies,
     handle_github_app_webhook_request,
@@ -25,6 +26,8 @@ from tests.support.stores import sqlite_database_url
 
 _SECRET = "app-webhook-secret"
 _REPOSITORY_ID = 424242
+_OWNER_ID = "1"
+_REPOSITORY = "example/site"
 _BUILD_PATH = ".github/workflows/build.yml"
 
 
@@ -32,11 +35,49 @@ def _signature(body: bytes, secret: str = _SECRET) -> str:
     return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
-def _profile(product: str, repository_id: int = _REPOSITORY_ID) -> LaunchplaneProductProfileRecord:
+def _profile(
+    product: str,
+    *,
+    repository: str = _REPOSITORY,
+    stored_repository_id: int | None = None,
+    lifecycle_state: str = "active",
+) -> LaunchplaneProductProfileRecord:
+    """A profile that, by default, stores no repository ids: the inventory is the authority."""
     payload = product_profile_payload(product)
-    payload["repository_id"] = str(repository_id)
-    payload["repository_owner_id"] = "1"
+    payload["repository"] = repository
+    if lifecycle_state != "active":
+        payload["lifecycle_state"] = lifecycle_state
+        payload["preview"] = {"enabled": False}
+    if stored_repository_id is not None:
+        payload["repository_id"] = str(stored_repository_id)
+        payload["repository_owner_id"] = _OWNER_ID
     return LaunchplaneProductProfileRecord.model_validate(payload)
+
+
+def _inventory(
+    *,
+    repository_id: int = _REPOSITORY_ID,
+    repository: str = _REPOSITORY,
+    inventory_state: str = "tracked",
+    inventory_revision: int = 1,
+) -> RepositoryInventoryRecord:
+    return RepositoryInventoryRecord.model_validate(
+        {
+            "repository_id": str(repository_id),
+            "repository_owner_id": _OWNER_ID,
+            "repository": repository,
+            "inventory_state": inventory_state,
+            "inventory_revision": inventory_revision,
+            "recorded_at": "2026-09-29T11:00:00Z",
+            "source": "test",
+            "reason": "Track the site repository.",
+            "supersedes_record_id": (
+                None
+                if inventory_revision == 1
+                else f"repository-inventory-{repository_id}-r{inventory_revision - 1}"
+            ),
+        }
+    )
 
 
 def _workflow_run(
@@ -66,6 +107,7 @@ class GitHubAppWebhookTests(unittest.TestCase):
         )
         self.addCleanup(self.store.close)
         self.store.ensure_schema()
+        self.store.write_repository_inventory_record(_inventory())
         self.store.write_product_profile_record(_profile("site"))
         self.secret = _SECRET
         self.clock = "2026-09-29T12:00:00Z"
@@ -162,15 +204,79 @@ class GitHubAppWebhookTests(unittest.TestCase):
                 self.assertEqual(body["result"]["status"], "ignored")  # type: ignore[index]
         self.assert_nothing_recorded()
 
-    def test_unknown_or_ambiguous_repository_is_ignored(self) -> None:
-        unknown = {**_pull_request("opened"), "repository": {"id": 1}}
-        status, body = self.deliver(unknown, event="pull_request", delivery_id="unknown")
-        self.assertEqual((status, body["result"]["status"]), (202, "ignored"))  # type: ignore[index]
-
-        self.store.write_product_profile_record(_profile("site-copy"))
-        status, body = self.deliver(_pull_request("opened"), event="pull_request")
-        self.assertEqual((status, body["result"]["status"]), (202, "ignored"))  # type: ignore[index]
+    def assert_ignored(self, reason: str, *, delivery_id: str = "delivery-1") -> None:
+        status, body = self.deliver(
+            _pull_request("opened"), event="pull_request", delivery_id=delivery_id
+        )
+        self.assertEqual(
+            (status, body["result"]["status"], body["result"]["reason"]),  # type: ignore[index]
+            (202, "ignored", reason),
+        )
         self.assert_nothing_recorded()
+
+    def test_repository_is_mapped_through_the_inventory_by_case_insensitive_name(self) -> None:
+        self.store.write_product_profile_record(_profile("site", repository="Example/Site"))
+
+        status, body = self.deliver(_pull_request("opened"), event="pull_request")
+
+        self.assertEqual((status, body["result"]["status"]), (202, "recorded"))  # type: ignore[index]
+        self.assertEqual(
+            self.store.read_product_reconcile_request("site:preview:7").product, "site"
+        )
+
+    def test_repository_missing_from_inventory_is_ignored(self) -> None:
+        unknown = {**_pull_request("opened"), "repository": {"id": 1}}
+        status, body = self.deliver(unknown, event="pull_request")
+
+        self.assertEqual(
+            (status, body["result"]["status"], body["result"]["reason"]),  # type: ignore[index]
+            (202, "ignored", "repository_not_mapped"),
+        )
+        self.assert_nothing_recorded()
+
+    def test_profile_ids_without_inventory_record_are_not_mapped(self) -> None:
+        # Stored ids alone never map an event: the inventory is the authority.
+        self.store.write_product_profile_record(
+            _profile("other", repository="example/other", stored_repository_id=515151)
+        )
+        unknown = {**_pull_request("opened"), "repository": {"id": 515151}}
+
+        status, body = self.deliver(unknown, event="pull_request")
+
+        self.assertEqual(body["result"]["reason"], "repository_not_mapped")  # type: ignore[index]
+        self.assert_nothing_recorded()
+
+    def test_retired_inventory_repository_is_ignored(self) -> None:
+        self.store.write_repository_inventory_record(
+            _inventory(inventory_state="retired", inventory_revision=2)
+        )
+
+        self.assert_ignored("repository_not_mapped")
+
+    def test_repository_naming_no_active_profile_is_ignored(self) -> None:
+        self.store.write_product_profile_record(_profile("site", repository="example/elsewhere"))
+        self.store.write_product_profile_record(_profile("retired-site", lifecycle_state="retired"))
+
+        self.assert_ignored("repository_not_mapped")
+
+    def test_repository_naming_two_active_profiles_is_ignored(self) -> None:
+        self.store.write_product_profile_record(_profile("site-copy"))
+
+        self.assert_ignored("repository_not_mapped")
+
+    def test_stored_ids_that_disagree_with_inventory_fail_closed(self) -> None:
+        self.store.write_product_profile_record(_profile("site", stored_repository_id=999))
+
+        self.assert_ignored("repository_identity_mismatch")
+
+    def test_stored_ids_that_agree_with_inventory_are_mapped(self) -> None:
+        self.store.write_product_profile_record(
+            _profile("site", stored_repository_id=_REPOSITORY_ID)
+        )
+
+        status, body = self.deliver(_pull_request("opened"), event="pull_request")
+
+        self.assertEqual(body["result"]["status"], "recorded")  # type: ignore[index]
 
 
 class ProductReconcileFoldingTests(unittest.TestCase):
@@ -240,6 +346,7 @@ class GitHubAppWebhookRouteTests(unittest.IsolatedAsyncioTestCase):
             )
             self.addCleanup(store.close)
             store.ensure_schema()
+            store.write_repository_inventory_record(_inventory())
             store.write_product_profile_record(_profile("site"))
             app = create_launchplane_fastapi_app(
                 verifier=StubVerifier(identity()),

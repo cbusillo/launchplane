@@ -1030,8 +1030,20 @@ retired context.
 
 ### Product Repository Identity
 
-A product profile's immutable GitHub identity (`repository_id`,
-`repository_owner_id`) is recorded with
+Launchplane's repository inventory is the authority for a product's immutable
+GitHub identity (`repository_id`, `repository_owner_id`).
+`resolve_product_repository_identity` reads it from the one current `tracked`
+repository inventory record whose normalized `repository` equals the profile's
+`repository`. The GitHub App webhook receiver, the product reconcile, its
+build-provenance token and Launchplane's reconcile grant all use that lookup;
+none of them needs ids stored on the profile. It fails closed when the profile
+has no usable `repository`, the inventory has no current tracked record for it
+or more than one, or the profile stores ids that differ from the inventory's
+(`repository_identity_stored_mismatch`). A profile's stored ids are therefore an
+optional cross-check, and a stored identity without an inventory record grants
+nothing. Deleting the stored fields and the route below is part of #2606.
+
+The optional stored copy is recorded with
 `POST /v1/product-profiles/repository-identity/apply`. The request names only
 `product`, `mode`, `reason`, and, for apply, `reviewed_plan_sha256`; it never
 carries ids. Launchplane copies both ids from the one current `tracked`

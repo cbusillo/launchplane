@@ -56,6 +56,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.github_app_identity import (
     GitHubAppIdentity,
     GitHubAppIdentityError,
@@ -100,6 +101,12 @@ from control_plane.odoo_target_replacement_apply_http import (
     find_odoo_target_replacement_apply_operation_by_idempotency_key,
     odoo_target_replacement_apply_operation_store,
     resolve_odoo_target_replacement_apply_lane,
+)
+from control_plane.product_repository_identity import (
+    ProductRepositoryIdentity,
+    ProductRepositoryIdentityRefusal,
+    product_repository_identity_from_inventory,
+    resolve_product_repository_identity,
 )
 from control_plane.provider_operations import DurableProviderOperationStore
 from control_plane.testing_lane_hold import (
@@ -152,6 +159,10 @@ class ProductReconcileStore(Protocol):
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
     def list_product_profile_records(self) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
+
+    def list_repository_inventory_records(
+        self, *, repository_id: str = "", limit: int | None = None
+    ) -> tuple[RepositoryInventoryRecord, ...]: ...
 
     def read_release_tuple_record(
         self, *, context_name: str, channel_name: str
@@ -232,10 +243,11 @@ def resolve_build_provenance_transport(
             f"No build-provenance token: the merge train policy for {profile.repository} "
             "has no GitHub App."
         )
-    if str(app.repository_id) != profile.repository_id:
+    identity = product_repository_identity(record_store, profile)
+    if str(app.repository_id) != identity.repository_id:
         raise ProductReconcileError(
             "No build-provenance token: the merge train App's repository id is not the "
-            "product's recorded repository id."
+            "product's repository id in Launchplane's repository inventory."
         )
     try:
         private_key = secrets.resolve_context_secret_value(
@@ -256,7 +268,7 @@ def resolve_build_provenance_transport(
         token = mint_build_provenance_installation_token(
             identity=GitHubAppIdentity(app_id=app.app_id, private_key=private_key),
             repository=profile.repository,
-            repository_id=profile.repository_id,
+            repository_id=identity.repository_id,
         )
     except (GitHubAppIdentityError, click.ClickException, OSError, ValueError) as error:
         raise ProductReconcileError(
@@ -265,15 +277,32 @@ def resolve_build_provenance_transport(
     return GitHubBuildProvenanceTransport(token=token.token)
 
 
+def product_repository_identity(
+    record_store: object, profile: LaunchplaneProductProfileRecord
+) -> ProductRepositoryIdentity:
+    """The product's immutable repository identity from Launchplane's repository inventory."""
+    try:
+        return resolve_product_repository_identity(record_store, profile)
+    except ProductRepositoryIdentityRefusal as error:
+        raise ProductReconcileError(
+            f"Product {profile.product} has no usable repository identity in Launchplane's "
+            f"repository inventory ({error.code}): {error}"
+        ) from error
+
+
 def reconcile_testing_target(
     *,
     record_store: ProductReconcileStore,
     profile: LaunchplaneProductProfileRecord,
+    repository_id: str,
     transport: BuildProvenanceTransport,
 ) -> ReconcileOutcome:
     """Queue the testing lane's deploy of its desired artifact when it runs anything else."""
     plan, desired = _plan_testing_target(
-        record_store=record_store, profile=profile, transport=transport
+        record_store=record_store,
+        profile=profile,
+        repository_id=repository_id,
+        transport=transport,
     )
     if desired is None or plan["action"] != "deploy":
         return ReconcileOutcome(plan)
@@ -463,13 +492,16 @@ def _plan_testing_target(
     *,
     record_store: ProductReconcileStore,
     profile: LaunchplaneProductProfileRecord,
+    repository_id: str,
     transport: BuildProvenanceTransport,
 ) -> tuple[dict[str, object], VerifiedBuildArtifact | None]:
     """Desired: the newest first-parent default-branch commit with a verified release build."""
     lane = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
     if lane is None:
         raise ProductReconcileError(f"Product {profile.product} has no testing lane.")
-    desired, rejected = _desired_release(transport=transport, profile=profile, lane=lane)
+    desired, rejected = _desired_release(
+        transport=transport, profile=profile, repository_id=repository_id, lane=lane
+    )
     current_artifact_id, current_digest = _current_testing_release(
         record_store=record_store, profile=profile, lane=lane
     )
@@ -505,6 +537,7 @@ def reconcile_preview_target(
     *,
     record_store: ProductReconcileStore,
     profile: LaunchplaneProductProfileRecord,
+    repository_id: str,
     transport: BuildProvenanceTransport,
     pull_request_number: int,
     control_plane_root: Path | None,
@@ -514,6 +547,7 @@ def reconcile_preview_target(
     decision = _plan_preview_target(
         record_store=record_store,
         profile=profile,
+        repository_id=repository_id,
         transport=transport,
         pull_request_number=pull_request_number,
     )
@@ -540,6 +574,7 @@ def _plan_preview_target(
     *,
     record_store: ProductReconcileStore,
     profile: LaunchplaneProductProfileRecord,
+    repository_id: str,
     transport: BuildProvenanceTransport,
     pull_request_number: int,
 ) -> _PreviewDecision:
@@ -587,7 +622,7 @@ def _plan_preview_target(
         verified = verify_build_artifact(
             transport=transport,
             repository=profile.repository,
-            repository_id=profile.repository_id,
+            repository_id=repository_id,
             commit=head_sha,
             purpose="preview",
             context=preview_context,
@@ -764,19 +799,20 @@ def reconcile_product_request(
         return ReconcileOutcome(
             {"target": request.target_kind, "action": "none", "reason": "product_inactive"}
         )
-    if not profile.repository_id:
-        raise ProductReconcileError(
-            f"Product {profile.product} needs its immutable repository id recorded."
-        )
+    identity = product_repository_identity(record_store, profile)
     transport = transport_factory(record_store, profile)
     if request.target_kind == "testing":
         return reconcile_testing_target(
-            record_store=record_store, profile=profile, transport=transport
+            record_store=record_store,
+            profile=profile,
+            repository_id=identity.repository_id,
+            transport=transport,
         )
     assert request.pull_request_number is not None
     return reconcile_preview_target(
         record_store=record_store,
         profile=profile,
+        repository_id=identity.repository_id,
         transport=transport,
         pull_request_number=request.pull_request_number,
         control_plane_root=control_plane_root,
@@ -844,8 +880,12 @@ def request_product_reconcile_sweep(
 ) -> tuple[str, ...]:
     """Request every mapped product's testing target and every live preview; no GitHub reads."""
     targets: list[ProductReconcileTarget] = []
-    for profile in record_store.list_product_profile_records():
-        if not profile.is_active or not profile.repository_id:
+    inventory_records = record_store.list_repository_inventory_records()
+    profiles = record_store.list_product_profile_records()
+    for profile in profiles:
+        if not profile.is_active or not _has_repository_identity(
+            profile, inventory_records, profiles
+        ):
             continue
         if not any(lane.instance == "testing" for lane in profile.lanes):
             continue
@@ -870,10 +910,25 @@ def request_product_reconcile_sweep(
     return tuple(unique_targets)
 
 
+def _has_repository_identity(
+    profile: LaunchplaneProductProfileRecord,
+    inventory_records: tuple[RepositoryInventoryRecord, ...],
+    profiles: tuple[LaunchplaneProductProfileRecord, ...],
+) -> bool:
+    try:
+        product_repository_identity_from_inventory(
+            profile=profile, inventory_records=inventory_records, profiles=profiles
+        )
+    except ProductRepositoryIdentityRefusal:
+        return False
+    return True
+
+
 def _desired_release(
     *,
     transport: BuildProvenanceTransport,
     profile: LaunchplaneProductProfileRecord,
+    repository_id: str,
     lane: ProductLaneProfile,
 ) -> tuple[VerifiedBuildArtifact | None, list[dict[str, str]]]:
     default_branch = profile.default_branch
@@ -917,7 +972,7 @@ def _desired_release(
                 verify_build_artifact(
                     transport=transport,
                     repository=profile.repository,
-                    repository_id=profile.repository_id,
+                    repository_id=repository_id,
                     commit=commit,
                     purpose="release",
                     context=lane.context,

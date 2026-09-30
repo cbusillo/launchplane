@@ -35,6 +35,7 @@ from control_plane.contracts.product_reconcile import (
     ProductReconcileTarget,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
@@ -46,9 +47,13 @@ from control_plane.launchplane_reconcile_authorization import (
     build_launchplane_reconcile_authorization,
 )
 from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_APPLY_ROUTE
+from control_plane.contracts.merge_train_policy import MergeTrainPolicy, MergeTrainPolicyRecord
+from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.product_reconcile import (
     PreviewProviderHooks,
+    ProductReconcileError,
     request_product_reconcile_sweep,
+    resolve_build_provenance_transport,
     run_product_reconcile_once,
 )
 from control_plane.storage.postgres import PostgresRecordStore
@@ -172,7 +177,8 @@ class FakeGitHub:
         return archive.getvalue()
 
 
-def _profile(product: str = "site", *, repository_id: str = REPOSITORY_ID) -> dict[str, object]:
+def _profile(product: str = "site", *, repository_id: str = "") -> dict[str, object]:
+    """A profile that, by default, stores no repository ids: the inventory is the authority."""
     payload = _odoo_preview_profile_payload(product)
     payload.update(
         repository=REPOSITORY if product == "site" else f"example/{product}",
@@ -182,6 +188,21 @@ def _profile(product: str = "site", *, repository_id: str = REPOSITORY_ID) -> di
         preview={**cast(dict[str, object], payload["preview"]), "enable_label": LABEL},
     )
     return payload
+
+
+def _inventory(
+    repository: str = REPOSITORY, repository_id: str = REPOSITORY_ID
+) -> RepositoryInventoryRecord:
+    return RepositoryInventoryRecord(
+        repository_id=repository_id,
+        repository_owner_id="1",
+        repository=repository,
+        inventory_state="tracked",
+        inventory_revision=1,
+        recorded_at="2026-09-29T09:00:00Z",
+        source="test",
+        reason="Track the product repository.",
+    )
 
 
 class FakePreviewProvider:
@@ -270,6 +291,7 @@ class ProductReconcileTestCase(unittest.TestCase):
         )
         self.addCleanup(self.store.close)
         self.store.ensure_schema()
+        self.store.write_repository_inventory_record(_inventory())
         self.store.write_product_profile_record(
             LaunchplaneProductProfileRecord.model_validate(_profile())
         )
@@ -971,12 +993,19 @@ class ProductReconcileGrantTests(ProductReconcileTestCase):
 
     def test_reconcile_grant_is_refused_for_other_destinations(self) -> None:
         self.store.write_product_profile_record(
-            LaunchplaneProductProfileRecord.model_validate(_profile("other", repository_id=""))
+            LaunchplaneProductProfileRecord.model_validate(_profile("other"))
+        )
+        self.store.write_repository_inventory_record(_inventory("example/stale", "202"))
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(_profile("stale", repository_id="999"))
         )
         cases = {
             "prod instance": self.replacement(instance="prod"),
             "another context": self.replacement(context="elsewhere"),
-            "product without a repository id": self.replacement(product="other"),
+            "product not in the repository inventory": self.replacement(product="other"),
+            "product whose stored ids disagree with the inventory": self.replacement(
+                product="stale"
+            ),
             "unknown product": self.replacement(product="missing"),
         }
         for name, operation in cases.items():
@@ -1061,11 +1090,110 @@ class ProductReconcileFailureTests(ProductReconcileTestCase):
         self.assertEqual(failed.state, "failed")
         self.assertIn("has no GitHub App", failed.last_error)
 
+    def write_merge_train_app(self, *, app_repository_id: int) -> None:
+        record = build_test_merge_train_policy_record(repository=REPOSITORY)
+        policy = record.policy.model_dump(mode="json")
+        policy["policies"][0]["merge_identity"] = {"kind": "github_app", "name": "site-merge"}
+        policy["policies"][0]["github_token"] = {
+            "github_app": {
+                "app_id": 77,
+                "repository_id": app_repository_id,
+                "private_key_context": "site-merge-train",
+            }
+        }
+        self.store.write_merge_train_policy_record(
+            MergeTrainPolicyRecord(
+                record_id=record.record_id,
+                source="test",
+                updated_at=record.updated_at,
+                policy=MergeTrainPolicy.model_validate(policy),
+            )
+        )
+
+    def test_build_provenance_token_is_minted_for_the_inventory_repository_id(self) -> None:
+        self.write_merge_train_app(app_repository_id=int(REPOSITORY_ID))
+        profile = self.store.read_product_profile_record("site")
+        self.assertEqual(profile.repository_id, "")
+        token = GitHubAppInstallationToken(
+            token="read-only",
+            app_id=77,
+            installation_id=5,
+            repository_id=int(REPOSITORY_ID),
+            repository=REPOSITORY,
+            expires_at="2026-09-30T13:00:00Z",
+        )
+
+        with (
+            patch(
+                "control_plane.product_reconcile.secrets.resolve_context_secret_value",
+                return_value="private-key",
+            ),
+            patch(
+                "control_plane.product_reconcile.mint_build_provenance_installation_token",
+                return_value=token,
+            ) as mint,
+        ):
+            resolve_build_provenance_transport(self.store, profile)
+
+        self.assertEqual(mint.call_args.kwargs["repository_id"], REPOSITORY_ID)
+        self.assertEqual(mint.call_args.kwargs["repository"], REPOSITORY)
+
+    def test_build_provenance_token_is_refused_for_another_repository_id(self) -> None:
+        self.write_merge_train_app(app_repository_id=int(REPOSITORY_ID) + 1)
+
+        with (
+            patch(
+                "control_plane.product_reconcile.mint_build_provenance_installation_token"
+            ) as mint,
+            self.assertRaisesRegex(ProductReconcileError, "repository inventory"),
+        ):
+            resolve_build_provenance_transport(
+                self.store, self.store.read_product_profile_record("site")
+            )
+
+        mint.assert_not_called()
+
+    def test_reconcile_fails_closed_without_a_repository_inventory_identity(self) -> None:
+        cases = {
+            "not in the inventory": _profile() | {"repository": "example/untracked"},
+            "stored ids disagree": _profile(repository_id="999"),
+        }
+        for name, profile in cases.items():
+            with self.subTest(name):
+                self.store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(profile)
+                )
+                self.request()
+                with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                    failed = self.run_once()
+
+                self.assertEqual(failed.state, "failed")
+                self.assertIn("repository inventory", failed.last_error)
+                self.assertEqual(self.snapshot(), ((), (), (), (), ()))
+
+    def test_reconcile_fails_closed_when_another_active_profile_names_the_repository(
+        self,
+    ) -> None:
+        site = self.store.read_product_profile_record("site")
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(
+                _profile("copy") | {"repository": site.repository}
+            )
+        )
+        self.request()
+        with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+            failed = self.run_once()
+
+        self.assertEqual(failed.state, "failed")
+        self.assertIn("also named by active product profile copy", failed.last_error)
+        self.assertEqual(self.snapshot(), ((), (), (), (), ()))
+        self.assertEqual(request_product_reconcile_sweep(self.store, "2026-09-29T12:00:00Z"), ())
+
 
 class ProductReconcileSweepTests(ProductReconcileTestCase):
     def test_sweep_requests_mapped_testing_targets_and_live_previews(self) -> None:
         self.store.write_product_profile_record(
-            LaunchplaneProductProfileRecord.model_validate(_profile("unmapped", repository_id=""))
+            LaunchplaneProductProfileRecord.model_validate(_profile("unmapped"))
         )
         self.write_preview(number=5)
         self.write_preview(number=6, state="destroyed")
