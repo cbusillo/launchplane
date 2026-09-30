@@ -103,7 +103,9 @@ Each target keeps one reconcile request with its state, attempt count, last
 plan and last error. `GET /v1/product-profiles/{product}/reconcile-requests`
 returns them to a caller with `product_profile.read` on the product, so an
 event-driven preview or testing deploy can be checked without service logs.
-Exact commit SHAs and `sha256:` digests come back as they are. Every other
+Exact commit SHAs and `sha256:` digests come back as they are, and so do the
+ids Launchplane records itself: the GitHub delivery id and the plan's top-level
+`*_id` fields, when they are a UUID or a `name-<hex>` id. Every other
 string in the plan and error goes through the shared redactor, which removes
 secret assignments, tokens, authorization headers, URLs, paths and long
 random strings.
