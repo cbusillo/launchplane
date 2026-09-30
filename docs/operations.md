@@ -1599,13 +1599,14 @@ local `gh` authentication. Verify the configured actor with a token-scoped
 GitHub `/user` API read outside Launchplane, and never print or paste the token
 itself into logs, issues, or records.
 
-Record a product profile's immutable GitHub repository identity at its
-event-driven switch-over with the deployed service route
-`POST /v1/product-profiles/repository-identity/apply`, not a whole-profile
-`POST /v1/product-profiles` rewrite. Make sure the repository is tracked in the
-repository inventory first. Run `mode=dry-run` with the product and a reason,
-review the before/after identity, the inventory record it came from, and the
-plan SHA-256, then apply with that SHA-256 and an `Idempotency-Key`. Confirm
+A product's event-driven switch-over needs only its repository tracked in the
+repository inventory: webhook mapping, reconcile, build provenance and the
+reconcile grant read the immutable ids from there. Recording a copy of them on
+the profile is optional (and deleted in #2606); when wanted, use the deployed
+service route `POST /v1/product-profiles/repository-identity/apply`, not a
+whole-profile `POST /v1/product-profiles` rewrite. Run `mode=dry-run` with the
+product and a reason, review the before/after identity, the inventory record it
+came from, and the plan SHA-256, then apply with that SHA-256 and an `Idempotency-Key`. Confirm
 `read_back_matches` is `true`. The caller needs a target-product-scoped
 `product_profile.write` grant.
 

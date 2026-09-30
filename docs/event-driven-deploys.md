@@ -32,13 +32,18 @@ to do.
 1. Verify `X-Hub-Signature-256` with the App's webhook secret. The secret is
    a Launchplane managed secret, not service env, and it is used for nothing
    else.
-2. Map `repository.id` to exactly one product profile by its recorded
-   `repository_id`. An unknown repository is ignored. A profile gets its
-   `repository_id` and `repository_owner_id` through
-   `POST /v1/product-profiles/repository-identity/apply` at switch-over:
-   the route copies both ids from the current tracked repository inventory
-   record for the profile's `repository`, so the repository must be in
-   Launchplane's repository inventory first. See
+2. Map `repository.id` through Launchplane's repository inventory, which is
+   the authority for immutable repository ids: the current tracked inventory
+   record with that `repository_id` names a `repository`, and exactly one
+   active product profile must have that `repository` (compared
+   case-insensitively). A repository that is missing from the inventory,
+   retired there, or names no active profile or more than one is ignored
+   (`repository_not_mapped`). No per-product grant or profile write is
+   needed; the repository only has to be tracked in the inventory. Ids stored
+   on a profile are an optional cross-check: when present they must equal the
+   inventory's, or the delivery is ignored (`repository_identity_mismatch`).
+   The reconcile, its build-provenance token and Launchplane's reconcile
+   grant read the same inventory identity and fail closed without it. See
    [records.md](records.md#product-repository-identity).
 3. In one transaction, record the delivery by `X-GitHub-Delivery` and
    request a reconcile of the target. Only then return `202`. A repeated
@@ -173,3 +178,6 @@ repository changes.
 The site's `odoo-preview.yml`, `odoo-testing-deploy.yml`,
 `ship-testing-on-merge.yml`, `odoo-post-deploy.yml` and
 `odoo-artifact-publish.yml`, and their reusable workflows, routes and grants.
+Also the profile's stored `repository_id` and `repository_owner_id` copies and
+`POST /v1/product-profiles/repository-identity/apply`, now that the repository
+inventory is read directly.

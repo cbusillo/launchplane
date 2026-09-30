@@ -21,6 +21,12 @@ from control_plane.contracts.product_reconcile import (
     GitHubAppWebhookDeliveryRecord,
     ProductReconcileTarget,
 )
+from control_plane.contracts.repository_inventory import (
+    RepositoryInventoryRecord,
+    normalize_repository,
+)
+from control_plane.product_repository_identity import stored_identity_matches_inventory
+from control_plane.repository_inventory import get_repository_inventory_read_model
 from control_plane.workflows.launchplane import verify_github_webhook_signature
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -38,6 +44,10 @@ GitHubAppWebhookStatus = Literal["recorded", "duplicate", "ignored"]
 
 class GitHubAppWebhookStore(Protocol):
     def list_product_profile_records(self) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
+
+    def list_repository_inventory_records(
+        self, *, repository_id: str = "", limit: int | None = None
+    ) -> tuple[RepositoryInventoryRecord, ...]: ...
 
     def record_github_app_webhook_delivery(
         self,
@@ -132,11 +142,11 @@ def handle_github_app_webhook_request(
         return error(503, "github_app_webhook_unavailable", "Webhook storage is unavailable.")
     store = cast(GitHubAppWebhookStore, record_store)
     try:
-        product = _product_for_repository(store=store, repository_id=repository_id)
+        product, unmapped_reason = _product_for_repository(store=store, repository_id=repository_id)
     except Exception:
         return error(503, "github_app_webhook_unavailable", "Webhook storage is unavailable.")
     if not product:
-        return accepted("ignored", reason="repository_not_mapped")
+        return accepted("ignored", reason=unmapped_reason)
     targets = tuple(
         ProductReconcileTarget(
             product=product, target_kind=target_kind, pull_request_number=pull_request_number
@@ -187,13 +197,33 @@ def _target_shapes(
     return ()
 
 
-def _product_for_repository(*, store: GitHubAppWebhookStore, repository_id: str) -> str:
+def _product_for_repository(*, store: GitHubAppWebhookStore, repository_id: str) -> tuple[str, str]:
+    """The one active product whose repository the inventory names for this id, or why not.
+
+    The repository inventory is the authority for the immutable id; ids stored on
+    the profile are only a cross-check and must agree with it.
+    """
+    inventory = get_repository_inventory_read_model(repository_id=repository_id, store=store)
+    current = inventory.current_record
+    if current is None or current.inventory_state != "tracked":
+        return "", "repository_not_mapped"
     matches = tuple(
-        profile.product
+        profile
         for profile in store.list_product_profile_records()
-        if profile.repository_id == repository_id
+        if profile.is_active and _normalized_repository(profile.repository) == current.repository
     )
-    return matches[0] if len(matches) == 1 else ""
+    if len(matches) != 1:
+        return "", "repository_not_mapped"
+    if not stored_identity_matches_inventory(matches[0], current):
+        return "", "repository_identity_mismatch"
+    return matches[0].product, ""
+
+
+def _normalized_repository(repository: str) -> str:
+    try:
+        return normalize_repository(repository, "repository")
+    except ValueError:
+        return ""
 
 
 def _mapping(mapping: dict[str, object] | None, key: str) -> dict[str, object] | None:

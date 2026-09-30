@@ -17,6 +17,10 @@ from control_plane.contracts.durable_operation_authorization import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.odoo_product_driver_http import product_profile_uses_odoo_driver
+from control_plane.product_repository_identity import (
+    ProductRepositoryIdentityRefusal,
+    resolve_product_repository_identity,
+)
 
 TESTING_TARGET_REPLACEMENT_ACTION = "odoo_target_replacement_apply.execute"
 TESTING_INSTANCE = "testing"
@@ -47,7 +51,11 @@ def launchplane_reconcile_authorization_allows(
     instances: tuple[str, ...],
     record_store: object,
 ) -> bool:
-    """Accept the grant only for the product's own testing lane, read from its profile now."""
+    """Accept the grant only for the product's own testing lane, read from its profile now.
+
+    The product must also have a repository identity in Launchplane's repository
+    inventory that any ids stored on its profile agree with.
+    """
     if (
         authorization.grant != "launchplane_reconcile"
         or authorization.caller.identity_type != "launchplane_reconcile"
@@ -94,8 +102,12 @@ def _reconcilable_profile(
     if (
         not isinstance(profile, LaunchplaneProductProfileRecord)
         or not profile.is_active
-        or not profile.repository_id
         or not product_profile_uses_odoo_driver(profile)
     ):
+        return None
+    try:
+        # The repository inventory, not the profile, is the authority for the identity.
+        resolve_product_repository_identity(record_store, profile)
+    except ProductRepositoryIdentityRefusal:
         return None
     return profile
