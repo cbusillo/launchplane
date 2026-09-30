@@ -1028,6 +1028,38 @@ product repo authority. It enforces the same fail-closed historical-context
 transition rule as service and manifest writes, so it cannot reactivate a
 retired context.
 
+### Product Repository Identity
+
+A product profile's immutable GitHub identity (`repository_id`,
+`repository_owner_id`) is recorded with
+`POST /v1/product-profiles/repository-identity/apply`. The request names only
+`product`, `mode`, `reason`, and, for apply, `reviewed_plan_sha256`; it never
+carries ids. Launchplane copies both ids from the one current `tracked`
+repository inventory record whose normalized `repository` equals the profile's
+`repository`. The route refuses with a distinct code when the profile is missing
+(`not_found`), has no usable owner/name `repository`
+(`repository_identity_profile_repository_missing`), has no current tracked
+inventory record (`repository_identity_inventory_missing`) or more than one
+(`repository_identity_inventory_ambiguous`), when another profile already
+records that `repository_id` (`repository_identity_claimed_by_other_product`),
+or when the profile already records a different identity
+(`repository_identity_conflict`). It never overwrites a recorded identity; a
+matching one is `unchanged`.
+
+The dry-run plan reports the identity before and after, the inventory record id,
+revision, and digest it came from, the profile record SHA-256, and a plan
+SHA-256 over those inputs and the reason. Apply requires `product_profile.write`
+for the target product in the Launchplane service context (the same grant the
+whole-profile write needs), an `Idempotency-Key`, and the reviewed plan SHA-256.
+It re-plans from fresh DB-backed state, compare-and-writes the profile with its
+completed replay evidence in one transaction, sets `updated_at` and
+`source=service:product-repository-identity`, then reads the profile back and
+reports `read_back_matches`. A retried apply whose first attempt wrote but lost
+its receipt finds the identity already recorded and reports `unchanged` instead
+of refusing it as stale. A same-key replay returns the stored receipt, which
+precedes the read-back. The claimed-by-another-product check is made at plan
+time; it is not held under a lock across product rows.
+
 ## Public Ingress Observation Records
 
 Public ingress observations are append-only Launchplane records under

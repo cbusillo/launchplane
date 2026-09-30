@@ -33,7 +33,13 @@ to do.
    a Launchplane managed secret, not service env, and it is used for nothing
    else.
 2. Map `repository.id` to exactly one product profile by its recorded
-   `repository_id`. An unknown repository is ignored.
+   `repository_id`. An unknown repository is ignored. A profile gets its
+   `repository_id` and `repository_owner_id` through
+   `POST /v1/product-profiles/repository-identity/apply` at switch-over:
+   the route copies both ids from the current tracked repository inventory
+   record for the profile's `repository`, so the repository must be in
+   Launchplane's repository inventory first. See
+   [records.md](records.md#product-repository-identity).
 3. In one transaction, record the delivery by `X-GitHub-Delivery` and
    request a reconcile of the target. Only then return `202`. A repeated
    delivery id does nothing. A crash before the commit returns an error, and
