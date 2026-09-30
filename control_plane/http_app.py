@@ -5977,7 +5977,9 @@ def create_launchplane_fastapi_app(
                     )
                 ),
             )
-            controller_result = execute_merge_train_controller_run_once(
+            # A landing can take minutes of GitHub calls; keep the event loop free.
+            controller_result = await run_in_threadpool(
+                execute_merge_train_controller_run_once,
                 request=controller_request,
                 policy=policy_record.policy,
                 policy_sha256=policy_record.policy_sha256,
