@@ -18587,7 +18587,7 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> tuple[MergeTrainControllerStateRecord, ...]:
         filters: list[object] = []
         if repository:
-            filters.append(LaunchplaneMergeTrainControllerStateRow.repository == repository)
+            filters.append(LaunchplaneMergeTrainControllerStateRow.repository == repository.lower())
         if base_branch:
             filters.append(LaunchplaneMergeTrainControllerStateRow.base_branch == base_branch)
         if status:
