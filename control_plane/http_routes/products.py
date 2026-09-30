@@ -40,6 +40,11 @@ from control_plane.contracts.product_incident_read_model import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_operational_readiness import ProductOperationalReadiness
+from control_plane.product_reconcile_read import (
+    ProductReconcileRequestReader,
+    ProductReconcileRequestView,
+    product_reconcile_request_view,
+)
 from control_plane.contracts.protected_artifacts import (
     ProtectedArtifactSet,
     ProtectedArtifactStore,
@@ -217,6 +222,15 @@ class ProductProfileResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     profile: LaunchplaneProductProfileRecord
+
+
+class ProductReconcileRequestsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    product: str
+    requests: tuple[ProductReconcileRequestView, ...]
 
 
 class ProtectedArtifactsResponse(BaseModel):
@@ -1414,6 +1428,48 @@ def register_product_profile_read_routes(
                 message="Workflow cannot read the requested product profile.",
             )
         return ProductProfileResponse(trace_id=trace_id, profile=profile)
+
+    # What the event reconciler last decided for each of the product's targets, so
+    # an event-driven preview or testing deploy can be checked. Redacted in the view.
+    def read_product_reconcile_requests(
+        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+    ) -> ProductReconcileRequestsResponse:
+        profile = read_product_profile(
+            product=product, identity=identity, record_store=record_store
+        ).profile
+        trace_id = common.next_trace_id()
+        if not hasattr(record_store, "list_product_reconcile_requests"):
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Reading reconcile requests requires database storage.",
+            )
+        records = cast(ProductReconcileRequestReader, record_store).list_product_reconcile_requests(
+            product=profile.product
+        )
+        return ProductReconcileRequestsResponse(
+            trace_id=trace_id,
+            product=profile.product,
+            requests=tuple(product_reconcile_request_view(record) for record in records),
+        )
+
+    app.add_api_route(
+        "/v1/product-profiles/{product}/reconcile-requests",
+        read_product_reconcile_requests,
+        methods=["GET"],
+        response_model=ProductReconcileRequestsResponse,
+        operation_id="read_product_reconcile_requests",
+        summary="Read what the event reconciler last decided for a product",
+        responses={
+            401: {"model": common.error_response_model},
+            403: {"model": common.error_response_model},
+            404: {"model": common.error_response_model},
+            503: {"model": common.error_response_model},
+        },
+    )
 
     app.add_api_route(
         "/v1/product-profiles/{product}",

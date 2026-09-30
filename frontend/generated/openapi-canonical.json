@@ -11842,6 +11842,7 @@
         "title": "InspectionSetupRuntimeMetadata",
         "type": "object"
       },
+      "JsonValue": {},
       "LaunchplaneActiveAuthzPolicyResponse": {
         "additionalProperties": false,
         "properties": {
@@ -31207,6 +31208,123 @@
           }
         },
         "title": "ProductPublicIngressSummary",
+        "type": "object"
+      },
+      "ProductReconcileRequestView": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "last_delivery_id": {
+            "title": "Last Delivery Id",
+            "type": "string"
+          },
+          "last_error": {
+            "title": "Last Error",
+            "type": "string"
+          },
+          "last_plan": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Last Plan",
+            "type": "object"
+          },
+          "pull_request_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pull Request Number"
+          },
+          "request_count": {
+            "title": "Request Count",
+            "type": "integer"
+          },
+          "requested_at": {
+            "title": "Requested At",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "running",
+              "done",
+              "failed"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "target_key": {
+            "title": "Target Key",
+            "type": "string"
+          },
+          "target_kind": {
+            "enum": [
+              "testing",
+              "preview"
+            ],
+            "title": "Target Kind",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_key",
+          "target_kind",
+          "pull_request_number",
+          "state",
+          "requested_at",
+          "updated_at",
+          "request_count",
+          "attempt",
+          "last_delivery_id",
+          "last_error",
+          "last_plan"
+        ],
+        "title": "ProductReconcileRequestView",
+        "type": "object"
+      },
+      "ProductReconcileRequestsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "requests": {
+            "items": {
+              "$ref": "#/components/schemas/ProductReconcileRequestView"
+            },
+            "title": "Requests",
+            "type": "array"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "product",
+          "requests"
+        ],
+        "title": "ProductReconcileRequestsResponse",
         "type": "object"
       },
       "ProductRetirementRequest": {
@@ -76532,6 +76650,107 @@
           }
         },
         "summary": "Preview or change the Owner of a product"
+      }
+    },
+    "/v1/product-profiles/{product}/reconcile-requests": {
+      "get": {
+        "operationId": "read_product_reconcile_requests",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductReconcileRequestsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read what the event reconciler last decided for a product"
       }
     },
     "/v1/product-retirement": {
