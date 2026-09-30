@@ -41,6 +41,7 @@ from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStackCollapseRootProof,
 )
 from control_plane.merge_train import (
+    apply_merge_train_branch_update_intent,
     MergeTrainDryRunResult,
     build_merge_train_dry_run_result,
     discover_merge_train_stack,
@@ -97,6 +98,7 @@ MERGE_TRAIN_CONTROLLER_ADOPTABLE_ACTIVE_ACTIONS = (
     "plan_landing",
     "plan_stack_collapse",
     "reflow_candidate",
+    "update_branch",
 )
 
 
@@ -2640,6 +2642,29 @@ def _advance_from_live_snapshot(
             "mode": "dry-run",
             "controller_action": "idle",
             "dry_run_result": dry_run_result.model_dump(mode="json"),
+        }
+    if (
+        dry_run_result.intended_next_action == "update_branch"
+        and request.mutate
+        and selected_pr is not None
+    ):
+        lease.checkpoint(
+            active_action="update_branch",
+            active_phase="update_pull_request_branch",
+            active_record_id="",
+            active_pull_request_number=selected_pr.number,
+            step_payload={"expected_head_sha": selected_pr.head_sha},
+        )
+        branch_update_result = apply_merge_train_branch_update_intent(
+            dry_run_result=dry_run_result, branch_client=github_client
+        )
+        return {
+            "repository": request.repository,
+            "base_branch": request.base_branch,
+            "mode": "update_branch",
+            "controller_action": "update_branch",
+            "dry_run_result": dry_run_result.model_dump(mode="json"),
+            "branch_update_result": branch_update_result.model_dump(mode="json"),
         }
     if dry_run_result.intended_next_action != "merge":
         return {
