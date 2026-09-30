@@ -13706,6 +13706,15 @@
             "title": "Allowed Actor Roles",
             "type": "array"
           },
+          "dependency_update_github_user_ids": {
+            "default": [],
+            "items": {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            "title": "Dependency Update Github User Ids",
+            "type": "array"
+          },
           "label_required": {
             "default": true,
             "title": "Label Required",
