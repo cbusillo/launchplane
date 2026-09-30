@@ -299,7 +299,7 @@ class OdooStableBootstrapTests(unittest.TestCase):
             "deployment-cm-testing-bootstrap",
         )
 
-    def test_execute_passes_target_protected_store_keys_to_bootstrap_runner(self) -> None:
+    def test_execute_passes_target_policies_to_bootstrap_runner(self) -> None:
         store = _Store()
         store.target_record = store.target_record.model_copy(
             update={
@@ -354,8 +354,10 @@ class OdooStableBootstrapTests(unittest.TestCase):
             )
 
         self.assertEqual(len(captured_bootstrap_runs), 1)
+        target_definition = captured_bootstrap_runs[0]["target_definition"]
+        assert isinstance(target_definition, DokployTargetDefinition)
         self.assertEqual(
-            captured_bootstrap_runs[0]["protected_shopify_store_keys"],
+            target_definition.policies.shopify.protected_store_keys,
             ("example-production-store",),
         )
 

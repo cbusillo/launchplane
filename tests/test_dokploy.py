@@ -29,7 +29,12 @@ from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOA
 from control_plane import secrets as control_plane_secrets
 from control_plane.cli import main
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetPolicies,
+    DokployTargetRecord,
+    DokployTargetShopifyPolicy,
+)
+from control_plane.integration_readback import integration_readback_policy
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.product_profile_record import (
@@ -3129,6 +3134,7 @@ domains = ["cm-testing.shinycomputers.com"]
                 "odoo_module_update_completed=true",
                 "odoo_module_update_image_match=true",
                 "odoo_module_update_modules_configured=true",
+                "integration_readback_ok=true",
             ]
             if marker is not None:
                 logs.append(f"website_bootstrap_company_email_matches={marker}")
@@ -3497,7 +3503,13 @@ domains = ["cm-testing.shinycomputers.com"]
             ),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
-                return_value=("odoo_restore_completed=true",),
+                return_value=(
+                    "odoo_restore_completed=true",
+                    "odoo_module_update_completed=true",
+                    "odoo_module_update_image_match=true",
+                    "odoo_module_update_modules_configured=true",
+                    "integration_readback_ok=true",
+                ),
             ),
             patch(
                 "control_plane.dokploy.api.dokploy_request",
@@ -4134,6 +4146,7 @@ domains = ["cm-testing.shinycomputers.com"]
                             "odoo_module_update_image_match=true",
                             "odoo_module_update_modules_configured=true",
                             "odoo_module_update_completed=true",
+                            "integration_readback_ok=true",
                         ],
                     },
                 ),
@@ -4723,7 +4736,15 @@ actions = ["launchplane_service_deploy.execute"]
                 "EXTRA_WORKFLOW_VALUE": "https://opw-prod.example.com",
             },
             required_workflow_environment_keys=("ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN",),
-            protected_shopify_store_keys=("yps-your-part-supplier",),
+            readback_policy=integration_readback_policy(
+                instance_name="prod",
+                policies=DokployTargetPolicies(
+                    shopify=DokployTargetShopifyPolicy(
+                        protected_store_keys=("yps-your-part-supplier",)
+                    )
+                ),
+                workflow_mode="maintenance",
+            ),
         )
 
         self.assertIn(
@@ -4745,13 +4766,13 @@ actions = ["launchplane_service_deploy.execute"]
         self.assertIn('docker exec         "${workflow_environment[@]}"', script)
         self.assertIn('"${script_runner_container_id}"         /bin/bash -lc', script)
         self.assertIn("odoo_instance_overrides_payload_present=true", script)
-        self.assertIn("protected_shopify_store_keys+=(yps-your-part-supplier)", script)
+        self.assertIn("integration_readback_required=1", script)
         self.assertIn("Missing required Odoo override environment key", script)
-        self.assertIn("Protected Shopify store key is not allowed on this Dokploy lane.", script)
+        self.assertIn("Integration read-back refused", script)
         self.assertIn("trap exit_trap EXIT", script)
         self.assertIn("exit_trap() {", script)
         self.assertIn('local exit_status="$?"', script)
-        self.assertIn('if [ "${web_was_running}" != "1" ]; then', script)
+        self.assertIn('if [ "${start_web_after_workflow}" != "1" ]; then', script)
         self.assertIn('docker start "${web_container_id}" >/dev/null || true', script)
         self.assertIn("workflow_output_file=$(mktemp)", script)
         self.assertIn('workflow_pipeline_status=("${PIPESTATUS[@]}")', script)

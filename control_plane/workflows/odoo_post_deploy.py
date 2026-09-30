@@ -241,7 +241,6 @@ def execute_odoo_post_deploy(
                 env_file=env_file,
                 workflow_environment_overrides=workflow_environment_overrides,
                 required_workflow_environment_keys=required_workflow_environment_keys,
-                protected_shopify_store_keys=protected_shopify_store_keys,
                 run_destructive_restore=run_destructive_restore,
                 before_provider_mutation=provider_effect_checkpoint,
                 deployment_title=provider_operation_title,

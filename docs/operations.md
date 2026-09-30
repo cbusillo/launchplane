@@ -2501,8 +2501,35 @@ context only, and `context_instance` has both context and instance.
     its idempotency receipt finds the lane already holding the requested
     allowances and reports `changed: false` with a read-back, instead of
     `stale`.
-  - The record states intent only. The read-back that checks a lane's database
-    against its allowances before web starts is tracked in #2595.
+- The integration read-back enforces the allowances. The deploy, restore, stable
+  bootstrap and target replacement data-workflow schedules run it with web
+  stopped, before web starts again, on every Odoo lane that is not production.
+  Previews get it through #2596.
+  - Code owns the integration families in `control_plane/integration_readback.py`:
+    `shopify`, `printnode`, `fishbowl`, `repairshopr`, `cm_data`,
+    `outgoing_mail`, `incoming_mail`, `payment`, `mapbox`, `unsplash`, `tenor`
+    and `web_push`. An allowance under any other name has no effect.
+  - A setting passes when it is empty, or when the lane has an allowance for its
+    integration. An active outgoing mail server whose host is the reserved name
+    `invalid` never delivers, and a wire-transfer or demo payment provider
+    reaches no service, so neither counts. Odoo generates its web-push keys on
+    the lane itself, so `web_push` is checked only right after a restore.
+  - Values are compared inside PostgreSQL and never leave the database. The
+    schedule log reports `integration_readback_ok`, the number of settings
+    checked, and `integration_readback_refused` or `integration_readback_allowed`
+    as `integration/setting` names.
+  - Anything refused, or a read-back that cannot run, fails the run and leaves
+    web stopped. If the workflow itself fails first, web restarts only when the
+    read-back passes. Launchplane also refuses success unless the schedule log
+    proves the read-back passed.
+  - A lane's protected Shopify store keys are refused even with a `shopify`
+    allowance, and are checked on production too.
+  - To clear a refusal: empty the setting in the lane's database, or record the
+    allowance that explains it, then rerun the deploy. The rerun finds web
+    stopped and starts it only if the read-back passes.
+  - A provider redeploy that runs before the schedule (a changed target
+    environment, or target replacement's deploy) still starts web before the
+    read-back stops it again; see #2616.
 - `odoo-overrides put-addon-setting --allow-direct-db-mutation` writes
   addon-shaped Odoo override intent such as Authentik or Shopify settings for a
   context and instance. Use it only for explicit local/bootstrap repair.

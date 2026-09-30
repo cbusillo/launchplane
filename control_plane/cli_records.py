@@ -8,7 +8,12 @@ import click
 
 from control_plane import release_tuples as control_plane_release_tuples
 from control_plane.cli_shared import DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS
-from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.build_provenance import (
+    BuildProvenanceError,
+    GitHubBuildProvenanceTransport,
+    verify_build_artifact,
+)
+from control_plane.contracts.artifact_identity import ArtifactIdentityManifest, BuildPurpose
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -160,6 +165,50 @@ def artifacts_protected(
         context_name=context_name,
     )
     click.echo(json.dumps(protected.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
+@artifacts.command("verify-build")
+@click.option("--repository", required=True, help="Product repository, owner/name.")
+@click.option("--repository-id", required=True, help="Immutable GitHub repository id.")
+@click.option("--commit", required=True)
+@click.option("--purpose", type=click.Choice(["release", "preview"]), required=True)
+@click.option("--pull-request", "pull_request_number", type=int, default=None)
+@click.option("--context", required=True)
+@click.option("--image-repository", required=True)
+@click.option(
+    "--token-env",
+    default="GITHUB_TOKEN",
+    show_default=True,
+    help="Environment variable holding a read-only GitHub token.",
+)
+def artifacts_verify_build(
+    repository: str,
+    repository_id: str,
+    commit: str,
+    purpose: BuildPurpose,
+    pull_request_number: int | None,
+    context: str,
+    image_repository: str,
+    token_env: str,
+) -> None:
+    """Verify an artifact from GitHub's build-run record without recording it."""
+    token = os.environ.get(token_env, "").strip()
+    if not token:
+        raise click.ClickException(f"{token_env} is empty.")
+    try:
+        verified = verify_build_artifact(
+            transport=GitHubBuildProvenanceTransport(token=token),
+            repository=repository,
+            repository_id=repository_id,
+            commit=commit,
+            purpose=purpose,
+            context=context,
+            image_repository=image_repository,
+            pull_request_number=pull_request_number,
+        )
+    except BuildProvenanceError as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(json.dumps(verified.manifest.model_dump(mode="json"), indent=2, sort_keys=True))
 
 
 def _write_artifact_manifest_command(

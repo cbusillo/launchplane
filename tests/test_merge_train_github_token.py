@@ -14,6 +14,10 @@ from control_plane.contracts.merge_train_policy import (
     MergeTrainGitHubAppSource,
     MergeTrainGitHubTokenSource,
 )
+from control_plane.github_app_identity import (
+    GitHubAppIdentity,
+    mint_build_provenance_installation_token,
+)
 from control_plane.merge_train_github_token import resolve_merge_train_github_token
 
 
@@ -272,3 +276,29 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
                     self.assertEqual(self.minted, 1)
             finally:
                 store.close()
+
+    def test_shared_train_installation_mints_a_read_only_build_token(self) -> None:
+        self.token_permissions = {
+            "actions": "read",
+            "contents": "read",
+            "metadata": "read",
+            "pull_requests": "read",
+        }
+        with patch(
+            "control_plane.github_app_identity._github_api_request", side_effect=self.provider
+        ):
+            token = mint_build_provenance_installation_token(
+                identity=GitHubAppIdentity(app_id=42, private_key=self.private_key),
+                repository="example/repo",
+                repository_id="123",
+            )
+
+        self.assertEqual(token.token, "example-installation-token-1")
+        mint = next(call for call in self.calls if call.get("method") == "POST")
+        self.assertEqual(
+            mint["body"],
+            {
+                "repository_ids": [123],
+                "permissions": {"actions": "read", "contents": "read", "pull_requests": "read"},
+            },
+        )
