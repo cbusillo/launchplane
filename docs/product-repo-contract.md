@@ -589,8 +589,11 @@ Both callers must pin the full reviewed Launchplane commit SHA. The notice
 workflow accepts an optional `runs_on` input, a JSON-encoded GitHub Actions
 runner selector that defaults to `"ubuntu-latest"`. It applies to the notice's
 own job and to the cleanup and feedback reusable workflows it calls, so a
-product repository can run the notice on its own runner, for example
-`runs_on: '["self-hosted", "<runner-label>"]'`. Production
+product repository can run the notice on its own repository runners with
+`runs_on: '["self-hosted"]'`. The product-repo config authority gate accepts a
+selector built only from `self-hosted`, `ubuntu-latest`, or
+`${{ vars.LAUNCHPLANE_RUNNER_LABEL }}`; a literal runner label is still a
+finding. Production
 promotion, rollback, and other high-risk operations remain separate explicit
 workflows and are not part of the preview facade.
 
