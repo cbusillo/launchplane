@@ -41,6 +41,7 @@ def upgrade() -> None:
             sa.Column("state", sa.String(), nullable=False),
             sa.Column("requested_at", sa.String(), nullable=False),
             sa.Column("updated_at", sa.String(), nullable=False),
+            sa.Column("lease_expires_at", sa.String(), nullable=False, server_default=""),
             _payload_column(),
             sa.PrimaryKeyConstraint("target_key"),
         )

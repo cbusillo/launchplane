@@ -3731,6 +3731,7 @@ class LaunchplaneProductReconcileRequestRow(Base):
     state: Mapped[str] = mapped_column(String, nullable=False)
     requested_at: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    lease_expires_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
