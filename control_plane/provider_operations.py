@@ -604,12 +604,15 @@ def _apply_acquired(
             reservation=current_reservation,
             reconciliation_key=reconciliation_key,
         )
-    except ProviderMutationUnknownError:
+    except ProviderMutationUnknownError as error:
         current_reservation, _ = heartbeat.stop()
-        return _mark_reconcile_required(
-            store=store,
-            reservation=current_reservation,
-            reconciliation_key=reconciliation_key,
+        return _with_unknown_outcome_reason(
+            _mark_reconcile_required(
+                store=store,
+                reservation=current_reservation,
+                reconciliation_key=reconciliation_key,
+            ),
+            error,
         )
     except BaseException:
         current_reservation, _ = heartbeat.stop()
@@ -839,6 +842,16 @@ def _reconcile(
         409,
         {},
     )
+
+
+def _with_unknown_outcome_reason(
+    result: DurableProviderOperationResult, error: ProviderMutationUnknownError
+) -> DurableProviderOperationResult:
+    """Keep the adapter's reason on an unknown outcome, so a caller can say why it stopped."""
+    reason = str(error).strip()
+    if result.status != "reconcile_required" or result.response_payload or not reason:
+        return result
+    return result._replace(response_payload={"result": {"status": "fail", "error_message": reason}})
 
 
 def _mark_reconcile_required(

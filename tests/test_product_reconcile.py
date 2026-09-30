@@ -848,6 +848,24 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(applied["preview_result_status"], "pass")
         self.assertEqual(applied["omitted_integration_credential_keys"], ["ODOO_SMTP_PASSWORD"])
 
+    def test_preview_failure_after_the_provider_started_says_why(self) -> None:
+        def failed_apply(**_kwargs: object) -> dict[str, object]:
+            return {
+                "status": "fail",
+                "error_message": "Dokploy compose deploy failed: image pull denied.",
+                "provider_effect_attempted": True,
+            }
+
+        self.provider.execute_apply = failed_apply  # type: ignore[method-assign]
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+
+        failed = self.run_once()
+
+        self.assertEqual(failed.state, "failed")
+        self.assertEqual(failed.last_plan["preview_operation_status"], "reconcile_required")
+        self.assertEqual(failed.last_error, "Dokploy compose deploy failed: image pull denied.")
+
     def test_preview_is_not_changed_while_it_waits_or_has_nothing_to_do(self) -> None:
         cases: tuple[tuple[str, dict[str, object], bool, bool, str], ...] = (
             ("none when serving the build", {}, True, True, "none"),
