@@ -165,12 +165,13 @@ def product_repository_identity_from_inventory(
     *,
     profile: LaunchplaneProductProfileRecord,
     inventory_records: Iterable[RepositoryInventoryRecord],
+    profiles: Iterable[LaunchplaneProductProfileRecord],
 ) -> ProductRepositoryIdentity:
     """The profile's identity from the current tracked inventory record for its repository.
 
-    Fails closed when the profile has no usable repository, the inventory has no
-    (or more than one) current tracked record for it, or the profile stores ids
-    that differ from the inventory's.
+    Fails closed when the profile has no usable repository, another active profile
+    names the same repository, the inventory has no (or more than one) current
+    tracked record for it, or the profile stores ids that differ from the inventory's.
     """
 
     try:
@@ -180,6 +181,23 @@ def product_repository_identity_from_inventory(
             "repository_identity_profile_repository_missing",
             f"Product profile {profile.product} has no usable GitHub owner/name repository.",
         ) from error
+    # The webhook maps a repository only to its one active profile; everything that
+    # acts for a product must refuse the same ambiguity, or a copied profile would
+    # receive the original repository's builds.
+    claimed_by = sorted(
+        other.product
+        for other in profiles
+        if other.product != profile.product
+        and other.is_active
+        and _normalized_or_blank(other.repository) == repository
+    )
+    if claimed_by:
+        raise ProductRepositoryIdentityRefusal(
+            "repository_identity_claimed_by_other_product",
+            f"Repository {repository} is also named by active product profile "
+            + ", ".join(claimed_by)
+            + ".",
+        )
     inventory = current_tracked_inventory_record(
         repository=repository, inventory_records=inventory_records
     )
@@ -201,14 +219,22 @@ def resolve_product_repository_identity(
     """Read the profile's immutable repository identity from the repository inventory."""
 
     list_inventory_records = getattr(record_store, "list_repository_inventory_records", None)
-    if not callable(list_inventory_records):
+    list_profiles = getattr(record_store, "list_product_profile_records", None)
+    if not callable(list_inventory_records) or not callable(list_profiles):
         raise ProductRepositoryIdentityRefusal(
             "repository_identity_inventory_missing",
-            "The Launchplane record store cannot read the repository inventory.",
+            "The Launchplane record store cannot read the repository inventory and profiles.",
         )
     return product_repository_identity_from_inventory(
-        profile=profile, inventory_records=list_inventory_records()
+        profile=profile, inventory_records=list_inventory_records(), profiles=list_profiles()
     )
+
+
+def _normalized_or_blank(repository: str) -> str:
+    try:
+        return normalize_repository(repository, "repository")
+    except ValueError:
+        return ""
 
 
 def build_product_repository_identity_plan(

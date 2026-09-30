@@ -1171,6 +1171,24 @@ class ProductReconcileFailureTests(ProductReconcileTestCase):
                 self.assertIn("repository inventory", failed.last_error)
                 self.assertEqual(self.snapshot(), ((), (), (), (), ()))
 
+    def test_reconcile_fails_closed_when_another_active_profile_names_the_repository(
+        self,
+    ) -> None:
+        site = self.store.read_product_profile_record("site")
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(
+                _profile("copy") | {"repository": site.repository}
+            )
+        )
+        self.request()
+        with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+            failed = self.run_once()
+
+        self.assertEqual(failed.state, "failed")
+        self.assertIn("also named by active product profile copy", failed.last_error)
+        self.assertEqual(self.snapshot(), ((), (), (), (), ()))
+        self.assertEqual(request_product_reconcile_sweep(self.store, "2026-09-29T12:00:00Z"), ())
+
 
 class ProductReconcileSweepTests(ProductReconcileTestCase):
     def test_sweep_requests_mapped_testing_targets_and_live_previews(self) -> None:

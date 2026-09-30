@@ -881,8 +881,11 @@ def request_product_reconcile_sweep(
     """Request every mapped product's testing target and every live preview; no GitHub reads."""
     targets: list[ProductReconcileTarget] = []
     inventory_records = record_store.list_repository_inventory_records()
-    for profile in record_store.list_product_profile_records():
-        if not profile.is_active or not _has_repository_identity(profile, inventory_records):
+    profiles = record_store.list_product_profile_records()
+    for profile in profiles:
+        if not profile.is_active or not _has_repository_identity(
+            profile, inventory_records, profiles
+        ):
             continue
         if not any(lane.instance == "testing" for lane in profile.lanes):
             continue
@@ -910,10 +913,11 @@ def request_product_reconcile_sweep(
 def _has_repository_identity(
     profile: LaunchplaneProductProfileRecord,
     inventory_records: tuple[RepositoryInventoryRecord, ...],
+    profiles: tuple[LaunchplaneProductProfileRecord, ...],
 ) -> bool:
     try:
         product_repository_identity_from_inventory(
-            profile=profile, inventory_records=inventory_records
+            profile=profile, inventory_records=inventory_records, profiles=profiles
         )
     except ProductRepositoryIdentityRefusal:
         return False
