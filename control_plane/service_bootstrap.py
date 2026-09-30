@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 from datetime import datetime, timezone
+import faulthandler
 import os
+import signal
 from pathlib import Path
 
 import click
@@ -11,6 +13,7 @@ import uvicorn
 
 from control_plane.drivers import native_routes
 from control_plane.every_code_github_webhook import handle_every_code_github_webhook_request
+from control_plane.github_app_webhook import handle_github_app_webhook_request
 from control_plane.trusted_maintenance_github_webhook import (
     handle_trusted_maintenance_github_webhook_request,
 )
@@ -210,7 +213,15 @@ def create_launchplane_service_application(
         trusted_maintenance_github_webhook_handler=(
             handle_trusted_maintenance_github_webhook_request
         ),
+        github_app_webhook_handler=handle_github_app_webhook_request,
     )
+
+
+def register_thread_dump_signal() -> None:
+    """Let an operator dump every thread's stack with SIGUSR1, without stopping the service."""
+    thread_dump_signal = getattr(signal, "SIGUSR1", None)
+    if thread_dump_signal is not None:
+        faulthandler.register(thread_dump_signal, all_threads=True, chain=False)
 
 
 def serve_launchplane_service(
@@ -235,6 +246,7 @@ def serve_launchplane_service(
             service_record_store=service_record_store,
         )
         native_routes._validate_native_fastapi_driver_routes(fastapi_application)
+        register_thread_dump_signal()
         click.echo(f"Launchplane service listening on http://{host}:{port}")
         uvicorn.run(
             fastapi_application,

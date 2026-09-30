@@ -12,6 +12,9 @@ from control_plane.contracts.merge_train_batch import build_merge_train_batch_la
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train import MergeTrainPullRequestSnapshot
 from control_plane.merge_train import build_merge_train_dry_run_result
+from control_plane.merge_train_controller_run_once import (
+    _merge_train_candidate_matches_dry_run_queue,
+)
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 
 
@@ -159,6 +162,31 @@ class MergeTrainBatchContractTests(unittest.TestCase):
                 policy_sha256="policy-sha",
                 created_at="2026-05-13T23:00:00Z",
             )
+
+    def test_candidate_still_matches_its_queue_for_a_mixed_case_repository(self) -> None:
+        # The candidate stores the repository lowercased; the dry run keeps the
+        # policy's casing (cbusillo/BD_to_AVP re-planned the same candidate forever).
+        dry_run_result = build_merge_train_dry_run_result(
+            policy=build_test_merge_train_policy(repository="Example/Mixed_Case_Repo"),
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="Example/Mixed_Case_Repo",
+                base_branch="main",
+                base_sha="current-main",
+                pull_requests=(_pull_request(1),),
+            ),
+        )
+        candidate = build_merge_train_batch_candidate(
+            dry_run_result=dry_run_result,
+            base_sha="current-main",
+            policy_sha256="policy-sha",
+            created_at="2026-05-13T23:00:00Z",
+        )
+
+        self.assertTrue(
+            _merge_train_candidate_matches_dry_run_queue(
+                candidate=candidate, dry_run_result=dry_run_result, base_sha="current-main"
+            )
+        )
 
     def test_candidate_builder_rejects_empty_queue(self) -> None:
         dry_run_result = build_merge_train_dry_run_result(

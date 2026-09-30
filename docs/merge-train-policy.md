@@ -118,7 +118,10 @@ unconfigured. If the selected source cannot resolve a token, the service
 refuses the operation; it never tries a service-host bootstrap token, a different
 context, or an agent's local credential. Configured global runtime values are
 part of the selected context, not an alternate source. Controller, phase-specific operations, historical proof and
-current governance readiness use the same resolver. Adding optional source fields
+current governance readiness use the same resolver. The controller's landing
+admission reads pull-request evidence with that same policy credential, so
+enrolling a repository never also requires the service-wide
+`LAUNCHPLANE_GITHUB_TOKEN` to reach it. Adding optional source fields
 does not change existing policy bytes or digests. Selecting a managed source
 changes the full policy digest and therefore requires a new reviewed policy
 revision. Check every repository in that policy for active train work before
@@ -251,6 +254,22 @@ numeric user id in `trusted_automation_github_user_ids`. Matching identities are
 reported as `trusted_automation` in controller dry-run output. The default list
 is empty, so existing owner/admin-only policies remain fail-closed and unchanged.
 Logins are diagnostic labels, not policy identity, because logins can be renamed.
+
+`dependency_update_github_user_ids` names dependency-update bots, for example
+Dependabot. Each id must also be in `trusted_automation_github_user_ids`. A pull
+request from one of them enqueues without the enqueue label only when every
+commit on it is authored by that bot and signed by GitHub (committer
+`web-flow`, verified), nobody else force-pushed the branch, the commits match the
+pull request head the train read, and every dependency the update names stays
+within one major version. Transitive lockfile changes are not classified; the
+pull request's required checks still gate them. The adapter derives that from Dependabot's
+`updated-dependencies` commit trailer and the "from X to Y" lines, because the
+trailer often omits `update-type`. A major version, a `0.x` minor bump, a
+changed version suffix, a non-version reference such as a commit SHA, an
+unparseable message, or a commit by anyone else leaves the pull request
+ineligible with `dependency update needs agent review`. The label still
+enqueues any trusted pull request as before. An empty list, the default, changes
+nothing and is omitted from the policy digest.
 
 ## Failure Semantics
 
@@ -872,15 +891,17 @@ Controller actions have these retry/stop semantics:
   for that batch.
 - `block`: The selected PR is blocked by conflicts or failed checks. Stop and
   surface `dry_run_result.next_action_detail`.
-- `update_branch`: The selected PR needs a branch update before it can be
-  checked. Stop or use the lower-level recovery workflow deliberately.
+- `update_branch`: The selected PR is behind its base. A mutate call updates
+  the PR branch through GitHub with the expected head SHA and reports
+  `branch_update_result`; call again once the new head's checks pass. A dry-run
+  call changes nothing.
 - `wait_for_checks`: Required PR checks are pending. Stop and poll later.
 - `idle`: No eligible queued work exists. Stop.
 
 All controller calls are one-action calls. A caller that wants to drive the
 train should repeat `run-once` only after reading the returned action and should
 stop on terminal or attention states: `batch_landed`, `candidate_failed`,
-`stack_unsupported`, `block`, `update_branch`, `wait_for_checks`,
+`stack_unsupported`, `block`, `wait_for_checks`,
 `wait_for_root_checks`, and `idle`. A failed HTTP response with `status:
 "rejected"` is also terminal for that attempt. Public-safe helper summaries
 should include `error.code`, `trace_id`, and the retry/stop recommendation, not
@@ -1030,12 +1051,13 @@ execution or alter the scheduler policy.
 The GitHub Actions scheduler in `.github/workflows/merge-train-runner.yml` reads
 authorized policy targets from the native FastAPI
 `GET /v1/work-graph/merge-train/policy-targets` route on every scheduled run.
-Exactly one target may have `scheduler.enabled = true`;
-zero enabled targets make the scheduled pass a successful no-op, and multiple
-enabled targets fail closed until an operator narrows the DB-backed scheduler
-intent. The scheduler then uses the admission route before every worker call and
-writes at most one Launchplane worker result per pass; the five-minute schedule
-is the retry loop. Manual dispatch remains explicit and uses workflow inputs for
+Each target with `scheduler.enabled = true` gets its own run job in that pass
+(at most four run at once), using that target's `runner_mode` and `mutate`.
+Trains are independent per repository and base branch, so one target's failure
+does not stop the others. Zero enabled targets make the scheduled pass a
+successful no-op. Each run job uses the admission route before its worker call
+and writes at most one Launchplane worker result per pass; the five-minute
+schedule is the retry loop. Manual dispatch remains explicit and uses workflow inputs for
 repository, base branch, runner mode, mutation, and phase-specific commands.
 Controller-mode mutate runs and manually dispatched batch-candidate,
 stack-collapse, or batch-landing phases render conservative PR feedback payloads
@@ -1056,7 +1078,7 @@ should have low-risk candidate pull requests whose checks and labels make the
 expected train behavior easy to inspect.
 
 To opt a repository into observation, import an active merge-train policy record
-with exactly one repository policy whose scheduler is enabled:
+with the scheduler enabled on each repository policy to observe:
 
 ```toml
 [policies.scheduler]

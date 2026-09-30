@@ -1328,6 +1328,38 @@ decision (`accepted` or `changes_requested` with its reason), the Owner's GitHub
 id and login, and `decided_at`. The newest record for a repository and pull
 request is the current decision. The record authorizes nothing.
 
+## Product Reconcile Request Records
+
+`launchplane_product_reconcile_requests` holds at most one row per target key
+(`<product>:testing` or `<product>:preview:<pr>`) with `state` `pending`,
+`running`, `done`, or `failed`. A new request folds into the row: a missing,
+`done`, or `failed` row becomes `pending` (a `done` row's `last_error` is
+cleared, a `failed` row's is kept); a `pending` row only counts it; a `running`
+row sets `rerequested_while_running`. `request_count`, `updated_at`, and the
+last delivery id are updated each time; `attempt` and lease fields belong to
+the reconcile worker. `launchplane_github_app_webhook_deliveries` keeps each
+processed GitHub App delivery id with its event, repository id, and target
+keys; recording a delivery and folding its requests is one transaction, and a
+known delivery id changes nothing.
+
+### Reconciler (plan-only until #2623)
+
+The Odoo operation worker claims a reconcile request only after every real
+operation kind: the oldest `pending` request, or a `running` one whose lease
+expired. It re-reads GitHub through the product's build-provenance token, minted
+from its merge-train App (no policy, App, or key fails the request; there is no
+fallback token), and records the result as `last_plan`: for testing, the newest
+first-parent default-branch commit with a verified release build against the
+testing release (`deploy` or `none`, compared by artifact id and image digest);
+for a preview, `apply`, `destroy`, `wait` (open and labeled but no verified
+build yet), or `none`. Only the lease owner completes a request; one folded in
+during the run returns it to `pending`. Every 30 minutes each worker also
+requests the testing target of every active product with a `repository_id` and
+a testing lane, and every live preview of those products, without GitHub reads.
+Until the owner approves Launchplane acting on its own records (#2623), a
+reconcile writes nothing but its request: no artifact, release tuple, preview,
+or operation record, and actions are marked `held`.
+
 ## Preview PR Feedback Notification Records
 
 Preview PR feedback remediation records are stored under

@@ -22,6 +22,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Res
 from fastapi.datastructures import DefaultPlaceholder
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
+from control_plane.github_request_timing import github_request_tally
 from control_plane.http_routes.owner_secret_inputs import (
     OwnerSecretInputDependencies,
     register_owner_secret_input_routes,
@@ -157,7 +158,6 @@ from control_plane.http_routes import (
     build_generic_web_write_route_handlers,
     idempotency_capable_store,
     idempotency_scope as idempotency_scope,
-    provider_operation_response_payload as _provider_operation_response_payload,
     register_agent_context_read_routes,
     register_deployment_promotion_read_routes,
     register_dokploy_target_inspect_read_routes,
@@ -288,17 +288,11 @@ from control_plane.http_routes.release_review import (
 from control_plane.release_review import current_release_review
 from control_plane.release_review_record import publish_release_decision
 from control_plane.trusted_maintenance_github_webhook import TRUSTED_MAINTENANCE_WEBHOOK_ROUTE
+from control_plane.github_app_webhook import GITHUB_APP_WEBHOOK_ROUTE
 from control_plane.provider_operations import (
     DurableProviderMutationAdapter,
     DurableProviderOperationResult,
-    ProviderMutationOutcome,
-    ProviderMutationRejectedError,
-    ProviderMutationUnknownError,
-    ProviderObservation,
-    ProviderObservationOutcome,
-    ProviderOperationLease,
     ProviderTargetSupersession,
-    provider_operation_title,
     run_durable_provider_operation,
 )
 from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
@@ -497,11 +491,8 @@ from control_plane.odoo_preview_apply_http import (
     OdooPreviewApplyProductMismatchError,
     OdooPreviewApplyRouteDependencyError,
     OdooPreviewPlanProvenanceError,
-    apply_odoo_preview_lifecycle_evidence,
     build_odoo_preview_apply_inputs_result,
     build_odoo_preview_plan_id,
-    build_odoo_preview_runtime_identity,
-    driver_result_contains_status,
     execute_odoo_preview_apply_result,
     issue_odoo_preview_apply_plan,
     observe_odoo_preview_apply_result,
@@ -511,6 +502,7 @@ from control_plane.odoo_preview_apply_http import (
     validate_odoo_preview_lifecycle_response_current,
     validate_odoo_preview_profile_authority,
 )
+from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
 from control_plane.odoo_post_deploy_http import (
     ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE as _ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
     ODOO_POST_DEPLOY_ROUTE as _ODOO_POST_DEPLOY_ROUTE,
@@ -647,9 +639,7 @@ from control_plane.workflows.odoo_prod_backup_restore import (
     build_odoo_prod_backup_restore_plan,
 )
 from control_plane.workflows.odoo_preview_runtime import (
-    ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS,
     OdooPreviewApplyInputsResult,
-    OdooPreviewDokployApplyResult,
 )
 from control_plane.contracts.product_environment_read_model import (
     ActionAllowed,
@@ -868,6 +858,9 @@ EveryCodeGitHubWebhookHandler = Callable[
 TrustedMaintenanceGitHubWebhookHandler = Callable[
     [bytes, str, str, str, object, FilePath, str], tuple[int, dict[str, object]]
 ]
+GitHubAppWebhookHandler = Callable[
+    [bytes, str, str, str, object, FilePath, str], tuple[int, dict[str, object]]
+]
 
 
 Message = MutableMapping[str, Any]
@@ -879,6 +872,15 @@ STARLETTE_HTTP_EXCEPTION: Any = getattr(fastapi_exceptions, "StarletteHTTPExcept
 
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _run_merge_train_controller_with_github_tally(
+    *, operation: str, **kwargs: Any
+) -> MergeTrainControllerRunOnceResult:
+    # Runs in the worker thread, so the tally sees this call's GitHub requests only.
+    with github_request_tally(operation):
+        return execute_merge_train_controller_run_once(**kwargs)
+
 
 _ODOO_STABLE_BOOTSTRAP_OPERATION_CANCEL_ROUTE = (
     "/v1/drivers/odoo/stable-bootstrap/operations/{operation_id}/cancel"
@@ -960,6 +962,12 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     ),
     TRUSTED_MAINTENANCE_WEBHOOK_ROUTE: (
         "Trusted-maintenance GitHub webhook",
+        _GITHUB_WEBHOOK_MAX_BODY_BYTES,
+        False,
+        True,
+    ),
+    GITHUB_APP_WEBHOOK_ROUTE: (
+        "GitHub App webhook",
         _GITHUB_WEBHOOK_MAX_BODY_BYTES,
         False,
         True,
@@ -1841,172 +1849,6 @@ class EveryCodePrFeedbackStatusEnvelope(BaseModel):
         if not self.request_id.strip():
             raise ValueError("Every Code PR feedback status requires request_id")
         return self
-
-
-class _OdooPreviewProviderMutationAdapter:
-    def __init__(
-        self,
-        *,
-        control_plane_root: FilePath,
-        record_store: object,
-        profile: LaunchplaneProductProfileRecord,
-        apply_request: OdooPreviewApplyEnvelope,
-        issued_plan: OdooPreviewApplyInputsResult,
-        database_url: str | None,
-        trace_id: str,
-        deployment_record_id: str,
-    ) -> None:
-        self._control_plane_root = control_plane_root
-        self._record_store = record_store
-        self._profile = profile
-        self._apply_request = apply_request
-        self._issued_plan = issued_plan
-        self._database_url = database_url
-        self._trace_id = trace_id
-        self._deployment_record_id = deployment_record_id
-        self._runtime_identity = (
-            build_odoo_preview_runtime_identity(
-                profile=profile,
-                issued_plan=issued_plan,
-                deployment_record_id=deployment_record_id,
-            )
-            if issued_plan.operation == "refresh"
-            else None
-        )
-
-    def reconciliation_key(self) -> str:
-        plan = self._apply_request.apply.dry_run_plan
-        return (
-            f"dokploy:compose:{self._profile.preview.context.strip()}:{plan.compose_name.strip()}"
-        )
-
-    def target_key(self) -> str:
-        reconciliation_key = self.reconciliation_key()
-        return f"dokploy-provider-target:{hashlib.sha256(reconciliation_key.encode()).hexdigest()}"
-
-    def _finalize_successful_result(
-        self,
-        driver_result: dict[str, object],
-    ) -> tuple[dict[str, object], dict[str, object], int]:
-        lifecycle_records = apply_odoo_preview_lifecycle_evidence(
-            control_plane_root_path=self._control_plane_root,
-            record_store=self._record_store,
-            profile=self._profile,
-            issued_plan=self._issued_plan,
-            driver_result=driver_result,
-            runtime_identity=self._runtime_identity,
-        )
-        lifecycle_status = string_value(
-            lifecycle_records.get("lifecycle_evidence_status") or ""
-        ).strip()
-        if lifecycle_status == "stale":
-            blocked_result = OdooPreviewDokployApplyResult.model_validate(driver_result).model_copy(
-                update={
-                    "status": "blocked",
-                    "error_message": (
-                        "The Odoo preview operation completed at the provider but was "
-                        "superseded by newer Launchplane lifecycle authority."
-                    ),
-                }
-            )
-            return blocked_result.model_dump(mode="json"), lifecycle_records, 409
-        if lifecycle_status not in {"applied", "replayed"}:
-            raise ValueError("Successful Odoo preview apply requires lifecycle evidence.")
-        return driver_result, lifecycle_records, 202
-
-    def observe(
-        self,
-        provider_operation_key: str,
-        provider_effect_phase: str,
-        reconciliation_key: str,
-    ) -> ProviderObservation:
-        del reconciliation_key
-        observation_outcome, driver_result, retry_safe = observe_odoo_preview_apply_result(
-            control_plane_root_path=self._control_plane_root,
-            profile=self._profile,
-            request=self._apply_request,
-            database_url=self._database_url,
-            provider_operation_title=provider_operation_title(provider_operation_key),
-            provider_effect_phase=provider_effect_phase,
-        )
-        if driver_result is None:
-            return ProviderObservation(
-                outcome=cast(ProviderObservationOutcome, observation_outcome),
-                retry_safe=retry_safe,
-            )
-        driver_result.pop("provider_effect_attempted", None)
-        response_status_code = 202
-        records: dict[str, object] = {}
-        if string_value(driver_result.get("status", "")).strip() == "pass":
-            driver_result, records, response_status_code = self._finalize_successful_result(
-                driver_result
-            )
-        terminal_failure = string_value(driver_result.get("status", "")).strip() == "fail"
-        return ProviderObservation(
-            outcome="present",
-            response_status_code=502 if terminal_failure else response_status_code,
-            response_payload=_provider_operation_response_payload(
-                trace_id=self._trace_id,
-                records=records,
-                result=driver_result,
-            ),
-        )
-
-    def apply(
-        self, provider_operation_key: str, lease: ProviderOperationLease
-    ) -> ProviderMutationOutcome:
-        try:
-            driver_result = execute_odoo_preview_apply_result(
-                control_plane_root_path=self._control_plane_root,
-                record_store=self._record_store,
-                profile=self._profile,
-                request=self._apply_request,
-                issued_plan=self._issued_plan,
-                database_url=self._database_url,
-                provider_operation_title=provider_operation_title(provider_operation_key),
-                provider_effect_checkpoint=lease.checkpoint_effect,
-                provider_lease_check=lease.assert_current,
-                deployment_record_id=self._deployment_record_id,
-                runtime_identity=self._runtime_identity,
-            )
-        except (
-            OdooPreviewApplyConfigError,
-            FileNotFoundError,
-            ValueError,
-            click.ClickException,
-        ) as error:
-            raise ProviderMutationRejectedError(error)
-        provider_effect_attempted = driver_result.pop("provider_effect_attempted", False) is True
-        driver_status = string_value(driver_result.get("status", "")).strip()
-        if driver_status == "fail" and provider_effect_attempted:
-            raise ProviderMutationUnknownError(
-                string_value(driver_result.get("error_message", "")).strip()
-                or "Odoo preview provider outcome requires reconciliation."
-            )
-        response_status_code = 202
-        records: dict[str, object] = {}
-        lifecycle_finalized = driver_status == "pass"
-        if lifecycle_finalized:
-            lease.assert_current()
-            driver_result, records, response_status_code = self._finalize_successful_result(
-                driver_result
-            )
-            lease.assert_current()
-            driver_status = string_value(driver_result.get("status", "")).strip()
-        return ProviderMutationOutcome(
-            response_status_code=response_status_code,
-            response_payload=_provider_operation_response_payload(
-                trace_id=self._trace_id,
-                records=records,
-                result=driver_result,
-            ),
-            durable=lifecycle_finalized
-            or (
-                not driver_result_contains_status(driver_result, "blocked")
-                and driver_status != "fail"
-            ),
-            provider_effect_performed=provider_effect_attempted,
-        )
 
 
 class ProductOnboardingApplyEnvelope(BaseModel):
@@ -3949,6 +3791,7 @@ def create_launchplane_fastapi_app(
     trusted_maintenance_github_webhook_handler: (
         TrustedMaintenanceGitHubWebhookHandler | None
     ) = None,
+    github_app_webhook_handler: GitHubAppWebhookHandler | None = None,
     engineering_review_target_resolver: EngineeringReviewTargetResolver | None = None,
     owner_review_status_publisher: OwnerReviewStatusPublisher | None = None,
 ) -> FastAPI:
@@ -4868,6 +4711,32 @@ def create_launchplane_fastapi_app(
                 message=f"No Launchplane route for {TRUSTED_MAINTENANCE_WEBHOOK_ROUTE}.",
             )
         status_code, payload = trusted_maintenance_github_webhook_handler(
+            await request.body(),
+            x_github_event,
+            x_github_delivery,
+            x_hub_signature_256,
+            record_store,
+            resolved_control_plane_root,
+            trace_id,
+        )
+        return JSONResponse(status_code=status_code, content=payload)
+
+    async def handle_github_app_webhook(
+        request: Request,
+        x_github_event: Annotated[str, Header(alias="X-GitHub-Event")] = "",
+        x_github_delivery: Annotated[str, Header(alias="X-GitHub-Delivery")] = "",
+        x_hub_signature_256: Annotated[str, Header(alias="X-Hub-Signature-256")] = "",
+        record_store: object = Depends(get_record_store),
+    ) -> JSONResponse:
+        trace_id = next_trace_id()
+        if github_app_webhook_handler is None:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {GITHUB_APP_WEBHOOK_ROUTE}.",
+            )
+        status_code, payload = github_app_webhook_handler(
             await request.body(),
             x_github_event,
             x_github_delivery,
@@ -6099,9 +5968,18 @@ def create_launchplane_fastapi_app(
                     response=idempotent_response,
                 )
 
+            # Admission reads the pull request with the policy's own credential,
+            # the same one the rest of this train uses, so enrolling a repository
+            # never also needs the service-wide token to reach it.
             admission_evaluator = LiveMergeAdmissionEvaluator(
                 store=record_store,
-                repository_evidence_provider=resolved_repository_evidence_provider,
+                repository_evidence_provider=repository_evidence_provider
+                or GitHubRepositoryEvidenceProvider(
+                    control_plane_root=resolved_control_plane_root,
+                    github_token=lambda **_: token,
+                    github_api=github_api_request,
+                    token_context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ),
                 technical_check_client=GitHubMergeTrainClient(
                     transport=UrllibMergeTrainGitHubTransport(
                         token=token,
@@ -6109,7 +5987,13 @@ def create_launchplane_fastapi_app(
                     )
                 ),
             )
-            controller_result = execute_merge_train_controller_run_once(
+            # A landing can take minutes of GitHub calls; keep the event loop free.
+            controller_result = await run_in_threadpool(
+                _run_merge_train_controller_with_github_tally,
+                operation=(
+                    f"merge-train controller {controller_request.repository}"
+                    f"@{controller_request.base_branch} trace {trace_id}"
+                ),
                 request=controller_request,
                 policy=policy_record.policy,
                 policy_sha256=policy_record.policy_sha256,
@@ -6749,55 +6633,31 @@ def create_launchplane_fastapi_app(
             route_path=_ODOO_PREVIEW_APPLY_ROUTE,
             payload=raw_payload,
         )
-        adapter = _OdooPreviewProviderMutationAdapter(
+        preview_apply_operation = prepare_odoo_preview_apply_operation(
             control_plane_root=resolved_control_plane_root,
             record_store=record_store,
             profile=product_profile,
             apply_request=service_apply_request,
             issued_plan=issued_plan,
-            database_url=getattr(record_store, "database_url", None),
+            reservation_scope=idempotency_scope(identity),
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint=payload_fingerprint,
             trace_id=trace_id,
-            deployment_record_id=build_launchplane_mutation_reservation_id(
-                scope=idempotency_scope(identity),
-                route_path=_ODOO_PREVIEW_APPLY_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-            ),
-        )
-        target_supersession = ProviderTargetSupersession(
-            response_status_code=409,
-            response_payload=_provider_operation_response_payload(
-                trace_id=trace_id,
-                records={},
-                result={
-                    "status": "fail",
-                    "error_message": (
-                        "The earlier Odoo preview apply was superseded by an "
-                        f"authoritative {issued_plan.operation} after its recovery lease expired."
-                    ),
-                },
-            ),
-            minimum_expired_seconds=ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS,
-            quiescence_check=lambda _reservation: odoo_preview_supersession_is_quiescent(
-                control_plane_root_path=resolved_control_plane_root,
-                request=service_apply_request,
-                database_url=getattr(record_store, "database_url", None),
-            ),
+            execute_apply=execute_odoo_preview_apply_result,
+            observe_apply=observe_odoo_preview_apply_result,
+            supersession_is_quiescent=odoo_preview_supersession_is_quiescent,
         )
         try:
-            response = await run_provider_mutation(
+            response = await run_provider_operation_http(
                 record_store=record_store,
-                identity=identity,
-                route_path=_ODOO_PREVIEW_APPLY_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-                request_fingerprint=payload_fingerprint,
+                route_path=preview_apply_operation.route_path,
                 trace_id=trace_id,
-                adapter=adapter,
+                operation=preview_apply_operation.run,
                 in_progress_message=(
                     "A matching Odoo preview apply is already running. "
                     "Retry with the same Idempotency-Key."
                 ),
                 reconcile_message="The Odoo preview apply requires reconciliation before retry.",
-                target_supersession=target_supersession,
             )
             driver_result = response.result or {}
             if string_value(driver_result.get("status") or "").strip() != "pass":
@@ -6822,14 +6682,12 @@ def create_launchplane_fastapi_app(
                 content={
                     "status": "rejected",
                     "trace_id": trace_id,
-                    "error": {
-                        "code": "odoo_preview_runtime_config_incomplete",
-                        "message": "Odoo preview apply runtime environment is incomplete.",
-                    },
+                    "error": {"code": error.code, "message": error.message},
                     "details": {
                         "context": error.context,
                         "instance": error.instance,
                         "missing_keys": list(error.missing_keys),
+                        "refused_keys": list(error.refused_keys),
                     },
                 },
             )
@@ -13876,14 +13734,9 @@ def create_launchplane_fastapi_app(
         reservation_scope: str = "",
         target_supersession: ProviderTargetSupersession | None = None,
     ) -> AcceptedEvidenceResponse:
-        reservation_store = require_provider_operation_store(
-            record_store=record_store,
-            trace_id=trace_id,
-        )
-
-        def execute() -> DurableProviderOperationResult:
+        def operation(store: PostgresRecordStore) -> DurableProviderOperationResult:
             return run_durable_provider_operation(
-                store=reservation_store,
+                store=store,
                 scope=reservation_scope.strip() or idempotency_scope(identity),
                 route_path=route_path,
                 idempotency_key=idempotency_key,
@@ -13893,6 +13746,32 @@ def create_launchplane_fastapi_app(
                 adapter=adapter,
                 target_supersession=target_supersession,
             )
+
+        return await run_provider_operation_http(
+            record_store=record_store,
+            route_path=route_path,
+            trace_id=trace_id,
+            operation=operation,
+            in_progress_message=in_progress_message,
+            reconcile_message=reconcile_message,
+        )
+
+    async def run_provider_operation_http(
+        *,
+        record_store: object,
+        route_path: str,
+        trace_id: str,
+        operation: Callable[[PostgresRecordStore], DurableProviderOperationResult],
+        in_progress_message: str,
+        reconcile_message: str,
+    ) -> AcceptedEvidenceResponse:
+        reservation_store = require_provider_operation_store(
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+
+        def execute() -> DurableProviderOperationResult:
+            return operation(reservation_store)
 
         operation_task = asyncio.create_task(
             asyncio.to_thread(execute),
@@ -24642,6 +24521,21 @@ def create_launchplane_fastapi_app(
         status_code=202,
         operation_id="handle_trusted_maintenance_github_webhook",
         summary="Capture signed trusted-maintenance GitHub evidence",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            413: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+    app.add_api_route(
+        GITHUB_APP_WEBHOOK_ROUTE,
+        handle_github_app_webhook,
+        methods=["POST"],
+        status_code=202,
+        operation_id="handle_github_app_webhook",
+        summary="Record product reconcile requests from a signed GitHub App delivery",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

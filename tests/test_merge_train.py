@@ -181,6 +181,50 @@ class MergeTrainDryRunTests(unittest.TestCase):
         self.assertEqual(result.queue[1].actor_role, "unknown")
         self.assertIn("actor role is not allowed to enqueue", result.queue[1].ineligible_reasons)
 
+    def test_dry_run_enqueues_only_within_major_dependency_updates_without_label(self) -> None:
+        policy = _dependency_update_policy(49699333)
+        within_major = _pull_request(
+            8, labels=(), actor_id=49699333, actor_role="unknown"
+        ).model_copy(update={"dependency_update_class": "patch_or_minor"})
+        needs_review = _pull_request(
+            9, labels=(), actor_id=49699333, actor_role="unknown"
+        ).model_copy(update={"dependency_update_class": "needs_review"})
+        other_automation = _pull_request(10, labels=(), actor_id=279560559, actor_role="unknown")
+
+        result = build_merge_train_dry_run_result(
+            policy=policy,
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(within_major, needs_review, other_automation),
+            ),
+        )
+
+        self.assertEqual(result.queue_order, (8,))
+        reasons = {entry.number: entry.ineligible_reasons for entry in result.queue}
+        self.assertEqual(reasons[9], ("dependency update needs agent review",))
+        self.assertIn("missing ready-to-merge label", reasons[10])
+
+    def test_dependency_update_identity_without_policy_still_needs_the_label(self) -> None:
+        result = build_merge_train_dry_run_result(
+            policy=build_test_merge_train_policy(trusted_automation_github_user_ids=(49699333,)),
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(
+                    _pull_request(8, labels=(), actor_id=49699333, actor_role="unknown").model_copy(
+                        update={"dependency_update_class": "patch_or_minor"}
+                    ),
+                ),
+            ),
+        )
+
+        self.assertEqual(result.queue[0].ineligible_reasons, ("missing ready-to-merge label",))
+
+    def test_dependency_update_identity_must_be_trusted_automation(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must also be trusted automation"):
+            _dependency_update_policy(49699333, trusted=(279560559,))
+
     def test_dry_run_does_not_trust_automation_without_configured_identity(self) -> None:
         result = build_merge_train_dry_run_result(
             policy=build_test_merge_train_policy(),
@@ -526,6 +570,27 @@ class MergeTrainStackDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(result.status, "not_stacked")
         self.assertEqual(result.stack_order, (20,))
+        self.assertEqual(result.unsupported_reasons, ())
+
+    def test_single_root_pr_matches_a_mixed_case_repository_name(self) -> None:
+        # Policy keeps the repository's own casing; the GitHub adapter lowercases
+        # pull-request repository names (cbusillo/BD_to_AVP on 2026-09-29).
+        snapshot = MergeTrainDryRunSnapshot(
+            repository="example/Mixed_Case_Repo",
+            base_branch="main",
+            pull_requests=(
+                _pull_request(
+                    21,
+                    head_ref="work/change",
+                    base_ref="main",
+                    repository="example/mixed_case_repo",
+                ),
+            ),
+        )
+
+        result = discover_merge_train_stack(snapshot=snapshot, root_pull_request_number=21)
+
+        self.assertEqual(result.status, "not_stacked")
         self.assertEqual(result.unsupported_reasons, ())
 
     def test_rejects_ambiguous_sibling_stack_children(self) -> None:
@@ -905,6 +970,17 @@ class MergeTrainMergeIntentTests(unittest.TestCase):
         self.assertEqual(result.merge_commit_sha, "")
         self.assertFalse(result.reread_required)
         self.assertEqual(merge_client.merged_pull_requests, [])
+
+
+def _dependency_update_policy(
+    github_user_id: int, *, trusted: tuple[int, ...] | None = None
+) -> MergeTrainPolicy:
+    base = build_test_merge_train_policy(
+        trusted_automation_github_user_ids=trusted if trusted is not None else (github_user_id,)
+    )
+    payload = base.model_dump(mode="json")
+    payload["policies"][0]["enqueue"]["dependency_update_github_user_ids"] = [github_user_id]
+    return MergeTrainPolicy.model_validate(payload)
 
 
 def _pull_request(

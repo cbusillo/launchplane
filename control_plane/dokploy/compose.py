@@ -8,6 +8,7 @@ import click
 
 from control_plane.dokploy import api
 from control_plane.dokploy.source import DokployTargetDefinition
+from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 
 
 ODOO_RAW_COMPOSE_REQUIRED_SERVICES = ("web", "database", "script-runner")
@@ -74,9 +75,33 @@ def _render_odoo_web_traefik_labels(
     return "\n".join(lines) + "\n"
 
 
+_ODOO_WEB_START_COMMAND = (
+    "${ODOO_WEB_COMMAND:-python3 /volumes/scripts/run_odoo_startup.py -c /tmp/platform.odoo.conf}"
+)
+
+
+def _odoo_web_command(*, hold_until_integration_readback: bool) -> str:
+    if not hold_until_integration_readback:
+        return _ODOO_WEB_START_COMMAND
+    # Web applies the instance overrides payload when it starts, so it waits until the
+    # data-workflow schedule has passed the read-back for this database and this exact
+    # payload. `$$` is Compose's escape for a `$` the container shell expands.
+    passed = INTEGRATION_READBACK_PASSED_PATH
+    return (
+        "expected=$$(printf '%s\\n%s' \"$${ODOO_DB_NAME:-}\" "
+        '"$${ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64:-}"'
+        ' | sha256sum | cut -d " " -f 1); '
+        f'if [ "$$(cat {passed} 2>/dev/null)" != "$$expected" ]; then '
+        'echo "[launchplane] web waits for the integration read-back to pass"; fi; '
+        f'while [ "$$(cat {passed} 2>/dev/null)" != "$$expected" ]; do sleep 5; done; '
+        f"exec {_ODOO_WEB_START_COMMAND}"
+    )
+
+
 def render_odoo_raw_compose_file(
     *,
     image_reference: str,
+    hold_web_until_integration_readback: bool,
     domain_hosts: tuple[str, ...] = (),
     runtime_port: int = 8069,
     publish_host_ports: bool = True,
@@ -88,6 +113,11 @@ def render_odoo_raw_compose_file(
             "Odoo raw compose rendering requires a non-empty image reference."
         )
     rendered_image_reference = json.dumps(normalized_image_reference)
+    web_command = _odoo_web_command(
+        hold_until_integration_readback=hold_web_until_integration_readback
+    )
+    if hold_web_until_integration_readback:
+        web_command = json.dumps(web_command)
     web_route_labels = _render_odoo_web_traefik_labels(
         domain_hosts=domain_hosts,
         runtime_port=runtime_port,
@@ -154,7 +184,7 @@ services:
     command:
       - /bin/sh
       - -lc
-      - ${{ODOO_WEB_COMMAND:-python3 /volumes/scripts/run_odoo_startup.py -c /tmp/platform.odoo.conf}}
+      - {web_command}
     volumes:
       - odoo_data:/volumes/data
       - odoo_logs:/volumes/logs

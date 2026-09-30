@@ -7,6 +7,8 @@ updates:
     # enforced and updated through `launchplane action-pins` instead.
     directory: "/"
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
     schedule:
       interval: weekly
     labels:

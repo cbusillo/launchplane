@@ -618,7 +618,7 @@ def _admission_matches_entry(
     entry: MergeTrainBatchLandingEntry,
 ) -> bool:
     return (
-        admission.repository == plan.repository
+        admission.repository.casefold() == plan.repository.casefold()
         and admission.base_branch == plan.base_branch
         and admission.pull_request_number == entry.pull_request_number
         and admission.landing_plan_id == plan.plan_id

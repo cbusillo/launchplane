@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 from pathlib import Path
 from threading import Event, Thread
+import time
 from typing import Callable, Protocol, cast
 
 from control_plane.contracts.odoo_stable_bootstrap import OdooStableBootstrapResult
@@ -33,6 +34,7 @@ from control_plane.contracts.odoo_stable_target_replacement import (
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
+from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationDeniedError,
     DurableOperationAuthorizationGuard,
@@ -55,6 +57,12 @@ from control_plane.workflows.odoo_prod_retained_volume_backup_import import (
 from control_plane.workflows.odoo_stable_target_replacement import (
     OdooStableTargetReplacementStore,
     execute_odoo_stable_target_replacement_apply,
+)
+from control_plane.product_reconcile import (
+    PRODUCT_RECONCILE_SWEEP_SECONDS,
+    ProductReconcileStore,
+    request_product_reconcile_sweep,
+    run_product_reconcile_once,
 )
 
 DEFAULT_ODOO_STABLE_WORKER_LEASE_SECONDS = 300
@@ -482,6 +490,21 @@ def run_odoo_stable_operation_worker_once(
             recovered_operation_ids=recovered_operation_ids,
             terminal_write_committed=terminal_write_committed,
         )
+    # Last, so a real deploy operation always wins over a plan.
+    if hasattr(record_store, "claim_next_product_reconcile_request"):
+        reconciled = run_product_reconcile_once(
+            record_store=cast(ProductReconcileStore, record_store),
+            lease_owner=normalized_lease_owner,
+            lease_seconds=lease_seconds,
+        )
+        if reconciled is not None:
+            return OdooStableOperationWorkerResult(
+                status="worked",
+                operation_kind="product_reconcile",
+                operation_id=reconciled.target_key,
+                recovered_operation_ids=recovered_operation_ids,
+                terminal_write_committed=True,
+            )
     return OdooStableOperationWorkerResult(
         status="idle",
         recovered_operation_ids=recovered_operation_ids,
@@ -545,6 +568,8 @@ def run_odoo_stable_operation_worker_loop(
     stop_event: Event | None = None,
     max_iterations: int | None = None,
     iteration_callback: Callable[[OdooStableOperationWorkerResult], None] | None = None,
+    reconcile_sweep_seconds: int = PRODUCT_RECONCILE_SWEEP_SECONDS,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> OdooStableOperationWorkerLoopResult:
     if poll_seconds < 1:
         raise ValueError("Odoo stable operation worker poll_seconds must be positive.")
@@ -560,9 +585,21 @@ def run_odoo_stable_operation_worker_loop(
     idle_count = 0
     error_count = 0
     consecutive_errors = 0
+    last_sweep_at: float | None = None
     while not worker_stop_event.is_set():
         if max_iterations is not None and iterations >= max_iterations:
             break
+        if hasattr(record_store, "request_product_reconcile") and (
+            last_sweep_at is None or monotonic() - last_sweep_at >= reconcile_sweep_seconds
+        ):
+            # In-memory timer: another replica's sweep only folds into the same requests.
+            last_sweep_at = monotonic()
+            try:
+                request_product_reconcile_sweep(
+                    cast(ProductReconcileStore, record_store), _utc_now_timestamp()
+                )
+            except Exception:
+                logging.exception("Product reconcile sweep failed.")
         try:
             result = run_odoo_stable_operation_worker_once(
                 record_store=record_store,
@@ -675,7 +712,16 @@ def build_odoo_stable_operation_worker_status(
             for record in active_replacement_records
         )
     )
+    reconcile_requests = _product_reconcile_requests(record_store)
+    summaries += tuple(
+        _reconcile_lease_summary(request, recorded_at=recorded_at)
+        for request in reconcile_requests
+        if request.state in {"pending", "running"}
+    )
     counts_by_kind_status: dict[str, int] = {}
+    for request in reconcile_requests:
+        key = f"product_reconcile:{request.state}"
+        counts_by_kind_status[key] = counts_by_kind_status.get(key, 0) + 1
     for kind, records in (
         ("odoo_stable_bootstrap", active_bootstrap_records + terminal_bootstrap_records),
         ("odoo_prod_backup_restore", active_restore_records + terminal_restore_records),
@@ -843,6 +889,40 @@ def _lease_summary(
         heartbeat_at=record.heartbeat_at,
         heartbeat_age_seconds=heartbeat_age_seconds,
         lease_expired=lease_expired,
+    )
+
+
+def _product_reconcile_requests(
+    record_store: object,
+) -> tuple[ProductReconcileRequestRecord, ...]:
+    list_requests = getattr(record_store, "list_product_reconcile_requests", None)
+    if not callable(list_requests):
+        return ()
+    return tuple(
+        request
+        for state in ("pending", "running", "failed")
+        for request in cast(tuple[ProductReconcileRequestRecord, ...], list_requests(state=state))
+    )
+
+
+def _reconcile_lease_summary(
+    request: ProductReconcileRequestRecord, *, recorded_at: str
+) -> OdooStableOperationLeaseSummary:
+    return OdooStableOperationLeaseSummary(
+        operation_kind="product_reconcile",
+        operation_id=request.target_key,
+        product=request.product,
+        context="",
+        instance=request.target_kind,
+        status=request.state,
+        phase=request.state,
+        attempt=request.attempt,
+        lease_owner=request.lease_owner,
+        lease_expires_at=request.lease_expires_at,
+        heartbeat_at="",
+        heartbeat_age_seconds=None,
+        lease_expired=request.state == "running"
+        and (not request.lease_expires_at or request.lease_expires_at <= recorded_at),
     )
 
 

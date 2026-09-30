@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
 from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
+from control_plane.merge_train_dependency_updates import DependencyUpdateClass
 
 
 MergeTrainCheckStatus = Literal["pass", "fail", "pending", "unknown"]
@@ -64,6 +65,10 @@ class MergeTrainPullRequestSnapshot(BaseModel):
     mergeable: MergeTrainMergeableState = "unknown"
     required_checks_status: MergeTrainCheckStatus = "unknown"
     branch_update_required: bool = False
+    # Set only for bot-authored pull requests; see merge_train_dependency_updates.
+    dependency_update_class: DependencyUpdateClass | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def _validate_snapshot(self) -> "MergeTrainPullRequestSnapshot":
@@ -526,11 +531,18 @@ def _build_queue_entry(
         ineligible_reasons.append("pull request is not open")
     if pull_request.is_draft:
         ineligible_reasons.append("draft pull request")
+    is_dependency_update = (
+        pull_request.actor_id is not None
+        and pull_request.actor_id in repository_policy.enqueue.dependency_update_github_user_ids
+    )
     if (
         repository_policy.enqueue.label_required
         and repository_policy.enqueue_label not in pull_request.labels
     ):
-        ineligible_reasons.append(f"missing {repository_policy.enqueue_label} label")
+        if not is_dependency_update:
+            ineligible_reasons.append(f"missing {repository_policy.enqueue_label} label")
+        elif pull_request.dependency_update_class != "patch_or_minor":
+            ineligible_reasons.append("dependency update needs agent review")
     if (
         not is_trusted_automation
         and actor_role not in repository_policy.enqueue.allowed_actor_roles
@@ -583,9 +595,11 @@ def _stack_pull_request_reasons(
         reasons.append(f"pull request #{pull_request.number} is missing base ref")
     if not pull_request.head_repository or not pull_request.base_repository:
         reasons.append(f"pull request #{pull_request.number} is missing repository identity")
-    if pull_request.head_repository != snapshot.repository:
+    # GitHub repository names are case-insensitive, and the adapter lowercases them.
+    train_repository = snapshot.repository.casefold()
+    if pull_request.head_repository.casefold() != train_repository:
         reasons.append(f"pull request #{pull_request.number} is not from the train repository")
-    if pull_request.base_repository != snapshot.repository:
+    if pull_request.base_repository.casefold() != train_repository:
         reasons.append(f"pull request #{pull_request.number} does not target the train repository")
     if pull_request.head_ref == pull_request.base_ref:
         reasons.append(f"pull request #{pull_request.number} has identical head and base refs")

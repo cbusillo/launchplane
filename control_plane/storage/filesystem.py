@@ -2354,7 +2354,7 @@ class FilesystemRecordStore:
                 MergeTrainControllerStateRecord,
                 "launchplane_merge_train_controller_states",
             )
-            if (not repository or record.repository == repository)
+            if (not repository or record.repository == repository.lower())
             and (not base_branch or record.base_branch == base_branch)
             and (not status or record.status == status)
         ]
@@ -2532,7 +2532,7 @@ class FilesystemRecordStore:
                 MergeTrainBatchCandidateRecord,
                 "launchplane_merge_train_batch_candidates",
             )
-            if (not repository or record.candidate.repository == repository)
+            if (not repository or record.candidate.repository == repository.lower())
             and (not base_branch or record.candidate.base_branch == base_branch)
             and (not status or record.status == status)
             and (not batch_id or record.candidate.batch_id == batch_id)
@@ -2613,7 +2613,7 @@ class FilesystemRecordStore:
                 MergeTrainBatchLandingPlanRecord,
                 "launchplane_merge_train_batch_landing_plans",
             )
-            if (not repository or record.landing_plan.repository == repository)
+            if (not repository or record.landing_plan.repository == repository.lower())
             and (not base_branch or record.landing_plan.base_branch == base_branch)
             and (not status or record.status == status)
             and (not record_id or record.record_id == record_id)

@@ -173,7 +173,11 @@ def _normalize_required(value: str, message: str) -> str:
 
 
 def _normalize_repository(repository: str) -> str:
-    normalized = _normalize_required(repository, "merge train controller state requires repository")
+    # Lowercased like batch records, so every spelling of one repository shares a
+    # controller key and lease (GitHub repository names are case-insensitive).
+    normalized = _normalize_required(
+        repository, "merge train controller state requires repository"
+    ).lower()
     if "/" not in normalized:
         raise ValueError("merge train controller state repository must be owner/name")
     return normalized

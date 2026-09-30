@@ -9,12 +9,13 @@ are never evidence. See docs/artifact-provenance.md.
 import io
 import json
 import zipfile
+from collections.abc import Iterator
 from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
@@ -24,6 +25,8 @@ from control_plane.contracts.artifact_identity import (
 
 BUILD_WORKFLOW_PATH = ".github/workflows/build.yml"
 MANIFEST_ARTIFACT_PREFIX = "artifact-manifest-"
+# A PR author controls a preview build's upload; never read more than this.
+MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 FIRST_PARENT_PAGE_LIMIT = 3
 _GITHUB_API = "https://api.github.com"
 
@@ -54,7 +57,7 @@ class GitHubBuildProvenanceTransport:
             with build_opener(_NoRedirect).open(
                 self._api_request(path), timeout=self._timeout_seconds
             ) as response:
-                return bytes(response.read())
+                return _bounded_read(response, path)
         except HTTPError as redirect:
             location = (
                 redirect.headers.get("Location") if redirect.code in {301, 302, 307} else None
@@ -65,7 +68,11 @@ class GitHubBuildProvenanceTransport:
                 ) from redirect
         except (URLError, OSError) as error:
             raise BuildProvenanceError(f"GitHub read failed for {path}: {error}") from error
-        return self._read(Request(url=location))
+        try:
+            with urlopen(Request(url=location), timeout=self._timeout_seconds) as response:
+                return _bounded_read(response, path)
+        except (HTTPError, URLError, OSError) as error:
+            raise BuildProvenanceError(f"GitHub read failed for {path}: {error}") from error
 
     def _api_request(self, path: str) -> Request:
         return Request(
@@ -85,6 +92,13 @@ class GitHubBuildProvenanceTransport:
             raise BuildProvenanceError(
                 f"GitHub read failed for {request.full_url}: {error}"
             ) from error
+
+
+def _bounded_read(response: object, path: str) -> bytes:
+    data = bytes(response.read(MAX_MANIFEST_BYTES + 1))  # type: ignore[attr-defined]
+    if len(data) > MAX_MANIFEST_BYTES:
+        raise BuildProvenanceError(f"The download from {path} is larger than allowed.")
+    return data
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -154,7 +168,12 @@ def verify_build_artifact(
         run_id=run_id,
         run_attempt=run_attempt,
     )
-    manifest = ArtifactIdentityManifest.model_validate(manifest_payload)
+    try:
+        manifest = ArtifactIdentityManifest.model_validate(manifest_payload)
+    except ValidationError as error:
+        raise BuildProvenanceError(
+            "The build manifest is not a valid artifact manifest."
+        ) from error
     if manifest.schema_version != 2:
         raise BuildProvenanceError("The build manifest must be schema version 2.")
     if manifest.source_commit != commit:
@@ -275,6 +294,30 @@ def _require_first_parent(
     workflow. Following only first parents from the tip visits merge results
     and direct pushes, never a pull request's own commits.
     """
+    for sha in _first_parent_history(
+        transport=transport, repository_path=repository_path, default_branch=default_branch
+    ):
+        if sha == commit:
+            return
+    raise BuildProvenanceError(
+        f"{commit} is not on {default_branch}'s first-parent history within the checked range."
+    )
+
+
+def first_parent_history(
+    *, transport: BuildProvenanceTransport, repository: str, default_branch: str
+) -> Iterator[str]:
+    """Yield the default branch's first-parent commits from the tip, newest first, bounded."""
+    return _first_parent_history(
+        transport=transport,
+        repository_path=_repository_path(repository),
+        default_branch=default_branch,
+    )
+
+
+def _first_parent_history(
+    *, transport: BuildProvenanceTransport, repository_path: str, default_branch: str
+) -> Iterator[str]:
     parents: dict[str, str] = {}
     cursor = ""
     for page in range(1, FIRST_PARENT_PAGE_LIMIT + 1):
@@ -292,14 +335,10 @@ def _require_first_parent(
             if not cursor:
                 cursor = sha
         while cursor in parents:
-            if cursor == commit:
-                return
+            yield cursor
             cursor = parents[cursor]
         if not cursor or len(commits) < 100:
-            break
-    raise BuildProvenanceError(
-        f"{commit} is not on {default_branch}'s first-parent history within the checked range."
-    )
+            return
 
 
 def _download_manifest(
@@ -328,13 +367,19 @@ def _download_manifest(
     if artifact.get("expired"):
         raise BuildProvenanceError(f"Run {run_id}'s {name} artifact has expired.")
     artifact_id = _int(artifact.get("id"), "artifact id")
+    if _int(artifact.get("size_in_bytes") or 0, "artifact size") > MAX_MANIFEST_BYTES:
+        raise BuildProvenanceError(f"Run {run_id}'s {name} artifact is larger than allowed.")
     archive = transport.get_bytes(f"/repos/{repository_path}/actions/artifacts/{artifact_id}/zip")
     try:
         with zipfile.ZipFile(io.BytesIO(archive)) as zip_file:
             members = [info for info in zip_file.infolist() if not info.is_dir()]
             if len(members) != 1:
                 raise BuildProvenanceError(f"The {name} artifact must hold exactly one file.")
-            manifest = json.loads(zip_file.read(members[0]))
+            with zip_file.open(members[0]) as member:
+                manifest_bytes = member.read(MAX_MANIFEST_BYTES + 1)
+            if len(manifest_bytes) > MAX_MANIFEST_BYTES:
+                raise BuildProvenanceError(f"The {name} manifest is larger than allowed.")
+            manifest = json.loads(manifest_bytes)
     except (zipfile.BadZipFile, json.JSONDecodeError, UnicodeDecodeError) as error:
         raise BuildProvenanceError(f"The {name} artifact is not a readable manifest.") from error
     return artifact_id, _object(manifest, "manifest")
