@@ -165,6 +165,11 @@ not part of this input flow.
   and release review and the advisory GitHub App private key, live in the
   `launchplane_service` integration at global or context scope. A context copy
   wins over the global one. No app environment resolves this integration.
+- The GitHub App webhook secret that verifies `POST /v1/github/app-webhook`
+  deliveries lives in the `github_app_webhook` integration, context
+  `launchplane`, binding key `webhook_secret`: exactly one configured,
+  context-scoped, write-only binding. It is resolved per request and used for
+  nothing else. When it is missing the route returns `503` and records nothing.
 
 ## Managed Secret Model
 

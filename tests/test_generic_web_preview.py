@@ -1544,13 +1544,27 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         dokploy_request.assert_not_called()
 
-    def test_execute_generic_web_preview_refresh_blocks_unsafe_copied_secret_key(self) -> None:
+    def test_execute_generic_web_preview_refresh_blocks_unsafe_copied_credential(self) -> None:
+        # SMTP_URL is not secret-shaped, but its value carries a password.
+        cases = (
+            ("SMTP_PASSWORD", "secret-value", "secret_class_not_allowed"),
+            ("SMTP_URL", "smtp://mailer:secret-value@smtp.example:587", "binding_missing"),
+        )
+        for copied_key, copied_value, finding_code in cases:
+            with self.subTest(copied_key=copied_key):
+                self._assert_copied_credential_blocks_refresh(
+                    copied_key=copied_key, copied_value=copied_value, finding_code=finding_code
+                )
+
+    def _assert_copied_credential_blocks_refresh(
+        self, *, copied_key: str, copied_value: str, finding_code: str
+    ) -> None:
         profile = _profile().model_copy(
             update={
                 "preview": _profile().preview.model_copy(
                     update={
                         "required_template_env_keys": ("SMTP_HOST",),
-                        "copied_env_keys": ("SMTP_PASSWORD",),
+                        "copied_env_keys": (copied_key,),
                     }
                 )
             }
@@ -1586,7 +1600,7 @@ class GenericWebPreviewTests(unittest.TestCase):
                 "control_plane.workflows.generic_web_preview.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
                     "applicationId": "app-testing",
-                    "env": "SMTP_HOST=smtp.example\nSMTP_PASSWORD=secret-value\n",
+                    "env": f"SMTP_HOST=smtp.example\n{copied_key}={copied_value}\n",
                     "dockerImage": "ghcr.io/cbusillo/sellyouroutboard:old",
                     "username": "github-actions",
                 },
@@ -1608,7 +1622,7 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         self.assertEqual(result.refresh_status, "fail")
         self.assertIn("runtime key-safety gate failed", result.error_message)
-        self.assertIn("secret_class_not_allowed", result.error_message)
+        self.assertIn(finding_code, result.error_message)
         dokploy_request.assert_not_called()
 
     def test_execute_generic_web_preview_refresh_blocks_retired_odoo_compose_template(
