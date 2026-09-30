@@ -9,6 +9,7 @@ import time
 from typing import Callable, Protocol, cast
 
 from control_plane.contracts.odoo_stable_bootstrap import OdooStableBootstrapResult
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.odoo_prod_backup_restore import OdooProdBackupRestoreResult
 from control_plane.contracts.odoo_prod_backup_restore_operation import (
@@ -43,6 +44,10 @@ from control_plane.durable_operation_authorization import (
 from control_plane.launchplane_reconcile_authorization import (
     TESTING_INSTANCE,
     launchplane_reconcile_authorization_allows,
+)
+from control_plane.testing_lane_hold import (
+    read_staff_testing_hold,
+    staff_testing_hold_cancellation,
 )
 from control_plane.workflows.odoo_stable_bootstrap import (
     OdooStableBootstrapStore,
@@ -294,6 +299,10 @@ class OdooStableOperationWorkerStore(Protocol):
         safe_phases: tuple[str, ...],
         max_attempts: int,
     ) -> tuple[str, ...]: ...
+
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord: ...
 
 
 @dataclass(frozen=True)
@@ -1261,6 +1270,8 @@ def _execute_target_replacement_operation(
     )
     try:
         authorization_guard.authorize_execution()
+        if _reconcile_deploy_is_held(record_store=record_store, operation=operation):
+            raise _StaffTestingHoldError
         result = execute_odoo_stable_target_replacement_apply(
             control_plane_root=control_plane_root_path,
             record_store=cast(OdooStableTargetReplacementStore, record_store),
@@ -1269,6 +1280,23 @@ def _execute_target_replacement_operation(
         )
         if authorization_guard.denial_error is not None:
             raise authorization_guard.denial_error
+    except _StaffTestingHoldError:
+        logging.info(
+            "Odoo stable target replacement operation %s was cancelled: its testing lane is "
+            "held for staff testing.",
+            operation.operation_id,
+        )
+        finished_at = _utc_now_timestamp()
+        terminal_operation = operation.model_copy(
+            update={
+                "status": "cancelled",
+                "phase": "cancelled",
+                "updated_at": finished_at,
+                "finished_at": finished_at,
+                "lease_owner": lease_owner,
+                "cancellation": staff_testing_hold_cancellation(finished_at),
+            }
+        )
     except DurableOperationAuthorizationDeniedError as error:
         logging.warning(
             "Odoo stable target replacement operation %s was denied before provider mutation: %s",
@@ -1320,6 +1348,22 @@ def _execute_target_replacement_operation(
         record=terminal_operation,
         lease_owner=lease_owner,
     )
+
+
+class _StaffTestingHoldError(Exception):
+    """A reconcile deploy reached a testing lane that site staff hold; nothing ran."""
+
+
+def _reconcile_deploy_is_held(
+    *,
+    record_store: OdooStableOperationWorkerStore,
+    operation: OdooStableTargetReplacementOperationRecord,
+) -> bool:
+    """Only Launchplane's own reconcile deploys wait on a hold; an operator's deploy runs."""
+    authorization = operation.authorization
+    if authorization is None or authorization.grant != "launchplane_reconcile":
+        return False
+    return read_staff_testing_hold(record_store=record_store, context=operation.context) is not None
 
 
 def _bootstrap_terminal_operation(

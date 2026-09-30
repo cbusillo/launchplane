@@ -1,8 +1,8 @@
 # Event-Driven Deploys
 
-Status: issue #2605. The receiver, the reconciler, and its acting on testing
-and previews are built; the site owner's staff-testing hold on the testing
-lane is separate work. Depends on [artifact provenance](artifact-provenance.md).
+Status: issue #2605. The receiver, the reconciler, its acting on testing and
+previews, and the staff-testing hold on the testing lane are built. Depends on
+[artifact provenance](artifact-provenance.md).
 
 A product repository never calls Launchplane. Launchplane hears GitHub's
 events for the product's repository, verifies the build, and deploys it.
@@ -65,8 +65,9 @@ reservation. The webhook request never waits on a deploy.
   - That operation already runs Odoo post-deploy, so there is no separate
     post-deploy step.
   - If the lane is busy, the reconcile stays pending and runs again after it.
-  - A site owner's hold on the testing lane (staff testing) is not part of
-    this; the reconcile deploys whenever testing is behind.
+  - While the testing lane is held for staff testing, the reconcile records
+    its plan as held (`action: wait`, reason `staff_testing`) and deploys
+    nothing; see [Staff-testing hold](#staff-testing-hold).
 - **preview:** read the PR now.
   - If it's open, carries the product's preview label, and its current head
     has a verified preview build, the desired state is a preview running
@@ -86,6 +87,29 @@ reservation. The webhook request never waits on a deploy.
     reservation scope `launchplane-reconcile:<product>`. Its key is the PR,
     the verified build's run id and attempt (or `destroy`), and the preview's
     current lifecycle state, so a repeated reconcile replays it.
+
+## Staff-testing hold
+
+Once site staff test on a testing lane, a merge must not deploy mid-session.
+The site operator holds the lane, and lifts the hold when staff are done.
+
+- The hold is `policies.staff_testing_hold` on the testing lane's tracked
+  target record: a reason, who recorded it and when. It is set and lifted only
+  through `POST /v1/product-config/testing-hold/apply` (dry-run, then a
+  reviewed apply; see [operations](operations.md)), never in code or config.
+  Only a `testing` lane takes one.
+- While it's on, the testing reconcile still works out the desired build, then
+  records the plan as held with reason `staff_testing` and the hold's reason.
+  It records no artifact and queues nothing. A testing lane already running the
+  desired build is reported as `already_deployed`, as before.
+- A deploy the reconciler queued just before the hold is cancelled by the
+  worker before any provider effect. Its cancellation names the hold and the
+  reconciler; it doesn't count toward the three failed attempts.
+- A deploy an operator queued runs regardless: deploying during staff testing
+  is the operator's call.
+- Lifting the hold requests a reconcile of the product's testing target, so
+  the newest verified build deploys right away rather than at the next sweep.
+- Previews are unaffected.
 
 ## Bounded work
 
