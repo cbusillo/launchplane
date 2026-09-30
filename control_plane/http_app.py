@@ -157,7 +157,6 @@ from control_plane.http_routes import (
     build_generic_web_write_route_handlers,
     idempotency_capable_store,
     idempotency_scope as idempotency_scope,
-    provider_operation_response_payload as _provider_operation_response_payload,
     register_agent_context_read_routes,
     register_deployment_promotion_read_routes,
     register_dokploy_target_inspect_read_routes,
@@ -291,14 +290,7 @@ from control_plane.trusted_maintenance_github_webhook import TRUSTED_MAINTENANCE
 from control_plane.provider_operations import (
     DurableProviderMutationAdapter,
     DurableProviderOperationResult,
-    ProviderMutationOutcome,
-    ProviderMutationRejectedError,
-    ProviderMutationUnknownError,
-    ProviderObservation,
-    ProviderObservationOutcome,
-    ProviderOperationLease,
     ProviderTargetSupersession,
-    provider_operation_title,
     run_durable_provider_operation,
 )
 from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
@@ -497,11 +489,8 @@ from control_plane.odoo_preview_apply_http import (
     OdooPreviewApplyProductMismatchError,
     OdooPreviewApplyRouteDependencyError,
     OdooPreviewPlanProvenanceError,
-    apply_odoo_preview_lifecycle_evidence,
     build_odoo_preview_apply_inputs_result,
     build_odoo_preview_plan_id,
-    build_odoo_preview_runtime_identity,
-    driver_result_contains_status,
     execute_odoo_preview_apply_result,
     issue_odoo_preview_apply_plan,
     observe_odoo_preview_apply_result,
@@ -511,6 +500,7 @@ from control_plane.odoo_preview_apply_http import (
     validate_odoo_preview_lifecycle_response_current,
     validate_odoo_preview_profile_authority,
 )
+from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
 from control_plane.odoo_post_deploy_http import (
     ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE as _ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
     ODOO_POST_DEPLOY_ROUTE as _ODOO_POST_DEPLOY_ROUTE,
@@ -647,9 +637,7 @@ from control_plane.workflows.odoo_prod_backup_restore import (
     build_odoo_prod_backup_restore_plan,
 )
 from control_plane.workflows.odoo_preview_runtime import (
-    ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS,
     OdooPreviewApplyInputsResult,
-    OdooPreviewDokployApplyResult,
 )
 from control_plane.contracts.product_environment_read_model import (
     ActionAllowed,
@@ -1841,172 +1829,6 @@ class EveryCodePrFeedbackStatusEnvelope(BaseModel):
         if not self.request_id.strip():
             raise ValueError("Every Code PR feedback status requires request_id")
         return self
-
-
-class _OdooPreviewProviderMutationAdapter:
-    def __init__(
-        self,
-        *,
-        control_plane_root: FilePath,
-        record_store: object,
-        profile: LaunchplaneProductProfileRecord,
-        apply_request: OdooPreviewApplyEnvelope,
-        issued_plan: OdooPreviewApplyInputsResult,
-        database_url: str | None,
-        trace_id: str,
-        deployment_record_id: str,
-    ) -> None:
-        self._control_plane_root = control_plane_root
-        self._record_store = record_store
-        self._profile = profile
-        self._apply_request = apply_request
-        self._issued_plan = issued_plan
-        self._database_url = database_url
-        self._trace_id = trace_id
-        self._deployment_record_id = deployment_record_id
-        self._runtime_identity = (
-            build_odoo_preview_runtime_identity(
-                profile=profile,
-                issued_plan=issued_plan,
-                deployment_record_id=deployment_record_id,
-            )
-            if issued_plan.operation == "refresh"
-            else None
-        )
-
-    def reconciliation_key(self) -> str:
-        plan = self._apply_request.apply.dry_run_plan
-        return (
-            f"dokploy:compose:{self._profile.preview.context.strip()}:{plan.compose_name.strip()}"
-        )
-
-    def target_key(self) -> str:
-        reconciliation_key = self.reconciliation_key()
-        return f"dokploy-provider-target:{hashlib.sha256(reconciliation_key.encode()).hexdigest()}"
-
-    def _finalize_successful_result(
-        self,
-        driver_result: dict[str, object],
-    ) -> tuple[dict[str, object], dict[str, object], int]:
-        lifecycle_records = apply_odoo_preview_lifecycle_evidence(
-            control_plane_root_path=self._control_plane_root,
-            record_store=self._record_store,
-            profile=self._profile,
-            issued_plan=self._issued_plan,
-            driver_result=driver_result,
-            runtime_identity=self._runtime_identity,
-        )
-        lifecycle_status = string_value(
-            lifecycle_records.get("lifecycle_evidence_status") or ""
-        ).strip()
-        if lifecycle_status == "stale":
-            blocked_result = OdooPreviewDokployApplyResult.model_validate(driver_result).model_copy(
-                update={
-                    "status": "blocked",
-                    "error_message": (
-                        "The Odoo preview operation completed at the provider but was "
-                        "superseded by newer Launchplane lifecycle authority."
-                    ),
-                }
-            )
-            return blocked_result.model_dump(mode="json"), lifecycle_records, 409
-        if lifecycle_status not in {"applied", "replayed"}:
-            raise ValueError("Successful Odoo preview apply requires lifecycle evidence.")
-        return driver_result, lifecycle_records, 202
-
-    def observe(
-        self,
-        provider_operation_key: str,
-        provider_effect_phase: str,
-        reconciliation_key: str,
-    ) -> ProviderObservation:
-        del reconciliation_key
-        observation_outcome, driver_result, retry_safe = observe_odoo_preview_apply_result(
-            control_plane_root_path=self._control_plane_root,
-            profile=self._profile,
-            request=self._apply_request,
-            database_url=self._database_url,
-            provider_operation_title=provider_operation_title(provider_operation_key),
-            provider_effect_phase=provider_effect_phase,
-        )
-        if driver_result is None:
-            return ProviderObservation(
-                outcome=cast(ProviderObservationOutcome, observation_outcome),
-                retry_safe=retry_safe,
-            )
-        driver_result.pop("provider_effect_attempted", None)
-        response_status_code = 202
-        records: dict[str, object] = {}
-        if string_value(driver_result.get("status", "")).strip() == "pass":
-            driver_result, records, response_status_code = self._finalize_successful_result(
-                driver_result
-            )
-        terminal_failure = string_value(driver_result.get("status", "")).strip() == "fail"
-        return ProviderObservation(
-            outcome="present",
-            response_status_code=502 if terminal_failure else response_status_code,
-            response_payload=_provider_operation_response_payload(
-                trace_id=self._trace_id,
-                records=records,
-                result=driver_result,
-            ),
-        )
-
-    def apply(
-        self, provider_operation_key: str, lease: ProviderOperationLease
-    ) -> ProviderMutationOutcome:
-        try:
-            driver_result = execute_odoo_preview_apply_result(
-                control_plane_root_path=self._control_plane_root,
-                record_store=self._record_store,
-                profile=self._profile,
-                request=self._apply_request,
-                issued_plan=self._issued_plan,
-                database_url=self._database_url,
-                provider_operation_title=provider_operation_title(provider_operation_key),
-                provider_effect_checkpoint=lease.checkpoint_effect,
-                provider_lease_check=lease.assert_current,
-                deployment_record_id=self._deployment_record_id,
-                runtime_identity=self._runtime_identity,
-            )
-        except (
-            OdooPreviewApplyConfigError,
-            FileNotFoundError,
-            ValueError,
-            click.ClickException,
-        ) as error:
-            raise ProviderMutationRejectedError(error)
-        provider_effect_attempted = driver_result.pop("provider_effect_attempted", False) is True
-        driver_status = string_value(driver_result.get("status", "")).strip()
-        if driver_status == "fail" and provider_effect_attempted:
-            raise ProviderMutationUnknownError(
-                string_value(driver_result.get("error_message", "")).strip()
-                or "Odoo preview provider outcome requires reconciliation."
-            )
-        response_status_code = 202
-        records: dict[str, object] = {}
-        lifecycle_finalized = driver_status == "pass"
-        if lifecycle_finalized:
-            lease.assert_current()
-            driver_result, records, response_status_code = self._finalize_successful_result(
-                driver_result
-            )
-            lease.assert_current()
-            driver_status = string_value(driver_result.get("status", "")).strip()
-        return ProviderMutationOutcome(
-            response_status_code=response_status_code,
-            response_payload=_provider_operation_response_payload(
-                trace_id=self._trace_id,
-                records=records,
-                result=driver_result,
-            ),
-            durable=lifecycle_finalized
-            or (
-                not driver_result_contains_status(driver_result, "blocked")
-                and driver_status != "fail"
-            ),
-            provider_effect_performed=provider_effect_attempted,
-        )
 
 
 class ProductOnboardingApplyEnvelope(BaseModel):
@@ -6758,55 +6580,31 @@ def create_launchplane_fastapi_app(
             route_path=_ODOO_PREVIEW_APPLY_ROUTE,
             payload=raw_payload,
         )
-        adapter = _OdooPreviewProviderMutationAdapter(
+        preview_apply_operation = prepare_odoo_preview_apply_operation(
             control_plane_root=resolved_control_plane_root,
             record_store=record_store,
             profile=product_profile,
             apply_request=service_apply_request,
             issued_plan=issued_plan,
-            database_url=getattr(record_store, "database_url", None),
+            reservation_scope=idempotency_scope(identity),
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint=payload_fingerprint,
             trace_id=trace_id,
-            deployment_record_id=build_launchplane_mutation_reservation_id(
-                scope=idempotency_scope(identity),
-                route_path=_ODOO_PREVIEW_APPLY_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-            ),
-        )
-        target_supersession = ProviderTargetSupersession(
-            response_status_code=409,
-            response_payload=_provider_operation_response_payload(
-                trace_id=trace_id,
-                records={},
-                result={
-                    "status": "fail",
-                    "error_message": (
-                        "The earlier Odoo preview apply was superseded by an "
-                        f"authoritative {issued_plan.operation} after its recovery lease expired."
-                    ),
-                },
-            ),
-            minimum_expired_seconds=ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS,
-            quiescence_check=lambda _reservation: odoo_preview_supersession_is_quiescent(
-                control_plane_root_path=resolved_control_plane_root,
-                request=service_apply_request,
-                database_url=getattr(record_store, "database_url", None),
-            ),
+            execute_apply=execute_odoo_preview_apply_result,
+            observe_apply=observe_odoo_preview_apply_result,
+            supersession_is_quiescent=odoo_preview_supersession_is_quiescent,
         )
         try:
-            response = await run_provider_mutation(
+            response = await run_provider_operation_http(
                 record_store=record_store,
-                identity=identity,
-                route_path=_ODOO_PREVIEW_APPLY_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-                request_fingerprint=payload_fingerprint,
+                route_path=preview_apply_operation.route_path,
                 trace_id=trace_id,
-                adapter=adapter,
+                operation=preview_apply_operation.run,
                 in_progress_message=(
                     "A matching Odoo preview apply is already running. "
                     "Retry with the same Idempotency-Key."
                 ),
                 reconcile_message="The Odoo preview apply requires reconciliation before retry.",
-                target_supersession=target_supersession,
             )
             driver_result = response.result or {}
             if string_value(driver_result.get("status") or "").strip() != "pass":
@@ -13885,14 +13683,9 @@ def create_launchplane_fastapi_app(
         reservation_scope: str = "",
         target_supersession: ProviderTargetSupersession | None = None,
     ) -> AcceptedEvidenceResponse:
-        reservation_store = require_provider_operation_store(
-            record_store=record_store,
-            trace_id=trace_id,
-        )
-
-        def execute() -> DurableProviderOperationResult:
+        def operation(store: PostgresRecordStore) -> DurableProviderOperationResult:
             return run_durable_provider_operation(
-                store=reservation_store,
+                store=store,
                 scope=reservation_scope.strip() or idempotency_scope(identity),
                 route_path=route_path,
                 idempotency_key=idempotency_key,
@@ -13902,6 +13695,32 @@ def create_launchplane_fastapi_app(
                 adapter=adapter,
                 target_supersession=target_supersession,
             )
+
+        return await run_provider_operation_http(
+            record_store=record_store,
+            route_path=route_path,
+            trace_id=trace_id,
+            operation=operation,
+            in_progress_message=in_progress_message,
+            reconcile_message=reconcile_message,
+        )
+
+    async def run_provider_operation_http(
+        *,
+        record_store: object,
+        route_path: str,
+        trace_id: str,
+        operation: Callable[[PostgresRecordStore], DurableProviderOperationResult],
+        in_progress_message: str,
+        reconcile_message: str,
+    ) -> AcceptedEvidenceResponse:
+        reservation_store = require_provider_operation_store(
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+
+        def execute() -> DurableProviderOperationResult:
+            return operation(reservation_store)
 
         operation_task = asyncio.create_task(
             asyncio.to_thread(execute),
