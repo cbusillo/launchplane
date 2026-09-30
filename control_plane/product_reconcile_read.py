@@ -3,7 +3,9 @@
 The saved plan and error carry GitHub, provider and build text Launchplane did not
 write itself, so every string passes through the shared redactor before it leaves
 the service. Exact commit SHAs and image digests stay readable: they are what an
-operator compares against the build they expect.
+operator compares against the build they expect. So do the ids Launchplane records
+itself, the GitHub delivery id and the plan's top-level `*_id` fields, when they
+have an id's shape; the shared redactor would otherwise take their hex for a token.
 """
 
 import re
@@ -22,6 +24,10 @@ _MAX_TEXT_LENGTH = 400
 _MAX_DEPTH = 4
 _MAX_ITEMS = 50
 _IDENTIFIER_PATTERN = re.compile(r"^(?:[0-9a-f]{40}|sha256:[0-9a-f]{64})$")
+_RECORDED_ID_PATTERN = re.compile(
+    r"^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    r"|[a-z][a-z0-9]*(?:-[a-z0-9]+)*-[0-9a-f]{16,64})$"
+)
 _KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 _REDACTED = "[redacted]"
 
@@ -52,6 +58,10 @@ def product_reconcile_request_view(
     record: ProductReconcileRequestRecord,
 ) -> ProductReconcileRequestView:
     plan = _safe_value(record.last_plan, depth=0)
+    plan = plan if isinstance(plan, dict) else {}
+    for key, item in record.last_plan.items():
+        if key in plan and key.endswith("_id") and _is_recorded_id(item):
+            plan[key] = item
     return ProductReconcileRequestView(
         target_key=record.target_key,
         target_kind=record.target_kind,
@@ -61,9 +71,13 @@ def product_reconcile_request_view(
         updated_at=record.updated_at,
         request_count=record.request_count,
         attempt=record.attempt,
-        last_delivery_id=_safe_text(record.last_delivery_id),
+        last_delivery_id=(
+            record.last_delivery_id
+            if _is_recorded_id(record.last_delivery_id)
+            else _safe_text(record.last_delivery_id)
+        ),
         last_error=_safe_text(record.last_error),
-        last_plan=plan if isinstance(plan, dict) else {},
+        last_plan=plan,
     )
 
 
@@ -80,6 +94,10 @@ def _safe_value(value: JsonValue, *, depth: int) -> JsonValue:
         (key if _KEY_PATTERN.match(key) else _REDACTED): _safe_value(item, depth=depth + 1)
         for key, item in list(value.items())[:_MAX_ITEMS]
     }
+
+
+def _is_recorded_id(value: JsonValue) -> bool:
+    return isinstance(value, str) and _RECORDED_ID_PATTERN.match(value) is not None
 
 
 def _safe_text(value: str) -> str:

@@ -4,8 +4,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.product_reconcile import ProductReconcileTarget
+from control_plane.contracts.product_reconcile import (
+    ProductReconcileRequestRecord,
+    ProductReconcileTarget,
+)
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.product_reconcile_read import product_reconcile_request_view
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _asgi_get, _product_profile_read_policy
 from tests.support.auth import StubVerifier, identity
@@ -14,6 +18,8 @@ from tests.support.stores import sqlite_database_url
 
 _COMMIT = "cdd8f4a0d68be3575389fdffbcd6ef138ca13cc9"
 _DIGEST = "sha256:" + "d5da36c3" * 8
+_PLAN_ID = "odoo-preview-plan-" + "4be1" * 16
+_DELIVERY_ID = "7d0e5c10-9e8f-11f0-8a2b-3c1d2e4f5a6b"
 # Shapes a secret can take in text the reconciler saves from GitHub, providers and builds.
 _SECRETS = (
     "hunter2-db-password",
@@ -41,9 +47,15 @@ def _write_request(store: PostgresRecordStore, *, product: str, number: int) -> 
             "action": "apply",
             "head_sha": _COMMIT,
             "desired_image_digest": _DIGEST,
+            "preview_plan_id": _PLAN_ID,
+            "token_id": _SECRETS[1],
             "omitted_integration_credential_keys": ["ODOO_SMTP_PASSWORD"],
             "detail": f"ODOO_SMTP_PASSWORD={_SECRETS[0]} with token {_SECRETS[1]}",
-            "provider": {"response": f"Authorization: Bearer {_SECRETS[2]}", "raw": _SECRETS[3]},
+            "provider": {
+                "response": f"Authorization: Bearer {_SECRETS[2]}",
+                "raw": _SECRETS[3],
+                "request_id": _DELIVERY_ID,
+            },
         },
         f"Provider rejected https://admin:{_SECRETS[4]}@provider.example/api for {_COMMIT}",
     )
@@ -88,6 +100,8 @@ class ProductReconcileRequestsRouteTests(unittest.IsolatedAsyncioTestCase):
         plan = request["last_plan"]
         self.assertEqual(plan["head_sha"], _COMMIT)
         self.assertEqual(plan["desired_image_digest"], _DIGEST)
+        self.assertEqual(plan["preview_plan_id"], _PLAN_ID)
+        self.assertNotIn(_DELIVERY_ID, str(plan["provider"]))
         self.assertEqual(plan["omitted_integration_credential_keys"], ["ODOO_SMTP_PASSWORD"])
         self.assertIn("ODOO_SMTP_PASSWORD=[redacted]", plan["detail"])
         self.assertIn("[redacted-url]", request["last_error"])
@@ -98,6 +112,23 @@ class ProductReconcileRequestsRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 403, text)
         for secret in _SECRETS:
             self.assertNotIn(secret, text)
+
+
+class ProductReconcileRequestViewTests(unittest.TestCase):
+    def test_keeps_the_github_delivery_id_readable(self) -> None:
+        record = ProductReconcileRequestRecord(
+            target_key="cm:preview:111",
+            product="cm",
+            target_kind="preview",
+            pull_request_number=111,
+            state="failed",
+            requested_at="2026-09-30T18:48:00Z",
+            updated_at="2026-09-30T18:48:00Z",
+            request_count=1,
+            last_delivery_id=_DELIVERY_ID,
+        )
+
+        self.assertEqual(product_reconcile_request_view(record).last_delivery_id, _DELIVERY_ID)
 
 
 if __name__ == "__main__":
