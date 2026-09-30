@@ -9,6 +9,8 @@ from control_plane.contracts.durable_operation_authorization import (
 )
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationCaptureError,
+    DurableOperationAuthorizationDeniedError,
+    DurableOperationAuthorizationGuard,
     capture_explicit_action_durable_operation_authorization,
     capture_durable_operation_authorization,
     durable_operation_authorization_allows,
@@ -16,6 +18,9 @@ from control_plane.durable_operation_authorization import (
     managed_github_id_action_allows,
     managed_github_id_rule_allows,
     require_single_managed_github_id_rule_identity,
+)
+from control_plane.launchplane_reconcile_authorization import (
+    build_launchplane_reconcile_authorization,
 )
 from control_plane.service_auth import (
     AuthorizationTarget,
@@ -513,6 +518,74 @@ class DurableOperationAuthorizationTests(unittest.TestCase):
                 policy_record=self._policy_record(self._policy(schema_version=2), revision=52),
             )
         )
+
+
+class LaunchplaneReconcileGrantContractTests(unittest.TestCase):
+    def _grant(self) -> DurableOperationAuthorization:
+        return build_launchplane_reconcile_authorization(
+            product="odoo-tenant-cm", context="cm", authorized_at="2026-09-30T00:00:00Z"
+        )
+
+    def test_reconcile_grant_carries_no_policy_rule_and_round_trips(self) -> None:
+        grant = self._grant()
+
+        payload = grant.model_dump(mode="json")
+
+        self.assertEqual(payload["grant"], "launchplane_reconcile")
+        self.assertEqual(payload["caller"]["identity_type"], "launchplane_reconcile")
+        self.assertFalse({"managed_rule_id", "policy_sha256", "policy_revision"} & set(payload))
+        self.assertEqual(DurableOperationAuthorization.model_validate(payload), grant)
+
+    def test_grant_and_identity_cannot_be_mixed(self) -> None:
+        policy_rule = json.loads(_LEGACY_V2_POLICY_AUTHORIZATION_JSON)
+        reconcile = self._grant().model_dump(mode="json")
+        invalid = {
+            "reconcile grant with a policy rule": {**policy_rule, "grant": "launchplane_reconcile"},
+            "policy rule for the reconcile identity": {
+                **policy_rule,
+                "caller": reconcile["caller"],
+            },
+            "reconcile grant for a workflow caller": {**reconcile, "caller": policy_rule["caller"]},
+            "reconcile identity with another subject": {
+                **reconcile,
+                "caller": {**reconcile["caller"], "subject": "someone"},
+            },
+            "reconcile identity with a repository": {
+                **reconcile,
+                "caller": {**reconcile["caller"], "repository": "cbusillo/launchplane"},
+            },
+        }
+        for name, payload in invalid.items():
+            with self.subTest(name), self.assertRaises(ValidationError):
+                DurableOperationAuthorization.model_validate(payload)
+
+    def test_policy_rule_checks_and_guards_without_a_reconcile_check_refuse_the_grant(
+        self,
+    ) -> None:
+        grant = self._grant()
+        policy_record = LaunchplaneAuthzPolicyRecord(
+            record_id="launchplane-authz-policy-r1",
+            revision=1,
+            status="active",
+            source="service:test",
+            updated_at="2026-09-30T00:00:00Z",
+            policy=LaunchplaneAuthzPolicy(schema_version=2),
+        )
+
+        self.assertFalse(
+            durable_operation_authorization_allows(authorization=grant, policy_record=policy_record)
+        )
+        self.assertFalse(
+            explicit_action_durable_operation_authorization_allows(
+                authorization=grant, policy_record=policy_record
+            )
+        )
+        guard = DurableOperationAuthorizationGuard(
+            authorization=grant, policy_record_reader=lambda: policy_record
+        )
+        with self.assertRaises(DurableOperationAuthorizationDeniedError) as denied:
+            guard.authorize_execution()
+        self.assertEqual(denied.exception.code, "operation_authorization_reconcile_refused")
 
 
 if __name__ == "__main__":

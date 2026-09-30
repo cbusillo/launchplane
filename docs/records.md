@@ -1342,23 +1342,49 @@ processed GitHub App delivery id with its event, repository id, and target
 keys; recording a delivery and folding its requests is one transaction, and a
 known delivery id changes nothing.
 
-### Reconciler (plan-only until #2623)
+### Reconciler
 
 The Odoo operation worker claims a reconcile request only after every real
 operation kind: the oldest `pending` request, or a `running` one whose lease
-expired. It re-reads GitHub through the product's build-provenance token, minted
-from its merge-train App (no policy, App, or key fails the request; there is no
-fallback token), and records the result as `last_plan`: for testing, the newest
-first-parent default-branch commit with a verified release build against the
-testing release (`deploy` or `none`, compared by artifact id and image digest);
-for a preview, `apply`, `destroy`, `wait` (open and labeled but no verified
-build yet), or `none`. Only the lease owner completes a request; one folded in
-during the run returns it to `pending`. Every 30 minutes each worker also
-requests the testing target of every active product with a `repository_id` and
-a testing lane, and every live preview of those products, without GitHub reads.
-Until the owner approves Launchplane acting on its own records (#2623), a
-reconcile writes nothing but its request: no artifact, release tuple, preview,
-or operation record, and actions are marked `held`.
+(20 minutes, long enough for a preview apply) expired. It re-reads GitHub
+through the product's build-provenance token, minted from its merge-train App
+(no policy, App, or key fails the request; there is no fallback token), and
+records what it decided and did as `last_plan`:
+
+- testing: the newest first-parent default-branch commit with a verified
+  release build against the testing release (`deploy` or `none`, compared by
+  artifact id and image digest). A `deploy` records the verified artifact
+  manifest and queues the lane's stable target replacement (`recreate-in-place`,
+  `allow_empty_data`, existing data, the artifact and its commit) under
+  idempotency scope `launchplane-reconcile:<product>` and key
+  `launchplane-reconcile:<product>:<context>:testing:<artifact id>`; the plan
+  names `queued_operation_id`. A repeated reconcile finds the same operation,
+  including one awaiting provider reconciliation. When that attempt ended
+  (`fail`, `cancelled`, or `pass` while testing no longer runs the artifact),
+  the next attempt's key appends `:after-<previous operation id>`, and the plan
+  names `last_failed_operation_id`. After three failed attempts of one artifact
+  the request is `failed`. A lane with another active operation leaves the
+  request `pending` (`deferred: lane_busy`).
+- preview: `apply`, `destroy`, `wait` (open and labeled but no verified build
+  yet), or `none`. An apply or destroy issues the preview plan the inputs route
+  would and runs it through the durable preview operation under reservation
+  scope `launchplane-reconcile:<product>`. Its key is the product, PR, verified
+  build run and attempt (or `destroy`), and the preview record's current
+  lifecycle state, so a crashed or repeated reconcile replays the operation and
+  a later lifecycle step is a new one. After the reservation is held and just
+  before the provider apply, the PR is read again; if it closed, lost its label,
+  or moved its head, the reservation is released with no provider effect and
+  the request returns to `pending` (`deferred: pull_request_moved`). A blocked plan or a failed provider result
+  records the request `failed` with the plan.
+
+The testing replacement carries the `launchplane_reconcile` grant (see Durable
+Operation Authorization); a preview runs in-process after a direct check that
+it is the product's own preview in its preview context. A product whose driver is not Odoo keeps `held: true` plans.
+Only the lease owner completes a request; one folded in during the run returns
+it to `pending`, and a deferred request folds itself in the same way. Every 30
+minutes each worker also requests the testing target of every active product
+with a `repository_id` and a testing lane, and every live preview of those
+products, without GitHub reads.
 
 ## Preview PR Feedback Notification Records
 
@@ -1696,6 +1722,18 @@ state/
   workflow/ref/event/subject facts but never the bearer token or raw claims.
   The payload remains the storage authority, so this contract does not require
   promoted SQL columns or an Alembic migration.
+- Durable Operation Authorization has a `grant`: `policy_rule` (the default,
+  serialized without the field, exactly as before) or `launchplane_reconcile`.
+  A reconcile grant has caller identity type `launchplane_reconcile` with the
+  fixed subject `launchplane-reconciler` and carries no managed rule or policy
+  fields; neither form accepts the other's identity. Only the reconciler builds
+  it (`control_plane/launchplane_reconcile_authorization.py`), and no HTTP
+  request can supply one. The worker accepts it only for the stable target
+  replacement of a product's own `testing` lane, re-reading the product profile
+  (active, Odoo, `repository_id`, testing lane in the recorded context); every
+  other operation kind or destination fails with
+  `operation_authorization_reconcile_refused`, and policy-rule checks never
+  accept it.
 - A worker re-evaluates the recorded caller and the same managed rule against
   the current active policy after claim and again immediately before the first
   provider mutation. A later policy revision may authorize execution only when
