@@ -265,7 +265,11 @@ class LiveMergeAdmissionEvaluator:
             (pull_request_number, live_queue_by_number[pull_request_number].head_sha)
             for pull_request_number in live_queue.queue_order
         )
-        queue_matches = live_queue_identity == expected_queue
+        # The planned entries must still lead the live queue, unchanged and in
+        # order. A pull request that joined behind them waits for the next
+        # candidate instead of wedging this landing (#2637); one that sorts ahead
+        # of a planned entry still changes the lineage.
+        queue_matches = live_queue_identity[: len(expected_queue)] == expected_queue
         if not queue_matches:
             queue_matches = _ordinary_no_op_lifecycle_queue_matches(
                 candidate_record=candidate_record,
