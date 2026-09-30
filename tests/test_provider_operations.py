@@ -740,6 +740,10 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
             result = fixture.run(adapter)
 
             self.assertEqual(result.status, "reconcile_required")
+            self.assertEqual(
+                result.response_payload,
+                {"result": {"status": "fail", "error_message": "timed out after dispatch"}},
+            )
             self.assertEqual(adapter.apply_calls, 1)
             stored = fixture.stored()
             self.assertEqual(getattr(stored, "state"), "reconcile_required")
