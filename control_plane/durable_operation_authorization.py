@@ -55,6 +55,9 @@ class DurableOperationAuthorizationGuard:
     policy_record_reader: Callable[[], LaunchplaneAuthzPolicyRecord]
     provider_effect_authorized: bool = False
     denial_error: DurableOperationAuthorizationDeniedError | None = None
+    # Only a worker path that Launchplane's reconciler may queue passes this; every
+    # other guard refuses a launchplane_reconcile grant.
+    reconcile_grant_allows: Callable[[DurableOperationAuthorization], bool] | None = None
 
     def authorize_execution(self) -> None:
         try:
@@ -81,6 +84,18 @@ class DurableOperationAuthorizationGuard:
                     "Legacy durable operation lacks authorization provenance and cannot execute."
                 ),
             )
+        if self.authorization.grant == "launchplane_reconcile":
+            if self.reconcile_grant_allows is None or not self.reconcile_grant_allows(
+                self.authorization
+            ):
+                raise DurableOperationAuthorizationDeniedError(
+                    code="operation_authorization_reconcile_refused",
+                    message=(
+                        "Launchplane's reconcile grant does not cover this operation "
+                        "or destination."
+                    ),
+                )
+            return
         try:
             policy_record = self.policy_record_reader()
         except Exception as error:
@@ -457,7 +472,7 @@ def durable_operation_authorization_allows(
     authorization: DurableOperationAuthorization,
     policy_record: LaunchplaneAuthzPolicyRecord,
 ) -> bool:
-    if policy_record.status != "active":
+    if authorization.grant != "policy_rule" or policy_record.status != "active":
         return False
     schema_transition = (
         authorization.policy_schema_version,
@@ -484,7 +499,7 @@ def explicit_action_durable_operation_authorization_allows(
     authorization: DurableOperationAuthorization,
     policy_record: LaunchplaneAuthzPolicyRecord,
 ) -> bool:
-    if policy_record.status != "active":
+    if authorization.grant != "policy_rule" or policy_record.status != "active":
         return False
     schema_transition = (
         authorization.policy_schema_version,

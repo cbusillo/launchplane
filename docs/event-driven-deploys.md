@@ -1,7 +1,8 @@
 # Event-Driven Deploys
 
-Status: design for issue #2605, not yet built. Depends on
-[artifact provenance](artifact-provenance.md).
+Status: issue #2605. The receiver, the reconciler, and its acting on testing
+and previews are built; the site owner's staff-testing hold on the testing
+lane is separate work. Depends on [artifact provenance](artifact-provenance.md).
 
 A product repository never calls Launchplane. Launchplane hears GitHub's
 events for the product's repository, verifies the build, and deploys it.
@@ -59,6 +60,8 @@ reservation. The webhook request never waits on a deploy.
   - That operation already runs Odoo post-deploy, so there is no separate
     post-deploy step.
   - If the lane is busy, the reconcile stays pending and runs again after it.
+  - A site owner's hold on the testing lane (staff testing) is not part of
+    this; the reconcile deploys whenever testing is behind.
 - **preview:** read the PR now.
   - If it's open, carries the product's preview label, and its current head
     has a verified preview build, the desired state is a preview running
@@ -71,9 +74,11 @@ reservation. The webhook request never waits on a deploy.
     PR.
   - Read the PR state again just before the provider change; if it moved,
     the reconcile runs again.
-
-The preview apply orchestration now lives inside the HTTP app factory. It
-moves to a module the worker can call, with no change in behavior.
+  - The apply or destroy issues the same service plan as the preview inputs
+    route and runs it through `run_odoo_preview_apply_operation`, under
+    reservation scope `launchplane-reconcile:<product>`. Its key is the PR,
+    the verified build's run id and attempt (or `destroy`), and the preview's
+    current lifecycle state, so a repeated reconcile replays it.
 
 ## Bounded work
 
@@ -88,22 +93,28 @@ A PR author controls that PR's build, so its uploads are untrusted input.
 
 ## Who the work runs as
 
-Every queued deploy today carries a caller identity with a matching grant
-rule, re-checked before it runs. Reconciles have no outside caller:
-Launchplane acts from its own records and GitHub's.
+Launchplane needs no caller grant for the work it starts from source-control
+events (DIRECTION.md). Every other queued deploy still carries a caller
+identity with a matching policy rule, re-checked before it runs.
 
-Proposal: an internal-only authorization variant, `launchplane_reconcile`,
-that the worker attaches to the operations it queues itself. It covers only:
+Operations the reconciler starts carry the `launchplane_reconcile` grant
+instead: caller identity type `launchplane_reconcile`, subject
+`launchplane-reconciler`, and no managed rule or policy fields. Only
+`control_plane/launchplane_reconcile_authorization.py` builds it, called from
+the reconciler. It covers only:
 
-- the testing lane's stable target replacement;
-- a product's own PR previews.
+- the stable target replacement of a product's own testing lane;
+- a product's own PR previews, in its preview context.
 
-A request can never select this variant. Every route still requires its
-normal caller identity and grant, and the worker's re-check accepts the
-variant only for these operation kinds and destinations. Anything a person
-or another agent starts still needs its grant. This is the direction change
-the owner approved on 2026-09-30, "Launchplane needs no grant to act on its
-own records", and it is decided before this is built.
+No request can supply it: route payloads forbid unknown fields, no request or
+response schema carries a durable authorization, and each route builds its
+authorization from the verified caller. Before the testing replacement runs,
+the worker re-reads the product profile and accepts the grant only for that
+product's testing lane in the recorded context; any other operation kind,
+instance, context, or product fails closed. The reconciler checks the preview
+destination the same way before it applies or destroys. The grant does not
+replace operator approval at a stop boundary, a site owner's release approval,
+or a backup gate.
 
 ## Catch-up sweep
 
