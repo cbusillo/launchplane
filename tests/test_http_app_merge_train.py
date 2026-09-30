@@ -1,3 +1,5 @@
+import asyncio
+import threading
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -28,7 +30,9 @@ from control_plane.merge_admission import (
     MergeAdmissionEvaluation,
 )
 from control_plane.merge_train import MergeTrainDryRunSnapshot
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from control_plane.merge_train_controller_run_once import MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION
+from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.merge_train_github import MergeTrainGitHubMergeRejectedError
 from control_plane.merge_train_github import MergeTrainGitHubStaleHeadError
 from control_plane.merge_train_github import merge_train_construction_ref
@@ -93,6 +97,28 @@ from tests.support.merge_train import (
 )
 from tests.test_merge_readiness import _candidate, _evaluate
 from tests.test_merge_train_admission import _fenced_landing_record
+
+
+class _LowercaseRepositorySnapshotReader(_FakeMergeTrainSnapshotReader):
+    """Report pull-request repositories lowercased, as the GitHub adapter does."""
+
+    def read_merge_train_snapshot(
+        self, *, repository: str, base_branch: str
+    ) -> MergeTrainDryRunSnapshot:
+        snapshot = super().read_merge_train_snapshot(repository=repository, base_branch=base_branch)
+        return snapshot.model_copy(
+            update={
+                "pull_requests": tuple(
+                    pull_request.model_copy(
+                        update={
+                            "head_repository": pull_request.head_repository.lower(),
+                            "base_repository": pull_request.base_repository.lower(),
+                        }
+                    )
+                    for pull_request in snapshot.pull_requests
+                )
+            }
+        )
 
 
 class _FenceCapturingAdmissionEvaluator:
@@ -2073,6 +2099,115 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([entry["pull_request_number"] for entry in plan["entries"]], [1, 2])
         self.assertEqual(calls, ["batch_pr", "checks", "batch_pr"])
 
+    async def test_controller_refreshes_a_lone_behind_base_pull_request(self) -> None:
+        branch_updates: list[tuple[int, str]] = []
+
+        class BehindBaseReader(_FakeMergeTrainSnapshotReader):
+            def read_merge_train_snapshot(self, **kwargs: Any) -> Any:
+                snapshot = super().read_merge_train_snapshot(**kwargs)
+                (pull_request,) = snapshot.pull_requests
+                return snapshot.model_copy(
+                    update={
+                        "pull_requests": (
+                            pull_request.model_copy(update={"branch_update_required": True}),
+                        )
+                    }
+                )
+
+        class BranchUpdatingClient(_FakeMergeTrainGitHubClient):
+            def update_pull_request_branch(
+                self, *, repository: str, pull_request_number: int, expected_head_sha: str
+            ) -> None:
+                branch_updates.append((pull_request_number, expected_head_sha))
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            payload: dict[str, object] = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+            }
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    BehindBaseReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    BranchUpdatingClient,
+                ),
+            ):
+                dry_run = await _post_merge_train_controller_run_once(
+                    app, {**payload, "mutate": False}
+                )
+                mutated = await _post_merge_train_controller_run_once(
+                    app, {**payload, "mutate": True}
+                )
+
+        self.assertEqual(dry_run.status_code, 202, dry_run.text)
+        self.assertEqual(dry_run.json()["result"]["mode"], "dry-run")
+        self.assertEqual(mutated.status_code, 202, mutated.text)
+        result = mutated.json()["result"]
+        self.assertEqual(result["controller_action"], "update_branch")
+        self.assertEqual(result["branch_update_result"]["status"], "updated")
+        self.assertEqual(branch_updates, [(1, "head-1")])
+
+    async def test_a_slow_controller_run_does_not_block_other_requests(self) -> None:
+        controller_started = threading.Event()
+        release_controller = threading.Event()
+        controller_finished = threading.Event()
+
+        def slow_controller(**_: Any) -> Any:
+            controller_started.set()
+            release_controller.wait(10)
+            controller_finished.set()
+            raise MergeTrainGitHubError("slow controller test")
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.http_app.execute_merge_train_controller_run_once", slow_controller
+            ):
+                controller_request = asyncio.create_task(
+                    _post_merge_train_controller_run_once(
+                        app,
+                        {
+                            "schema_version": 1,
+                            "repository": "cbusillo/sellyouroutboard",
+                            "base_branch": "main",
+                            "mutate": True,
+                        },
+                    )
+                )
+                self.assertTrue(await asyncio.to_thread(controller_started.wait, 10))
+                health = await _asgi_get(app, "/v1/health")
+                served_while_controller_ran = not controller_finished.is_set()
+                release_controller.set()
+                await controller_request
+
+        self.assertEqual(health.status_code, 200)
+        self.assertTrue(served_while_controller_ran)
+
     async def test_controller_uses_only_the_declared_managed_token_source(self) -> None:
         for managed_token, expected_status in (
             ("managed-test-token", 202),
@@ -2335,6 +2470,62 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 for record in landing_records
             )
         )
+
+    async def test_advances_unstacked_batch_flow_for_a_mixed_case_repository(self) -> None:
+        # The policy keeps the repository's casing, GitHub reports lowercase
+        # repository names, and batch records store them lowercased. Every phase
+        # must still find its own records (cbusillo/BD_to_AVP, 2026-09-30).
+        repository = "cbusillo/Mixed_Case_Repo"
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(
+                state_dir, policy=build_test_merge_train_policy_record(repository=repository)
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _LowercaseRepositorySnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
+            ):
+                payloads = [
+                    (
+                        await _post_merge_train_controller_run_once(
+                            app,
+                            {
+                                "schema_version": 1,
+                                "repository": repository,
+                                "base_branch": "main",
+                                "mutate": True,
+                            },
+                        )
+                    ).json()
+                    for _ in range(5)
+                ]
+
+        self.assertEqual(
+            [payload["result"]["controller_action"] for payload in payloads],
+            [
+                "plan_candidate",
+                "build_candidate",
+                "observe_candidate",
+                "plan_landing",
+                "land_batch",
+            ],
+        )
+        self.assertEqual(payloads[4]["result"]["landing_plan"]["entries"][0]["status"], "merged")
 
     async def test_stale_landing_returns_accepted_result_and_replays_idempotently(self) -> None:
         class PartialLandingThenStale(_StaleLandingMergeTrainGitHubClient):

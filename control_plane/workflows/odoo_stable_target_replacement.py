@@ -9,6 +9,7 @@ from typing import Literal, Protocol
 import click
 from pydantic import BaseModel, ConfigDict, Field
 
+from control_plane.integration_readback import web_held_until_integration_readback
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import release_tuples as control_plane_release_tuples
@@ -1185,6 +1186,9 @@ def build_odoo_stable_target_replacement_plan(
                 _runtime_configuration_blockers(
                     compose_file=dokploy_compose.render_odoo_raw_compose_file(
                         image_reference=profile.image.repository,
+                        hold_web_until_integration_readback=(
+                            web_held_until_integration_readback(lane.instance)
+                        ),
                         domain_hosts=current_target.domain_hosts,
                         runtime_port=profile.runtime_port,
                     ),
@@ -1579,12 +1583,24 @@ def execute_odoo_stable_target_replacement_apply(
                     instance_name=plan.instance,
                 )
             )
+            # Check every secret this deployment carries, including ones the profile
+            # doesn't declare, such as an override's secret-backed addon setting.
+            transported_secret_keys = (
+                control_plane_live_target_runtime.transported_runtime_secret_keys(
+                    record_store=record_store,
+                    context_name=plan.context,
+                    instance_name=plan.instance,
+                    transported_keys=runtime_environment_values,
+                )
+            )
             runtime_key_safety = (
                 control_plane_live_target_runtime.evaluate_runtime_key_safety_for_live_target_sync(
                     record_store=record_store,
                     context_name=plan.context,
                     instance_name=plan.instance,
-                    required_binding_keys=tuple(sorted(runtime_secret_binding_keys)),
+                    required_binding_keys=tuple(
+                        sorted(runtime_secret_binding_keys | transported_secret_keys)
+                    ),
                 )
             )
         except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
@@ -1600,6 +1616,7 @@ def execute_odoo_stable_target_replacement_apply(
         )
         compose_file = dokploy_compose.render_odoo_raw_compose_file(
             image_reference=image_reference,
+            hold_web_until_integration_readback=web_held_until_integration_readback(plan.instance),
             domain_hosts=plan.expected_domain_hosts,
             runtime_port=profile.runtime_port,
         )

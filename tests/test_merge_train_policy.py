@@ -35,6 +35,7 @@ from control_plane.contracts.merge_train_policy import (
 )
 from control_plane.merge_train_policy_source import MergeTrainPolicyStoreMissingError
 from control_plane.merge_train_policy_source import resolve_merge_train_policy_record
+from control_plane.contracts.merge_train_controller_state import build_merge_train_controller_key
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 
@@ -70,6 +71,32 @@ def _provider_delivery_expectation(
 
 
 class MergeTrainPolicyTests(unittest.TestCase):
+    def test_every_repository_spelling_shares_one_controller_key(self) -> None:
+        # A case-insensitive policy lookup must not let two spellings hold two
+        # leases on the same train.
+        self.assertEqual(
+            build_merge_train_controller_key(repository="cbusillo/BD_to_AVP", base_branch="main"),
+            build_merge_train_controller_key(repository="cbusillo/bd_to_avp", base_branch="main"),
+        )
+
+    def test_repository_policy_lookup_ignores_repository_casing(self) -> None:
+        # Train records store the repository lowercased; the policy keeps its own
+        # casing (cbusillo/BD_to_AVP admission was refused as "not admitted").
+        policy = build_test_merge_train_policy(repository="Example/Mixed_Case_Repo")
+
+        found = policy.find_repository_policy(
+            repository="example/mixed_case_repo", base_branch="main"
+        )
+
+        self.assertEqual(found.repository, "Example/Mixed_Case_Repo")
+        with self.assertRaises(ValueError):
+            policy.find_repository_policy(repository="example/other_repo", base_branch="main")
+
+        payload = policy.model_dump(mode="json")
+        twin = dict(payload["policies"][0], repository="example/mixed_case_repo")
+        with self.assertRaisesRegex(ValueError, "unique by repository/base_branch"):
+            MergeTrainPolicy.model_validate({**payload, "policies": [payload["policies"][0], twin]})
+
     def test_token_source_preserves_stored_policy_and_requires_explicit_selection(self) -> None:
         legacy = build_test_merge_train_policy()
         payload = legacy.model_dump(mode="json")

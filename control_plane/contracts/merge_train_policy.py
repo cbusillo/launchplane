@@ -67,6 +67,9 @@ class MergeTrainEnqueuePolicy(BaseModel):
     label_required: bool = True
     allowed_actor_roles: tuple[MergeTrainActorRole, ...] = ("repo_owner", "repo_admin")
     trusted_automation_github_user_ids: tuple[PositiveInt, ...] = ()
+    # Pull requests these identities open enqueue without the label when every
+    # named update stays within one major version (merge_train_dependency_updates).
+    dependency_update_github_user_ids: tuple[PositiveInt, ...] = ()
 
     @model_validator(mode="after")
     def _validate_enqueue_policy(self) -> "MergeTrainEnqueuePolicy":
@@ -76,6 +79,15 @@ class MergeTrainEnqueuePolicy(BaseModel):
         self.trusted_automation_github_user_ids = tuple(
             sorted(set(self.trusted_automation_github_user_ids))
         )
+        self.dependency_update_github_user_ids = tuple(
+            sorted(set(self.dependency_update_github_user_ids))
+        )
+        if not set(self.dependency_update_github_user_ids) <= set(
+            self.trusted_automation_github_user_ids
+        ):
+            raise ValueError(
+                "merge train dependency update identities must also be trusted automation"
+            )
         return self
 
     @model_serializer(mode="wrap")
@@ -83,6 +95,8 @@ class MergeTrainEnqueuePolicy(BaseModel):
         payload = cast(dict[str, Any], handler(self))
         if not self.trusted_automation_github_user_ids:
             payload.pop("trusted_automation_github_user_ids", None)
+        if not self.dependency_update_github_user_ids:
+            payload.pop("dependency_update_github_user_ids", None)
         return payload
 
 
@@ -371,9 +385,11 @@ class MergeTrainPolicy(BaseModel):
             raise ValueError("merge train policy requires at least one repository policy")
         seen_keys: set[str] = set()
         for repository_policy in self.policies:
-            if repository_policy.policy_key in seen_keys:
+            # Unique ignoring repository casing, because lookups ignore it too.
+            key = f"{repository_policy.repository.casefold()}:{repository_policy.base_branch}"
+            if key in seen_keys:
                 raise ValueError("merge train policies must be unique by repository/base_branch")
-            seen_keys.add(repository_policy.policy_key)
+            seen_keys.add(key)
         return self
 
     @property
@@ -389,9 +405,11 @@ class MergeTrainPolicy(BaseModel):
         normalized_base_branch = _normalize_required_value(
             base_branch, "merge train policy lookup requires base_branch"
         )
+        # GitHub repository names are case-insensitive, and train records store
+        # them lowercased while the policy keeps the repository's own casing.
         for repository_policy in self.policies:
             if (
-                repository_policy.repository == normalized_repository
+                repository_policy.repository.casefold() == normalized_repository.casefold()
                 and repository_policy.base_branch == normalized_base_branch
             ):
                 return repository_policy

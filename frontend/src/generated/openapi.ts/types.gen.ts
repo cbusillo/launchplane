@@ -1283,6 +1283,7 @@ export type MergeTrainDryRunQueueEntrySummary = {
 
 export type MergeTrainEnqueuePolicyInput = {
     allowed_actor_roles?: Array<'repo_owner' | 'repo_admin'>;
+    dependency_update_github_user_ids?: Array<number>;
     label_required?: boolean;
     trusted_automation_github_user_ids?: Array<number>;
 };

@@ -726,6 +726,7 @@ class TenantAdmissionControllerTests(unittest.TestCase):
             "plan_landing",
             "plan_stack_collapse",
             "reflow_candidate",
+            "update_branch",
         }
         self.assertEqual(set(MERGE_TRAIN_CONTROLLER_ADOPTABLE_ACTIVE_ACTIONS), expected_actions)
 
