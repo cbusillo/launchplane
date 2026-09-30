@@ -45,6 +45,7 @@ from control_plane.github_payload import required_positive_int
 from control_plane.github_payload import required_string_text
 from control_plane.github_response_headers import GitHubResponseHeadersObserver
 from control_plane.github_response_headers import notify_github_quota_response_headers
+from control_plane.github_request_timing import timed_github_request
 from control_plane.merge_train_dependency_updates import DependencyUpdateClass
 from control_plane.merge_train_dependency_updates import classify_dependency_update
 from control_plane.merge_train import MergeTrainCheckStatus
@@ -166,7 +167,10 @@ class UrllibMergeTrainGitHubTransport:
             data=request_body,
         )
         try:
-            with urlopen(request, timeout=15) as response:
+            with (
+                timed_github_request(method=method, path=path),
+                urlopen(request, timeout=15) as response,
+            ):
                 response_text = response.read().decode("utf-8")
                 notify_github_quota_response_headers(
                     self.response_headers_observer,

@@ -47,6 +47,7 @@ from control_plane.contracts.promotion_record import ReleaseStatus
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.github_response_headers import GitHubResponseHeadersObserver
 from control_plane.github_response_headers import notify_github_quota_response_headers
+from control_plane.github_request_timing import timed_github_request
 from control_plane.workflows.ship import utc_now_timestamp
 
 RECENT_GENERATION_LIMIT = 3
@@ -1005,7 +1006,10 @@ def github_api_request(
         data=request_body,
     )
     try:
-        with urlopen(request, timeout=15) as response:
+        with (
+            timed_github_request(method=method, path=path),
+            urlopen(request, timeout=15) as response,
+        ):
             response_text = response.read().decode("utf-8")
             notify_github_quota_response_headers(
                 response_headers_observer,
