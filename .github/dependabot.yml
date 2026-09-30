@@ -7,6 +7,8 @@ updates:
     # enforced and updated through `launchplane action-pins` instead.
     directory: "/"
     open-pull-requests-limit: 5
+    cooldown:
+      semver-major-days: 30
     schedule:
       interval: weekly
     labels:
