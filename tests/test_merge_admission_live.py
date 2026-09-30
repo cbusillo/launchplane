@@ -258,6 +258,7 @@ def _evaluate_live(
     store: FilesystemRecordStore,
     provider: _EvidenceProvider,
     evidence: RepositoryEvidence,
+    extra_pull_requests: tuple[MergeTrainPullRequestSnapshot, ...] = (),
 ) -> MergeAdmissionEvaluation:
     policy_record = build_test_merge_train_policy_record(repository=OWNER_REPOSITORY)
     candidate_record, landing_record, controller_state, _ = _guard_records(
@@ -284,6 +285,7 @@ def _evaluate_live(
                         head_sha=evidence.target.head_sha,
                         created_at="2026-08-11T03:00:00Z",
                     ),
+                    *extra_pull_requests,
                 ),
             )
         ),
@@ -324,6 +326,23 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
         self.assertEqual(result.readiness.state, "ready")
         self.assertEqual(result.structural_result.status, "exact")
         self.assertEqual(result.readiness.owner_facets, ())
+
+    def test_a_pull_request_queued_behind_the_plan_does_not_block_landing(self) -> None:
+        # A newer PR labeled while the batch lands waits for the next candidate (#2637).
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            evidence = _repository_evidence()
+            result = _evaluate_live(
+                store=store,
+                provider=_EvidenceProvider(evidence),
+                evidence=evidence,
+                extra_pull_requests=(
+                    _queued_pull_request(
+                        number=2030, head_sha="e" * 40, created_at="2026-08-11T03:00:30Z"
+                    ),
+                ),
+            )
+        self.assertEqual(result.readiness.state, "ready")
 
 
 class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
