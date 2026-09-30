@@ -537,6 +537,45 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
         self.assertNotEqual(redeployed["queued_operation_id"], first)
         self.assertNotIn("last_failed_operation_id", redeployed)
 
+    def test_a_deploy_that_finishes_after_the_plan_read_is_not_queued_again(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        first = cast(str, self.reconcile()["queued_operation_id"])
+        self.request()
+        read_release = self.store.read_release_tuple_record
+        reads = 0
+
+        def publish_after_the_plan_read(**kwargs: str) -> ReleaseTupleRecord:
+            # The plan reads no release; the worker then publishes it and completes.
+            nonlocal reads
+            reads += 1
+            try:
+                return read_release(**kwargs)
+            finally:
+                if reads == 1:
+                    self.store.write_release_tuple_record(
+                        ReleaseTupleRecord(
+                            tuple_id="cm-testing-deployed",
+                            context="cm",
+                            channel="testing",
+                            artifact_id="artifact-cm-run-20-1",
+                            repo_shas={"site": DEPLOYABLE},
+                            image_repository=IMAGE_REPOSITORY,
+                            image_digest=_digest(DEPLOYABLE),
+                            provenance="ship",
+                            minted_at="2026-09-30T12:00:00Z",
+                        )
+                    )
+                    self.finish(first, "pass")
+
+        with patch.object(self.store, "read_release_tuple_record", publish_after_the_plan_read):
+            plan = self.reconcile()
+
+        self.assertEqual(reads, 2)
+        self.assertEqual((plan["action"], plan["reason"]), ("none", "already_deployed"))
+        self.assertEqual(plan["deployed_operation_id"], first)
+        self.assertEqual(len(self.store.list_odoo_stable_target_replacement_operation_records()), 1)
+
     def test_uncertain_testing_deploy_is_not_bypassed(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
         self.request()

@@ -295,8 +295,21 @@ def reconcile_testing_target(
         ),
     )
     idempotency_scope = reconcile_reservation_scope(profile.product)
+
+    def testing_runs_desired() -> bool:
+        # Re-read now: the worker may have published this release since the plan read it.
+        current_artifact_id, current_digest = _current_testing_release(
+            record_store=record_store, profile=profile, lane=lane
+        )
+        plan.update(current_artifact_id=current_artifact_id, current_image_digest=current_digest)
+        return (
+            manifest.artifact_id == current_artifact_id
+            or manifest.image.digest.lower() == current_digest
+        )
+
     attempt = _next_testing_attempt(
         record_store=record_store,
+        testing_runs_desired=testing_runs_desired,
         base_key=(
             f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:{TESTING_INSTANCE}:"
             f"{manifest.artifact_id}"
@@ -305,6 +318,14 @@ def reconcile_testing_target(
     )
     if attempt.last_failed_operation_id:
         plan["last_failed_operation_id"] = attempt.last_failed_operation_id
+    if attempt.deployed_operation_id:
+        plan.update(
+            action="none",
+            reason="already_deployed",
+            held=False,
+            deployed_operation_id=attempt.deployed_operation_id,
+        )
+        return ReconcileOutcome(plan)
     if attempt.active is not None:
         # Includes an operation awaiting provider reconciliation: it is never bypassed.
         plan.update(
@@ -362,10 +383,15 @@ class _TestingAttempt:
     active: OdooStableTargetReplacementOperationRecord | None = None
     failed_attempts: int = 0
     last_failed_operation_id: str = ""
+    deployed_operation_id: str = ""
 
 
 def _next_testing_attempt(
-    *, record_store: object, base_key: str, idempotency_scope: str
+    *,
+    record_store: object,
+    testing_runs_desired: Callable[[], bool],
+    base_key: str,
+    idempotency_scope: str,
 ) -> _TestingAttempt:
     """Follow this artifact's earlier attempts to the active one or the next key.
 
@@ -395,7 +421,13 @@ def _next_testing_attempt(
                 failed_attempts=failed_attempts,
                 last_failed_operation_id=last_failed_operation_id,
             )
-        if existing.status != "pass":
+        if existing.status == "pass":
+            if testing_runs_desired():
+                # It finished after the plan read the release; nothing to redeploy.
+                return _TestingAttempt(
+                    idempotency_key=key, deployed_operation_id=existing.operation_id
+                )
+        else:
             failed_attempts += 1
             last_failed_operation_id = existing.operation_id
         # A passed attempt that testing no longer runs was rolled back: deploy again.
