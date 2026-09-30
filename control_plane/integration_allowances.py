@@ -46,6 +46,34 @@ class IntegrationAllowancesStale(ValueError):
     pass
 
 
+class ReviewedLaneRequest(Protocol):
+    product: str
+    context: str
+    instance: str
+    mode: Literal["dry-run", "apply"]
+    reason: str
+    reviewed_plan_sha256: str
+
+
+def normalize_reviewed_lane_request(request: ReviewedLaneRequest, *, label: str) -> None:
+    """Normalize a lane product-config request; apply must name the reviewed plan digest."""
+    request.product = request.product.strip()
+    request.context = request.context.strip().lower()
+    request.instance = request.instance.strip().lower()
+    request.reason = request.reason.strip()
+    request.reviewed_plan_sha256 = request.reviewed_plan_sha256.strip().lower()
+    for field_name in ("product", "context", "instance", "reason"):
+        if not getattr(request, field_name):
+            raise ValueError(f"{label} request requires {field_name}.")
+    if request.mode == "dry-run" and request.reviewed_plan_sha256:
+        raise ValueError(f"{label} dry-run rejects reviewed_plan_sha256.")
+    if request.mode == "apply" and (
+        len(request.reviewed_plan_sha256) != _SHA256_LENGTH
+        or any(character not in "0123456789abcdef" for character in request.reviewed_plan_sha256)
+    ):
+        raise ValueError(f"{label} apply requires the reviewed 64-character plan SHA-256.")
+
+
 class IntegrationAllowancesStore(Protocol):
     def read_dokploy_target_record(
         self, *, context_name: str, instance_name: str
@@ -82,23 +110,7 @@ class IntegrationAllowancesApplyRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_request(self) -> IntegrationAllowancesApplyRequest:
-        self.product = self.product.strip()
-        self.context = self.context.strip().lower()
-        self.instance = self.instance.strip().lower()
-        self.reason = self.reason.strip()
-        self.reviewed_plan_sha256 = self.reviewed_plan_sha256.strip().lower()
-        for field_name in ("product", "context", "instance", "reason"):
-            if not getattr(self, field_name):
-                raise ValueError(f"Integration allowances request requires {field_name}.")
-        if self.mode == "dry-run" and self.reviewed_plan_sha256:
-            raise ValueError("Integration allowances dry-run rejects reviewed_plan_sha256.")
-        if self.mode == "apply" and (
-            len(self.reviewed_plan_sha256) != _SHA256_LENGTH
-            or any(character not in "0123456789abcdef" for character in self.reviewed_plan_sha256)
-        ):
-            raise ValueError(
-                "Integration allowances apply requires the reviewed 64-character plan SHA-256."
-            )
+        normalize_reviewed_lane_request(self, label="Integration allowances")
         return self
 
 
@@ -144,16 +156,16 @@ class IntegrationAllowancesReadResult(BaseModel):
     record_sha256: str
 
 
-def _canonical_sha256(payload: object) -> str:
+def canonical_sha256(payload: object) -> str:
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
-def _record_sha256(record: DokployTargetRecord) -> str:
-    return _canonical_sha256(record.model_dump(mode="json"))
+def target_record_sha256(record: DokployTargetRecord) -> str:
+    return canonical_sha256(record.model_dump(mode="json"))
 
 
-def _utc_now_timestamp() -> str:
+def utc_now_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
@@ -255,7 +267,7 @@ def read_integration_allowances(
         instance=instance,
         environment_class=runtime_key_safety_environment_class(instance),
         allowances=target.policies.integration_allowances,
-        record_sha256=_record_sha256(target),
+        record_sha256=target_record_sha256(target),
     )
 
 
@@ -273,7 +285,7 @@ def build_integration_allowances_plan(
     environment_class = runtime_key_safety_environment_class(request.instance)
     existing = target.policies.integration_allowances
     desired = _desired_allowances(
-        request=request, existing=existing, actor=actor, recorded_at=_utc_now_timestamp()
+        request=request, existing=existing, actor=actor, recorded_at=utc_now_timestamp()
     )
     # Validate the full replacement through the contract: uniqueness and evidence rules.
     replacement_policies = target.policies.model_copy(update={"integration_allowances": desired})
@@ -283,8 +295,8 @@ def build_integration_allowances_plan(
     desired = replacement_policies.integration_allowances
     _validate_lane(environment_class=environment_class, allowances=desired)
     changes = _changes(before=existing, after=desired)
-    record_sha256_before = _record_sha256(target)
-    plan_sha256 = _canonical_sha256(
+    record_sha256_before = target_record_sha256(target)
+    plan_sha256 = canonical_sha256(
         {
             "product": request.product,
             "context": request.context,
@@ -340,7 +352,7 @@ def apply_integration_allowances_plan(
         expected = _read_target_record(
             record_store=record_store, context=request.context, instance=request.instance
         )
-        if _record_sha256(expected) != plan.record_sha256_before:
+        if target_record_sha256(expected) != plan.record_sha256_before:
             raise IntegrationAllowancesStale(
                 "Reviewed integration allowances plan no longer matches the lane's record."
             )
@@ -349,7 +361,7 @@ def apply_integration_allowances_plan(
                 expected_record=expected,
                 replacement_record=replacement.model_copy(
                     update={
-                        "updated_at": _utc_now_timestamp(),
+                        "updated_at": utc_now_timestamp(),
                         "source_label": INTEGRATION_ALLOWANCES_SOURCE_LABEL,
                     }
                 ),
@@ -369,6 +381,6 @@ def apply_integration_allowances_plan(
             "read_back": stored_allowances,
             "read_back_matches": [_allowance_terms(item) for item in stored_allowances]
             == requested_terms,
-            "record_sha256_after": _record_sha256(stored),
+            "record_sha256_after": target_record_sha256(stored),
         }
     )
