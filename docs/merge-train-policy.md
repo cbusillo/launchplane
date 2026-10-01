@@ -636,8 +636,7 @@ uv run launchplane merge-train-policies build-import-request \
     idempotency-key: merge-train-policy-import:${{ github.run_id }}
 ```
 
-During the `#2058` authorization freeze, reviewed merge-train policy changes
-use the typed `managed-merge-train-policy-import` privileged-operation path
+Reviewed merge-train policy changes use the typed `managed-merge-train-policy-import` privileged-operation path
 instead of adding workflow, local-operator, or local-admin
 `merge_train.policy_import` authority. The privileged-operation proposal accepts
 one complete candidate record and produces redacted active/candidate digests,

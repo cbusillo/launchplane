@@ -2,9 +2,9 @@
 
 Issue [#2328](https://github.com/cbusillo/launchplane/issues/2328) owns the approved
 feedback continuation plan. The Owner selected implementation with a supported
-operator recovery path required before production enablement. The
-[#2058](https://github.com/cbusillo/launchplane/issues/2058) production authority
-freeze and separate rollout approvals remain in effect.
+operator recovery path required before production enablement. Enabling it in
+production needs new grants, which are an operator decision, and its separate
+rollout approvals.
 
 ## Implemented foundation
 
@@ -128,8 +128,8 @@ evidence for the same operation and receipt kind.
 Strict GitHub policy IDs preserve already-normalized DB records and reject
 malformed new policy input. Secret-held desired sets were not inspected for this
 change. Before any separately authorized reconciliation resumes, verify that
-their `github_ids` contain unquoted positive integers. The #2058 freeze remains
-in effect; this compatibility check does not authorize reconciliation.
+their `github_ids` contain unquoted positive integers. This compatibility check
+does not authorize reconciliation.
 
 ## Transactional intent minting
 

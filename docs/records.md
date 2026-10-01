@@ -950,8 +950,8 @@ helper (`product-expected-config-dry-run`, then `product-expected-config-apply`
 with the reviewed dry-run evidence) is the supported path for additions and
 removals; real product, context, instance, and binding values come from the
 operator's private payload file, not checked-in defaults. The manual
-`Product Expected Config` workflow only adds requirements and is frozen under
-issue #2058. Because the route authorizes against
+`Product Expected Config` workflow only adds requirements; granting it new
+authority is an operator decision. Because the route authorizes against
 the target product in the Launchplane service context, product-specific workflow
 authority must come from managed authz reconciliation through the service or
 operator UI, not a checked-in product catalog.
