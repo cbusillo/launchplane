@@ -593,6 +593,7 @@ from control_plane.odoo_prod_promotion_http import (
     resolve_odoo_prod_promotion_product_route,
     should_store_prod_promotion_idempotency,
 )
+from control_plane.workflows.odoo_prod_rollback import OdooProdRollbackTargetMissingError
 from control_plane.odoo_prod_rollback_http import (
     ODOO_PROD_ROLLBACK_ROUTE as _ODOO_PROD_ROLLBACK_ROUTE,
     OdooProdRollbackEnvelope,
@@ -4503,6 +4504,20 @@ def create_launchplane_fastapi_app(
             cookie=cookie,
             allow_owner=False,
         )
+
+    # Operator release routes take a CSRF-checked session or a bearer caller.
+    # Terminal-agent tokens stay read-only here, as on the generic-web routes.
+    def read_operator_mutation_identity(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
+    ) -> LaunchplaneIdentity:
+        if isinstance(identity, TerminalAgentIdentity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=next_trace_id(),
+                code="authorization_denied",
+                message="Terminal agent credentials can only read redacted Launchplane context.",
+            )
+        return identity
 
     def read_owner_review_browser_mutation_identity(
         request: Request,
@@ -9446,7 +9461,7 @@ def create_launchplane_fastapi_app(
 
     async def write_odoo_prod_rollback(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_operator_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse | JSONResponse:
@@ -9544,6 +9559,13 @@ def create_launchplane_fastapi_app(
                 record_store=record_store,
                 request=rollback_request,
             )
+        except OdooProdRollbackTargetMissingError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="rollback_target_missing",
+                message=error.message,
+            ) from error
         except FileNotFoundError as error:
             raise _launchplane_http_error(
                 status_code=404,
@@ -9860,7 +9882,7 @@ def create_launchplane_fastapi_app(
 
     async def write_odoo_prod_promotion_run(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_operator_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse | JSONResponse:
@@ -25248,7 +25270,7 @@ def create_launchplane_fastapi_app(
         app,
         dependencies=ProductionBackupGateRouteDependencies(
             common=read_route_dependencies,
-            read_write_identity=read_write_identity,
+            read_mutation_identity=read_operator_mutation_identity,
             cancel_pending_operation=cancel_pending_durable_operation,
         ),
     )

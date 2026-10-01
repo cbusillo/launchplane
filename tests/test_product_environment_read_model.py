@@ -10,6 +10,7 @@ from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
 )
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -1114,6 +1115,49 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
 
         self.assertEqual(detail.managed_secrets[0].status, "disabled")
         self.assertEqual(detail.managed_secrets[0].trust_state, "disabled")
+
+    def test_odoo_prod_detail_names_the_artifact_a_default_rollback_redeploys(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{database_path}")
+            store.ensure_schema()
+            payload = _site_profile_payload(product="odoo-tenant-opw", preview_enabled=False)
+            payload["driver_id"] = "odoo"
+            profile = LaunchplaneProductProfileRecord.model_validate(payload)
+            store.write_product_profile_record(profile)
+            for record_id, artifact_id, finished_at in (
+                ("deployment-prod-older", "artifact-previous", "2026-05-01T10:00:00Z"),
+                ("deployment-prod-latest", "artifact-current", "2026-05-02T10:00:00Z"),
+            ):
+                store.write_deployment_record(
+                    DeploymentRecord(
+                        record_id=record_id,
+                        artifact_identity=ArtifactIdentityReference(artifact_id=artifact_id),
+                        context="example-site-prod",
+                        instance="prod",
+                        source_git_ref="0123456789abcdef0123456789abcdef01234567",
+                        deploy=DeploymentEvidence(
+                            target_name="example-site-prod",
+                            target_type="compose",
+                            deploy_mode="dokploy-compose-api",
+                            status="pass",
+                            started_at=finished_at,
+                            finished_at=finished_at,
+                        ),
+                    )
+                )
+
+            detail = build_product_environment_detail(
+                record_store=store,
+                product=profile.product,
+                environment="prod",
+                action_allowed=lambda *_: False,
+            )
+
+        odoo = detail.driver_extensions.odoo
+        assert odoo is not None
+        self.assertEqual(odoo.rollback_artifact_id, "artifact-previous")
+        self.assertEqual(odoo.rollback_deployment_record_id, "deployment-prod-older")
 
     def test_product_read_model_exposes_prelaunch_rebuild_policy(self) -> None:
         payload = _site_profile_payload(product="odoo-tenant-opw", preview_enabled=False)

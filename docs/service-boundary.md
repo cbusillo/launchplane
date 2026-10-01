@@ -1670,9 +1670,22 @@ full RBAC system yet.
 
 Human policy rules use the same reviewed policy file under `github_humans`.
 The first supported roles are `read_only` and `admin`. Browser sessions can
-authorize read endpoints, but POST mutation routes remain GitHub Actions OIDC
-only until browser-initiated mutation workflows get a dedicated CSRF and audit
-design.
+authorize read endpoints. A POST route accepts a browser session only through
+the CSRF-checked browser-mutation dependency (same-origin fetch metadata plus a
+single-use CSRF token); `tests/test_http_app_browser_mutation.py` pins that
+route inventory. Every other POST route stays bearer-only: GitHub Actions OIDC
+or the local operator/admin tokens.
+
+The Odoo release routes `POST /v1/drivers/odoo/prod-promotion-run` and
+`POST /v1/drivers/odoo/prod-rollback`, and the `POST /v1/production-backup-gates`
+enqueue and cancel routes, accept a signed-in session this way so the operator
+can release from the product's prod environment page. They keep accepting the
+bearer and OIDC callers the site workflows use, and refuse terminal-agent
+tokens. Authorization is unchanged: the same actions are checked against the
+caller's identity. Starting a backup still needs exactly one managed rule that
+matches the caller, so a session whose only standing is the policy
+administrator is refused at the backup step (`authorization_provenance_unavailable`)
+until that is decided (#2682).
 
 Agent consumers use the same allow-list policy but are classified into a compact
 subject model before diagnostics or downstream intent contracts consume them:
@@ -3332,8 +3345,8 @@ tenant workflow does not have to accept hand-entered artifact or source facts.
 The route is owned by native FastAPI; its descriptor remains discoverable, the
 native route owns execution.
 
-`POST /v1/drivers/odoo/prod-promotion-run` is the preferred thin-workflow
-mutation route for Odoo prod promotion. The tenant workflow supplies product,
+`POST /v1/drivers/odoo/prod-promotion-run` is the preferred mutation route for
+Odoo prod promotion, from the operator's release panel or a thin workflow. The tenant workflow supplies product,
 context, and a stable request ID to the shared Launchplane workflow. That workflow
 captures the typed infrastructure backup and supplies
 `run.infrastructure_backup_record_id`. Launchplane requires its current passing

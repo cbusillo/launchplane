@@ -44,8 +44,12 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "/v1/authz-policies/solo-administration-confirmations/{confirmation_id}/revoke",
             "/v1/drivers/generic-web/prod-promotion",
             "/v1/drivers/generic-web/prod-promotion-workflow",
+            "/v1/drivers/odoo/prod-promotion-run",
+            "/v1/drivers/odoo/prod-rollback",
             "/v1/merge-train/policies/import",
             "/v1/product-config/apply",
+            "/v1/production-backup-gates",
+            "/v1/production-backup-gates/operations/{operation_id}/cancel",
             "/v1/product-profiles/{product}/owner",
             "/v1/product-review/decisions",
             "/v1/product-review/feedback/retry",
@@ -68,6 +72,7 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
         }
         browser_dependency_names = {
             "read_browser_mutation_identity",
+            "read_operator_mutation_identity",
             "read_github_human_browser_mutation_identity",
             "read_owner_review_browser_mutation_identity",
             "read_browser_work_graph_rank_identity",

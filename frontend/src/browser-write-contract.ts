@@ -8,6 +8,7 @@ import type {
   ApproveHumanPrivilegedOperationData,
   DispatchProductPromotionWorkflowData,
   DryRunProductPromotionData,
+  EnqueueProductionBackupGateData,
   RankWorkGraphSnapshotData,
   RevokeHumanPrivilegedOperationData,
   PlanOrdinaryAgentDeliveryActivationData,
@@ -18,6 +19,8 @@ import type {
   RetryProductReviewFeedbackData,
   WriteReleaseReviewDecisionData,
   SubmitOwnerSecretInputData,
+  WriteOdooProdPromotionRunData,
+  WriteOdooProdRollbackData,
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
@@ -35,6 +38,12 @@ export const BROWSER_WRITE_ROUTES = {
     "/v1/products/{product}/environments/{environment}/promotion/dry-run" satisfies DryRunProductPromotionData["url"],
   productPromotionWorkflowDispatch:
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch" satisfies DispatchProductPromotionWorkflowData["url"],
+  productionBackupGateEnqueue:
+    "/v1/production-backup-gates" satisfies EnqueueProductionBackupGateData["url"],
+  odooProdPromotionRun:
+    "/v1/drivers/odoo/prod-promotion-run" satisfies WriteOdooProdPromotionRunData["url"],
+  odooProdRollback:
+    "/v1/drivers/odoo/prod-rollback" satisfies WriteOdooProdRollbackData["url"],
   workGraphRank:
     "/v1/work-graph/rank" satisfies RankWorkGraphSnapshotData["url"],
   productReviewDecision:

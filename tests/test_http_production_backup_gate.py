@@ -5,10 +5,21 @@ import os
 from urllib.parse import urlencode
 
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.service_auth import LaunchplaneAuthzPolicy, LocalOperatorPolicyRule
+from control_plane.service_auth import (
+    BearerIdentityConfig,
+    LaunchplaneAuthzPolicy,
+    LocalOperatorPolicyRule,
+)
+from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.contracts.verireel_prod_backup_gate import VeriReelProdBackupGateResult
-from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+from tests.http_app_test_support import (
+    _browser_mutation_headers,
+    _github_human_identity,
+    _github_oauth_config,
+    _local_operator_bearer_config,
+    _RejectingVerifier,
+)
 from tests.support.http import get, request
 from tests.test_production_backup_provider import _binding
 from control_plane.contracts.authz_policy_record import (
@@ -64,6 +75,73 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
                             "Authorization": "Bearer local-operator-token",
                             "Idempotency-Key": key,
                         },
+                        payload=_binding().request.model_dump(mode="json"),
+                    )
+                    self.assertEqual(response.status_code, status, response.text)
+                    self.assertEqual(response.json()["error"]["code"], code)
+                    self.assertEqual(store.list_verireel_prod_backup_gate_operation_records(), ())
+                finally:
+                    store.close()
+
+    async def test_signed_in_session_reaches_the_gate_only_with_csrf(self) -> None:
+        for drop_csrf, bearer, status, code in (
+            (False, "", 503, "database_storage_required"),
+            (True, "", 403, "browser_mutation_denied"),
+            (False, "Bearer terminal-agent-token", 403, "authorization_denied"),
+        ):
+            with self.subTest(code=code), TemporaryDirectory() as directory:
+                store = PostgresRecordStore(
+                    database_url=f"sqlite+pysqlite:///{Path(directory) / 'state.sqlite3'}"
+                )
+                store.ensure_schema()
+                session_manager = HumanSessionManager(
+                    config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+                )
+                human_session = session_manager.issue(_github_human_identity())
+                try:
+                    app = create_launchplane_fastapi_app(
+                        verifier=_RejectingVerifier(),
+                        bearer_identity_config=BearerIdentityConfig(
+                            terminal_agent_token="terminal-agent-token",
+                            terminal_agent_subject="terminal-agent",
+                            terminal_agent_token_label="terminal-agent-read",
+                        ),
+                        authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                            {
+                                "github_humans": [
+                                    {
+                                        "logins": ["example-operator"],
+                                        "roles": ["admin"],
+                                        "actions": ["production_backup_gate.execute"],
+                                        "products": ["example-product"],
+                                        "contexts": ["example-product"],
+                                    }
+                                ],
+                                "terminal_agents": [
+                                    {
+                                        "subjects": ["terminal-agent"],
+                                        "token_labels": ["terminal-agent-read"],
+                                        "actions": ["production_backup_gate.execute"],
+                                        "products": ["example-product"],
+                                        "contexts": ["example-product"],
+                                    }
+                                ],
+                            }
+                        ),
+                        record_store_factory=lambda: store,
+                        human_session_manager=session_manager,
+                    )
+                    headers = _browser_mutation_headers(session_manager, human_session)
+                    headers["Idempotency-Key"] = "ui-backup"
+                    if drop_csrf:
+                        headers.pop("X-CSRF-Token")
+                    if bearer:
+                        headers = {"Authorization": bearer, "Idempotency-Key": "ui-backup"}
+                    response = await request(
+                        app,
+                        "POST",
+                        "/v1/production-backup-gates",
+                        headers=headers,
                         payload=_binding().request.model_dump(mode="json"),
                     )
                     self.assertEqual(response.status_code, status, response.text)

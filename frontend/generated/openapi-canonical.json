@@ -29131,6 +29131,16 @@
             "title": "Requires Runtime Identity",
             "type": "boolean"
           },
+          "rollback_artifact_id": {
+            "default": "",
+            "title": "Rollback Artifact Id",
+            "type": "string"
+          },
+          "rollback_deployment_record_id": {
+            "default": "",
+            "title": "Rollback Deployment Record Id",
+            "type": "string"
+          },
           "upstream_source": {
             "default": "",
             "title": "Upstream Source",
@@ -56776,6 +56786,16 @@
               "title": "Authorization",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -57668,6 +57688,16 @@
             "schema": {
               "default": "",
               "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
               "type": "string"
             }
           }
@@ -77535,6 +77565,16 @@
               "title": "Authorization",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -77815,6 +77855,16 @@
             "schema": {
               "default": "",
               "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
               "type": "string"
             }
           }
@@ -85532,6 +85582,7 @@
     "/v1/product-profiles": "list_product_profiles",
     "/v1/product-profiles/{product}": "read_product_profile",
     "/v1/product-review": "read_product_review",
+    "/v1/production-backup-gates/operations/{operation_id}": "read_production_backup_gate_operation",
     "/v1/products": "list_products",
     "/v1/products/{product}": "read_product",
     "/v1/products/{product}/activity": "read_product_activity",
@@ -85552,6 +85603,8 @@
     "/v1/work-graph/tenant-admission/evaluation": "read_tenant_admission_evaluation"
   },
   "x-launchplane-ui-write-operations": {
+    "/v1/drivers/odoo/prod-promotion-run": "write_odoo_prod_promotion_run",
+    "/v1/drivers/odoo/prod-rollback": "write_odoo_prod_rollback",
     "/v1/ordinary-agent-connections/{principal_id}/disconnect": "disconnect_ordinary_agent_principal",
     "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/approve": "approve_ordinary_agent_operation",
     "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/cancel": "cancel_ordinary_agent_operation",
@@ -85566,6 +85619,7 @@
     "/v1/product-profiles/{product}/owner": "apply_product_owner",
     "/v1/product-review/decisions": "write_product_review_decision",
     "/v1/product-review/feedback/retry": "retry_product_review_feedback",
+    "/v1/production-backup-gates": "enqueue_production_backup_gate",
     "/v1/products/{product}/environments/{environment}/config/apply": "apply_product_environment_config",
     "/v1/products/{product}/environments/{environment}/promotion/dry-run": "dry_run_product_promotion",
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch": "dispatch_product_promotion_workflow",

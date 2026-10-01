@@ -23,12 +23,12 @@ from control_plane.contracts.promotion_record import (
     PostDeployUpdateEvidence,
     PromotionRecord,
 )
-from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyResult,
 )
 from control_plane.workflows.odoo_prod_rollback import (
     OdooProdRollbackRequest,
+    OdooProdRollbackTargetMissingError,
     execute_odoo_prod_rollback,
 )
 
@@ -60,18 +60,24 @@ def _previous_prod_artifact_manifest() -> ArtifactIdentityManifest:
     )
 
 
-def _release_tuple() -> ReleaseTupleRecord:
-    return ReleaseTupleRecord(
-        tuple_id="opw-testing-artifact-opw-847c71c1db61785c",
+def _prod_deployment(
+    record_id: str,
+    artifact_id: str,
+    *,
+    status: Literal["pass", "fail"] = "pass",
+) -> DeploymentRecord:
+    return DeploymentRecord(
+        record_id=record_id,
+        artifact_identity=ArtifactIdentityReference(artifact_id=artifact_id),
         context="opw",
-        channel="testing",
-        artifact_id="artifact-opw-847c71c1db61785c",
-        repo_shas={"tenant-opw": "9e09b858e1f93aa4a1f4b887b528ba7e5a999ee6"},
-        image_repository="ghcr.io/cbusillo/odoo-tenant-opw",
-        image_digest="sha256:847c71c1db61785c0aa265949f45a74c5dd9535e62c89db26d5650684c340100",
-        deployment_record_id="deployment-opw-testing",
-        provenance="ship",
-        minted_at="2026-04-17T20:32:32Z",
+        instance="prod",
+        source_git_ref="9e09b858e1f93aa4a1f4b887b528ba7e5a999ee6",
+        deploy=DeploymentEvidence(
+            target_name="opw-prod",
+            target_type="compose",
+            deploy_mode="dokploy-compose-api",
+            status=status,
+        ),
     )
 
 
@@ -193,14 +199,19 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
 
     def _record_store(self) -> Mock:
         record_store = Mock()
-        record_store.read_release_tuple_record.return_value = _release_tuple()
+        record_store.list_deployment_records.return_value = (
+            _prod_deployment("deployment-opw-prod-current", "artifact-opw-current"),
+            _prod_deployment("deployment-opw-prod-current-earlier", "artifact-opw-current"),
+            _prod_deployment("deployment-opw-prod-failed", "artifact-opw-broken", status="fail"),
+            _prod_deployment("deployment-opw-prod-previous", "artifact-opw-847c71c1db61785c"),
+        )
         record_store.read_artifact_manifest.return_value = _artifact_manifest()
         record_store.read_environment_inventory.return_value = _inventory_record()
         record_store.read_promotion_record.return_value = _promotion_record()
         record_store.read_deployment_record.return_value = _deployment_record()
         return record_store
 
-    def test_rollback_to_testing_tuple_delegates_to_target_replacement(self) -> None:
+    def test_rollback_defaults_to_previous_passing_prod_deployment(self) -> None:
         record_store = self._record_store()
 
         with patch(
@@ -236,7 +247,12 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
         inventory = record_store.write_environment_inventory.call_args.args[0]
         self.assertEqual(inventory.deployment_record_id, "deployment-opw-prod-rollback")
         self.assertEqual(inventory.promotion_record_id, _promotion_record().record_id)
-        self.assertEqual(inventory.promoted_from_instance, "testing")
+        self.assertEqual(inventory.promoted_from_instance, "previous-deployment")
+        self.assertEqual(result.source_channel, "previous-deployment")
+        record_store.list_deployment_records.assert_called_once_with(
+            context_name="opw", instance_name="prod"
+        )
+        record_store.read_artifact_manifest.assert_called_once_with("artifact-opw-847c71c1db61785c")
         final_promotion = record_store.write_promotion_record.call_args_list[-1].args[0]
         self.assertEqual(final_promotion.rollback.status, "pass")
         self.assertEqual(final_promotion.rollback_health.status, "pass")
@@ -290,7 +306,7 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
         self.assertEqual(result.rollback_status, "pass")
         self.assertEqual(result.source_channel, "artifact")
         self.assertEqual(result.artifact_id, "artifact-opw-previous-prod")
-        record_store.read_release_tuple_record.assert_not_called()
+        record_store.list_deployment_records.assert_not_called()
         replacement_request = replacement_apply.call_args.kwargs["request"]
         self.assertEqual(replacement_request.artifact_id, "artifact-opw-previous-prod")
         self.assertEqual(
@@ -318,8 +334,33 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
                 ),
             )
 
-        record_store.read_release_tuple_record.assert_not_called()
+        record_store.list_deployment_records.assert_not_called()
         record_store.write_promotion_record.assert_not_called()
+
+    def test_rollback_without_an_earlier_passing_deployment_is_refused(self) -> None:
+        for deployments in (
+            (),
+            (_prod_deployment("deployment-opw-prod-current", "artifact-opw-current"),),
+            (
+                _prod_deployment("deployment-opw-prod-current", "artifact-opw-current"),
+                _prod_deployment("deployment-opw-prod-old", "artifact-opw-old", status="fail"),
+            ),
+        ):
+            with self.subTest(count=len(deployments)):
+                record_store = self._record_store()
+                record_store.list_deployment_records.return_value = deployments
+
+                with self.assertRaisesRegex(
+                    OdooProdRollbackTargetMissingError, "no earlier passing opw/prod"
+                ):
+                    execute_odoo_prod_rollback(
+                        control_plane_root=Path("/control-plane"),
+                        record_store=record_store,
+                        product="odoo-tenant-opw",
+                        request=OdooProdRollbackRequest(context="opw"),
+                    )
+
+                record_store.write_promotion_record.assert_not_called()
 
     def test_failed_deploy_records_failed_rollback(self) -> None:
         record_store = self._record_store()

@@ -1959,7 +1959,7 @@ Current derived-state behavior:
   backup, and `POST /v1/drivers/odoo/prod-promotion`
   validates the stored artifact, source release tuple, and required backup gate
   before promoting `testing` to `prod`, and `POST /v1/drivers/odoo/prod-rollback`
-  deploys an explicit previous artifact. These routes resolve target identity,
+  redeploys the previous passing prod artifact, or an explicit one. These routes resolve target identity,
   runtime values, override inputs, and managed secrets from DB-backed
   Launchplane records; tenant workflows should only send thin
   OIDC-authenticated requests and record returned IDs.
@@ -2407,7 +2407,10 @@ context only, and `context_instance` has both context and instance.
   runners; privileged provider mutations still execute inside the deployed
   Launchplane service.
 - `POST /v1/drivers/odoo/prod-rollback` rolls a prod-named Odoo lane back to
-  the DB-backed `testing` release tuple for the same context. The driver owns
+  the artifact of the newest passing prod deployment whose artifact differs from
+  the lane's latest deployment, read from deployment history (newest first). It
+  refuses with `rollback_target_missing` when there is none. An explicit
+  `rollback.artifact_id` still overrides the default. The driver owns
   rollback intent and promotion-record annotation, but the provider mutation runs
   through the stable target replacement executor so deploy, runtime identity,
   Odoo post-deploy maintenance, canonical/logo verification, deployment, and
@@ -2687,6 +2690,36 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   routes should not be inserted into the local PyCharm or local container loop;
   use them only for remote stable lanes and promotion/deploy evidence.
 
+## Odoo Operator Release Panel
+
+On an Odoo product's prod environment page, a signed-in operator releases from
+the Release panel instead of a site workflow:
+
+- **Promote** reads `GET /v1/release-review` and stops unless the release is
+  approved or needs no approval. It then starts the infrastructure backup with
+  `POST /v1/production-backup-gates`, polls the operation to a terminal state,
+  and only after a passing backup calls `POST /v1/drivers/odoo/prod-promotion-run`
+  with that `infrastructure_backup_record_id`. The server re-checks approval and
+  the backup, takes the logical Odoo backup, deploys, and runs post-deploy.
+- Each click gets one Idempotency-Key and request ID, kept in session storage.
+  After an uncertain stop (timeout, 5xx, closed tab) the button retries the same
+  request, so the backup enqueue returns the same operation and a finished
+  promotion replays. The route stores no in-flight reservation, so a retry while
+  the first promotion still runs starts a second run (and its logical backup);
+  check the latest prod deployment before retrying a promote that timed out. A
+  definitive answer clears the key.
+- **Roll back** shows the artifact the rollback driver will redeploy, asks for a
+  reason and confirmation, and calls `POST /v1/drivers/odoo/prod-rollback` with
+  no artifact id.
+- Each step shows its state and the server's refusal. Today a session whose
+  only standing is the policy administrator is refused at the backup step,
+  because a durable backup needs exactly one managed rule for the caller (#2682).
+
+The CM website's `odoo-prod-promotion.yml`, `odoo-prod-rollback.yml`, and
+`odoo-post-deploy.yml` stay in place until one real promote and one rollback
+drill have gone through this panel (#2606); they are deleted, with their
+workflow grant, after that.
+
 ## Odoo Rollback And Re-Promote Waterfall
 
 - Confirm Launchplane health reports `storage_backend=postgres`.
@@ -2696,13 +2729,18 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
 - For Odoo artifacts, the stored artifact manifest carries `odoo_install_modules`.
   Stable target replacement merges that list into `ODOO_INSTALL_MODULES` with
   Launchplane's required safety modules before deploying the target.
-- For the first harmless drill, call the Odoo prod rollback driver with no
-  explicit artifact id. The driver selects the current `testing` release tuple
-  for that context and fails closed if the tuple or artifact manifest is missing.
-- For a real rollback after `testing` has advanced, call the same driver with
-  an explicit DB-backed artifact id for the previous known-good prod artifact.
-  The driver reads the artifact manifest directly from Launchplane records and
-  writes rollback evidence with an `artifact:<artifact_id>` source marker.
+- With no explicit artifact id, the Odoo prod rollback driver redeploys the
+  artifact of the previous passing prod deployment: the newest passing one whose
+  artifact differs from the lane's latest deployment. It writes rollback
+  evidence with a `deployment:<record_id>` source marker and fails closed when
+  no such deployment or its artifact manifest is missing. The prod environment
+  page shows that artifact before the operator confirms.
+- To choose another DB-backed artifact, pass it explicitly. The driver reads the
+  artifact manifest directly from Launchplane records and writes rollback
+  evidence with an `artifact:<artifact_id>` source marker.
+- Rollback changes the image only; it re-runs post-deploy on a database the
+  newer modules may already have upgraded. Restoring data is a separate stop-
+  boundary action, so drill rollback with a release that has no schema change.
 - A passing rollback delegates deployment and prod release-tuple writes to stable
   target replacement, then writes inventory rollback provenance, promotion
   rollback, and rollback-health evidence. Verify the target

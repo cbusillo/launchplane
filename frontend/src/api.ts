@@ -15,6 +15,8 @@ import type {
   DispatchProductPromotionWorkflowResponse,
   DryRunProductPromotionData,
   DryRunProductPromotionResponse,
+  EnqueueProductionBackupGateData,
+  EnqueueProductionBackupGateResponse,
   EveryCodeSummaryResponse,
   GovernanceProjectionResponse,
   InspectionSetupMetadata,
@@ -75,6 +77,12 @@ import type {
   RetryProductReviewFeedbackData,
   ReleaseReviewResponse,
   ReleaseReviewDecisionEnvelope,
+  ReadProductionBackupGateOperationData,
+  ReadProductionBackupGateOperationResponse,
+  WriteOdooProdPromotionRunData,
+  WriteOdooProdPromotionRunResponse,
+  WriteOdooProdRollbackData,
+  WriteOdooProdRollbackResponse,
 } from "./generated/openapi.ts";
 import type {
   OrdinaryAgentOperationClientResponse,
@@ -639,6 +647,64 @@ export function dispatchProductPromotionWorkflow(
     request.body,
     options.signal,
     generatedIdempotencyKey(request.headers),
+    options.onDispatch,
+  );
+}
+
+export function enqueueProductionBackupGate(
+  payload: EnqueueProductionBackupGateData["body"],
+  options: BrowserOperationOptions,
+): Promise<EnqueueProductionBackupGateResponse> {
+  return requestGeneratedPost<EnqueueProductionBackupGateResponse>(
+    {
+      url: BROWSER_WRITE_ROUTES.productionBackupGateEnqueue,
+      body: payload,
+      headers: { "Idempotency-Key": options.idempotencyKey },
+    },
+    options.signal,
+    options.onDispatch,
+  );
+}
+
+export function readProductionBackupGateOperation(
+  operationId: string,
+  scope: ReadProductionBackupGateOperationData["query"],
+  signal?: AbortSignal,
+): Promise<ReadProductionBackupGateOperationResponse> {
+  return requestJson<ReadProductionBackupGateOperationResponse>(
+    `/v1/production-backup-gates/operations/${encodeURIComponent(operationId)}?${new URLSearchParams(scope)}`,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function runOdooProdPromotion(
+  payload: WriteOdooProdPromotionRunData["body"],
+  options: BrowserOperationOptions,
+): Promise<WriteOdooProdPromotionRunResponse> {
+  return requestGeneratedPost<WriteOdooProdPromotionRunResponse>(
+    {
+      url: BROWSER_WRITE_ROUTES.odooProdPromotionRun,
+      body: payload,
+      headers: { "Idempotency-Key": options.idempotencyKey },
+    },
+    options.signal,
+    options.onDispatch,
+  );
+}
+
+export function rollBackOdooProd(
+  payload: WriteOdooProdRollbackData["body"],
+  options: BrowserOperationOptions,
+): Promise<WriteOdooProdRollbackResponse> {
+  return requestGeneratedPost<WriteOdooProdRollbackResponse>(
+    {
+      url: BROWSER_WRITE_ROUTES.odooProdRollback,
+      body: payload,
+      headers: { "Idempotency-Key": options.idempotencyKey },
+    },
+    options.signal,
     options.onDispatch,
   );
 }

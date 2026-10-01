@@ -1479,6 +1479,37 @@ export type OdooOverrideValue = {
     value: string | number | number | boolean | null;
 };
 
+export type OdooProdPromotionRunRequest = {
+    backup_timeout_seconds?: number | null;
+    context: string;
+    from_instance?: string;
+    health_timeout_seconds?: number | null;
+    infrastructure_backup_record_id?: string;
+    no_cache?: boolean;
+    product?: string;
+    promotion_timeout_seconds?: number | null;
+    request_id: string;
+    schema_version?: number;
+    to_instance?: string;
+    verify_health?: boolean;
+    wait?: boolean;
+};
+
+export type OdooProdRollbackRequest = {
+    artifact_id?: string;
+    context: string;
+    health_timeout_seconds?: number | null;
+    instance?: string;
+    no_cache?: boolean;
+    promotion_record_id?: string;
+    reason?: string;
+    schema_version?: number;
+    source_channel?: 'testing';
+    timeout_seconds?: number | null;
+    verify_health?: boolean;
+    wait?: boolean;
+};
+
 export type OdooWebsiteBootstrapPayload = {
     canonical_url: string;
     company_email: string;
@@ -2972,6 +3003,8 @@ export type ProductOdooEnvironmentExtension = {
     requires_backup_before_destroy: boolean;
     requires_restore_proof: boolean;
     requires_runtime_identity: boolean;
+    rollback_artifact_id: string;
+    rollback_deployment_record_id: string;
     upstream_source: string;
 };
 
@@ -3527,6 +3560,28 @@ export type ProductionBackupAuthorityStatus = {
     schema_version: number;
     state: 'ready' | 'missing' | 'invalid' | 'stale' | 'retired';
     summary: string;
+};
+
+export type ProductionBackupGateRequest = {
+    backup_record_id: string;
+    context: string;
+    instance: string;
+    product: string;
+    promotion_action: string;
+    schema_version?: 1;
+    timeout_seconds?: number;
+};
+
+export type ProductionBackupGateResponse = {
+    backup_record_id: string;
+    error_code: string;
+    evidence: {
+        [key: string]: string;
+    };
+    operation_id: string;
+    operation_status: string;
+    status: 'accepted';
+    trace_id: string;
 };
 
 export type PromotionRecordOutput = {
@@ -4616,6 +4671,40 @@ export type ReadProductReviewResponses = {
 
 export type ReadProductReviewResponse = ReadProductReviewResponses[keyof ReadProductReviewResponses];
 
+export type ReadProductionBackupGateOperationData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        operation_id: string;
+    };
+    query: {
+        product: string;
+        context: string;
+        instance: string;
+    };
+    url: '/v1/production-backup-gates/operations/{operation_id}';
+};
+
+export type ReadProductionBackupGateOperationErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadProductionBackupGateOperationError = ReadProductionBackupGateOperationErrors[keyof ReadProductionBackupGateOperationErrors];
+
+export type ReadProductionBackupGateOperationResponses = {
+    200: ProductionBackupGateResponse;
+};
+
+export type ReadProductionBackupGateOperationResponse = ReadProductionBackupGateOperationResponses[keyof ReadProductionBackupGateOperationResponses];
+
 export type ListProductsData = {
     body?: never;
     headers?: {
@@ -5162,6 +5251,72 @@ export type ReadTenantAdmissionEvaluationResponses = {
 
 export type ReadTenantAdmissionEvaluationResponse = ReadTenantAdmissionEvaluationResponses[keyof ReadTenantAdmissionEvaluationResponses];
 
+export type WriteOdooProdPromotionRunData = {
+    body: {
+        product: string;
+        run: OdooProdPromotionRunRequest;
+        schema_version?: number;
+    };
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/drivers/odoo/prod-promotion-run';
+};
+
+export type WriteOdooProdPromotionRunErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type WriteOdooProdPromotionRunError = WriteOdooProdPromotionRunErrors[keyof WriteOdooProdPromotionRunErrors];
+
+export type WriteOdooProdPromotionRunResponses = {
+    202: AcceptedEvidenceResponse;
+};
+
+export type WriteOdooProdPromotionRunResponse = WriteOdooProdPromotionRunResponses[keyof WriteOdooProdPromotionRunResponses];
+
+export type WriteOdooProdRollbackData = {
+    body: {
+        product: string;
+        rollback: OdooProdRollbackRequest;
+        schema_version?: number;
+    };
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/drivers/odoo/prod-rollback';
+};
+
+export type WriteOdooProdRollbackErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type WriteOdooProdRollbackError = WriteOdooProdRollbackErrors[keyof WriteOdooProdRollbackErrors];
+
+export type WriteOdooProdRollbackResponses = {
+    202: AcceptedEvidenceResponse;
+};
+
+export type WriteOdooProdRollbackResponse = WriteOdooProdRollbackResponses[keyof WriteOdooProdRollbackResponses];
+
 export type DisconnectOrdinaryAgentPrincipalData = {
     body: OrdinaryAgentDisconnectRequest;
     path: {
@@ -5522,6 +5677,35 @@ export type RetryProductReviewFeedbackResponses = {
 };
 
 export type RetryProductReviewFeedbackResponse = RetryProductReviewFeedbackResponses[keyof RetryProductReviewFeedbackResponses];
+
+export type EnqueueProductionBackupGateData = {
+    body: ProductionBackupGateRequest;
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/production-backup-gates';
+};
+
+export type EnqueueProductionBackupGateErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type EnqueueProductionBackupGateError = EnqueueProductionBackupGateErrors[keyof EnqueueProductionBackupGateErrors];
+
+export type EnqueueProductionBackupGateResponses = {
+    200: ProductionBackupGateResponse;
+};
+
+export type EnqueueProductionBackupGateResponse = EnqueueProductionBackupGateResponses[keyof EnqueueProductionBackupGateResponses];
 
 export type ApplyProductEnvironmentConfigData = {
     body: {

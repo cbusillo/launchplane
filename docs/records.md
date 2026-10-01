@@ -1911,9 +1911,10 @@ run` is the foreground loop intended for an external process supervisor, and
   which writes the deployment record and prod release tuple. Rollback then
   refreshes prod inventory with rollback provenance and annotates the current
   prod promotion record's `rollback` and `rollback_health` fields. The selected
-  rollback source is the DB-backed `testing` release tuple unless the operator
-  supplies an explicit DB-backed artifact ID; operators must not supply
-  unrecorded image refs or source SHAs.
+  rollback source is the artifact of the previous passing prod deployment record
+  (the newest passing one whose artifact differs from the lane's latest
+  deployment) unless the operator supplies an explicit DB-backed artifact ID;
+  operators must not supply unrecorded image refs or source SHAs.
 - Generic-web rollback planning writes `GenericWebRollbackPlanRecord` entries
   under `generic_web_rollback_plans` in file-backed state and
   `launchplane_generic_web_rollback_plans` in DB-backed state. These records are

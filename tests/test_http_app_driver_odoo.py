@@ -11,6 +11,7 @@ from typing import Literal, cast
 from unittest.mock import MagicMock, patch
 
 from click import ClickException
+from fastapi import FastAPI
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.odoo_instance_override_record import (
@@ -52,7 +53,16 @@ from control_plane.odoo_preview_apply_http import (
     validate_odoo_preview_lifecycle_response_current,
     validate_odoo_preview_profile_authority,
 )
-from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
+from control_plane.service_auth import (
+    BearerIdentityConfig,
+    GitHubActionsIdentity,
+    LaunchplaneAuthzPolicy,
+)
+from control_plane.service_human_auth import (
+    HumanSessionManager,
+    InMemoryHumanSessionStore,
+    LaunchplaneHumanSession,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.odoo_artifact_publish import OdooArtifactPublishResult
@@ -70,7 +80,10 @@ from control_plane.workflows.odoo_prod_backup_gate import (
 from control_plane.workflows.odoo_prod_promotion import OdooProdPromotionResult
 from control_plane.workflows.odoo_prod_promotion_inputs import OdooProdPromotionInputsResult
 from control_plane.workflows.odoo_prod_promotion_run import OdooProdPromotionRunResult
-from control_plane.workflows.odoo_prod_rollback import OdooProdRollbackResult
+from control_plane.workflows.odoo_prod_rollback import (
+    OdooProdRollbackResult,
+    OdooProdRollbackTargetMissingError,
+)
 from control_plane.workflows.odoo_stable_target_replacement import (
     OdooStableTargetRuntimeSnapshot,
     OdooStableTargetReplacementPlan,
@@ -78,6 +91,9 @@ from control_plane.workflows.odoo_stable_target_replacement import (
 from tests.http_app_test_support import (
     _AsgiResponse,
     _asgi_get,
+    _browser_mutation_headers,
+    _github_human_identity,
+    _github_oauth_config,
     _MissingProductReadStore,
     _post_odoo_app_maintenance,
     _post_odoo_artifact_publish,
@@ -6918,6 +6934,7 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             payload["records"],
             {
+                "artifact_id": "artifact-opw-847c71c1db61785c",
                 "promotion_record_id": "promotion-opw-testing-to-prod",
                 "deployment_record_id": "deployment-opw-prod-rollback",
                 "release_tuple_id": "opw-prod-artifact-opw-847c71c1db61785c",
@@ -6926,6 +6943,9 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             set(payload["result"]),
             {
+                "artifact_id",
+                "source_channel",
+                "error_message",
                 "promotion_record_id",
                 "deployment_record_id",
                 "release_tuple_id",
@@ -8054,6 +8074,184 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
             )
             for status_code in ("400", "401", "403", "404", "409", "503"):
                 self.assertIn(status_code, route["responses"])
+
+
+class FastApiOdooOperatorSessionTests(unittest.IsolatedAsyncioTestCase):
+    """Signed-in operators call the Odoo release routes the site workflows call."""
+
+    @staticmethod
+    def _policy() -> LaunchplaneAuthzPolicy:
+        return LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_humans": [
+                    {
+                        "logins": ["example-operator"],
+                        "roles": ["admin"],
+                        "products": ["odoo-tenant-cm", "odoo-tenant-opw"],
+                        "contexts": ["cm", "opw"],
+                        "actions": [
+                            "odoo_prod_promotion_run.execute",
+                            "odoo_prod_rollback.execute",
+                        ],
+                    }
+                ],
+                "terminal_agents": [
+                    {
+                        "subjects": ["terminal-agent"],
+                        "token_labels": ["terminal-agent-read"],
+                        "products": ["odoo-tenant-cm", "odoo-tenant-opw"],
+                        "contexts": ["cm", "opw"],
+                        "actions": [
+                            "odoo_prod_promotion_run.execute",
+                            "odoo_prod_rollback.execute",
+                        ],
+                    }
+                ],
+            }
+        )
+
+    def _app(self, root: Path) -> tuple[FastAPI, HumanSessionManager, LaunchplaneHumanSession]:
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(),
+            session_store=InMemoryHumanSessionStore(),
+        )
+        human_session = session_manager.issue(_github_human_identity())
+        state_dir = root / "state"
+        store = _odoo_route_store(state_dir, product="odoo-tenant-cm", context="cm")
+        _odoo_route_store(state_dir, product="odoo-tenant-opw", context="opw")
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=self._policy(),
+            record_store_factory=lambda: store,
+            control_plane_root_path=root,
+            state_dir=state_dir,
+            human_session_manager=session_manager,
+            bearer_identity_config=BearerIdentityConfig(
+                terminal_agent_token="terminal-agent-token",
+                terminal_agent_subject="terminal-agent",
+                terminal_agent_token_label="terminal-agent-read",
+            ),
+        )
+        return app, session_manager, human_session
+
+    @staticmethod
+    def _rollback_payload() -> dict[str, object]:
+        return {"product": "odoo-tenant-opw", "rollback": {"context": "opw", "reason": "drill"}}
+
+    @staticmethod
+    def _rollback_result() -> OdooProdRollbackResult:
+        return OdooProdRollbackResult(
+            context="opw",
+            instance="prod",
+            source_channel="previous-deployment",
+            artifact_id="artifact-opw-previous",
+            promotion_record_id="promotion-opw-testing-to-prod",
+            deployment_record_id="deployment-opw-prod-rollback",
+            rollback_status="pass",
+            rollback_health_status="pass",
+            post_deploy_status="pass",
+        )
+
+    async def test_signed_in_admin_can_promote_and_roll_back_with_csrf(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            app, session_manager, human_session = self._app(Path(temporary_directory_name))
+            with (
+                patch(
+                    "control_plane.odoo_prod_promotion_http.execute_odoo_prod_promotion_run",
+                    return_value=FastApiOdooProdPromotionTests._run_result(),
+                ) as promote_mock,
+                patch(
+                    "control_plane.odoo_prod_rollback_http.execute_odoo_prod_rollback",
+                    return_value=self._rollback_result(),
+                ) as rollback_mock,
+            ):
+                promote_response = await _post_odoo_prod_promotion_run(
+                    app,
+                    FastApiOdooProdPromotionTests._run_payload(),
+                    authorization="",
+                    idempotency_key="ui-odoo-release-1",
+                    headers=_browser_mutation_headers(session_manager, human_session),
+                )
+                rollback_response = await _post_odoo_prod_rollback(
+                    app,
+                    self._rollback_payload(),
+                    authorization="",
+                    idempotency_key="ui-odoo-rollback-1",
+                    headers=_browser_mutation_headers(session_manager, human_session),
+                )
+
+        self.assertEqual(promote_response.status_code, 202, promote_response.text)
+        self.assertEqual(promote_response.json()["result"]["run_status"], "pass")
+        self.assertEqual(rollback_response.status_code, 202, rollback_response.text)
+        self.assertEqual(rollback_response.json()["result"]["artifact_id"], "artifact-opw-previous")
+        promote_mock.assert_called_once()
+        rollback_mock.assert_called_once()
+
+    async def test_session_without_csrf_is_refused(self) -> None:
+        for post, payload, target in (
+            (
+                _post_odoo_prod_promotion_run,
+                FastApiOdooProdPromotionTests._run_payload(),
+                "control_plane.odoo_prod_promotion_http.execute_odoo_prod_promotion_run",
+            ),
+            (
+                _post_odoo_prod_rollback,
+                self._rollback_payload(),
+                "control_plane.odoo_prod_rollback_http.execute_odoo_prod_rollback",
+            ),
+        ):
+            with self.subTest(target=target), TemporaryDirectory() as temporary_directory_name:
+                app, session_manager, human_session = self._app(Path(temporary_directory_name))
+                headers = _browser_mutation_headers(session_manager, human_session)
+                headers.pop("X-CSRF-Token")
+                with patch(target) as execute_mock:
+                    response = await post(app, payload, authorization="", headers=headers)
+
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(response.json()["error"]["code"], "browser_mutation_denied")
+                execute_mock.assert_not_called()
+
+    async def test_terminal_agent_token_is_refused(self) -> None:
+        for post, payload, target in (
+            (
+                _post_odoo_prod_promotion_run,
+                FastApiOdooProdPromotionTests._run_payload(),
+                "control_plane.odoo_prod_promotion_http.execute_odoo_prod_promotion_run",
+            ),
+            (
+                _post_odoo_prod_rollback,
+                self._rollback_payload(),
+                "control_plane.odoo_prod_rollback_http.execute_odoo_prod_rollback",
+            ),
+        ):
+            with self.subTest(target=target), TemporaryDirectory() as temporary_directory_name:
+                app, _session_manager, _human_session = self._app(Path(temporary_directory_name))
+                with patch(target) as execute_mock:
+                    response = await post(app, payload, authorization="Bearer terminal-agent-token")
+
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+                execute_mock.assert_not_called()
+
+    async def test_rollback_without_an_earlier_deployment_is_refused_plainly(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            app, session_manager, human_session = self._app(Path(temporary_directory_name))
+            with patch(
+                "control_plane.odoo_prod_rollback_http.execute_odoo_prod_rollback",
+                side_effect=OdooProdRollbackTargetMissingError(
+                    "Odoo prod rollback found no earlier passing opw/prod deployment."
+                ),
+            ):
+                response = await _post_odoo_prod_rollback(
+                    app,
+                    self._rollback_payload(),
+                    authorization="",
+                    headers=_browser_mutation_headers(session_manager, human_session),
+                )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "rollback_target_missing")
+        self.assertIn("no earlier passing", response.json()["error"]["message"])
 
 
 if __name__ == "__main__":

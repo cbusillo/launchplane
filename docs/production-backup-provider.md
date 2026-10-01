@@ -19,6 +19,13 @@ authority changes; changed requests conflict. New captures resolve current
 authority. Backup record IDs cannot be reused for another capture, including
 after an operation finishes.
 
+The enqueue and cancel routes accept a bearer or OIDC caller, or a signed-in
+browser session through the CSRF-checked browser-mutation dependency; terminal
+agent tokens are refused. The managed-rule requirement applies to sessions too:
+the policy administrator alone does not satisfy it, so the operator's release
+panel stops at the backup step with `authorization_provenance_unavailable` until
+the caller has exactly one matching managed rule (#2682).
+
 `GET /v1/production-backup-gates/operations/{operation_id}` takes the same
 product/context/instance as query parameters and requires
 `production_backup_authority.read`. It returns status and bounded evidence,
