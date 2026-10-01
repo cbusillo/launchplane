@@ -690,6 +690,7 @@ from control_plane.contracts.route_binding_record import (
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.contracts.secret_reencryption_request import SecretReencryptionRequest
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
 from control_plane.drivers import native_routes
 from control_plane.drivers.route_paths import (
@@ -1921,6 +1922,31 @@ class ProductOnboardingApplyEnvelope(BaseModel):
         return self
 
 
+class ProductSecretConfigRequirementRemoval(BaseModel):
+    """Identity of a declared managed secret binding requirement to remove."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    binding_key: str
+    integration: str = "runtime_environment"
+    context: str = ""
+    instance: str = ""
+
+    @model_validator(mode="after")
+    def _validate_removal(self) -> "ProductSecretConfigRequirementRemoval":
+        self.binding_key = self.binding_key.strip()
+        self.integration = self.integration.strip()
+        self.context = self.context.strip()
+        self.instance = self.instance.strip()
+        if not self.binding_key:
+            raise ValueError("product secret config removal requires binding_key")
+        if not self.integration:
+            raise ValueError("product secret config removal requires integration")
+        if self.instance and not self.context:
+            raise ValueError("instance secret config removal requires context")
+        return self
+
+
 class ProductExpectedConfigApplyEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1931,6 +1957,8 @@ class ProductExpectedConfigApplyEnvelope(BaseModel):
     source_label: str = "product-expected-config"
     runtime_environment_keys: tuple[ProductRuntimeConfigRequirement, ...] = ()
     managed_secret_bindings: tuple[ProductSecretConfigRequirement, ...] = ()
+    remove_runtime_environment_keys: tuple[ProductRuntimeConfigRequirement, ...] = ()
+    remove_managed_secret_bindings: tuple[ProductSecretConfigRequirementRemoval, ...] = ()
 
     @model_validator(mode="after")
     def _validate_request(self) -> "ProductExpectedConfigApplyEnvelope":
@@ -1941,12 +1969,43 @@ class ProductExpectedConfigApplyEnvelope(BaseModel):
             raise ValueError("Product expected config request requires product.")
         if not self.reason:
             raise ValueError("Product expected config request requires reason.")
-        if not self.runtime_environment_keys and not self.managed_secret_bindings:
+        if not (
+            self.runtime_environment_keys
+            or self.managed_secret_bindings
+            or self.remove_runtime_environment_keys
+            or self.remove_managed_secret_bindings
+        ):
             raise ValueError(
                 "Product expected config request requires at least one runtime key "
-                "or managed secret binding."
+                "or managed secret binding to add or remove."
+            )
+        runtime_removals = [
+            _runtime_config_requirement_key(removal)
+            for removal in self.remove_runtime_environment_keys
+        ]
+        secret_removals = [
+            _secret_config_requirement_key(removal)
+            for removal in self.remove_managed_secret_bindings
+        ]
+        if len(runtime_removals) != len(set(runtime_removals)) or len(secret_removals) != len(
+            set(secret_removals)
+        ):
+            raise ValueError("Product expected config removals must be unique.")
+        if {
+            _runtime_config_requirement_key(requirement)
+            for requirement in self.runtime_environment_keys
+        } & set(runtime_removals) or {
+            _secret_config_requirement_key(requirement)
+            for requirement in self.managed_secret_bindings
+        } & set(secret_removals):
+            raise ValueError(
+                "Product expected config request cannot add and remove the same requirement."
             )
         return self
+
+    @property
+    def requests_removal(self) -> bool:
+        return bool(self.remove_runtime_environment_keys or self.remove_managed_secret_bindings)
 
 
 def _runtime_config_requirement_key(
@@ -1956,7 +2015,7 @@ def _runtime_config_requirement_key(
 
 
 def _secret_config_requirement_key(
-    requirement: ProductSecretConfigRequirement,
+    requirement: ProductSecretConfigRequirement | ProductSecretConfigRequirementRemoval,
 ) -> tuple[str, str, str, str]:
     return (
         requirement.integration,
@@ -1966,23 +2025,96 @@ def _secret_config_requirement_key(
     )
 
 
+def _secret_binding_serves_requirement(
+    binding: SecretBinding, requirement: ProductSecretConfigRequirement
+) -> bool:
+    if binding.status != "configured":
+        return False
+    if (binding.integration, binding.binding_key) != (
+        requirement.integration,
+        requirement.binding_key,
+    ):
+        return False
+    if requirement.context and binding.context != requirement.context:
+        return False
+    return not requirement.instance or binding.instance in {requirement.instance, ""}
+
+
 def _merge_product_expected_config(
     *,
     profile: LaunchplaneProductProfileRecord,
     request: ProductExpectedConfigApplyEnvelope,
     updated_at: str,
+    secret_bindings: tuple[SecretBinding, ...] = (),
 ) -> tuple[LaunchplaneProductProfileRecord, dict[str, object]]:
+    runtime_removal_keys = {
+        _runtime_config_requirement_key(removal)
+        for removal in request.remove_runtime_environment_keys
+    }
+    secret_removal_keys = {
+        _secret_config_requirement_key(removal)
+        for removal in request.remove_managed_secret_bindings
+    }
+    runtime_requirements: list[ProductRuntimeConfigRequirement] = []
+    removed_runtime_requirements: list[ProductRuntimeConfigRequirement] = []
+    for runtime_requirement in profile.expected_config.runtime_environment_keys:
+        if _runtime_config_requirement_key(runtime_requirement) in runtime_removal_keys:
+            removed_runtime_requirements.append(runtime_requirement)
+        else:
+            runtime_requirements.append(runtime_requirement)
+    secret_requirements: list[ProductSecretConfigRequirement] = []
+    removed_secret_requirements: list[ProductSecretConfigRequirement] = []
+    for secret_requirement in profile.expected_config.managed_secret_bindings:
+        if _secret_config_requirement_key(secret_requirement) in secret_removal_keys:
+            removed_secret_requirements.append(secret_requirement)
+        else:
+            secret_requirements.append(secret_requirement)
+    removed_runtime_keys = {
+        _runtime_config_requirement_key(requirement) for requirement in removed_runtime_requirements
+    }
+    removed_secret_keys = {
+        _secret_config_requirement_key(requirement) for requirement in removed_secret_requirements
+    }
+    absent_runtime_removals = [
+        removal
+        for removal in request.remove_runtime_environment_keys
+        if _runtime_config_requirement_key(removal) not in removed_runtime_keys
+    ]
+    absent_secret_removals = [
+        removal
+        for removal in request.remove_managed_secret_bindings
+        if _secret_config_requirement_key(removal) not in removed_secret_keys
+    ]
+    # Removing a requirement never unbinds or deletes a stored secret; report any
+    # configured binding that still holds a value so the caller is not misled.
+    still_bound_secrets = [
+        {
+            "integration": binding.integration,
+            "context": binding.context,
+            "instance": binding.instance,
+            "binding_key": binding.binding_key,
+        }
+        for binding in sorted(
+            secret_bindings,
+            key=lambda candidate: (
+                candidate.integration,
+                candidate.context,
+                candidate.instance,
+                candidate.binding_key,
+            ),
+        )
+        if any(
+            _secret_binding_serves_requirement(binding, requirement)
+            for requirement in removed_secret_requirements
+        )
+    ]
+
     existing_runtime_keys = {
-        _runtime_config_requirement_key(requirement)
-        for requirement in profile.expected_config.runtime_environment_keys
+        _runtime_config_requirement_key(requirement) for requirement in runtime_requirements
     }
     existing_secret_keys = {
-        _secret_config_requirement_key(requirement)
-        for requirement in profile.expected_config.managed_secret_bindings
+        _secret_config_requirement_key(requirement) for requirement in secret_requirements
     }
-
-    runtime_requirements = list(profile.expected_config.runtime_environment_keys)
-    secret_requirements = list(profile.expected_config.managed_secret_bindings)
     added_runtime_requirements: list[ProductRuntimeConfigRequirement] = []
     unchanged_runtime_requirements: list[ProductRuntimeConfigRequirement] = []
     added_secret_requirements: list[ProductSecretConfigRequirement] = []
@@ -2006,7 +2138,12 @@ def _merge_product_expected_config(
         secret_requirements.append(secret_requirement)
         added_secret_requirements.append(secret_requirement)
 
-    changed = bool(added_runtime_requirements or added_secret_requirements)
+    changed = bool(
+        added_runtime_requirements
+        or added_secret_requirements
+        or removed_runtime_requirements
+        or removed_secret_requirements
+    )
     merged_profile = profile
     if changed:
         merged_profile = profile.model_copy(
@@ -2020,35 +2157,61 @@ def _merge_product_expected_config(
             }
         )
 
+    runtime_result: dict[str, object] = {
+        "added": [
+            requirement.model_dump(mode="json") for requirement in added_runtime_requirements
+        ],
+        "unchanged": [
+            requirement.model_dump(mode="json") for requirement in unchanged_runtime_requirements
+        ],
+    }
+    secret_result: dict[str, object] = {
+        "added": [requirement.model_dump(mode="json") for requirement in added_secret_requirements],
+        "unchanged": [
+            requirement.model_dump(mode="json") for requirement in unchanged_secret_requirements
+        ],
+    }
+    summary: dict[str, int] = {
+        "runtime_environment_key_add_count": len(added_runtime_requirements),
+        "managed_secret_binding_add_count": len(added_secret_requirements),
+        "runtime_environment_key_unchanged_count": len(unchanged_runtime_requirements),
+        "managed_secret_binding_unchanged_count": len(unchanged_secret_requirements),
+    }
+    # Add-only responses keep their original shape for callers that validate it
+    # strictly; removal dispositions appear only when the request asked for them.
+    if request.requests_removal:
+        runtime_result["removed"] = [
+            requirement.model_dump(mode="json") for requirement in removed_runtime_requirements
+        ]
+        runtime_result["absent"] = [
+            removal.model_dump(mode="json") for removal in absent_runtime_removals
+        ]
+        secret_result["removed"] = [
+            requirement.model_dump(mode="json") for requirement in removed_secret_requirements
+        ]
+        secret_result["absent"] = [
+            removal.model_dump(mode="json") for removal in absent_secret_removals
+        ]
+        secret_result["still_bound"] = still_bound_secrets
+        summary.update(
+            {
+                "runtime_environment_key_remove_count": len(removed_runtime_requirements),
+                "managed_secret_binding_remove_count": len(removed_secret_requirements),
+                "runtime_environment_key_absent_count": len(absent_runtime_removals),
+                "managed_secret_binding_absent_count": len(absent_secret_removals),
+                "managed_secret_binding_still_bound_count": len(still_bound_secrets),
+            }
+        )
+
     return merged_profile, {
         "status": "ok",
         "mode": request.mode,
         "product": request.product,
         "source_label": request.source_label,
         "changed": changed,
-        "runtime_environment_keys": {
-            "added": [
-                requirement.model_dump(mode="json") for requirement in added_runtime_requirements
-            ],
-            "unchanged": [
-                requirement.model_dump(mode="json")
-                for requirement in unchanged_runtime_requirements
-            ],
-        },
-        "managed_secret_bindings": {
-            "added": [
-                requirement.model_dump(mode="json") for requirement in added_secret_requirements
-            ],
-            "unchanged": [
-                requirement.model_dump(mode="json") for requirement in unchanged_secret_requirements
-            ],
-        },
-        "summary": {
-            "runtime_environment_key_add_count": len(added_runtime_requirements),
-            "managed_secret_binding_add_count": len(added_secret_requirements),
-            "runtime_environment_key_unchanged_count": len(unchanged_runtime_requirements),
-            "managed_secret_binding_unchanged_count": len(unchanged_secret_requirements),
-        },
+        "runtime_environment_keys": runtime_result,
+        "managed_secret_bindings": secret_result,
+        "summary": summary,
     }
 
 
@@ -11985,10 +12148,34 @@ def create_launchplane_fastapi_app(
                 code="not_found",
                 message=str(error),
             ) from error
+        secret_bindings: tuple[SecretBinding, ...] = ()
+        if expected_config_request.remove_managed_secret_bindings:
+            list_secret_bindings = getattr(record_store, "list_secret_bindings", None)
+            if not callable(list_secret_bindings):
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="database_storage_required",
+                    message=(
+                        "Launchplane record store does not support secret binding reads: "
+                        "list_secret_bindings"
+                    ),
+                )
+            secret_bindings = tuple(
+                binding
+                for integration in sorted(
+                    {
+                        removal.integration
+                        for removal in expected_config_request.remove_managed_secret_bindings
+                    }
+                )
+                for binding in list_secret_bindings(integration=integration, limit=None)
+            )
         merged_profile, result = _merge_product_expected_config(
             profile=profile,
             request=expected_config_request,
             updated_at=utc_now_timestamp(),
+            secret_bindings=secret_bindings,
         )
         if expected_config_request.mode == "apply" and result["changed"]:
             try:
@@ -25697,7 +25884,7 @@ def create_launchplane_fastapi_app(
             }
         },
         operation_id="apply_product_expected_config",
-        summary="Add product expected config metadata",
+        summary="Add or remove product expected config metadata",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
