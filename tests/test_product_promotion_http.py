@@ -14,19 +14,11 @@ from pydantic import ValidationError
 from control_plane.contracts.deploy_target import DeployedTargetReference, ProviderTargetRecord
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
-    authz_policy_sha256,
-    build_authz_policy_record_id,
 )
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
-from control_plane.contracts.retired_manager_preview_approval import (
-    MANAGER_PREVIEW_APPROVAL_READ_ACTION,
-    MANAGER_PREVIEW_APPROVAL_WRITE_ACTION,
-    ManagerPreviewApprovalEventRecord,
-    ManagerPreviewApprovalEventWriteStatus,
-)
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
@@ -48,7 +40,6 @@ from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.service_auth import (
     GitHubActionsIdentity,
-    GitHubHumanPolicyRule,
     LaunchplaneAuthzPolicy,
 )
 from control_plane.product_promotion_http import (
@@ -267,126 +258,7 @@ def _status(
     )
 
 
-class _ManagerPromotionStore(_PromotionStore):
-    def __init__(self) -> None:
-        base = _store()
-        profile = base.profile.model_copy(
-            update={
-                "preview": ProductPreviewProfile(
-                    enabled=True,
-                    context="atlas-commerce",
-                    enable_label="launchplane-preview",
-                )
-            }
-        )
-        super().__init__(profile=profile, summaries=base.summaries)
-        self.policy: LaunchplaneAuthzPolicyRecord | None = _manager_policy_record()
-        self.preview = _manager_preview()
-        self.generation = _manager_generation()
-        self.events: dict[str, ManagerPreviewApprovalEventRecord] = {}
-
-    def list_authz_policy_records(
-        self,
-        *,
-        status: str = "",
-        limit: int | None = None,
-    ) -> tuple[LaunchplaneAuthzPolicyRecord, ...]:
-        records = (
-            (self.policy,)
-            if self.policy is not None and (not status or self.policy.status == status)
-            else ()
-        )
-        return records[:limit] if limit is not None else records
-
-    def list_preview_records(
-        self,
-        *,
-        context_name: str = "",
-        anchor_repo: str = "",
-        anchor_pr_number: int | None = None,
-        limit: int | None = None,
-    ) -> tuple[PreviewRecord, ...]:
-        records = (
-            (self.preview,)
-            if (not context_name or self.preview.context == context_name)
-            and (not anchor_repo or self.preview.anchor_repo == anchor_repo)
-            and (anchor_pr_number is None or self.preview.anchor_pr_number == anchor_pr_number)
-            else ()
-        )
-        return records[:limit] if limit is not None else records
-
-    def read_preview_generation_record(self, generation_id: str) -> PreviewGenerationRecord:
-        if generation_id != self.generation.generation_id:
-            raise FileNotFoundError(generation_id)
-        return self.generation
-
-    def list_manager_preview_approval_event_records(
-        self,
-        *,
-        product: str = "",
-        context: str = "",
-        repository: str = "",
-        pr_number: int | None = None,
-        preview_id: str = "",
-        action: str = "",
-        limit: int | None = None,
-    ) -> tuple[ManagerPreviewApprovalEventRecord, ...]:
-        records = tuple(
-            event
-            for event in self.events.values()
-            if (not product or event.binding.product == product)
-            and (not context or event.binding.context == context)
-            and (not repository or event.binding.repository == repository)
-            and (pr_number is None or event.binding.pr_number == pr_number)
-            and (not preview_id or event.binding.preview_id == preview_id)
-            and (not action or event.action == action)
-        )
-        records = tuple(sorted(records, key=lambda event: (event.occurred_at, event.event_id)))
-        return records[:limit] if limit is not None else records
-
-    def write_manager_preview_approval_event_record(
-        self, record: ManagerPreviewApprovalEventRecord
-    ) -> ManagerPreviewApprovalEventWriteStatus:
-        if record.event_id in self.events:
-            return "replayed"
-        self.events[record.event_id] = record
-        return "written"
-
-
-def _manager_policy_record(*, revision: int = 1) -> LaunchplaneAuthzPolicyRecord:
-    policy = LaunchplaneAuthzPolicy(
-        schema_version=2,
-        github_humans=(
-            GitHubHumanPolicyRule(
-                managed_set_id="manager.atlas-commerce",
-                managed_rule_id="preview-approval",
-                github_ids=(101,),
-                roles=("read_only",),
-                products=("atlas-commerce",),
-                contexts=("atlas-commerce",),
-                actions=(
-                    MANAGER_PREVIEW_APPROVAL_READ_ACTION,
-                    MANAGER_PREVIEW_APPROVAL_WRITE_ACTION,
-                ),
-            ),
-        ),
-    )
-    policy_sha256 = authz_policy_sha256(policy)
-    return LaunchplaneAuthzPolicyRecord(
-        record_id=build_authz_policy_record_id(
-            revision=revision,
-            policy_sha256=policy_sha256,
-        ),
-        revision=revision,
-        status="active",
-        source="test:manager-preview-promotion",
-        updated_at="2026-07-15T08:55:00Z",
-        policy_sha256=policy_sha256,
-        policy=policy,
-    )
-
-
-def _manager_preview() -> PreviewRecord:
+def _atlas_preview() -> PreviewRecord:
     return PreviewRecord(
         preview_id="preview-atlas-17",
         context="atlas-commerce",
@@ -406,7 +278,7 @@ def _manager_preview() -> PreviewRecord:
     )
 
 
-def _manager_generation() -> PreviewGenerationRecord:
+def _atlas_preview_generation() -> PreviewGenerationRecord:
     runtime_identity = RuntimeIdentity(
         product="atlas-commerce",
         context="atlas-commerce",
@@ -443,15 +315,6 @@ def _manager_generation() -> PreviewGenerationRecord:
         overall_health_status="pass",
         runtime_identity=runtime_identity,
     )
-
-
-def _approve_manager_preview(store: _ManagerPromotionStore) -> None:
-    # Serialized by the pre-retirement implementation; a historical approval
-    # must never satisfy the release gate.
-    record = ManagerPreviewApprovalEventRecord.model_validate_json(
-        (Path(__file__).parent / "fixtures/retired-approval/manager-event.json").read_text()
-    )
-    store.write_manager_preview_approval_event_record(record)
 
 
 class ProductPromotionStatusTests(unittest.TestCase):
@@ -959,17 +822,6 @@ class ProductPromotionReleaseApprovalTests(unittest.TestCase):
         self.assertTrue(approved.workflow_live.enabled)
         self.assertNotEqual(pending.evidence_fingerprint, approved.evidence_fingerprint)
 
-    def test_old_manager_policy_does_not_control_release_gate(self) -> None:
-        store = _ManagerPromotionStore()
-        _approve_manager_preview(store)
-        store.profile = store.profile.model_copy(update={"production_use": "live"})
-        with patch(
-            "control_plane.release_review.resolve_launchplane_github_token", return_value=""
-        ):
-            _, _, status = _status(store)
-        self.assertFalse(status.workflow_live.enabled)
-        self.assertFalse(status.release_review.approved)
-
 
 class FastApiProductPromotionTests(unittest.IsolatedAsyncioTestCase):
     async def test_raw_live_execution_denies_missing_release_approval_before_provider(self) -> None:
@@ -993,9 +845,8 @@ class FastApiProductPromotionTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
             )
-            store.write_preview_record(_manager_preview())
-            store.write_preview_generation_record(_manager_generation())
-            store.seed_authz_policy_if_absent(_manager_policy_record())
+            store.write_preview_record(_atlas_preview())
+            store.write_preview_generation_record(_atlas_preview_generation())
             identity = GitHubActionsIdentity(
                 repository="example/atlas-commerce",
                 repository_owner="example",

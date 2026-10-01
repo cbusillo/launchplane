@@ -30373,8 +30373,7 @@
           },
           "path_kind": {
             "enum": [
-              "trusted_maintenance",
-              "manager_preview_approval"
+              "trusted_maintenance"
             ],
             "title": "Path Kind",
             "type": "string"
@@ -30543,7 +30542,6 @@
               "engineering",
               "eligible",
               "pending",
-              "manager-approved",
               "maintenance-admitted",
               "stale",
               "denied",
@@ -30873,8 +30871,7 @@
             "default": "none",
             "enum": [
               "none",
-              "trusted_maintenance",
-              "manager_preview_approval"
+              "trusted_maintenance"
             ],
             "title": "Evidence Kind",
             "type": "string"
@@ -30897,8 +30894,6 @@
               "engineering_normal_flow",
               "tenant_normal_flow",
               "trusted_maintenance_admitted",
-              "manager_preview_approved",
-              "manager_preview_required",
               "evidence_denied",
               "evidence_stale",
               "evidence_unavailable",
@@ -30967,16 +30962,6 @@
       "TenantMergeEligibilityEvidenceInputs": {
         "additionalProperties": false,
         "properties": {
-          "manager_preview_approval": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/TenantAdmissionPathResult"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "schema_version": {
             "default": 1,
             "minimum": 1,
@@ -30997,7 +30982,6 @@
         "title": "TenantMergeEligibilityEvidenceInputs",
         "type": "object",
         "required": [
-          "manager_preview_approval",
           "schema_version",
           "trusted_maintenance"
         ]
