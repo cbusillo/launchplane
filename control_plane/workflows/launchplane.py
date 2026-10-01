@@ -918,23 +918,34 @@ def github_pr_owner(*, pr_url: str) -> str:
     return owner if isinstance(owner, str) else ""
 
 
+GITHUB_COMMENT_PAGE_SIZE = 100
+GITHUB_COMMENT_MAX_PAGES = 10
+
+
 def find_github_issue_comment_by_marker(
     *, owner: str, repo: str, issue_number: int, token: str, marker: str
 ) -> dict[str, object] | None:
-    payload = github_api_request(
-        path=f"/repos/{owner}/{repo}/issues/{issue_number}/comments",
-        token=token,
-    )
-    if not isinstance(payload, list):
-        raise click.ClickException(
-            f"GitHub issue comments response for {owner}/{repo}#{issue_number} must be a list."
+    """The first comment carrying the marker, searching at most the first 1,000 comments."""
+    for page in range(1, GITHUB_COMMENT_MAX_PAGES + 1):
+        payload = github_api_request(
+            path=(
+                f"/repos/{owner}/{repo}/issues/{issue_number}/comments"
+                f"?per_page={GITHUB_COMMENT_PAGE_SIZE}&page={page}"
+            ),
+            token=token,
         )
-    for item in payload:
-        if not isinstance(item, dict):
-            continue
-        body = item.get("body")
-        if isinstance(body, str) and marker in body:
-            return item
+        if not isinstance(payload, list):
+            raise click.ClickException(
+                f"GitHub issue comments response for {owner}/{repo}#{issue_number} must be a list."
+            )
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            body = item.get("body")
+            if isinstance(body, str) and marker in body:
+                return item
+        if len(payload) < GITHUB_COMMENT_PAGE_SIZE:
+            return None
     return None
 
 

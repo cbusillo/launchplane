@@ -1084,6 +1084,7 @@ def _current_preview(
     current: dict[str, object] = {
         "current_preview_id": "",
         "current_state": "",
+        "current_preview_url": "",
         "current_head_sha": "",
         "current_image_digest": "",
     }
@@ -1100,7 +1101,11 @@ def _current_preview(
     lifecycle_token = f"{preview.preview_id}@{preview.state}@{preview.updated_at}"
     if preview.state in _ENDED_PREVIEW_STATES:
         return current, lifecycle_token
-    current.update(current_preview_id=preview.preview_id, current_state=preview.state)
+    current.update(
+        current_preview_id=preview.preview_id,
+        current_state=preview.state,
+        current_preview_url=preview.canonical_url.strip(),
+    )
     generation_id = preview.serving_generation_id or preview.active_generation_id
     if not generation_id:
         return current, lifecycle_token

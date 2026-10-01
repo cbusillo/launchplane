@@ -256,10 +256,14 @@ class FakeGitHubComments:
                         comment["body"] = body["body"]
                         self.writes.append(("PATCH", number))
                         return dict(comment)
+        path, _, query = path.partition("?")
         if path.startswith(f"{prefix}/issues/") and path.endswith("/comments"):
             number = int(path.split("/issues/")[1].split("/")[0])
             if method == "GET":
-                return [dict(comment) for comment in self.on(number)]
+                parameters = dict(item.split("=", 1) for item in query.split("&") if item)
+                size, page = int(parameters["per_page"]), int(parameters["page"])
+                comments = self.on(number)[(page - 1) * size : page * size]
+                return [dict(comment) for comment in comments]
             if method == "POST":
                 assert body is not None
                 self._next_id += 1
@@ -1075,6 +1079,39 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
                 else:
                     self.assertNotIn("@site-owner", body)
 
+    def test_owner_label_added_after_the_preview_is_up_adds_the_mention(self) -> None:
+        payload = _profile()
+        payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.assertEqual(self.reconcile_preview()["action"], "apply")
+        self.assertNotIn("@site-owner", self.comment_body())
+
+        self.github.pull_request["labels"] = [{"name": LABEL}, {"name": "owner-review"}]
+        marked = self.reconcile_preview()
+
+        self.assertEqual(marked["reason"], "already_serving")
+        self.assertIn("@site-owner this change is ready for you to look at.", self.comment_body())
+        self.assertIn("https://pr-5.example.test", self.comment_body())
+        self.reconcile_preview()
+        self.assertEqual(self.comments.writes, [("POST", 5), ("PATCH", 5)])
+
+    def test_the_comment_is_found_past_the_first_page(self) -> None:
+        self.comments.comments[5] = [
+            {"id": index, "body": f"review comment {index}"} for index in range(1, 101)
+        ]
+        self.comments.comments[5].append(
+            {"id": 101, "body": "<!-- launchplane-reconcile-preview -->"}
+        )
+
+        self.reconcile_preview()
+
+        self.assertEqual(len(self.comments.on(5)), 101)
+        self.assertEqual(self.comments.writes, [("PATCH", 5)])
+        self.assertIn("Waiting for", cast(str, self.comments.on(5)[100]["body"]))
+
     def test_incomplete_preview_environment_names_the_missing_keys(self) -> None:
         def incomplete_inputs(**_kwargs: object) -> dict[str, object]:
             raise OdooPreviewApplyConfigError(
@@ -1159,6 +1196,39 @@ class ProductReconcileTestingFeedbackTests(ProductReconcileTestCase):
         self.assertEqual(self.comments.writes, [("POST", 12), ("PATCH", 12)])
         feedback = cast(dict[str, object], queued["pr_feedback"])
         self.assertEqual((feedback["pull_request_number"], feedback["status"]), (12, "queued"))
+
+    def test_hold_reason_is_redacted_before_it_reaches_the_pr(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.comments.merged[DEPLOYABLE] = 12
+        self.hold_testing()
+        target = self.store.read_dokploy_target_record(context_name="cm", instance_name="testing")
+        hold = target.policies.staff_testing_hold
+        assert hold is not None
+        self.store.write_dokploy_target_record(
+            target.model_copy(
+                update={
+                    "policies": target.policies.model_copy(
+                        update={
+                            "staff_testing_hold": hold.model_copy(
+                                update={
+                                    "reason": "Checkout test, notes at "
+                                    "https://notes.example.test/plan password=hunter2"
+                                }
+                            )
+                        }
+                    )
+                }
+            )
+        )
+        self.request()
+
+        self.reconcile()
+
+        (comment,) = self.comments.on(12)
+        body = cast(str, comment["body"])
+        self.assertIn("- Hold: Checkout test", body)
+        self.assertNotIn("hunter2", body)
+        self.assertNotIn("notes.example.test", body)
 
     def test_a_direct_push_is_not_announced_anywhere(self) -> None:
         self.github.add_run(20, DEPLOYABLE)

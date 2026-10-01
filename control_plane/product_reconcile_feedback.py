@@ -173,6 +173,16 @@ def _preview_feedback(
         status, failure_summary = "cleanup_failed", _failure_summary(error)
     elif action == "apply" and plan.get("preview_result_status") == "pass":
         status, preview_url = "ready", _text(plan.get("preview_url"))
+    elif (
+        action == "none"
+        and plan.get("reason") == "already_serving"
+        and plan.get("current_state") == "active"
+        and _text(plan.get("current_preview_url"))
+    ):
+        # Said again from the live preview, so a later Owner-review label, a fixed
+        # public origin, or a post that failed reaches the PR; an unchanged body is
+        # not posted again.
+        status, preview_url = "ready", _text(plan.get("current_preview_url"))
     elif action == "destroy" and plan.get("preview_result_status") == "pass":
         status, revision = "destroyed", ""
     else:
@@ -279,7 +289,8 @@ def render_testing_feedback_markdown(
     lines = [TESTING_FEEDBACK_MARKER, titles[status], "", f"- Commit: `{commit}`"]
     if status == "waiting":
         if hold_reason:
-            lines.append(f"- Hold: {hold_reason}")
+            # Operator free text: redacted like a failure summary before it is public.
+            lines.append(f"- Hold: {_failure_summary(hold_reason)}")
         lines.extend(["", "Launchplane deploys the newest verified build when the hold is lifted."])
     elif status == "failed":
         if failure_summary:
