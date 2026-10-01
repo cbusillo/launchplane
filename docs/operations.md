@@ -2831,6 +2831,25 @@ requested image repository and complete requested platform set. After all
 producers migrate, service ingress can require v2 without rewriting historical
 v1 records.
 
+## Live Sites During A Launchplane Outage
+
+While Launchplane is unavailable, the real live sites named in `DIRECTION.md`
+get rollback only. Nothing moves a live site forward until Launchplane is
+restored: no promotion, no deploy, and no provider-console change. There is no
+break-glass authority for forward production changes.
+
+- A live-site rollback during an outage happens at the deployment provider, to
+  an artifact that previously passed in production. It is an operator action:
+  the agent asks the operator first, as for any live-site change, and never
+  treats an outage as permission to work around Launchplane.
+- Restore Launchplane itself through
+  [Launchplane Service Deploy Posture](#launchplane-service-deploy-posture),
+  including its manual break-glass rollback of Launchplane's own image, before
+  resuming merges or promotions.
+- Once Launchplane is back, confirm its inventory for each live site matches
+  what the provider is serving before the next promotion, which takes the
+  normal path with a fresh backup gate.
+
 ## Launchplane Preview Operations
 
 Launchplane commands operate on durable preview, generation, and enablement records.
