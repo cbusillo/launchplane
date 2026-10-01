@@ -3023,7 +3023,11 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
             "mutation_reconciliation_required",
         )
         self.assertEqual(second_response.status_code, 409)
-        self.assertEqual(second_response.json()["error"]["code"], "mutation_in_progress")
+        self.assertEqual(
+            second_response.json()["error"]["code"],
+            "mutation_reconciliation_required",
+        )
+        self.assertNotIn("already running", second_response.json()["error"]["message"])
         self.assertEqual(apply_driver.call_count, 1)
         assert reconcile_stored is not None
         self.assertEqual(reconcile_stored.state, "reconcile_required")
