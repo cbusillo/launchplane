@@ -21,10 +21,10 @@ after an operation finishes.
 
 The enqueue and cancel routes accept a bearer or OIDC caller, or a signed-in
 browser session through the CSRF-checked browser-mutation dependency; terminal
-agent tokens are refused. The managed-rule requirement applies to sessions too:
-the policy administrator alone does not satisfy it, so the operator's release
-panel stops at the backup step with `authorization_provenance_unavailable` until
-the caller has exactly one matching managed rule (#2682).
+agent tokens are refused. A caller needs exactly one matching managed rule,
+except a signed-in policy administrator, whose backup records a
+`policy_administrator` grant that the worker re-checks against the active policy
+before the capture's first effect.
 
 `GET /v1/production-backup-gates/operations/{operation_id}` takes the same
 product/context/instance as query parameters and requires

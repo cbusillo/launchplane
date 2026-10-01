@@ -6,11 +6,13 @@ import type {
 } from "./browser-operation";
 import { promotionOperationFailure } from "./promotion-operation";
 import type {
-  AcceptedEvidenceResponse,
+  EnqueueOdooProdPromotionData,
+  OdooProdPromotionOperationResponse,
+  OdooProdPromotionOperationView,
+  OdooProdPromotionRunResult,
   ProductionBackupGateRequest,
   ProductionBackupGateResponse,
   ReleaseReviewResponse,
-  WriteOdooProdPromotionRunData,
 } from "./generated/openapi.ts";
 
 // The promotion action the infrastructure backup is recorded against; the
@@ -27,9 +29,12 @@ export interface OdooReleaseScope {
 }
 
 // One click's identity. A retry after an uncertain stop reuses it, so the
-// backup enqueue returns the same operation and the promotion replays.
+// backup and promotion enqueues return the operations they already created.
+// Once the promotion is queued its operation id is kept too, and a reload only
+// resumes watching that operation.
 export interface OdooReleaseAttempt {
   idempotencyKey: string;
+  promotionOperationId?: string;
   requestId: string;
 }
 
@@ -41,8 +46,8 @@ export interface OdooReleaseProgress {
 
 export type OdooReleaseOutcome =
   | {
-      backupRecordId: string;
-      response: AcceptedEvidenceResponse;
+      operation: OdooProdPromotionOperationView;
+      result: OdooProdPromotionRunResult;
       status: "promoted";
     }
   | {
@@ -57,10 +62,15 @@ export interface OdooReleaseDependencies {
     payload: ProductionBackupGateRequest,
     options: BrowserOperationOptions,
   ) => Promise<ProductionBackupGateResponse>;
-  promote: (
-    payload: WriteOdooProdPromotionRunData["body"],
+  enqueuePromotion: (
+    payload: EnqueueOdooProdPromotionData["body"],
     options: BrowserOperationOptions,
-  ) => Promise<AcceptedEvidenceResponse>;
+  ) => Promise<OdooProdPromotionOperationResponse>;
+  readPromotion: (
+    operationId: string,
+    scope: { context: string; product: string },
+    signal?: AbortSignal,
+  ) => Promise<OdooProdPromotionOperationResponse>;
   readBackup: (
     operationId: string,
     scope: { context: string; instance: string; product: string },
@@ -74,6 +84,15 @@ export interface OdooReleaseDependencies {
 }
 
 const BACKUP_ACTIVE_STATUSES = new Set(["pending", "running"]);
+const PROMOTION_ACTIVE_STATUSES = new Set(["pending", "running"]);
+const PROMOTION_PHASE_DETAILS: Record<string, string> = {
+  created: "Queued; waiting for the Launchplane worker.",
+  running: "The worker picked it up and is checking approval and the backup.",
+  validated: "Approval and backup verified; starting the logical database backup.",
+  logical_backup_started: "Taking the logical database backup.",
+  logical_backup_completed: "Logical backup taken.",
+  promotion_started: "Deploying the testing artifact and running post-deploy. This can take many minutes.",
+};
 // Refusals the server reports with a 5xx status that are still final answers.
 const DEFINITIVE_SERVER_CODES = new Set([
   "authorization_provenance_unavailable",
@@ -107,7 +126,7 @@ export function odooReleaseFailure(error: unknown): BrowserOperationFailure {
     return {
       ...failure,
       message:
-        "Launchplane refused to start the backup: a durable backup needs exactly one managed authorization rule for your identity on this lane, and the administrator role alone does not count.",
+        "Launchplane could not record durable authority for your identity on this lane: it needs you to be the policy administrator, or to have exactly one managed rule for this action.",
     };
   }
   if (failure.code === "authorization_denied") {
@@ -123,6 +142,7 @@ export async function runOdooRelease({
   attempt,
   dependencies,
   onProgress,
+  onPromotionQueued,
   pollIntervalMilliseconds = 5000,
   scope,
   signal,
@@ -130,6 +150,7 @@ export async function runOdooRelease({
   attempt: OdooReleaseAttempt;
   dependencies: OdooReleaseDependencies;
   onProgress: (progress: OdooReleaseProgress) => void;
+  onPromotionQueued?: (operationId: string) => void;
   pollIntervalMilliseconds?: number;
   scope: OdooReleaseScope;
   signal?: AbortSignal;
@@ -142,7 +163,23 @@ export async function runOdooRelease({
     onProgress({ detail: failure.message, state: "failed", step });
     return { certainty, failure, status: "stopped", step };
   };
+  const promotionScope = { context: scope.context, product: scope.product };
   try {
+    if (attempt.promotionOperationId) {
+      // The promotion is already queued: only watch it. Re-running review and
+      // backup would ask for a second backup the server would not use.
+      for (const earlier of ["review", "backup"] as const) {
+        onProgress({ detail: "Done before the promotion was queued.", state: "passed", step: earlier });
+      }
+      step = "promote";
+      onProgress({ detail: "Reading the queued promotion.", state: "running", step });
+      const resumed = await dependencies.readPromotion(
+        attempt.promotionOperationId,
+        promotionScope,
+        signal,
+      );
+      return await watchPromotion(resumed);
+    }
     onProgress({ detail: "Reading the release review.", state: "running", step });
     const review = await dependencies.readReleaseReview(scope.product, signal);
     if (review.product !== scope.product || !releaseReviewAllowsPromotion(review)) {
@@ -206,12 +243,8 @@ export async function runOdooRelease({
     });
 
     step = "promote";
-    onProgress({
-      detail: "Promoting the testing artifact to production. This can take many minutes.",
-      state: "running",
-      step,
-    });
-    const response = await dependencies.promote(
+    onProgress({ detail: "Queueing the promotion.", state: "running", step });
+    const queued = await dependencies.enqueuePromotion(
       {
         product: scope.product,
         run: {
@@ -224,29 +257,71 @@ export async function runOdooRelease({
       },
       { idempotencyKey: attempt.idempotencyKey, signal },
     );
-    const result = response.result ?? {};
-    if (result.run_status !== "pass") {
-      const message = typeof result.error_message === "string" ? result.error_message : "";
-      return stop(
-        {
-          code: `promotion_${String(result.run_status ?? "unknown")}`,
-          message: message || `The promotion ended ${String(result.run_status ?? "without a status")}.`,
-          statusCode: 0,
-          traceId: response.trace_id,
-        },
-        "definitive",
-      );
-    }
-    const artifactId = typeof result.artifact_id === "string" ? result.artifact_id : "";
-    onProgress({
-      detail: artifactId ? `Promoted ${artifactId}.` : "Promoted.",
-      state: "passed",
-      step,
-    });
-    return { backupRecordId: backup.backup_record_id, response, status: "promoted" };
+    onPromotionQueued?.(queued.operation.operation_id);
+    return await watchPromotion(queued);
   } catch (error) {
     return stop(odooReleaseFailure(error), odooReleaseFailureCertainty(error));
   }
+
+  async function watchPromotion(
+    response: OdooProdPromotionOperationResponse,
+  ): Promise<OdooReleaseOutcome> {
+    let current = response;
+    while (PROMOTION_ACTIVE_STATUSES.has(current.operation.status)) {
+      onProgress({
+        detail: PROMOTION_PHASE_DETAILS[current.operation.phase] ?? `Phase ${current.operation.phase}.`,
+        state: "running",
+        step,
+      });
+      await dependencies.wait(pollIntervalMilliseconds, signal);
+      current = await dependencies.readPromotion(
+        current.operation.operation_id,
+        promotionScope,
+        signal,
+      );
+    }
+    const operation = current.operation;
+    if (operation.status === "pass" && operation.result) {
+      onProgress({
+        detail: `Promoted ${operation.result.artifact_id || "the testing artifact"}.`,
+        state: "passed",
+        step,
+      });
+      return { operation, result: operation.result, status: "promoted" };
+    }
+    return stop(promotionStopFailure(operation, current.trace_id), "definitive");
+  }
+}
+
+function promotionStopFailure(
+  operation: OdooProdPromotionOperationView,
+  traceId: string,
+): BrowserOperationFailure {
+  if (operation.status === "reconciliation_required") {
+    return {
+      code: operation.error_code || "operation_reconciliation_required",
+      message: `The worker stopped mid-promotion (phase ${operation.phase}) and did not run it again. Check the latest prod deployment, then cancel operation ${operation.operation_id} with what you found to free the lane.`,
+      statusCode: 0,
+      traceId,
+    };
+  }
+  if (operation.status === "cancelled") {
+    return {
+      code: "promotion_cancelled",
+      message: `Promotion ${operation.operation_id} was cancelled before it finished.`,
+      statusCode: 0,
+      traceId,
+    };
+  }
+  return {
+    code: operation.error_code || `promotion_${operation.status}`,
+    message:
+      operation.error_message ||
+      operation.result?.error_message ||
+      `The promotion ended ${operation.status}.`,
+    statusCode: 0,
+    traceId,
+  };
 }
 
 export function waitFor(milliseconds: number, signal?: AbortSignal): Promise<void> {
@@ -285,7 +360,13 @@ export function readOdooReleaseAttempt(
     ) {
       return null;
     }
-    return { idempotencyKey: candidate.idempotencyKey, requestId: candidate.requestId };
+    return {
+      idempotencyKey: candidate.idempotencyKey,
+      requestId: candidate.requestId,
+      ...(typeof candidate.promotionOperationId === "string" && candidate.promotionOperationId
+        ? { promotionOperationId: candidate.promotionOperationId }
+        : {}),
+    };
   } catch {
     return null;
   }

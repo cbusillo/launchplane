@@ -1747,11 +1747,28 @@ state/
   `provider_control` stage with distinct target, schedule, trigger, wait, and
   identity codes; result-read and result-parse failures use bounded `result`
   codes.
-- Bootstrap, target replacement, production backup restore, and retained-volume
-  backup import creation and worker claim also share one storage-level
-  stable-lane reservation.
+- Odoo prod promotions queued from the operator's release panel write
+  `OdooProdPromotionOperationRecord` entries to
+  `launchplane_odoo_prod_promotion_operations` (DB-backed only; there is no
+  file-backed form). The record stores the promotion run request, the caller's
+  idempotency scope and key, request fingerprint, authorization provenance for
+  `odoo_prod_promotion_run.execute` on the prod instance, lease ownership,
+  monotonic phase checkpoints (`validated`, `logical_backup_started`,
+  `logical_backup_completed`, `promotion_started`), the final run result
+  (run status, artifact, deployment and promotion record ids, error), and a
+  bounded error. The operation id is derived from the caller scope, key,
+  product, and context, so a repeated enqueue finds the same record. A partial
+  unique index allows one pending, running, or reconciliation-required promotion
+  per lane. An expired lease in `created`, `running`, or `validated` (before the
+  logical backup) requeues the promotion; an expired lease in any later phase
+  moves it to `reconciliation_required`, because it may have taken a backup or
+  deployed, and the lane stays blocked until an operator cancels it with provider
+  inspection evidence. The worker never re-runs such a promotion.
+- Bootstrap, target replacement, production backup restore, retained-volume
+  backup import, and queued prod promotion creation and worker claim also share
+  one storage-level stable-lane reservation.
   Filesystem storage serializes the exact product/context/instance with one lock;
-  PostgreSQL uses a transaction-scoped advisory lock and checks all four blocking
+  PostgreSQL uses a transaction-scoped advisory lock and checks all five blocking
   operation tables before inserting or claiming. Claims choose one deterministic
   owner across legacy cross-kind queue entries, prioritizing reconciliation and
   running work before the oldest pending record. Per-table partial indexes remain
@@ -1765,7 +1782,7 @@ state/
   and block on any difference before an apply operation can be created. Volume
   changes remain explicit rebuild/restore decisions rather than implicit
   `data_source_mode=existing` behavior.
-- New records for all five durable driver queues use schema version 2 and
+- New records for the five original durable driver queues use schema version 2 and
   persist authorization provenance in the canonical operation payload: action,
   product, context, exact instances, managed set/rule ids, policy record id,
   revision, schema version, digest, source, authorization time, and normalized
@@ -1774,7 +1791,19 @@ state/
   The payload remains the storage authority, so this contract does not require
   promoted SQL columns or an Alembic migration.
 - Durable Operation Authorization has a `grant`: `policy_rule` (the default,
-  serialized without the field, exactly as before) or `launchplane_reconcile`.
+  serialized without the field, exactly as before), `policy_administrator`, or
+  `launchplane_reconcile`.
+  A `policy_administrator` grant is captured, for any product and action, when
+  the caller is a signed-in GitHub human with role `admin` whom the active
+  policy names as its administrator by immutable GitHub id (the strict
+  `authz_policy_grant.write` rule on `launchplane`/`launchplane`). It records the
+  policy record id, revision, schema version, digest, and source for audit, and
+  no managed set or rule id. The worker re-reads the active policy before
+  executing and before the first provider effect, and fails the operation with
+  `operation_authorization_administrator_revoked` when that policy no longer
+  names the recorded caller's GitHub id as administrator. It creates no grant or
+  credential, and no automated identity can hold it; managed-rule checks never
+  accept it. Every other caller still needs exactly one managed rule.
   A reconcile grant has caller identity type `launchplane_reconcile` with the
   fixed subject `launchplane-reconciler` and carries no managed rule or policy
   fields; neither form accepts the other's identity. Only the reconciler builds

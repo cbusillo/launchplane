@@ -1479,6 +1479,36 @@ export type OdooOverrideValue = {
     value: string | number | number | boolean | null;
 };
 
+export type OdooProdPromotionOperationResponse = {
+    operation: OdooProdPromotionOperationView;
+    status: 'accepted';
+    trace_id: string;
+};
+
+export type OdooProdPromotionOperationView = {
+    attempt: number;
+    context: string;
+    created_at: string;
+    error_code: string;
+    error_message: string;
+    finished_at: string;
+    instance: string;
+    operation_id: string;
+    phase: 'created' | 'running' | 'validated' | 'logical_backup_started' | 'logical_backup_completed' | 'promotion_started' | 'completed' | 'failed' | 'cancelled';
+    product: string;
+    request_id: string;
+    result: OdooProdPromotionRunResult | null;
+    started_at: string;
+    status: 'pending' | 'running' | 'reconciliation_required' | 'pass' | 'fail' | 'cancelled';
+    updated_at: string;
+};
+
+export type OdooProdPromotionRunEnvelope = {
+    product: string;
+    run: OdooProdPromotionRunRequest;
+    schema_version?: number;
+};
+
 export type OdooProdPromotionRunRequest = {
     backup_timeout_seconds?: number | null;
     context: string;
@@ -1493,6 +1523,30 @@ export type OdooProdPromotionRunRequest = {
     to_instance?: string;
     verify_health?: boolean;
     wait?: boolean;
+};
+
+export type OdooProdPromotionRunResult = {
+    artifact_id: string;
+    backup_record_id: string;
+    backup_status: 'pass' | 'fail' | 'skipped';
+    context: string;
+    deployment_record_id: string;
+    deployment_status: 'pending' | 'pass' | 'fail' | 'skipped';
+    destination_health_status: 'pending' | 'pass' | 'fail' | 'skipped';
+    error_message: string;
+    from_instance: string;
+    image_digest: string;
+    image_repository: string;
+    infrastructure_backup_record_id: string;
+    input_status: 'ready' | 'blocked';
+    post_deploy_status: 'pending' | 'pass' | 'fail' | 'skipped';
+    promotion_record_id: string;
+    promotion_status: 'pass' | 'fail' | 'skipped';
+    release_tuple_id: string;
+    request_id: string;
+    run_status: 'pass' | 'fail' | 'blocked';
+    source_git_ref: string;
+    to_instance: string;
 };
 
 export type OdooProdRollbackRequest = {
@@ -4316,6 +4370,39 @@ export type ReadGovernanceProjectionResponses = {
 
 export type ReadGovernanceProjectionResponse = ReadGovernanceProjectionResponses[keyof ReadGovernanceProjectionResponses];
 
+export type ReadOdooProdPromotionOperationData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        operation_id: string;
+    };
+    query: {
+        product: string;
+        context: string;
+    };
+    url: '/v1/odoo-prod-promotions/operations/{operation_id}';
+};
+
+export type ReadOdooProdPromotionOperationErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadOdooProdPromotionOperationError = ReadOdooProdPromotionOperationErrors[keyof ReadOdooProdPromotionOperationErrors];
+
+export type ReadOdooProdPromotionOperationResponses = {
+    200: OdooProdPromotionOperationResponse;
+};
+
+export type ReadOdooProdPromotionOperationResponse = ReadOdooProdPromotionOperationResponses[keyof ReadOdooProdPromotionOperationResponses];
+
 export type ReadHumanOrdinaryAgentJobData = {
     body?: never;
     path: {
@@ -5251,39 +5338,6 @@ export type ReadTenantAdmissionEvaluationResponses = {
 
 export type ReadTenantAdmissionEvaluationResponse = ReadTenantAdmissionEvaluationResponses[keyof ReadTenantAdmissionEvaluationResponses];
 
-export type WriteOdooProdPromotionRunData = {
-    body: {
-        product: string;
-        run: OdooProdPromotionRunRequest;
-        schema_version?: number;
-    };
-    headers?: {
-        'Idempotency-Key'?: string;
-        Authorization?: string;
-        Cookie?: string;
-    };
-    path?: never;
-    query?: never;
-    url: '/v1/drivers/odoo/prod-promotion-run';
-};
-
-export type WriteOdooProdPromotionRunErrors = {
-    400: LaunchplaneErrorResponse;
-    401: LaunchplaneErrorResponse;
-    403: LaunchplaneErrorResponse;
-    404: LaunchplaneErrorResponse;
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type WriteOdooProdPromotionRunError = WriteOdooProdPromotionRunErrors[keyof WriteOdooProdPromotionRunErrors];
-
-export type WriteOdooProdPromotionRunResponses = {
-    202: AcceptedEvidenceResponse;
-};
-
-export type WriteOdooProdPromotionRunResponse = WriteOdooProdPromotionRunResponses[keyof WriteOdooProdPromotionRunResponses];
-
 export type WriteOdooProdRollbackData = {
     body: {
         product: string;
@@ -5316,6 +5370,35 @@ export type WriteOdooProdRollbackResponses = {
 };
 
 export type WriteOdooProdRollbackResponse = WriteOdooProdRollbackResponses[keyof WriteOdooProdRollbackResponses];
+
+export type EnqueueOdooProdPromotionData = {
+    body: OdooProdPromotionRunEnvelope;
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/odoo-prod-promotions';
+};
+
+export type EnqueueOdooProdPromotionErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type EnqueueOdooProdPromotionError = EnqueueOdooProdPromotionErrors[keyof EnqueueOdooProdPromotionErrors];
+
+export type EnqueueOdooProdPromotionResponses = {
+    200: OdooProdPromotionOperationResponse;
+};
+
+export type EnqueueOdooProdPromotionResponse = EnqueueOdooProdPromotionResponses[keyof EnqueueOdooProdPromotionResponses];
 
 export type DisconnectOrdinaryAgentPrincipalData = {
     body: OrdinaryAgentDisconnectRequest;

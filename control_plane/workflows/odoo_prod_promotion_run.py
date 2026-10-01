@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
 import click
+
+from control_plane.contracts.odoo_prod_promotion_operation import (
+    OdooProdPromotionOperationPhase,
+    OdooProdPromotionRunRequest as OdooProdPromotionRunRequest,
+    OdooProdPromotionRunResult as OdooProdPromotionRunResult,
+)
 
 from control_plane.release_review import require_release_approval
 from control_plane.workflows.production_promotion_backup import (
@@ -41,76 +48,22 @@ class OdooProdPromotionRunStore(
     pass
 
 
-class OdooProdPromotionRunRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+@dataclass(frozen=True, slots=True)
+class OdooProdPromotionRunAdmission:
+    """What a promotion run checks before any provider effect."""
 
-    schema_version: int = Field(default=1, ge=1)
-    context: str
-    from_instance: str = "testing"
-    to_instance: str = "prod"
-    product: str = ""
-    request_id: str
-    infrastructure_backup_record_id: str = ""
-    backup_timeout_seconds: int | None = Field(default=None, ge=1)
-    promotion_timeout_seconds: int | None = Field(default=None, ge=1)
-    health_timeout_seconds: int | None = Field(default=None, ge=1)
-    wait: bool = True
-    verify_health: bool = True
-    no_cache: bool = False
-
-    @model_validator(mode="after")
-    def _validate_request(self) -> "OdooProdPromotionRunRequest":
-        self.context = self.context.strip().lower()
-        self.from_instance = self.from_instance.strip().lower()
-        self.to_instance = self.to_instance.strip().lower()
-        self.product = self.product.strip()
-        self.request_id = self.request_id.strip()
-        self.infrastructure_backup_record_id = self.infrastructure_backup_record_id.strip()
-        if not self.context:
-            raise ValueError("Odoo prod promotion run requires context.")
-        if self.from_instance != "testing" or self.to_instance != "prod":
-            raise ValueError("Odoo prod promotion run requires testing -> prod.")
-        if not self.request_id:
-            raise ValueError("Odoo prod promotion run requires request_id.")
-        if self.verify_health and not self.wait:
-            raise ValueError("Odoo prod promotion run health verification requires wait=true.")
-        return self
+    inputs_result: OdooProdPromotionInputsResult
+    blocked_reason: str = ""
 
 
-class OdooProdPromotionRunResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    context: str
-    from_instance: str
-    to_instance: str
-    request_id: str
-    run_status: Literal["pass", "fail", "blocked"]
-    input_status: Literal["ready", "blocked"]
-    backup_status: Literal["pass", "fail", "skipped"] = "skipped"
-    promotion_status: Literal["pass", "fail", "skipped"] = "skipped"
-    deployment_status: Literal["pending", "pass", "fail", "skipped"] = "skipped"
-    post_deploy_status: Literal["pending", "pass", "fail", "skipped"] = "skipped"
-    destination_health_status: Literal["pending", "pass", "fail", "skipped"] = "skipped"
-    artifact_id: str = ""
-    source_git_ref: str = ""
-    backup_record_id: str = ""
-    infrastructure_backup_record_id: str = ""
-    promotion_record_id: str = ""
-    deployment_record_id: str = ""
-    release_tuple_id: str = ""
-    image_repository: str = ""
-    image_digest: str = ""
-    error_message: str = ""
-
-
-def execute_odoo_prod_promotion_run(
+def admit_odoo_prod_promotion_run(
     *,
     control_plane_root: Path,
-    state_dir: Path,
-    database_url: str | None,
     record_store: OdooProdPromotionRunStore,
     request: OdooProdPromotionRunRequest,
-) -> OdooProdPromotionRunResult:
+) -> OdooProdPromotionRunAdmission:
+    """Check ready inputs, release approval, and the verified infrastructure backup."""
+
     inputs_result = resolve_odoo_prod_promotion_inputs(
         record_store=record_store,
         request=OdooProdPromotionInputsRequest(
@@ -121,13 +74,11 @@ def execute_odoo_prod_promotion_run(
         ),
     )
     if inputs_result.input_status != "ready":
-        return _result_from_inputs(
-            request=request,
+        return OdooProdPromotionRunAdmission(
             inputs_result=inputs_result,
-            run_status="blocked",
-            error_message=inputs_result.error_message,
+            blocked_reason=inputs_result.error_message
+            or "Odoo prod promotion inputs are not ready.",
         )
-
     try:
         require_release_approval(
             control_plane_root=control_plane_root,
@@ -145,13 +96,51 @@ def execute_odoo_prod_promotion_run(
             backup_record_id=request.infrastructure_backup_record_id,
         )
     except (AttributeError, FileNotFoundError, ValueError, click.ClickException) as error:
+        return OdooProdPromotionRunAdmission(
+            inputs_result=inputs_result,
+            blocked_reason=str(error) or "Odoo prod promotion is not admitted.",
+        )
+    return OdooProdPromotionRunAdmission(inputs_result=inputs_result)
+
+
+def execute_odoo_prod_promotion_run(
+    *,
+    control_plane_root: Path,
+    state_dir: Path,
+    database_url: str | None,
+    record_store: OdooProdPromotionRunStore,
+    request: OdooProdPromotionRunRequest,
+    phase_checkpoint: Callable[[OdooProdPromotionOperationPhase], None] | None = None,
+    provider_effect_checkpoint: Callable[[str], None] | None = None,
+) -> OdooProdPromotionRunResult:
+    """Run one promotion; the durable worker passes checkpoints, the sync route does not.
+
+    ``provider_effect_checkpoint`` runs before the first provider effect (the logical
+    backup) and again before the deploy's effects; ``phase_checkpoint`` records progress
+    after each check passes and before the effect it names starts.
+    """
+
+    def record_phase(phase: OdooProdPromotionOperationPhase) -> None:
+        if phase_checkpoint is not None:
+            phase_checkpoint(phase)
+
+    admission = admit_odoo_prod_promotion_run(
+        control_plane_root=control_plane_root,
+        record_store=record_store,
+        request=request,
+    )
+    inputs_result = admission.inputs_result
+    if admission.blocked_reason:
         return _result_from_inputs(
             request=request,
             inputs_result=inputs_result,
             run_status="blocked",
-            error_message=str(error),
+            error_message=admission.blocked_reason,
         )
-
+    record_phase("validated")
+    if provider_effect_checkpoint is not None:
+        provider_effect_checkpoint("odoo_logical_backup")
+    record_phase("logical_backup_started")
     backup_result = execute_odoo_prod_backup_gate(
         control_plane_root=control_plane_root,
         record_store=record_store,
@@ -171,6 +160,8 @@ def execute_odoo_prod_promotion_run(
             error_message=backup_result.error_message or "Odoo prod backup gate failed.",
         )
 
+    record_phase("logical_backup_completed")
+    record_phase("promotion_started")
     promotion_result = execute_odoo_prod_promotion(
         control_plane_root=control_plane_root,
         state_dir=state_dir,
@@ -191,6 +182,7 @@ def execute_odoo_prod_promotion_run(
             health_timeout_seconds=request.health_timeout_seconds,
             no_cache=request.no_cache,
         ),
+        provider_effect_checkpoint=provider_effect_checkpoint,
     )
     run_status: Literal["pass", "fail"] = (
         "pass"

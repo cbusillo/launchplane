@@ -13,11 +13,12 @@ import {
 import { useEffect, useRef, useState } from "react";
 
 import {
+  enqueueOdooProdPromotion,
   enqueueProductionBackupGate,
+  readOdooProdPromotionOperation,
   readProductionBackupGateOperation,
   readReleaseReview,
   rollBackOdooProd,
-  runOdooProdPromotion,
 } from "./api";
 import type { BrowserOperationState } from "./browser-operation";
 import {
@@ -110,10 +111,21 @@ function PromoteSection({
   const [running, setRunning] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  // Each run gets a number; a run that a newer one replaced (a remount, a
+  // resume) does not write its stale outcome over the newer run's state.
+  const runNumberRef = useRef(0);
 
   useEffect(() => {
     void refreshReview();
-    return () => abortRef.current?.abort();
+    // A promotion queued before a reload keeps running on the server; resume
+    // watching it. Watching only reads, so it needs no new confirmation.
+    if (readOdooReleaseAttempt(scope)?.promotionOperationId) {
+      void promote();
+    }
+    return () => {
+      abortRef.current?.abort();
+      abortRef.current = null;
+    };
   }, [scope.product]);
 
   async function refreshReview() {
@@ -134,10 +146,11 @@ function PromoteSection({
   }
 
   async function promote() {
-    if (running || (!pendingAttempt && !confirmed)) {
+    const storedAttempt = readOdooReleaseAttempt(scope);
+    if (abortRef.current || (!storedAttempt && !confirmed)) {
       return;
     }
-    const attempt = pendingAttempt ?? createOdooReleaseAttempt();
+    let attempt = storedAttempt ?? createOdooReleaseAttempt();
     writeOdooReleaseAttempt(scope, attempt);
     setPendingAttempt(attempt);
     setProgress({});
@@ -145,21 +158,38 @@ function PromoteSection({
     setRunning(true);
     const controller = new AbortController();
     abortRef.current = controller;
+    const runNumber = ++runNumberRef.current;
     const result = await runOdooRelease({
       attempt,
       dependencies: {
         enqueueBackup: enqueueProductionBackupGate,
-        promote: runOdooProdPromotion,
+        enqueuePromotion: enqueueOdooProdPromotion,
         readBackup: readProductionBackupGateOperation,
+        readPromotion: readOdooProdPromotionOperation,
         readReleaseReview,
         wait: waitFor,
       },
-      onProgress: (update) =>
-        setProgress((current) => ({ ...current, [update.step]: update })),
+      onProgress: (update) => {
+        if (runNumber === runNumberRef.current) {
+          setProgress((current) => ({ ...current, [update.step]: update }));
+        }
+      },
+      onPromotionQueued: (operationId) => {
+        attempt = { ...attempt, promotionOperationId: operationId };
+        writeOdooReleaseAttempt(scope, attempt);
+        if (runNumber === runNumberRef.current) {
+          setPendingAttempt(attempt);
+        }
+      },
       scope,
       signal: controller.signal,
     });
-    abortRef.current = null;
+    if (abortRef.current === controller) {
+      abortRef.current = null;
+    }
+    if (runNumber !== runNumberRef.current) {
+      return;
+    }
     setRunning(false);
     setOutcome(result);
     if (result.status === "stopped" && result.certainty === "uncertain") {
@@ -220,13 +250,17 @@ function PromoteSection({
             <CheckCircle2 aria-hidden="true" />
             <div>
               <strong>Production promoted</strong>
-              <p>Backup {outcome.backupRecordId} was verified before the promotion.</p>
+              <p>
+                Backup {outcome.result.infrastructure_backup_record_id || "—"} was verified
+                before the promotion (operation {outcome.operation.operation_id}).
+              </p>
             </div>
           </div>
           <dl>
-            <div><dt>Artifact</dt><dd>{resultText(outcome.response.result, "artifact_id")}</dd></div>
-            <div><dt>Promotion record</dt><dd>{resultText(outcome.response.result, "promotion_record_id")}</dd></div>
-            <div><dt>Post-deploy</dt><dd>{resultText(outcome.response.result, "post_deploy_status")}</dd></div>
+            <div><dt>Artifact</dt><dd>{resultText(outcome.result, "artifact_id")}</dd></div>
+            <div><dt>Deployment record</dt><dd>{resultText(outcome.result, "deployment_record_id")}</dd></div>
+            <div><dt>Promotion record</dt><dd>{resultText(outcome.result, "promotion_record_id")}</dd></div>
+            <div><dt>Post-deploy</dt><dd>{resultText(outcome.result, "post_deploy_status")}</dd></div>
           </dl>
         </div>
       ) : null}
@@ -251,7 +285,13 @@ function PromoteSection({
           ) : (
             <Rocket size={16} aria-hidden="true" />
           )}
-          {pendingAttempt && !running ? "Retry the same release" : "Promote to production"}
+          {running
+            ? "Promoting…"
+            : pendingAttempt?.promotionOperationId
+              ? "Resume watching the promotion"
+              : pendingAttempt
+                ? "Retry the same release"
+                : "Promote to production"}
         </button>
         {running ? (
           <button className="secondary-button" onClick={() => abortRef.current?.abort()} type="button">
@@ -434,12 +474,14 @@ function ReleaseOutcomeNotice({
         <p>{outcome.failure.message}</p>
         {outcome.certainty === "uncertain" && outcome.step === "promote" ? (
           <p>
-            The promotion may still be running on the server. Check the latest prod
-            deployment in Activity before retrying: the server replays only a finished
-            promotion, so a retry while one runs starts a second attempt.
+            The promotion runs on the server whether or not this page is open. Resuming
+            only watches it; the same request never starts a second promotion.
           </p>
         ) : outcome.certainty === "uncertain" ? (
-          <p>The result is uncertain. Retrying reuses the same backup request.</p>
+          <p>
+            The result is uncertain. Retrying reuses the same request, so Launchplane
+            returns the backup it already started instead of taking another.
+          </p>
         ) : null}
         {outcome.failure.code ? <code>{outcome.failure.code}</code> : null}
         {outcome.failure.traceId ? <small>Trace {outcome.failure.traceId}</small> : null}
@@ -515,10 +557,10 @@ function releaseReviewSummary(review: ResourceState<ReleaseReviewResponse>): str
 }
 
 function resultText(
-  result: { [key: string]: unknown } | null | undefined,
+  result: object | null | undefined,
   key: string,
   fallback = "—",
 ): string {
-  const value = result?.[key];
+  const value = (result as Record<string, unknown> | null | undefined)?.[key];
   return typeof value === "string" && value ? value : fallback;
 }

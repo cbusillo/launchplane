@@ -301,6 +301,65 @@ class ProductionBackupGatePostgresHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(cancel_failure.status_code, 409, cancel_failure.text)
 
+    async def test_signed_in_policy_administrator_enqueues_without_a_product_rule(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            binding = _binding()
+            store.write_production_backup_target_record(binding.source_target)
+            store.write_production_backup_target_record(binding.destination_target)
+            store.write_production_backup_policy_record(binding.policy)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 2,
+                    "github_humans": [
+                        {
+                            "github_ids": [123],
+                            "roles": ["admin"],
+                            "actions": ["authz_policy_grant.write"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                        }
+                    ],
+                }
+            )
+            digest = authz_policy_sha256(policy)
+            store.seed_authz_policy_if_absent(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id=build_authz_policy_record_id(revision=1, policy_sha256=digest),
+                    source="test:administrator-backup-http",
+                    updated_at="2026-09-30T00:00:00Z",
+                    policy_sha256=digest,
+                    policy=policy,
+                )
+            )
+            session_manager = HumanSessionManager(
+                config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+            )
+            human_session = session_manager.issue(_github_human_identity())
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+                human_session_manager=session_manager,
+            )
+            headers = _browser_mutation_headers(session_manager, human_session)
+            headers["Idempotency-Key"] = "administrator-backup"
+
+            response = await request(
+                app,
+                "POST",
+                "/v1/production-backup-gates",
+                headers=headers,
+                payload=binding.request.model_dump(mode="json"),
+            )
+
+            self.assertEqual(response.status_code, 200, response.text)
+            operation = store.read_verireel_prod_backup_gate_operation_record(
+                response.json()["operation_id"]
+            )
+            assert operation.authorization is not None
+            self.assertEqual(operation.authorization.grant, "policy_administrator")
+            self.assertEqual(operation.authorization.caller.github_id, 123)
+
 
 if __name__ == "__main__":
     unittest.main()

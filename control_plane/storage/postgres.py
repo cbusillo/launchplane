@@ -323,6 +323,12 @@ from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackRecord,
 )
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_prod_promotion_operation import (
+    ODOO_PROD_PROMOTION_OPERATION_PHASE_SEQUENCE,
+    OdooProdPromotionCheckpoint,
+    OdooProdPromotionOperationPhase,
+    OdooProdPromotionOperationRecord,
+)
 from control_plane.contracts.odoo_prod_backup_restore_operation import (
     ODOO_PROD_BACKUP_RESTORE_OPERATION_PHASE_SEQUENCE,
     OdooProdBackupRestoreCheckpoint,
@@ -5614,6 +5620,49 @@ class LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
+class LaunchplaneOdooProdPromotionOperationRow(Base):
+    __tablename__ = "launchplane_odoo_prod_promotion_operations"
+    __table_args__ = (
+        Index(
+            "launchplane_odoo_promotion_operation_lane_status_idx",
+            "product",
+            "context",
+            "instance",
+            "status",
+            desc("updated_at"),
+        ),
+        Index(
+            "launchplane_odoo_promotion_active_lane_uidx",
+            "product",
+            "context",
+            "instance",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'running', 'reconciliation_required')"),
+            sqlite_where=text("status IN ('pending', 'running', 'reconciliation_required')"),
+        ),
+        Index(
+            "launchplane_odoo_promotion_worker_claim_idx",
+            "status",
+            "lease_expires_at",
+            "updated_at",
+        ),
+    )
+
+    operation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    instance: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    phase: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    lease_owner: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    lease_expires_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    heartbeat_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
 class LaunchplaneVeriReelProdBackupGateOperationRow(Base):
     __tablename__ = "launchplane_verireel_prod_backup_gate_operations"
     __table_args__ = (
@@ -8841,6 +8890,7 @@ class PostgresRecordStore(HumanSessionStore):
                 "retained_volume_backup_import",
                 LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow,
             ),
+            ("prod_promotion", LaunchplaneOdooProdPromotionOperationRow),
         )
         candidates: list[tuple[tuple[int, str, int, str], OdooStableLaneOperationOwner]] = []
         for operation_kind, operation_table in operation_tables:
@@ -10191,6 +10241,415 @@ class PostgresRecordStore(HumanSessionStore):
                         }
                     )
                 self._sync_odoo_prod_backup_restore_operation_row(row, recovered_record)
+            session.commit()
+        return tuple(affected_operation_ids)
+
+    def _odoo_prod_promotion_operation_row(
+        self, record: OdooProdPromotionOperationRecord
+    ) -> LaunchplaneOdooProdPromotionOperationRow:
+        row = LaunchplaneOdooProdPromotionOperationRow(operation_id=record.operation_id)
+        self._sync_odoo_prod_promotion_operation_row(row, record)
+        return row
+
+    def _sync_odoo_prod_promotion_operation_row(
+        self,
+        row: LaunchplaneOdooProdPromotionOperationRow,
+        record: OdooProdPromotionOperationRecord,
+    ) -> None:
+        row.product = record.product
+        row.context = record.context
+        row.instance = record.instance
+        row.status = record.status
+        row.phase = record.phase
+        row.created_at = record.created_at
+        row.updated_at = record.updated_at
+        row.lease_owner = record.lease_owner
+        row.lease_expires_at = record.lease_expires_at
+        row.heartbeat_at = record.heartbeat_at
+        row.attempt = record.attempt
+        row.payload = self._payload_dict(record)
+
+    def write_odoo_prod_promotion_operation_record(
+        self, record: OdooProdPromotionOperationRecord
+    ) -> None:
+        self._write_row(self._odoo_prod_promotion_operation_row(record))
+
+    def read_odoo_prod_promotion_operation_record(
+        self, operation_id: str
+    ) -> OdooProdPromotionOperationRecord:
+        return self._read_model(
+            model_type=OdooProdPromotionOperationRecord,
+            orm_model=LaunchplaneOdooProdPromotionOperationRow,
+            filters=(LaunchplaneOdooProdPromotionOperationRow.operation_id == operation_id,),
+        )
+
+    def list_odoo_prod_promotion_operation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        statuses: tuple[str, ...] = (),
+        limit: int | None = None,
+    ) -> tuple[OdooProdPromotionOperationRecord, ...]:
+        filters: list[object] = []
+        if product:
+            filters.append(LaunchplaneOdooProdPromotionOperationRow.product == product)
+        if context_name:
+            filters.append(LaunchplaneOdooProdPromotionOperationRow.context == context_name)
+        if instance_name:
+            filters.append(LaunchplaneOdooProdPromotionOperationRow.instance == instance_name)
+        if statuses:
+            filters.append(LaunchplaneOdooProdPromotionOperationRow.status.in_(statuses))
+        return self._list_models(
+            model_type=OdooProdPromotionOperationRecord,
+            orm_model=LaunchplaneOdooProdPromotionOperationRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneOdooProdPromotionOperationRow.updated_at.desc(),
+                LaunchplaneOdooProdPromotionOperationRow.operation_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def create_odoo_prod_promotion_operation_record_if_no_active_lane(
+        self, record: OdooProdPromotionOperationRecord
+    ) -> tuple[OdooProdPromotionOperationRecord, bool]:
+        """Create the operation unless its id exists or another lane operation is active.
+
+        Returns the existing operation with the same id, or the active promotion on the
+        lane, with ``False``. Another kind of active lane operation raises
+        ``OdooStableLaneOperationConflictError``.
+        """
+
+        with self._session_factory() as session:
+            self._lock_odoo_stable_lane(
+                session,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            existing_row = session.get(
+                LaunchplaneOdooProdPromotionOperationRow, record.operation_id
+            )
+            if existing_row is not None:
+                return (
+                    self._read_payload(
+                        model_type=OdooProdPromotionOperationRecord,
+                        payload=existing_row.payload,
+                    ),
+                    False,
+                )
+            active_owner = self._active_odoo_stable_lane_operation_owner(
+                session,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            if active_owner is not None:
+                if active_owner.operation_kind == "prod_promotion":
+                    active_row = session.get(
+                        LaunchplaneOdooProdPromotionOperationRow,
+                        active_owner.operation_id,
+                    )
+                    if active_row is None:
+                        raise RuntimeError("Active Odoo prod promotion operation disappeared.")
+                    return (
+                        self._read_payload(
+                            model_type=OdooProdPromotionOperationRecord,
+                            payload=active_row.payload,
+                        ),
+                        False,
+                    )
+                raise OdooStableLaneOperationConflictError(active_owner)
+            session.add(self._odoo_prod_promotion_operation_row(record))
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                return self.create_odoo_prod_promotion_operation_record_if_no_active_lane(record)
+        return record, True
+
+    def _locked_odoo_prod_promotion_operation_row(
+        self, session: Any, operation_id: str
+    ) -> LaunchplaneOdooProdPromotionOperationRow:
+        statement = (
+            select(LaunchplaneOdooProdPromotionOperationRow)
+            .where(LaunchplaneOdooProdPromotionOperationRow.operation_id == operation_id)
+            .limit(1)
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        row = session.scalar(statement)
+        if row is None:
+            raise FileNotFoundError(operation_id)
+        return cast(LaunchplaneOdooProdPromotionOperationRow, row)
+
+    def cancel_pending_odoo_prod_promotion_operation_record(
+        self, record: OdooProdPromotionOperationRecord
+    ) -> bool:
+        if record.status != "cancelled" or record.phase != "cancelled":
+            raise ValueError("Odoo prod promotion cancellation requires a cancelled record.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = self._locked_odoo_prod_promotion_operation_row(session, record.operation_id)
+            current_record = self._read_payload(
+                model_type=OdooProdPromotionOperationRecord,
+                payload=row.payload,
+            )
+            if not odoo_stable_lane_cancellation_is_allowed(
+                current_status=current_record.status,
+                reconciliation_required_at=current_record.updated_at,
+                cancellation=record.cancellation,
+            ):
+                return False
+            self._sync_odoo_prod_promotion_operation_row(row, record)
+            session.commit()
+            return True
+
+    def claim_next_odoo_prod_promotion_operation_record(
+        self,
+        *,
+        lease_owner: str,
+        lease_expires_at: str,
+        claimed_at: str,
+    ) -> OdooProdPromotionOperationRecord | None:
+        normalized_lease_owner = lease_owner.strip()
+        if not normalized_lease_owner or not lease_expires_at.strip() or not claimed_at.strip():
+            raise ValueError("Odoo prod promotion claim requires lease evidence.")
+        statement = (
+            select(LaunchplaneOdooProdPromotionOperationRow)
+            .where(LaunchplaneOdooProdPromotionOperationRow.status == "pending")
+            .order_by(
+                LaunchplaneOdooProdPromotionOperationRow.created_at.asc(),
+                LaunchplaneOdooProdPromotionOperationRow.operation_id.asc(),
+            )
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update(skip_locked=True)
+        with self._session_factory() as session:
+            if self.database_url.startswith("sqlite"):
+                self._lock_odoo_stable_lane(session, product="", context="", instance="")
+            for row in session.scalars(statement).all():
+                record = self._read_payload(
+                    model_type=OdooProdPromotionOperationRecord,
+                    payload=row.payload,
+                )
+                if not self.database_url.startswith("sqlite"):
+                    self._lock_odoo_stable_lane(
+                        session,
+                        product=record.product,
+                        context=record.context,
+                        instance=record.instance,
+                    )
+                active_owner = self._active_odoo_stable_lane_operation_owner(
+                    session,
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                )
+                if active_owner != OdooStableLaneOperationOwner(
+                    operation_kind="prod_promotion",
+                    operation_id=record.operation_id,
+                ):
+                    continue
+                claimed_record = record.model_copy(
+                    update={
+                        "status": "running",
+                        "phase": "running",
+                        "checkpoints": (),
+                        "started_at": record.started_at or claimed_at,
+                        "updated_at": claimed_at,
+                        "lease_owner": normalized_lease_owner,
+                        "lease_expires_at": lease_expires_at.strip(),
+                        "heartbeat_at": claimed_at.strip(),
+                        "attempt": record.attempt + 1,
+                    }
+                )
+                self._sync_odoo_prod_promotion_operation_row(row, claimed_record)
+                session.commit()
+                return claimed_record
+            return None
+
+    def _odoo_prod_promotion_lease_is_current(
+        self, record: OdooProdPromotionOperationRecord, *, lease_owner: str, at: str
+    ) -> bool:
+        return (
+            record.status == "running"
+            and record.lease_owner == lease_owner.strip()
+            and bool(record.lease_expires_at)
+            and record.lease_expires_at > at.strip()
+        )
+
+    def heartbeat_odoo_prod_promotion_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = self._locked_odoo_prod_promotion_operation_row(session, operation_id)
+            record = self._read_payload(
+                model_type=OdooProdPromotionOperationRecord,
+                payload=row.payload,
+            )
+            if not self._odoo_prod_promotion_lease_is_current(
+                record, lease_owner=lease_owner, at=heartbeat_at
+            ):
+                return False
+            self._sync_odoo_prod_promotion_operation_row(
+                row,
+                record.model_copy(
+                    update={
+                        "heartbeat_at": heartbeat_at.strip(),
+                        "lease_expires_at": lease_expires_at.strip(),
+                        "updated_at": heartbeat_at.strip(),
+                    }
+                ),
+            )
+            session.commit()
+            return True
+
+    def checkpoint_odoo_prod_promotion_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        phase: OdooProdPromotionOperationPhase,
+        checkpointed_at: str,
+        evidence: dict[str, str],
+    ) -> OdooProdPromotionOperationRecord | None:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = self._locked_odoo_prod_promotion_operation_row(session, operation_id)
+            record = self._read_payload(
+                model_type=OdooProdPromotionOperationRecord,
+                payload=row.payload,
+            )
+            if not self._odoo_prod_promotion_lease_is_current(
+                record, lease_owner=lease_owner, at=checkpointed_at
+            ):
+                return None
+            phase_indexes = {
+                phase_name: index
+                for index, phase_name in enumerate(ODOO_PROD_PROMOTION_OPERATION_PHASE_SEQUENCE)
+            }
+            if phase_indexes[phase] < phase_indexes[record.phase]:
+                return None
+            checkpointed_record = record.model_copy(
+                update={
+                    "phase": phase,
+                    "checkpoints": (
+                        *record.checkpoints,
+                        OdooProdPromotionCheckpoint(
+                            phase=phase, recorded_at=checkpointed_at, evidence=evidence
+                        ),
+                    ),
+                    "updated_at": checkpointed_at,
+                }
+            )
+            self._sync_odoo_prod_promotion_operation_row(row, checkpointed_record)
+            session.commit()
+            return checkpointed_record
+
+    def complete_odoo_prod_promotion_operation_record(
+        self,
+        *,
+        record: OdooProdPromotionOperationRecord,
+        lease_owner: str,
+    ) -> bool:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = self._locked_odoo_prod_promotion_operation_row(session, record.operation_id)
+            current_record = self._read_payload(
+                model_type=OdooProdPromotionOperationRecord,
+                payload=row.payload,
+            )
+            if not self._odoo_prod_promotion_lease_is_current(
+                current_record, lease_owner=lease_owner, at=_utc_now_timestamp()
+            ):
+                return False
+            self._sync_odoo_prod_promotion_operation_row(row, record)
+            session.commit()
+            return True
+
+    def recover_expired_odoo_prod_promotion_operation_records(
+        self,
+        *,
+        now: str,
+        safe_phases: tuple[str, ...],
+        max_attempts: int,
+    ) -> tuple[str, ...]:
+        """Requeue a promotion whose lease expired before any provider effect; hold the rest.
+
+        Past the safe phases the promotion may have taken a backup or deployed, so it
+        waits as ``reconciliation_required`` for an operator instead of running again.
+        """
+
+        statement = select(LaunchplaneOdooProdPromotionOperationRow).where(
+            LaunchplaneOdooProdPromotionOperationRow.status == "running",
+            (
+                (LaunchplaneOdooProdPromotionOperationRow.lease_expires_at == "")
+                | (LaunchplaneOdooProdPromotionOperationRow.lease_expires_at < now)
+            ),
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update(skip_locked=True)
+        affected_operation_ids: list[str] = []
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            for row in session.scalars(statement).all():
+                record = self._read_payload(
+                    model_type=OdooProdPromotionOperationRecord,
+                    payload=row.payload,
+                )
+                affected_operation_ids.append(record.operation_id)
+                released_lease = {"lease_owner": "", "lease_expires_at": "", "heartbeat_at": ""}
+                if record.phase in safe_phases and record.attempt < max_attempts:
+                    recovered_record = record.model_copy(
+                        update={
+                            **released_lease,
+                            "status": "pending",
+                            "phase": "created",
+                            "checkpoints": (),
+                            "started_at": "",
+                            "updated_at": now,
+                        }
+                    )
+                elif record.phase in safe_phases:
+                    recovered_record = record.model_copy(
+                        update={
+                            **released_lease,
+                            "status": "fail",
+                            "phase": "failed",
+                            "updated_at": now,
+                            "finished_at": now,
+                            "error_code": "operation_attempts_exhausted",
+                            "error_message": (
+                                "Odoo prod promotion exhausted automatic attempts before any "
+                                f"provider effect (phase {record.phase!r})."
+                            ),
+                        }
+                    )
+                else:
+                    recovered_record = record.model_copy(
+                        update={
+                            **released_lease,
+                            "status": "reconciliation_required",
+                            "updated_at": now,
+                            "result": None,
+                            "error_code": "operation_reconciliation_required",
+                            "error_message": (
+                                "Odoo prod promotion lease expired in phase "
+                                f"{record.phase!r}; it may have taken a backup or deployed. "
+                                "Check the latest prod deployment before releasing the lane."
+                            ),
+                        }
+                    )
+                self._sync_odoo_prod_promotion_operation_row(row, recovered_record)
             session.commit()
         return tuple(affected_operation_ids)
 

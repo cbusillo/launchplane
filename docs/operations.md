@@ -2697,24 +2697,41 @@ the Release panel instead of a site workflow:
 
 - **Promote** reads `GET /v1/release-review` and stops unless the release is
   approved or needs no approval. It then starts the infrastructure backup with
-  `POST /v1/production-backup-gates`, polls the operation to a terminal state,
-  and only after a passing backup calls `POST /v1/drivers/odoo/prod-promotion-run`
-  with that `infrastructure_backup_record_id`. The server re-checks approval and
-  the backup, takes the logical Odoo backup, deploys, and runs post-deploy.
-- Each click gets one Idempotency-Key and request ID, kept in session storage.
-  After an uncertain stop (timeout, 5xx, closed tab) the button retries the same
-  request, so the backup enqueue returns the same operation and a finished
-  promotion replays. The route stores no in-flight reservation, so a retry while
-  the first promotion still runs starts a second run (and its logical backup);
-  check the latest prod deployment before retrying a promote that timed out. A
-  definitive answer clears the key.
+  `POST /v1/production-backup-gates` and polls the operation to a terminal
+  state. Only after a passing backup does it queue the promotion with
+  `POST /v1/odoo-prod-promotions`, passing that `infrastructure_backup_record_id`.
+- The queue route checks what the synchronous run checks before any effect:
+  ready promotion inputs, release approval, and the verified infrastructure
+  backup for `odoo_prod_promotion_run.execute`. It refuses with
+  `promotion_not_ready` and the reason, or queues one durable operation and
+  returns at once. The stable-lane worker runs it: it re-checks approval and the
+  backup, takes the logical Odoo backup, deploys, and runs post-deploy, and
+  records each phase. The panel polls
+  `GET /v1/odoo-prod-promotions/operations/{operation_id}` and shows the phase,
+  then the result or the server's reason.
+- Each click gets one Idempotency-Key and request ID, kept in session storage
+  with the promotion's operation id once it is queued. The same key returns the
+  same backup and promotion operations, so a retry after an uncertain stop
+  (timeout, 5xx, closed tab) never starts a second run. After a reload the panel
+  resumes watching a queued promotion without asking again. A different request
+  while a promotion is active on the lane is refused with
+  `promotion_already_active`; another kind of Odoo lane operation, with
+  `lane_busy`. A definitive answer clears the key.
+- If the worker loses its lease after the logical backup started, the promotion
+  becomes `reconciliation_required` and is not run again: check the latest prod
+  deployment, then cancel it with
+  `POST /v1/odoo-prod-promotions/operations/{operation_id}/cancel` and a
+  `reconciliation_attestation` to free the lane.
 - **Roll back** shows the artifact the rollback driver will redeploy, asks for a
   reason and confirmation, and calls `POST /v1/drivers/odoo/prod-rollback` with
   no artifact id.
-- Each step shows its state and the server's refusal. Today a session whose
-  only standing is the policy administrator is refused at the backup step,
-  because a durable backup needs exactly one managed rule for the caller (#2682).
+- The policy administrator needs no product rule for these steps: the durable
+  backup and promotion record a `policy_administrator` grant, which the worker
+  re-checks against the active policy (see Durable Operation Authorization in
+  [records](records.md)).
 
+The synchronous `POST /v1/drivers/odoo/prod-promotion-run` route is unchanged
+for the site workflows; the panel no longer calls it.
 The CM website's `odoo-prod-promotion.yml`, `odoo-prod-rollback.yml`, and
 `odoo-post-deploy.yml` stay in place until one real promote and one rollback
 drill have gone through this panel (#2606); they are deleted, with their

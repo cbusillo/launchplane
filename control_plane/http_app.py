@@ -215,6 +215,10 @@ from control_plane.http_routes import (
     request_fingerprint as build_request_fingerprint,
     require_product_profile_read_store,
 )
+from control_plane.http_routes.odoo_prod_promotion_operation import (
+    OdooProdPromotionOperationRouteDependencies,
+    register_odoo_prod_promotion_operation_routes,
+)
 from control_plane.http_routes.production_backup_gate import (
     ProductionBackupGateRouteDependencies,
     register_production_backup_gate_routes,
@@ -25272,6 +25276,15 @@ def create_launchplane_fastapi_app(
             common=read_route_dependencies,
             read_mutation_identity=read_operator_mutation_identity,
             cancel_pending_operation=cancel_pending_durable_operation,
+        ),
+    )
+    register_odoo_prod_promotion_operation_routes(
+        app,
+        dependencies=OdooProdPromotionOperationRouteDependencies(
+            common=read_route_dependencies,
+            read_mutation_identity=read_operator_mutation_identity,
+            cancel_pending_operation=cancel_pending_durable_operation,
+            control_plane_root=resolved_control_plane_root,
         ),
     )
 

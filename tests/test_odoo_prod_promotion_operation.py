@@ -1,0 +1,511 @@
+import unittest
+from collections.abc import Callable
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import cast
+from unittest.mock import patch
+
+from fastapi import FastAPI
+from urllib.parse import urlencode
+
+from control_plane.contracts.authz_policy_record import (
+    LaunchplaneAuthzPolicyRecord,
+    authz_policy_sha256,
+    build_authz_policy_record_id,
+)
+from control_plane.contracts.durable_operation_authorization import (
+    DurableOperationCancellation,
+    DurableOperationCallerIdentity,
+    DurableOperationReconciliationAttestation,
+)
+from control_plane.contracts.odoo_prod_promotion_operation import (
+    ODOO_PROD_PROMOTION_RUN_ACTION,
+    ODOO_PROD_PROMOTION_SAFE_RETRY_PHASES,
+    OdooProdPromotionOperationPhase,
+    OdooProdPromotionOperationRecord,
+    OdooProdPromotionRunRequest,
+    OdooProdPromotionRunResult,
+    build_odoo_prod_promotion_operation_id,
+    odoo_prod_promotion_request_fingerprint,
+)
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.durable_operation_authorization import capture_durable_operation_authorization
+from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.odoo_stable_lane import OdooStableLaneOperationConflictError
+from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
+from control_plane.service_human_auth import (
+    HumanSessionManager,
+    InMemoryHumanSessionStore,
+    LaunchplaneHumanSession,
+)
+from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.workflows.odoo_prod_promotion_inputs import OdooProdPromotionInputsResult
+from control_plane.workflows.odoo_prod_promotion_run import OdooProdPromotionRunAdmission
+from control_plane.workflows.odoo_stable_operation_worker import (
+    run_odoo_stable_operation_worker_once,
+)
+from tests.http_app_test_support import (
+    _browser_mutation_headers,
+    _github_human_identity,
+    _github_oauth_config,
+    _RejectingVerifier,
+)
+from tests.support.http import get, request
+from tests.support.profiles import _odoo_preview_profile_payload
+from tests.test_odoo_stable_operation_worker import _restore_operation
+
+_ADMINISTRATOR_POLICY = LaunchplaneAuthzPolicy.model_validate(
+    {
+        "schema_version": 2,
+        "github_humans": [
+            {
+                "github_ids": [123],
+                "roles": ["admin"],
+                "actions": ["authz_policy_grant.write"],
+                "products": ["launchplane"],
+                "contexts": ["launchplane"],
+            }
+        ],
+        "terminal_agents": [
+            {
+                "subjects": ["terminal-agent"],
+                "token_labels": ["terminal-agent-read"],
+                "actions": [ODOO_PROD_PROMOTION_RUN_ACTION],
+                "products": ["odoo-tenant-cm"],
+                "contexts": ["cm"],
+                "instances": ["testing", "prod"],
+            }
+        ],
+    }
+)
+
+
+def _policy_record(
+    policy: LaunchplaneAuthzPolicy, revision: int = 1
+) -> LaunchplaneAuthzPolicyRecord:
+    digest = authz_policy_sha256(policy)
+    return LaunchplaneAuthzPolicyRecord(
+        record_id=build_authz_policy_record_id(revision=revision, policy_sha256=digest),
+        revision=revision,
+        source="test:odoo-prod-promotion-operation",
+        updated_at="2026-09-30T00:00:00Z",
+        policy_sha256=digest,
+        policy=policy,
+    )
+
+
+def _store(directory: str) -> PostgresRecordStore:
+    store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{Path(directory) / 'state.db'}")
+    store.ensure_schema()
+    profile = _odoo_preview_profile_payload()
+    profile["lanes"] = tuple(
+        {
+            "instance": instance,
+            "context": "cm",
+            "base_url": f"https://{instance}.cm.example.test",
+            "health_url": f"https://{instance}.cm.example.test/web/health",
+        }
+        for instance in ("testing", "prod")
+    )
+    store.write_product_profile_record(LaunchplaneProductProfileRecord.model_validate(profile))
+    store.seed_authz_policy_if_absent(_policy_record(_ADMINISTRATOR_POLICY))
+    return store
+
+
+def _run_request(request_id: str = "release-1") -> OdooProdPromotionRunRequest:
+    return OdooProdPromotionRunRequest(
+        context="cm",
+        product="odoo-tenant-cm",
+        request_id=request_id,
+        infrastructure_backup_record_id=f"infrastructure-{request_id}",
+    )
+
+
+def _operation(key: str = "release-1") -> OdooProdPromotionOperationRecord:
+    run_request = _run_request(key)
+    scope = "github-human|example-operator|123"
+    return OdooProdPromotionOperationRecord(
+        operation_id=build_odoo_prod_promotion_operation_id(
+            product="odoo-tenant-cm", context="cm", idempotency_key=key, idempotency_scope=scope
+        ),
+        product="odoo-tenant-cm",
+        context="cm",
+        instance="prod",
+        idempotency_key=key,
+        idempotency_scope=scope,
+        request_fingerprint=odoo_prod_promotion_request_fingerprint(run_request),
+        request=run_request,
+        authorization=capture_durable_operation_authorization(
+            identity=_github_human_identity(),
+            action=ODOO_PROD_PROMOTION_RUN_ACTION,
+            product="odoo-tenant-cm",
+            context="cm",
+            instances=("prod",),
+            policy_record=_policy_record(_ADMINISTRATOR_POLICY),
+            authorized_at="2026-09-30T00:00:00Z",
+        ),
+        created_at="2026-09-30T00:00:00Z",
+        updated_at="2026-09-30T00:00:00Z",
+    )
+
+
+def _passing_result(request_id: str = "release-1") -> OdooProdPromotionRunResult:
+    return OdooProdPromotionRunResult(
+        context="cm",
+        from_instance="testing",
+        to_instance="prod",
+        request_id=request_id,
+        run_status="pass",
+        input_status="ready",
+        backup_status="pass",
+        promotion_status="pass",
+        deployment_status="pass",
+        post_deploy_status="pass",
+        destination_health_status="pass",
+        artifact_id="artifact-cm-new",
+        promotion_record_id="promotion-cm-testing-to-prod",
+        deployment_record_id="deployment-cm-prod",
+    )
+
+
+class OdooProdPromotionOperationStorageTests(unittest.TestCase):
+    def test_one_active_promotion_per_lane_and_the_same_id_replays(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(directory)
+            first = _operation("release-1")
+
+            self.assertEqual(
+                store.create_odoo_prod_promotion_operation_record_if_no_active_lane(first),
+                (first, True),
+            )
+            replay, created = store.create_odoo_prod_promotion_operation_record_if_no_active_lane(
+                first
+            )
+            self.assertFalse(created)
+            self.assertEqual(replay.operation_id, first.operation_id)
+            active, created = store.create_odoo_prod_promotion_operation_record_if_no_active_lane(
+                _operation("release-2")
+            )
+            self.assertFalse(created)
+            self.assertEqual(active.operation_id, first.operation_id)
+            # A queued promotion holds the lane against the other Odoo lane operations.
+            with self.assertRaises(OdooStableLaneOperationConflictError) as conflict:
+                store.create_odoo_prod_backup_restore_operation_record_if_no_active_lane(
+                    _restore_operation()
+                )
+            self.assertEqual(conflict.exception.owner.operation_kind, "prod_promotion")
+
+    def test_expired_lease_reruns_only_before_any_provider_effect(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(directory)
+            operation = _operation()
+            store.create_odoo_prod_promotion_operation_record_if_no_active_lane(operation)
+
+            def claim_and_reach(phases: tuple[OdooProdPromotionOperationPhase, ...]) -> None:
+                claimed = store.claim_next_odoo_prod_promotion_operation_record(
+                    lease_owner="worker-a",
+                    lease_expires_at="2026-09-30T00:05:00Z",
+                    claimed_at="2026-09-30T00:00:00Z",
+                )
+                self.assertIsNotNone(claimed)
+                for phase in phases:
+                    self.assertIsNotNone(
+                        store.checkpoint_odoo_prod_promotion_operation_record(
+                            operation_id=operation.operation_id,
+                            lease_owner="worker-a",
+                            phase=phase,
+                            checkpointed_at="2026-09-30T00:01:00Z",
+                            evidence={},
+                        )
+                    )
+
+            def recover() -> OdooProdPromotionOperationRecord:
+                store.recover_expired_odoo_prod_promotion_operation_records(
+                    now="2026-09-30T00:10:00Z",
+                    safe_phases=ODOO_PROD_PROMOTION_SAFE_RETRY_PHASES,
+                    max_attempts=3,
+                )
+                return store.read_odoo_prod_promotion_operation_record(operation.operation_id)
+
+            claim_and_reach(("validated",))
+            requeued = recover()
+            self.assertEqual((requeued.status, requeued.phase), ("pending", "created"))
+
+            claim_and_reach(("validated", "logical_backup_started"))
+            held = recover()
+            self.assertEqual(held.status, "reconciliation_required")
+            self.assertEqual(held.phase, "logical_backup_started")
+            self.assertIsNone(
+                store.claim_next_odoo_prod_promotion_operation_record(
+                    lease_owner="worker-b",
+                    lease_expires_at="2026-09-30T00:20:00Z",
+                    claimed_at="2026-09-30T00:15:00Z",
+                )
+            )
+
+            cancelled = held.model_copy(
+                update={
+                    "status": "cancelled",
+                    "phase": "cancelled",
+                    "finished_at": "2026-09-30T00:30:00Z",
+                    "error_code": "",
+                    "error_message": "",
+                    "cancellation": DurableOperationCancellation(
+                        reason="Checked prod: the old artifact is still deployed.",
+                        cancelled_at="2026-09-30T00:30:00Z",
+                        caller=DurableOperationCallerIdentity(
+                            identity_type="github_human",
+                            login="example-operator",
+                            github_id=123,
+                            role="admin",
+                        ),
+                        reconciliation_attestation=DurableOperationReconciliationAttestation(
+                            provider_inspected_at="2026-09-30T00:20:00Z",
+                            provider_state="previous artifact still running",
+                            evidence_reference="deployment-cm-prod-previous",
+                            safe_to_release=True,
+                        ),
+                    ),
+                }
+            )
+            self.assertTrue(store.cancel_pending_odoo_prod_promotion_operation_record(cancelled))
+            _created_after_release, created = (
+                store.create_odoo_prod_promotion_operation_record_if_no_active_lane(
+                    _operation("release-2")
+                )
+            )
+            self.assertTrue(created)
+
+
+class OdooProdPromotionWorkerTests(unittest.TestCase):
+    def _run_worker(
+        self,
+        store: PostgresRecordStore,
+        side_effect: Callable[..., OdooProdPromotionRunResult],
+    ) -> None:
+        with patch(
+            "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_prod_promotion_run",
+            side_effect=side_effect,
+        ):
+            result = run_odoo_stable_operation_worker_once(
+                record_store=cast(object, store),  # type: ignore[arg-type]
+                control_plane_root_path=Path("."),
+                lease_owner="worker-a",
+            )
+        self.assertEqual(result.operation_kind, "odoo_prod_promotion")
+        self.assertTrue(result.terminal_write_committed)
+
+    def test_worker_records_phases_and_the_final_result(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(directory)
+            operation = _operation()
+            store.create_odoo_prod_promotion_operation_record_if_no_active_lane(operation)
+
+            def run(**kwargs: object) -> OdooProdPromotionRunResult:
+                phase_checkpoint = cast(Callable[[str], None], kwargs["phase_checkpoint"])
+                provider_effect = cast(Callable[[str], None], kwargs["provider_effect_checkpoint"])
+                self.assertEqual(kwargs["request"], operation.request)
+                phase_checkpoint("validated")
+                provider_effect("odoo_logical_backup")
+                for phase in ("logical_backup_started", "logical_backup_completed"):
+                    phase_checkpoint(phase)
+                phase_checkpoint("promotion_started")
+                return _passing_result()
+
+            self._run_worker(store, run)
+
+            finished = store.read_odoo_prod_promotion_operation_record(operation.operation_id)
+            self.assertEqual((finished.status, finished.phase), ("pass", "completed"))
+            assert finished.result is not None
+            self.assertEqual(finished.result.deployment_record_id, "deployment-cm-prod")
+            self.assertEqual(
+                tuple(checkpoint.phase for checkpoint in finished.checkpoints),
+                (
+                    "validated",
+                    "logical_backup_started",
+                    "logical_backup_completed",
+                    "promotion_started",
+                ),
+            )
+
+    def test_worker_refuses_before_effects_once_the_administrator_is_removed(self) -> None:
+        narrowed_policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                **_ADMINISTRATOR_POLICY.model_dump(mode="json", exclude_none=True),
+                "github_humans": [],
+            }
+        )
+        with TemporaryDirectory() as directory:
+            store = _store(directory)
+            operation = _operation()
+            store.create_odoo_prod_promotion_operation_record_if_no_active_lane(operation)
+            effects: list[str] = []
+
+            def run(**kwargs: object) -> OdooProdPromotionRunResult:
+                cast(Callable[[str], None], kwargs["provider_effect_checkpoint"])(
+                    "odoo_logical_backup"
+                )
+                effects.append("logical_backup")
+                return _passing_result()
+
+            with patch(
+                "control_plane.workflows.odoo_stable_operation_worker."
+                "read_active_authz_policy_record",
+                return_value=_policy_record(narrowed_policy, revision=2),
+            ):
+                self._run_worker(store, run)
+
+            finished = store.read_odoo_prod_promotion_operation_record(operation.operation_id)
+            self.assertEqual(finished.status, "fail")
+            self.assertEqual(finished.error_code, "operation_authorization_administrator_revoked")
+            self.assertEqual(effects, [])
+
+
+class OdooProdPromotionOperationHttpTests(unittest.IsolatedAsyncioTestCase):
+    def _app(
+        self, store: PostgresRecordStore
+    ) -> tuple[FastAPI, HumanSessionManager, LaunchplaneHumanSession]:
+        session_manager = HumanSessionManager(
+            config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_ADMINISTRATOR_POLICY,
+            record_store_factory=lambda: store,
+            human_session_manager=session_manager,
+            bearer_identity_config=BearerIdentityConfig(
+                terminal_agent_token="terminal-agent-token",
+                terminal_agent_subject="terminal-agent",
+                terminal_agent_token_label="terminal-agent-read",
+            ),
+        )
+        return app, session_manager, session_manager.issue(_github_human_identity())
+
+    @staticmethod
+    def _payload(request_id: str = "release-1") -> dict[str, object]:
+        return {
+            "product": "odoo-tenant-cm",
+            "run": {
+                "context": "cm",
+                "request_id": request_id,
+                "infrastructure_backup_record_id": f"infrastructure-{request_id}",
+            },
+        }
+
+    @staticmethod
+    def _admission(blocked_reason: str = "") -> OdooProdPromotionRunAdmission:
+        return OdooProdPromotionRunAdmission(
+            inputs_result=OdooProdPromotionInputsResult(
+                context="cm",
+                from_instance="testing",
+                to_instance="prod",
+                request_id="release-1",
+                input_status="ready",
+            ),
+            blocked_reason=blocked_reason,
+        )
+
+    async def test_signed_in_administrator_queues_one_promotion_and_polls_it(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(directory)
+            app, session_manager, human_session = self._app(store)
+
+            async def enqueue(
+                key: str, payload: dict[str, object]
+            ) -> tuple[int, dict[str, object]]:
+                headers = _browser_mutation_headers(session_manager, human_session)
+                headers["Idempotency-Key"] = key
+                response = await request(
+                    app, "POST", "/v1/odoo-prod-promotions", headers=headers, payload=payload
+                )
+                return response.status_code, response.json()
+
+            with patch(
+                "control_plane.http_routes.odoo_prod_promotion_operation."
+                "admit_odoo_prod_promotion_run",
+                return_value=self._admission(),
+            ) as admit:
+                status, accepted = await enqueue("ui-release-1", self._payload())
+                replay_status, replay = await enqueue("ui-release-1", self._payload())
+                other_status, other = await enqueue("ui-release-2", self._payload("release-2"))
+                reused_status, reused = await enqueue("ui-release-1", self._payload("release-9"))
+
+            self.assertEqual(status, 200, accepted)
+            operation = cast(dict[str, object], accepted["operation"])
+            self.assertEqual((operation["status"], operation["phase"]), ("pending", "created"))
+            self.assertEqual(replay_status, 200, replay)
+            self.assertEqual(
+                cast(dict[str, object], replay["operation"])["operation_id"],
+                operation["operation_id"],
+            )
+            self.assertEqual(other_status, 409, other)
+            self.assertEqual(
+                cast(dict[str, dict[str, str]], other)["error"]["code"],
+                "promotion_already_active",
+            )
+            self.assertEqual(reused_status, 409, reused)
+            self.assertEqual(
+                cast(dict[str, dict[str, str]], reused)["error"]["code"],
+                "idempotency_key_reused",
+            )
+            # Only the first request is admitted; the rest answer from the stored operation.
+            self.assertEqual(admit.call_count, 1)
+            stored = store.read_odoo_prod_promotion_operation_record(str(operation["operation_id"]))
+            self.assertEqual(stored.authorization.grant, "policy_administrator")
+
+            query = urlencode({"product": "odoo-tenant-cm", "context": "cm"})
+            read = await get(
+                app,
+                f"/v1/odoo-prod-promotions/operations/{operation['operation_id']}?{query}",
+                headers={"Cookie": session_manager.session_cookie_header(human_session)},
+            )
+            self.assertEqual(read.status_code, 200, read.text)
+            self.assertEqual(read.json()["operation"]["request_id"], "release-1")
+            self.assertNotIn("authorization", read.json()["operation"])
+
+    async def test_promotion_that_is_not_ready_is_refused_before_queueing(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(directory)
+            app, session_manager, human_session = self._app(store)
+            headers = _browser_mutation_headers(session_manager, human_session)
+            headers["Idempotency-Key"] = "ui-release-1"
+            with patch(
+                "control_plane.http_routes.odoo_prod_promotion_operation."
+                "admit_odoo_prod_promotion_run",
+                return_value=self._admission("Release is not approved by the site owner."),
+            ):
+                response = await request(
+                    app,
+                    "POST",
+                    "/v1/odoo-prod-promotions",
+                    headers=headers,
+                    payload=self._payload(),
+                )
+
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(response.json()["error"]["code"], "promotion_not_ready")
+            self.assertIn("not approved", response.json()["error"]["message"])
+            self.assertEqual(store.list_odoo_prod_promotion_operation_records(), ())
+
+    async def test_terminal_agent_token_cannot_queue_a_promotion(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(directory)
+            app, _session_manager, _human_session = self._app(store)
+            response = await request(
+                app,
+                "POST",
+                "/v1/odoo-prod-promotions",
+                headers={
+                    "Authorization": "Bearer terminal-agent-token",
+                    "Idempotency-Key": "agent-release",
+                },
+                payload=self._payload(),
+            )
+
+            self.assertEqual(response.status_code, 403, response.text)
+            self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+            self.assertEqual(store.list_odoo_prod_promotion_operation_records(), ())
+
+
+if __name__ == "__main__":
+    unittest.main()
