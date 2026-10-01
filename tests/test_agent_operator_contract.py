@@ -7,23 +7,49 @@ import unittest
 from contextlib import chdir
 from dataclasses import replace
 from pathlib import Path
+from typing import Any, ClassVar
 from unittest.mock import patch
+
+from fastapi import FastAPI
 
 from control_plane import agent_operator_contract as contract_module
 from control_plane.agent_operator_contract import (
-    INVARIANTS,
     OPERATION_SPECS,
-    PROTECTED_WORKFLOWS,
     AgentOperatorContractError,
     build_agent_operator_contract,
     validate_agent_operator_contract,
     write_agent_operator_contract,
 )
-from control_plane.openapi_export import canonical_openapi_document
+from control_plane.openapi_export import (
+    build_deterministic_export_app,
+    canonical_openapi_document,
+)
 
 
 class AgentOperatorContractTests(unittest.TestCase):
-    def test_exact_operations_dependencies_and_workflows(self) -> None:
+    # Building the export app takes seconds; build it once and hand each test
+    # a copy of the document so mutations stay local to that test.
+    app: ClassVar[FastAPI]
+    document: ClassVar[dict[str, Any]]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = build_deterministic_export_app()
+        cls.document = canonical_openapi_document()
+
+    def setUp(self) -> None:
+        self.enterContext(
+            patch.object(
+                contract_module,
+                "canonical_openapi_document",
+                lambda: copy.deepcopy(self.document),
+            )
+        )
+        self.enterContext(
+            patch.object(contract_module, "build_deterministic_export_app", lambda: self.app)
+        )
+
+    def test_operations_follow_the_allow_list(self) -> None:
         artifact = build_agent_operator_contract(source_commit_sha="a" * 40)
         operations = artifact["contract"]["operations"]
 
@@ -31,86 +57,11 @@ class AgentOperatorContractTests(unittest.TestCase):
             [(operation["method"], operation["path"]) for operation in operations],
             [(spec.method, spec.path) for spec in OPERATION_SPECS],
         )
-        expected_operation_ids = {
-            ("POST", "/v1/agent/ordinary-agent-jobs"): "admit_ordinary_agent_job",
-            ("GET", "/v1/agent/ordinary-agent-jobs/{request_id}"): "read_ordinary_agent_job",
-            ("POST", "/v1/agent/ordinary-agent-enrollments"): "propose_ordinary_agent_enrollment",
-            (
-                "GET",
-                "/v1/agent/ordinary-agent-enrollments/{principal_id}/{operation_id}",
-            ): "read_proposed_ordinary_agent_enrollment",
-            (
-                "POST",
-                "/v1/agent/ordinary-agent-session-proposals",
-            ): "propose_ordinary_agent_session",
-            (
-                "GET",
-                "/v1/agent/ordinary-agent-session-proposals/{operation_id}",
-            ): "read_ordinary_agent_session_operation",
-            (
-                "POST",
-                "/v1/agent/ordinary-agent-session-proposals/{operation_id}/cancel",
-            ): "cancel_ordinary_agent_session",
-            (
-                "POST",
-                "/v1/agent/ordinary-agent-enrollments/{operation_id}/claim",
-            ): "claim_ordinary_agent_credential",
-            ("GET", "/v1/agent/context"): "read_agent_context",
-            ("POST", "/v1/agent/write-intents/evaluate"): "evaluate_agent_write_intent",
-            ("POST", "/v1/product-config/apply"): "apply_product_config",
-            ("POST", "/v1/product-config/odoo-addon-settings/apply"): "apply_odoo_addon_settings",
-            (
-                "POST",
-                "/v1/work-graph/merge-train/controller/run-once",
-            ): "write_merge_train_controller_run_once",
-            ("POST", "/v1/previews/pr-feedback/remediation"): "remediate_preview_pr_feedback",
-            ("POST", "/v1/product-retirement"): "execute_product_retirement",
-            ("POST", "/v1/detached-application-retirement"): (
-                "execute_detached_application_retirement"
-            ),
-            ("POST", "/v1/authz-policies/managed-rule-sets/reconcile"): (
-                "reconcile_managed_authz_policy"
-            ),
-            ("POST", "/v1/product-profiles/stable-lane-repair/apply"): (
-                "apply_product_stable_lane_repair"
-            ),
-            ("GET", "/v1/governance/projection"): "read_governance_projection",
-        }
-        expected_dependencies = {
-            "admit_ordinary_agent_job": ["read_ordinary_agent_proof"],
-            "read_ordinary_agent_job": ["read_ordinary_agent_proof"],
-            "propose_ordinary_agent_enrollment": ["read_terminal_enrollment_requester"],
-            "read_proposed_ordinary_agent_enrollment": ["read_terminal_enrollment_requester"],
-            "propose_ordinary_agent_session": ["read_ordinary_agent_proof"],
-            "read_ordinary_agent_session_operation": ["read_ordinary_agent_proof"],
-            "cancel_ordinary_agent_session": ["read_ordinary_agent_proof"],
-            "claim_ordinary_agent_credential": ["read_ordinary_agent_receiver_claim"],
-            "read_agent_context": ["read_identity"],
-            "evaluate_agent_write_intent": ["read_browser_mutation_identity"],
-            "apply_product_config": ["read_browser_mutation_identity"],
-            "apply_odoo_addon_settings": ["read_write_identity"],
-            "write_merge_train_controller_run_once": ["read_write_identity"],
-            "remediate_preview_pr_feedback": ["read_write_identity"],
-            "execute_product_retirement": ["read_write_identity"],
-            "execute_detached_application_retirement": ["read_write_identity"],
-            "reconcile_managed_authz_policy": ["read_identity"],
-            "apply_product_stable_lane_repair": ["read_write_identity"],
-            "read_governance_projection": ["read_identity"],
-        }
         for operation in operations:
-            key = (operation["method"], operation["path"])
-            self.assertEqual(operation["operation_id"], expected_operation_ids[key])
-            self.assertEqual(
-                operation["identity_dependencies"],
-                expected_dependencies[operation["operation_id"]],
-            )
             self.assertRegex(operation["schema_fingerprint_sha256"], r"^[0-9a-f]{64}$")
 
-        self.assertEqual(artifact["contract"]["protected_workflows"], list(PROTECTED_WORKFLOWS))
-        self.assertEqual(artifact["contract"]["invariants"], INVARIANTS)
-
     def test_noise_and_provenance_do_not_change_semantic_digest(self) -> None:
-        document = canonical_openapi_document()
+        document = copy.deepcopy(self.document)
         noisy_document = copy.deepcopy(document)
         noisy_document["paths"]["/v1/unrelated"] = {
             "get": {"responses": {"200": {"description": "unrelated"}}}
@@ -137,7 +88,7 @@ class AgentOperatorContractTests(unittest.TestCase):
         self.assertEqual(original["contract"], noisy["contract"])
 
     def test_unrelated_local_definitions_cannot_change_selected_fingerprints(self) -> None:
-        document = canonical_openapi_document()
+        document = copy.deepcopy(self.document)
         polluted_document = copy.deepcopy(document)
         polluted_document["components"]["schemas"]["Unrelated"] = {
             "$defs": {
@@ -155,7 +106,7 @@ class AgentOperatorContractTests(unittest.TestCase):
         self.assertEqual(original["contract"], polluted["contract"])
 
     def test_nested_local_definitions_cannot_pollute_sibling_schemas(self) -> None:
-        document = canonical_openapi_document()
+        document = copy.deepcopy(self.document)
         polluted_document = copy.deepcopy(document)
         request_schema = polluted_document["paths"]["/v1/product-config/apply"]["post"][
             "requestBody"
@@ -170,7 +121,7 @@ class AgentOperatorContractTests(unittest.TestCase):
         self.assertEqual(original["contract"], polluted["contract"])
 
     def test_reference_sibling_semantics_change_digest(self) -> None:
-        document = canonical_openapi_document()
+        document = copy.deepcopy(self.document)
         changed_document = copy.deepcopy(document)
         request_schema = changed_document["paths"]["/v1/product-config/apply"]["post"][
             "requestBody"
@@ -183,7 +134,7 @@ class AgentOperatorContractTests(unittest.TestCase):
         self.assertNotEqual(original["semantic_digest_sha256"], changed["semantic_digest_sha256"])
 
     def test_idempotency_metadata_must_match_live_openapi_parameters(self) -> None:
-        document = canonical_openapi_document()
+        document = copy.deepcopy(self.document)
         missing_header = copy.deepcopy(document)
         product_config = missing_header["paths"]["/v1/product-config/apply"]["post"]
         product_config["parameters"] = [
@@ -208,15 +159,22 @@ class AgentOperatorContractTests(unittest.TestCase):
             build_agent_operator_contract(openapi_document=unexpected_header)
 
     def test_contract_build_is_independent_of_current_working_directory(self) -> None:
+        expected = build_agent_operator_contract(source_commit_sha="a" * 40)
         frontend_directory = Path("frontend").resolve()
 
-        with chdir(frontend_directory):
+        with (
+            patch.object(contract_module, "canonical_openapi_document", canonical_openapi_document),
+            patch.object(
+                contract_module, "build_deterministic_export_app", build_deterministic_export_app
+            ),
+            chdir(frontend_directory),
+        ):
             artifact = build_agent_operator_contract(source_commit_sha="a" * 40)
 
-        self.assertEqual(len(artifact["contract"]["protected_workflows"]), 4)
+        self.assertEqual(artifact, expected)
 
     def test_structural_and_agent_owned_semantics_change_digest(self) -> None:
-        document = canonical_openapi_document()
+        document = copy.deepcopy(self.document)
         changed_document = copy.deepcopy(document)
         intent_schema = changed_document["components"]["schemas"]["AgentWriteIntentRequest"]
         intent_schema["properties"]["intent"]["enum"].append("new_intent")

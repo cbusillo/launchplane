@@ -110,6 +110,9 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          # Pull request caches are scoped to that PR, so saving one re-uploads
+          # ~400 MB that no later run can restore. Only main seeds the cache.
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
         run: uv python install 3.13
@@ -144,6 +147,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
         run: uv python install 3.13
@@ -335,6 +339,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
         run: uv python install 3.13
@@ -382,6 +387,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
         run: uv python install 3.13
@@ -483,6 +489,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
         run: uv python install 3.13
@@ -560,6 +567,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
         run: uv python install 3.13
@@ -613,6 +621,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
         run: uv python install 3.13
@@ -673,6 +682,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
         run: uv python install 3.13
@@ -713,6 +723,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
         run: uv python install 3.13
@@ -743,8 +754,28 @@ jobs:
       always() &&
       (github.event_name == 'pull_request' || github.event_name == 'push')
     permissions:
+      actions: read
       contents: read
     steps:
+      - name: Report CI time against budget
+        # Reports only; a slow run is a signal to fix a lane, not a failure.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_TIME_BUDGET_SECONDS: "600"
+        run: |
+          set -euo pipefail
+          started_at="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --jq .run_started_at)"
+          elapsed=$(( $(date -u +%s) - $(date -u -d "${started_at}" +%s) ))
+          message="CI took $((elapsed / 60))m $((elapsed % 60))s; budget is $((CI_TIME_BUDGET_SECONDS / 60))m."
+          echo "${message}" >> "${GITHUB_STEP_SUMMARY}"
+          if [ "${elapsed}" -gt "${CI_TIME_BUDGET_SECONDS}" ]; then
+            echo "::warning title=CI time budget exceeded::${message} See docs/style/testing.md."
+          else
+            echo "${message}"
+          fi
+
       - name: Require successful CI path
         env:
           BASE_REPOSITORY: ${{ github.repository }}

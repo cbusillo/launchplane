@@ -9,10 +9,7 @@ from control_plane.contracts.solo_administration_confirmation import (
     SoloAdministrationConfirmationRecord,
 )
 from control_plane.storage.postgres import PostgresRecordStore
-from tests.test_postgres_integration import (
-    _isolated_postgres_database,
-    _upgrade_empty_database_to_head,
-)
+from tests.test_postgres_integration import _head_postgres_database
 from tests.test_solo_administration_confirmation import _issue_record
 
 
@@ -50,8 +47,7 @@ def _consume_once(
 
 class RealPostgresSoloAdministrationConfirmationConcurrencyTests(unittest.TestCase):
     def test_consumed_confirmation_backing_is_exact_digest_bounded(self) -> None:
-        with _isolated_postgres_database() as database_url:
-            _upgrade_empty_database_to_head(database_url)
+        with _head_postgres_database() as database_url:
             store = PostgresRecordStore(database_url=database_url)
             try:
                 record = _issue_record()
@@ -98,8 +94,7 @@ class RealPostgresSoloAdministrationConfirmationConcurrencyTests(unittest.TestCa
                 store.close()
 
     def test_consumed_confirmation_backing_requires_recovery_identity_and_scope(self) -> None:
-        with _isolated_postgres_database() as database_url:
-            _upgrade_empty_database_to_head(database_url)
+        with _head_postgres_database() as database_url:
             store = PostgresRecordStore(database_url=database_url)
             try:
                 wrong_scope = _issue_record(
@@ -174,8 +169,7 @@ class RealPostgresSoloAdministrationConfirmationConcurrencyTests(unittest.TestCa
                 store.close()
 
     def test_concurrent_consumers_have_one_winner_and_retain_terminal_row(self) -> None:
-        with _isolated_postgres_database() as database_url:
-            _upgrade_empty_database_to_head(database_url)
+        with _head_postgres_database() as database_url:
             store = PostgresRecordStore(database_url=database_url)
             try:
                 record = _issue_record()
