@@ -1783,9 +1783,11 @@ Launchplane image repository, and an operator reason. The image is normally a
 previous Launchplane image; when no earlier image is compatible with
 Launchplane's database, it may be a fixed image built from `main` (see
 [Live Sites During A Launchplane Outage](#live-sites-during-a-launchplane-outage)).
-The job enforces only the repository and digest form and always deploys
-Launchplane's own Dokploy target, never a product site; the operator confirms
-which image it is before dispatch. The reason
+The job enforces only the repository and digest form; the operator confirms
+which image it is before dispatch. The job deploys the target named by the
+workflow's `LAUNCHPLANE_DOKPLOY_TARGET_TYPE` and `LAUNCHPLANE_DOKPLOY_TARGET_ID`
+variables without checking what it is, so those variables must identify
+Launchplane itself and never a product site. The reason
 must be a single printable line from 8 to 500 characters and contain
 non-whitespace text. Configure the `launchplane-break-glass` GitHub environment
 with required reviewers and protected-branch deployment rules before enabling
