@@ -548,6 +548,25 @@ TESTING_FAILURE_DESCRIPTIONS: dict[str, str] = {
     "logo_check_failed": "The website logo check did not pass.",
     "driver_result_failed": "The driver reported a failure outside its recorded steps.",
     "operation_failed": "The deploy stopped with an error before the driver returned a result.",
+    "plan_build_failed": "Building the replacement plan failed before the deploy started.",
+    "plan_not_ready": "The replacement plan was blocked before the deploy started.",
+    "strategy_unsupported": "The deploy asked for a replacement strategy Launchplane does not run.",
+    "target_not_compose": "The lane's Dokploy target is not a compose target.",
+    "artifact_id_missing": "The deploy named no artifact and the lane records none.",
+    "source_ref_missing": "The deploy named no source commit and the lane records none.",
+    "artifact_repository_mismatch": (
+        "The artifact's image repository does not match the product profile's image repository."
+    ),
+    "artifact_source_ref_mismatch": (
+        "The deploy's source commit does not match the artifact manifest's source commit."
+    ),
+    "artifact_required_modules_missing": (
+        "The artifact does not declare the Odoo modules Launchplane requires."
+    ),
+    "health_verification_required": (
+        "The lane requires runtime identity, but the deploy turned health verification off."
+    ),
+    "health_url_missing": "The lane requires runtime identity, but it has no health URL.",
     "post_deploy_setup_failed": (
         "The deploy finished, but the post-deploy update could not start: its target or "
         "setting overrides could not be read."
