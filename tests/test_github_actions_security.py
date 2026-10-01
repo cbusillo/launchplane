@@ -324,6 +324,72 @@ APPROVED_CONTAINER_IMAGES: Mapping[str, ActionClassification] = {
 }
 
 
+UNTRUSTED_RUN_EXPRESSION_PATTERN = re.compile(
+    r"\$\{\{[^}]*\b(?:inputs\.|github\.event\.|github\.head_ref\b)"
+)
+
+
+def _normalized_expression(expression: str) -> str:
+    return " ".join(expression.split())
+
+
+def _strip_enclosing_parentheses(expression: str) -> str:
+    while expression.startswith("(") and expression.endswith(")"):
+        depth = 0
+        for index, character in enumerate(expression):
+            depth += {"(": 1, ")": -1}.get(character, 0)
+            if depth == 0 and index < len(expression) - 1:
+                return expression
+        expression = expression[1:-1].strip()
+    return expression
+
+
+def _requires_conjunct(expression: str, required: str) -> bool:
+    """Whether `required` must hold for the whole expression to be true."""
+    expression = _strip_enclosing_parentheses(_normalized_expression(expression))
+    required = _strip_enclosing_parentheses(_normalized_expression(required))
+    if expression == required:
+        return True
+    conjuncts: list[str] = []
+    depth = 0
+    start = 0
+    index = 0
+    while index < len(expression):
+        character = expression[index]
+        depth += {"(": 1, ")": -1}.get(character, 0)
+        if depth == 0 and expression.startswith("||", index):
+            return False
+        if depth == 0 and expression.startswith("&&", index):
+            conjuncts.append(expression[start:index].strip())
+            start = index + 2
+            index += 1
+        index += 1
+    conjuncts.append(expression[start:].strip())
+    return any(_strip_enclosing_parentheses(conjunct) == required for conjunct in conjuncts)
+
+
+def _run_scripts() -> Iterator[tuple[Path, str, str]]:
+    for path in _action_reference_files():
+        data = load_workflow(path).data
+        jobs = data.get("jobs")
+        step_groups: list[tuple[str, object]] = []
+        if isinstance(jobs, dict):
+            step_groups.extend(
+                (str(job_id), job.get("steps"))
+                for job_id, job in jobs.items()
+                if isinstance(job, dict)
+            )
+        runs = data.get("runs")
+        if isinstance(runs, dict):
+            step_groups.append(("runs", runs.get("steps")))
+        for group, steps in step_groups:
+            if not isinstance(steps, list):
+                continue
+            for step in steps:
+                if isinstance(step, dict) and isinstance(step.get("run"), str):
+                    yield path, f"{group}:{step.get('name') or step.get('id') or '?'}", step["run"]
+
+
 def _action_reference_files() -> tuple[Path, ...]:
     workflow_files = sorted(Path(".github/workflows").glob("*.yml"))
     composite_action_files = sorted(Path(".github/actions").rglob("action.y*ml"))
@@ -412,7 +478,7 @@ class GitHubActionsSecurityTests(TestCase):
         self.assertEqual([], violations)
 
     def test_pull_request_jobs_on_self_hosted_runners_exclude_forks(self) -> None:
-        same_repo_guard = " ".join(SAME_REPO_PULL_REQUEST_IF.split())
+        same_repo_guard = f"({SAME_REPO_PULL_REQUEST_IF})"
         violations: list[str] = []
         workflow_root = Path(".github/workflows")
         workflow_paths = sorted((*workflow_root.glob("*.yml"), *workflow_root.glob("*.yaml")))
@@ -433,11 +499,36 @@ class GitHubActionsSecurityTests(TestCase):
                 labels = runs_on if isinstance(runs_on, list) else [runs_on]
                 if not any("self-hosted" in str(label) for label in labels):
                     continue
-                if same_repo_guard not in " ".join(str(job.get("if", "")).split()):
+                if not _requires_conjunct(str(job.get("if", "")), same_repo_guard):
                     violations.append(
                         f"{path}:{job_id}: self-hosted pull_request jobs must be gated to "
                         "same-repository pull requests."
                     )
+
+        self.assertEqual([], violations)
+
+    def test_same_repository_guard_must_hold_for_the_whole_condition(self) -> None:
+        guard = f"({SAME_REPO_PULL_REQUEST_IF})"
+        for expression, required in (
+            (f"needs.a.outputs.verified != 'true' && {guard}", True),
+            (f"{guard} && always()", True),
+            (f"({guard})", True),
+            (f"{guard} || needs.a.outputs.verified != 'true'", False),
+            (f"(needs.a.outputs.verified != 'true' || {guard}) && always()", False),
+            ("needs.a.outputs.verified != 'true'", False),
+        ):
+            with self.subTest(expression=expression):
+                self.assertEqual(_requires_conjunct(expression, guard), required)
+
+    def test_run_scripts_read_untrusted_values_through_the_environment(self) -> None:
+        # An expression in a run script is pasted into the shell before it runs,
+        # so a crafted input or event field becomes code. Pass it through env.
+        violations = [
+            f"{path}:{step}: {line.strip()}"
+            for path, step, script in _run_scripts()
+            for line in script.splitlines()
+            if UNTRUSTED_RUN_EXPRESSION_PATTERN.search(line)
+        ]
 
         self.assertEqual([], violations)
 

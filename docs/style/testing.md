@@ -200,16 +200,18 @@ that proof. Deployed OIDC smoke remains a separate non-destructive evidence
 layer because it validates service authentication and deployment wiring rather
 than deterministic UI behavior.
 
-Workflows are checked where they execute: CI runs them, and `security.yml` runs
-actionlint and zizmor over every workflow. Do not add a test that re-reads one
+Workflows are checked where they execute: CI runs them, `security.yml` runs
+actionlint over every workflow, and `tests/test_github_actions_security.py`
+holds the rules that apply to all of them. Do not add a test that re-reads one
 workflow to check that it says what it says. Workflow tests take one of three
 forms:
 
 - Run an embedded script step with inputs (through `tests/support/workflows.py`
   `load_workflow` and `step_named`) and assert its output or exit code.
 - Enforce a rule over every workflow, such as fork pull requests never reaching
-  self-hosted runners or remote actions being pinned to a full commit SHA, and
-  name the workflow file and violated rule on failure.
+  self-hosted runners, remote actions being pinned to a full commit SHA, or
+  `run:` scripts reading inputs and event fields through `env` instead of
+  `${{ }}`, and name the workflow file and violated rule on failure.
 - Check that two real files agree, such as an operator wrapper's inputs and the
   pinned worker it forwards to.
 
