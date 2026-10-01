@@ -1791,8 +1791,16 @@ repository secrets for normal deploy execution. Automatic rollback also uses the
 Launchplane service route. If a failed rollout makes that route unable to accept
 its own rollback request, direct Dokploy rollback is available only through the
 manual break-glass inputs on the Deploy Launchplane workflow: provide the exact
-confirmation text, a previous immutable `@sha256` image reference from the
-configured Launchplane image repository, and an operator reason. The reason
+confirmation text, an immutable `@sha256` image reference from the configured
+Launchplane image repository, and an operator reason. The image is normally a
+previous Launchplane image; when no earlier image is compatible with
+Launchplane's database, it may be a fixed image built from `main` (see
+[Live Sites During A Launchplane Outage](#live-sites-during-a-launchplane-outage)).
+The job enforces only the repository and digest form; the operator confirms
+which image it is before dispatch. The job deploys the target named by the
+workflow's `LAUNCHPLANE_DOKPLOY_TARGET_TYPE` and `LAUNCHPLANE_DOKPLOY_TARGET_ID`
+variables without checking what it is, so those variables must identify
+Launchplane itself and never a product site. The reason
 must be a single printable line from 8 to 500 characters and contain
 non-whitespace text. Configure the `launchplane-break-glass` GitHub environment
 with required reviewers and protected-branch deployment rules before enabling
@@ -2843,6 +2851,24 @@ must all declare version 2; local publish also binds the returned manifest to th
 requested image repository and complete requested platform set. After all
 producers migrate, service ingress can require v2 without rewriting historical
 v1 records.
+
+## Live Sites During A Launchplane Outage
+
+While Launchplane is unavailable, no new code or artifact is deployed or
+promoted to a real live site. With the operator's approval, the operator may
+roll a live site back to an artifact that previously passed in production, take
+it offline, disable its route, rotate a compromised secret, restore data, or
+repair DNS or TLS. None of these ships new code. There is no break-glass
+authority for forward live-site changes. Restore Launchplane first through
+[Launchplane Service Deploy Posture](#launchplane-service-deploy-posture). If no
+earlier Launchplane image is compatible with its database, the operator may
+deploy a fixed Launchplane image built from `main` through the same reviewed
+break-glass job; this path only ever repairs Launchplane itself and never
+deploys a product site.
+
+Once Launchplane is back, confirm its inventory for each live site matches what
+the provider is serving before the next promotion, which takes the normal path
+with a fresh backup gate.
 
 ## Launchplane Preview Operations
 
