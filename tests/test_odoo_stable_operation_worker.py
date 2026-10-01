@@ -47,6 +47,7 @@ from control_plane.odoo_stable_bootstrap_http import (
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.odoo_stable_operation_worker import (
     OdooStableOperationWorkerLoopResult,
+    _unexpected_error_code,
     build_odoo_stable_operation_worker_status,
     reconcile_stale_odoo_stable_operation_records,
     run_odoo_stable_operation_worker_loop,
@@ -977,6 +978,7 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             self.assertEqual(operation.status, "fail")
             self.assertEqual(operation.phase, "failed")
             self.assertEqual(operation.error_message, "provider unavailable")
+            self.assertEqual(operation.error_code, "unexpected.runtime_error")
 
     def test_worker_writes_target_replacement_failure_when_execution_raises(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1009,6 +1011,20 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             self.assertEqual(operation.status, "fail")
             self.assertEqual(operation.phase, "failed")
             self.assertEqual(operation.error_message, "provider unavailable")
+            self.assertEqual(operation.error_code, "unexpected.runtime_error")
+
+    def test_worker_keeps_an_unexpected_error_s_own_code(self) -> None:
+        class CodedError(Exception):
+            code = "runtime_environment_empty"
+
+        class UnsafeCodeError(Exception):
+            code = "Not A Code: secret=value"
+
+        self.assertEqual(_unexpected_error_code(CodedError("x")), "runtime_environment_empty")
+        self.assertEqual(
+            _unexpected_error_code(UnsafeCodeError("secret=value")), "unexpected.unsafe_code_error"
+        )
+        self.assertEqual(_unexpected_error_code(KeyError("x")), "unexpected.key_error")
 
     def test_worker_recovers_expired_safe_operation_before_claiming(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

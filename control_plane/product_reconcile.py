@@ -578,7 +578,14 @@ def _testing_failure_reason(
     error_code = operation.error_code.strip()
     if not _ERROR_CODE_PATTERN.match(error_code):
         error_code = _testing_failure_code(operation)
-    parts = [TESTING_FAILURE_DESCRIPTIONS.get(error_code, _UNKNOWN_TESTING_FAILURE)]
+    if error_code.startswith("unexpected."):
+        # The worker names an error it did not expect by its class, never its message.
+        description = (
+            "The deploy stopped with an unexpected error before the driver returned a result."
+        )
+    else:
+        description = TESTING_FAILURE_DESCRIPTIONS.get(error_code, _UNKNOWN_TESTING_FAILURE)
+    parts = [description]
     result = operation.result
     if result is not None:
         parts.append(
