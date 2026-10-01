@@ -28,7 +28,6 @@ from control_plane.contracts.product_profile_record import (
     ProductImageProfile,
 )
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
-from control_plane.contracts.repository_human_admission import RepositoryHumanRolePolicyRecord
 from control_plane.contracts.tenant_merge_eligibility import (
     TenantRepositoryClassificationRecord,
 )
@@ -47,13 +46,11 @@ class _Store:
         self,
         *,
         product_profiles: tuple[LaunchplaneProductProfileRecord, ...] = (),
-        role_policies: tuple[RepositoryHumanRolePolicyRecord, ...] = (),
         classifications: tuple[TenantRepositoryClassificationRecord, ...] = (),
         inventory_records: tuple[RepositoryInventoryRecord, ...] = (),
         work_requests: tuple[EveryCodeWorkRequestRecord, ...] = (),
     ) -> None:
         self.product_profiles = product_profiles
-        self.role_policies = role_policies
         self.classifications = classifications
         self.inventory_records = inventory_records
         self.work_requests = work_requests
@@ -65,20 +62,6 @@ class _Store:
     ) -> tuple[LaunchplaneProductProfileRecord, ...]:
         del driver_id
         return self.product_profiles
-
-    def list_repository_human_role_policy_records(
-        self,
-        *,
-        repository_id: str = "",
-        repository_owner_id: str = "",
-        repository: str = "",
-        product: str = "",
-        context: str = "",
-        status: str = "",
-        limit: int | None = None,
-    ) -> tuple[RepositoryHumanRolePolicyRecord, ...]:
-        del repository_id, repository_owner_id, repository, product, context, status
-        return self.role_policies if limit is None else self.role_policies[:limit]
 
     def list_tenant_repository_classification_records(
         self,
@@ -127,14 +110,12 @@ class _CliStore(_Store):
         *,
         active_policy_records: tuple[LaunchplaneAuthzPolicyRecord, ...],
         product_profiles: tuple[LaunchplaneProductProfileRecord, ...] = (),
-        role_policies: tuple[RepositoryHumanRolePolicyRecord, ...] = (),
         classifications: tuple[TenantRepositoryClassificationRecord, ...] = (),
         inventory_records: tuple[RepositoryInventoryRecord, ...] = (),
         work_requests: tuple[EveryCodeWorkRequestRecord, ...] = (),
     ) -> None:
         super().__init__(
             product_profiles=product_profiles,
-            role_policies=role_policies,
             classifications=classifications,
             inventory_records=inventory_records,
             work_requests=work_requests,
@@ -169,7 +150,6 @@ class AuthzRepositoryScopeTests(unittest.TestCase):
         store = _CliStore(
             active_policy_records=(_policy_record(repository=REPOSITORY),),
             product_profiles=(_product_profile(),),
-            role_policies=(_role_policy(),),
             classifications=(_classification(),),
             work_requests=(_work_request(),),
         )
@@ -306,7 +286,6 @@ class AuthzRepositoryScopeTests(unittest.TestCase):
         policy_record = _policy_record(repository=REPOSITORY)
         store = _Store(
             product_profiles=(_product_profile(),),
-            role_policies=(_role_policy(),),
             classifications=(_classification(),),
             work_requests=(_work_request(),),
         )
@@ -423,11 +402,6 @@ class AuthzRepositoryScopeTests(unittest.TestCase):
                 store=_Store(
                     product_profiles=(
                         _product_profile().model_copy(update={"repository": canonical_repository}),
-                    ),
-                    role_policies=(
-                        _role_policy().model_copy(
-                            update={"repository": canonical_repository.casefold()}
-                        ),
                     ),
                     classifications=(
                         _classification().model_copy(
@@ -783,22 +757,6 @@ def _product_profile(
             "updated_at": "2026-08-20T21:00:00+00:00",
             "source": "test:authz-repository-scope",
         }
-    )
-
-
-def _role_policy() -> RepositoryHumanRolePolicyRecord:
-    return RepositoryHumanRolePolicyRecord(
-        repository_id=REPOSITORY_ID,
-        repository_owner_id=REPOSITORY_OWNER_ID,
-        repository=REPOSITORY,
-        product="example-product",
-        context="prod",
-        role_policy_revision=1,
-        repository_owner_github_ids=(1001,),
-        manager_primary_github_ids=(1002,),
-        effective_at="2026-08-20T20:00:00Z",
-        source="test:authz-repository-scope",
-        reason="repository scope test",
     )
 
 

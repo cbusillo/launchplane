@@ -53,10 +53,6 @@ from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanR
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
 from control_plane.contracts.ingress_route_audit_record import IngressRouteAuditRecord
-from control_plane.contracts.retired_manager_preview_approval import (
-    ManagerPreviewApprovalEventRecord,
-    ManagerPreviewApprovalEventWriteStatus,
-)
 from control_plane.contracts.merge_admission_record import (
     MergeAdmissionFenceRejectedError,
     MergeAdmissionRecord,
@@ -153,9 +149,6 @@ from control_plane.contracts.preview_pr_feedback_remediation import (
 )
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
-from control_plane.contracts.repository_human_admission import (
-    RepositoryHumanRolePolicyRecord,
-)
 from control_plane.contracts.trusted_maintenance import (
     TrustedMaintenanceEvidenceRecord,
     TrustedMaintenancePolicyRecord,
@@ -200,9 +193,6 @@ from control_plane.contracts.public_ingress_monitoring import PublicIngressObser
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
-from control_plane.contracts.retired_manager_preview_approval import (
-    ManagerPreviewApprovalEventConflictError,
-)
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecord,
@@ -255,9 +245,6 @@ from control_plane.storage.product_authority_bundle import (
     RuntimeEnvironmentDelete,
     RuntimeEnvironmentWrite,
     runtime_environment_records_match,
-)
-from control_plane.repository_human_admission import (
-    plan_repository_human_role_policy_append,
 )
 from control_plane.contracts.product_owner import (
     ProductOwnerPolicyConflictError,
@@ -1242,85 +1229,6 @@ class FilesystemRecordStore:
             )
             return plan.result.model_copy(update={"status": "applied"})
 
-    def write_repository_human_role_policy_record(
-        self,
-        record: RepositoryHumanRolePolicyRecord,
-    ) -> Literal["written", "replayed"]:
-        record_type = "launchplane_repository_human_role_policies"
-        with self._product_authority_bundle_lock():
-            records = self._list_models_locked(RepositoryHumanRolePolicyRecord, record_type)
-            plan = plan_repository_human_role_policy_append(records=records, record=record)
-            if plan.status == "replayed":
-                return "replayed"
-            if plan.superseded_current_record is None:
-                self._write_model_locked(record_type, record.record_id, record)
-                return "written"
-            self._write_repository_human_role_policy_replacement_locked(
-                record_type=record_type,
-                superseded_current_record=plan.superseded_current_record,
-                active_record=record,
-            )
-            return "written"
-
-    def _write_repository_human_role_policy_replacement_locked(
-        self,
-        *,
-        record_type: str,
-        superseded_current_record: RepositoryHumanRolePolicyRecord,
-        active_record: RepositoryHumanRolePolicyRecord,
-    ) -> None:
-        stage_id = f"{_utc_now_timestamp().replace(':', '').replace('-', '')}-{time.time_ns()}"
-        stage_dir = self._product_authority_bundle_stage_root() / stage_id
-        records_dir = stage_dir / "records"
-        records_dir.mkdir(parents=True, exist_ok=False)
-        entries: list[_AuthorityBundleStageEntry] = []
-        try:
-            self._stage_product_authority_bundle_write(
-                stage_dir=stage_dir,
-                entries=entries,
-                record_type=record_type,
-                record_id=superseded_current_record.record_id,
-                model=superseded_current_record,
-                step_name="supersede_repository_human_role_policy",
-            )
-            self._stage_product_authority_bundle_write(
-                stage_dir=stage_dir,
-                entries=entries,
-                record_type=record_type,
-                record_id=active_record.record_id,
-                model=active_record,
-                step_name="write_repository_human_role_policy",
-            )
-            manifest = _AuthorityBundleStageManifest(
-                stage_id=stage_id,
-                state="ready",
-                entries=tuple(entries),
-            )
-            self._write_product_authority_bundle_stage_manifest(
-                stage_dir=stage_dir,
-                manifest=manifest,
-            )
-            self._after_product_authority_bundle_step(
-                "stage_repository_human_role_policy_replacement"
-            )
-            publishing_manifest = manifest.model_copy(update={"state": "publishing"})
-            self._write_product_authority_bundle_stage_manifest(
-                stage_dir=stage_dir,
-                manifest=publishing_manifest,
-            )
-            self._after_product_authority_bundle_step(
-                "publish_repository_human_role_policy_replacement"
-            )
-            self._publish_product_authority_bundle_stage(
-                manifest=publishing_manifest,
-                stage_dir=stage_dir,
-                recovering=False,
-            )
-        except Exception:
-            if not (stage_dir / "manifest.json").exists():
-                shutil.rmtree(stage_dir, ignore_errors=True)
-            raise
-
     def _write_production_backup_revision_replacement_locked(
         self,
         *,
@@ -1451,55 +1359,6 @@ class FilesystemRecordStore:
             if not (stage_dir / "manifest.json").exists():
                 shutil.rmtree(stage_dir, ignore_errors=True)
             raise
-
-    def read_repository_human_role_policy_record(
-        self,
-        record_id: str,
-    ) -> RepositoryHumanRolePolicyRecord:
-        return self._read_model(
-            RepositoryHumanRolePolicyRecord,
-            "launchplane_repository_human_role_policies",
-            record_id,
-        )
-
-    def list_repository_human_role_policy_records(
-        self,
-        *,
-        repository_id: str = "",
-        repository_owner_id: str = "",
-        repository: str = "",
-        product: str = "",
-        context: str = "",
-        status: str = "",
-        limit: int | None = None,
-    ) -> tuple[RepositoryHumanRolePolicyRecord, ...]:
-        normalized_repository = repository.strip().lower()
-        records = [
-            record
-            for record in self._list_models(
-                RepositoryHumanRolePolicyRecord,
-                "launchplane_repository_human_role_policies",
-            )
-            if (not repository_id or record.repository_id == repository_id)
-            and (not repository_owner_id or record.repository_owner_id == repository_owner_id)
-            and (not normalized_repository or record.repository == normalized_repository)
-            and (not product or record.product == product)
-            and (not context or record.context == context)
-            and (not status or record.status == status)
-        ]
-        records.sort(
-            key=lambda record: (
-                record.role_policy_revision,
-                record.repository_id,
-                record.product,
-                record.context,
-                record.record_id,
-            ),
-            reverse=True,
-        )
-        if limit is not None:
-            records = records[:limit]
-        return tuple(records)
 
     def compare_and_write_product_owner_policy_record(
         self,
@@ -3208,55 +3067,6 @@ class FilesystemRecordStore:
         records.sort(key=lambda record: (record.updated_at, record.gate_id), reverse=True)
         if offset > 0:
             records = records[offset:]
-        if limit is not None:
-            records = records[:limit]
-        return tuple(records)
-
-    def write_manager_preview_approval_event_record(
-        self, record: ManagerPreviewApprovalEventRecord
-    ) -> ManagerPreviewApprovalEventWriteStatus:
-        record_type = "launchplane_manager_preview_approval_events"
-        with self._product_authority_bundle_lock():
-            record_path = self._record_path(record_type, record.event_id)
-            if record_path.exists():
-                existing = self._read_model_locked(
-                    ManagerPreviewApprovalEventRecord,
-                    record_type,
-                    record.event_id,
-                )
-                if existing != record:
-                    raise ManagerPreviewApprovalEventConflictError(
-                        "Manager preview approval event replay changed the persisted payload."
-                    )
-                return "replayed"
-            self._write_model_locked(record_type, record.event_id, record)
-            return "written"
-
-    def list_manager_preview_approval_event_records(
-        self,
-        *,
-        product: str = "",
-        context: str = "",
-        repository: str = "",
-        pr_number: int | None = None,
-        preview_id: str = "",
-        action: str = "",
-        limit: int | None = None,
-    ) -> tuple[ManagerPreviewApprovalEventRecord, ...]:
-        records = [
-            record
-            for record in self._list_models(
-                ManagerPreviewApprovalEventRecord,
-                "launchplane_manager_preview_approval_events",
-            )
-            if (not product or record.binding.product == product.lower())
-            and (not context or record.binding.context == context.lower())
-            and (not repository or record.binding.repository == repository.lower())
-            and (pr_number is None or record.binding.pr_number == pr_number)
-            and (not preview_id or record.binding.preview_id == preview_id)
-            and (not action or record.action == action)
-        ]
-        records.sort(key=lambda record: (record.occurred_at, record.event_id), reverse=True)
         if limit is not None:
             records = records[:limit]
         return tuple(records)

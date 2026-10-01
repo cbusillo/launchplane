@@ -314,8 +314,6 @@ def _projection_state_and_description(
         return "success", "Tenant admission is not required for this repository."
     if category == "pending":
         return "pending", "Tenant admission is waiting for one authorized path."
-    if category == "manager-approved":
-        return "success", "Manager approved the exact current preview."
     if category == "maintenance-admitted":
         return "success", "Trusted maintenance policy admits the exact current head."
     if category == "stale":

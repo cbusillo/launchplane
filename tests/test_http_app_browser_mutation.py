@@ -88,7 +88,6 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "/v1/secrets/reencrypt",
             "/v1/repository-inventory/apply",
             "/v1/tenant-admission/repository-classifications/apply",
-            "/v1/tenant-admission/repository-human-role-policies/apply",
             "/v1/tenant-admission/status/reconcile",
             "/v1/work-graph/tenant-admission/controller/run-once",
         }

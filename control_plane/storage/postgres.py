@@ -240,10 +240,6 @@ from control_plane.contracts.ordinary_agent_lifecycle import (
 from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
 from control_plane.contracts.ingress_route_audit_record import IngressRouteAuditRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
-from control_plane.contracts.retired_manager_preview_approval import (
-    ManagerPreviewApprovalEventRecord,
-    ManagerPreviewApprovalEventWriteStatus,
-)
 from control_plane.contracts.merge_admission_record import (
     MergeAdmissionProposal,
     MergeAdmissionFenceRejectedError,
@@ -420,9 +416,6 @@ from control_plane.contracts.private_health_endpoint_record import (
     PrivateHealthEndpointRecord,
     private_health_endpoint_record_sha256,
 )
-from control_plane.contracts.retired_manager_preview_approval import (
-    ManagerPreviewApprovalEventConflictError,
-)
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
     route_binding_record_sha256,
@@ -496,18 +489,9 @@ from control_plane.contracts.tenant_merge_eligibility import (
     TenantRepositoryClassificationRecord,
 )
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
-from control_plane.contracts.repository_human_admission import (
-    RepositoryHumanRolePolicyRecord,
-)
 from control_plane.contracts.trusted_maintenance import (
     TrustedMaintenanceEvidenceRecord,
     TrustedMaintenancePolicyRecord,
-)
-from control_plane.repository_human_admission import (
-    RepositoryHumanRolePolicyConflictError,
-    RepositoryHumanRolePolicySequenceError,
-    plan_repository_human_role_policy_apply,
-    plan_repository_human_role_policy_append,
 )
 from control_plane.tenant_repository_classification import (
     TenantRepositoryClassificationConflictError,
@@ -810,14 +794,6 @@ ProductionBackupAuthorityCompareWriteStatus = Literal[
     "reservation_in_progress",
     "reconciliation_required",
 ]
-RepositoryHumanRolePolicyCompareWriteStatus = Literal[
-    "written",
-    "exact_replay",
-    "replayed",
-    "idempotency_conflict",
-    "reservation_in_progress",
-    "reconciliation_required",
-]
 TrustedMaintenancePolicyCompareWriteStatus = Literal[
     "written",
     "exact_replay",
@@ -939,11 +915,6 @@ class RepositoryInventoryCompareWriteResult(NamedTuple):
 class ProductionBackupAuthorityCompareWriteResult(NamedTuple):
     status: ProductionBackupAuthorityCompareWriteStatus
     result: ProductionBackupAuthorityWriteResult | None = None
-    idempotency_record: LaunchplaneIdempotencyRecord | None = None
-
-
-class RepositoryHumanRolePolicyCompareWriteResult(NamedTuple):
-    status: RepositoryHumanRolePolicyCompareWriteStatus
     idempotency_record: LaunchplaneIdempotencyRecord | None = None
 
 
@@ -1401,6 +1372,9 @@ class LaunchplanePreviewGenerationRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
+# Manager preview approval is retired and nothing reads or writes these rows.
+# The table stays mapped so existing rows are kept until the operator decides
+# whether to drop them.
 class LaunchplaneManagerPreviewApprovalEventRow(Base):
     __tablename__ = "launchplane_manager_preview_approval_events"
     __table_args__ = (
@@ -3033,6 +3007,9 @@ class LaunchplaneOrdinaryAgentLifecycleAuditRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
+# Repository human role policies (manager and delegate roles) are retired and
+# nothing reads or writes these rows. The table stays mapped so existing rows
+# are kept until the operator decides whether to drop them.
 class LaunchplaneRepositoryHumanRolePolicyRow(Base):
     __tablename__ = "launchplane_repository_human_role_policies"
     __table_args__ = (
@@ -12365,54 +12342,6 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
-    def write_manager_preview_approval_event_record(
-        self, record: ManagerPreviewApprovalEventRecord
-    ) -> ManagerPreviewApprovalEventWriteStatus:
-        row = LaunchplaneManagerPreviewApprovalEventRow(
-            event_id=record.event_id,
-            approval_id=record.approval_id,
-            product=record.binding.product,
-            context=record.binding.context,
-            repository=record.binding.repository,
-            pr_number=record.binding.pr_number,
-            head_sha=record.binding.head_sha,
-            preview_id=record.binding.preview_id,
-            serving_generation_id=record.binding.serving_generation_id,
-            artifact_id=record.binding.artifact_id,
-            artifact_image_digest=record.binding.artifact_image_digest,
-            manifest_fingerprint=record.binding.manifest_fingerprint,
-            runtime_identity_sha256=record.binding.runtime_identity_sha256,
-            action=record.action,
-            manager_github_id=record.manager_github_id,
-            manager_login=record.manager_login,
-            policy_record_id=record.policy_record_id,
-            policy_sha256=record.policy_sha256,
-            occurred_at=record.occurred_at,
-            payload=self._payload_dict(record),
-        )
-        with self._session_factory() as session:
-            session.add(row)
-            try:
-                session.commit()
-                return "written"
-            except IntegrityError:
-                session.rollback()
-                existing_row = session.get(
-                    LaunchplaneManagerPreviewApprovalEventRow,
-                    record.event_id,
-                )
-                if existing_row is None:
-                    raise
-                existing = self._read_payload(
-                    model_type=ManagerPreviewApprovalEventRecord,
-                    payload=existing_row.payload,
-                )
-                if existing != record:
-                    raise ManagerPreviewApprovalEventConflictError(
-                        "Manager preview approval event replay changed the persisted payload."
-                    )
-                return "replayed"
-
     def _owner_control_channel_session_row(
         self,
         session: Any,
@@ -14165,43 +14094,6 @@ class PostgresRecordStore(HumanSessionStore):
                 raise FileNotFoundError(event_id)
             return self._owner_acceptance_record_from_row(row)
 
-    def _repository_human_role_policy_row(
-        self, record: RepositoryHumanRolePolicyRecord
-    ) -> LaunchplaneRepositoryHumanRolePolicyRow:
-        return LaunchplaneRepositoryHumanRolePolicyRow(
-            record_id=record.record_id,
-            repository_id=record.repository_id,
-            repository_owner_id=record.repository_owner_id,
-            repository=record.repository,
-            product=record.product,
-            context=record.context,
-            status=record.status,
-            role_policy_revision=record.role_policy_revision,
-            effective_at=record.effective_at,
-            source=record.source,
-            supersedes_record_id=record.supersedes_record_id,
-            role_policy_digest=record.role_policy_digest,
-            payload=self._payload_dict(record),
-        )
-
-    def _sync_repository_human_role_policy_row(
-        self,
-        row: LaunchplaneRepositoryHumanRolePolicyRow,
-        record: RepositoryHumanRolePolicyRecord,
-    ) -> None:
-        row.repository_id = record.repository_id
-        row.repository_owner_id = record.repository_owner_id
-        row.repository = record.repository
-        row.product = record.product
-        row.context = record.context
-        row.status = record.status
-        row.role_policy_revision = record.role_policy_revision
-        row.effective_at = record.effective_at
-        row.source = record.source
-        row.supersedes_record_id = record.supersedes_record_id
-        row.role_policy_digest = record.role_policy_digest
-        row.payload = self._payload_dict(record)
-
     def _locked_current_classification_rows(
         self,
         *,
@@ -14214,50 +14106,6 @@ class PostgresRecordStore(HumanSessionStore):
             .order_by(LaunchplaneTenantRepositoryClassificationRow.classification_revision.asc())
         )
         if not self.database_url.startswith("sqlite"):
-            statement = statement.with_for_update()
-        return tuple(session.scalars(statement).all())
-
-    def _lock_repository_human_role_policy_write(
-        self,
-        session: Any,
-        *,
-        repository_id: str,
-        product: str,
-        context_name: str,
-    ) -> None:
-        if self.database_url.startswith("sqlite"):
-            return
-        lock_parts = (
-            "launchplane",
-            "repository-human-role-policy",
-            repository_id,
-            product,
-            context_name,
-        )
-        session.execute(
-            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
-            {"lock_name": "".join(f"{len(lock_part)}:{lock_part}" for lock_part in lock_parts)},
-        )
-
-    def _repository_human_role_policy_stream_rows(
-        self,
-        *,
-        session: Any,
-        repository_id: str,
-        product: str,
-        context_name: str,
-        for_update: bool = False,
-    ) -> tuple[LaunchplaneRepositoryHumanRolePolicyRow, ...]:
-        statement = (
-            select(LaunchplaneRepositoryHumanRolePolicyRow)
-            .where(
-                LaunchplaneRepositoryHumanRolePolicyRow.repository_id == repository_id,
-                LaunchplaneRepositoryHumanRolePolicyRow.product == product,
-                LaunchplaneRepositoryHumanRolePolicyRow.context == context_name,
-            )
-            .order_by(LaunchplaneRepositoryHumanRolePolicyRow.role_policy_revision.asc())
-        )
-        if for_update and not self.database_url.startswith("sqlite"):
             statement = statement.with_for_update()
         return tuple(session.scalars(statement).all())
 
@@ -14343,331 +14191,6 @@ class PostgresRecordStore(HumanSessionStore):
         )
         self._sync_idempotency_row(reservation_row, reclaimed_reservation)
         return "acquired", reservation_row, reclaimed_reservation
-
-    def compare_and_write_repository_human_role_policy_record(
-        self,
-        *,
-        record: RepositoryHumanRolePolicyRecord,
-        expected_current_record_id: str,
-        expected_current_role_policy_digest: str,
-        mutation: DbOnlyMutationRequest,
-    ) -> RepositoryHumanRolePolicyCompareWriteResult:
-        if not 100 <= mutation.response_status_code <= 599:
-            raise ValueError("DB-only mutation response status must be between 100 and 599.")
-        if not mutation.response_trace_id.strip():
-            raise ValueError("DB-only mutation response trace id is required.")
-        normalized_expected_record_id = expected_current_record_id.strip()
-        normalized_expected_digest = expected_current_role_policy_digest.strip().lower()
-
-        reservation_insert_error: IntegrityError | None = None
-        with self._session_factory() as session:
-            self._begin_serialized_write(session)
-            observed_at = self._database_mutation_timestamp(session)
-            stored_reservation = build_launchplane_mutation_reservation(
-                scope=mutation.scope,
-                route_path=mutation.route_path,
-                idempotency_key=mutation.idempotency_key,
-                request_fingerprint=mutation.request_fingerprint,
-                lease_owner=mutation.lease_owner,
-                lease_expires_at=self._mutation_lease_expiry(
-                    observed_at=observed_at,
-                    lease_seconds=mutation.lease_seconds,
-                ),
-                reserved_at=observed_at,
-            )
-            reservation_row = self._idempotency_row(stored_reservation)
-            session.add(reservation_row)
-            try:
-                session.flush()
-            except IntegrityError as error:
-                session.rollback()
-                reservation_insert_error = error
-            if reservation_insert_error is None:
-                return self._compare_and_write_repository_human_role_policy_locked(
-                    session=session,
-                    record=record,
-                    expected_current_record_id=normalized_expected_record_id,
-                    expected_current_role_policy_digest=normalized_expected_digest,
-                    reservation_row=reservation_row,
-                    mutation_reservation=stored_reservation,
-                    mutation=mutation,
-                )
-
-        with self._session_factory() as session:
-            self._begin_serialized_write(session)
-            reservation_row = session.scalar(
-                self._idempotency_statement(
-                    scope=mutation.scope,
-                    route_path=mutation.route_path,
-                    idempotency_key=mutation.idempotency_key,
-                    for_update=True,
-                )
-            )
-            if reservation_row is None:
-                assert reservation_insert_error is not None
-                raise reservation_insert_error
-            current_reservation = self._read_payload(
-                model_type=LaunchplaneIdempotencyRecord,
-                payload=reservation_row.payload,
-            )
-            if current_reservation.request_fingerprint != mutation.request_fingerprint:
-                return RepositoryHumanRolePolicyCompareWriteResult(
-                    status="idempotency_conflict",
-                    idempotency_record=current_reservation,
-                )
-            if current_reservation.state == "completed":
-                return RepositoryHumanRolePolicyCompareWriteResult(
-                    status="replayed",
-                    idempotency_record=current_reservation,
-                )
-            if current_reservation.state == "reconcile_required":
-                return RepositoryHumanRolePolicyCompareWriteResult(
-                    status="reconciliation_required",
-                    idempotency_record=current_reservation,
-                )
-            observed_at = self._database_mutation_timestamp(session)
-            if parse_launchplane_mutation_timestamp(
-                current_reservation.lease_expires_at,
-                field_name="lease_expires_at",
-            ) > parse_launchplane_mutation_timestamp(
-                observed_at,
-                field_name="observed_at",
-            ):
-                return RepositoryHumanRolePolicyCompareWriteResult(
-                    status="reservation_in_progress",
-                    idempotency_record=current_reservation,
-                )
-            if current_reservation.reconciliation_key:
-                reconcile_record = self._updated_idempotency_record(
-                    current_reservation,
-                    state="reconcile_required",
-                    updated_at=observed_at,
-                )
-                self._sync_idempotency_row(reservation_row, reconcile_record)
-                session.commit()
-                return RepositoryHumanRolePolicyCompareWriteResult(
-                    status="reconciliation_required",
-                    idempotency_record=reconcile_record,
-                )
-            reclaimed_reservation = self._updated_idempotency_record(
-                current_reservation,
-                lease_owner=mutation.lease_owner,
-                lease_expires_at=self._mutation_lease_expiry(
-                    observed_at=observed_at,
-                    lease_seconds=mutation.lease_seconds,
-                ),
-                attempt=current_reservation.attempt + 1,
-                updated_at=observed_at,
-                response_status_code=None,
-                response_trace_id="",
-                recorded_at="",
-                response_payload={},
-            )
-            self._sync_idempotency_row(reservation_row, reclaimed_reservation)
-            return self._compare_and_write_repository_human_role_policy_locked(
-                session=session,
-                record=record,
-                expected_current_record_id=normalized_expected_record_id,
-                expected_current_role_policy_digest=normalized_expected_digest,
-                reservation_row=reservation_row,
-                mutation_reservation=reclaimed_reservation,
-                mutation=mutation,
-            )
-
-    def _compare_and_write_repository_human_role_policy_locked(
-        self,
-        *,
-        session: Any,
-        record: RepositoryHumanRolePolicyRecord,
-        expected_current_record_id: str,
-        expected_current_role_policy_digest: str,
-        reservation_row: LaunchplaneIdempotencyRow,
-        mutation_reservation: LaunchplaneIdempotencyRecord,
-        mutation: DbOnlyMutationRequest,
-    ) -> RepositoryHumanRolePolicyCompareWriteResult:
-        self._lock_repository_human_role_policy_write(
-            session,
-            repository_id=record.repository_id,
-            product=record.product,
-            context_name=record.context,
-        )
-        rows = self._repository_human_role_policy_stream_rows(
-            session=session,
-            repository_id=record.repository_id,
-            product=record.product,
-            context_name=record.context,
-            for_update=True,
-        )
-        existing_records = tuple(
-            self._read_payload(
-                model_type=RepositoryHumanRolePolicyRecord,
-                payload=row.payload,
-            )
-            for row in rows
-        )
-        try:
-            plan = plan_repository_human_role_policy_apply(
-                records=existing_records,
-                record=record,
-                expected_current_record_id=expected_current_record_id,
-                expected_current_role_policy_digest=expected_current_role_policy_digest,
-            )
-        except (
-            RepositoryHumanRolePolicyConflictError,
-            RepositoryHumanRolePolicySequenceError,
-            ValueError,
-        ):
-            session.delete(reservation_row)
-            session.commit()
-            raise
-
-        exact_replay = plan.status == "replayed"
-        if not exact_replay:
-            if plan.superseded_current_record is not None:
-                current_row = next(
-                    row for row in rows if row.record_id == plan.superseded_current_record.record_id
-                )
-                self._sync_repository_human_role_policy_row(
-                    current_row,
-                    plan.superseded_current_record,
-                )
-                session.flush()
-            session.add(self._repository_human_role_policy_row(record))
-            session.flush()
-        completed_at = self._database_mutation_timestamp(session)
-        completion = complete_launchplane_mutation_reservation(
-            mutation_reservation,
-            response_status_code=mutation.response_status_code,
-            response_trace_id=mutation.response_trace_id,
-            completed_at=completed_at,
-            response_payload=(
-                mutation.replay_response_payload
-                if exact_replay and mutation.replay_response_payload is not None
-                else mutation.response_payload
-            ),
-        )
-        self._sync_idempotency_row(reservation_row, completion)
-        session.commit()
-        return RepositoryHumanRolePolicyCompareWriteResult(
-            status="exact_replay" if exact_replay else "written",
-            idempotency_record=completion,
-        )
-
-    def write_repository_human_role_policy_record(
-        self,
-        record: RepositoryHumanRolePolicyRecord,
-    ) -> Literal["written", "replayed"]:
-        insert_error: IntegrityError | None = None
-        with self._session_factory() as session:
-            self._begin_serialized_write(session)
-            self._lock_repository_human_role_policy_write(
-                session,
-                repository_id=record.repository_id,
-                product=record.product,
-                context_name=record.context,
-            )
-            rows = self._repository_human_role_policy_stream_rows(
-                session=session,
-                repository_id=record.repository_id,
-                product=record.product,
-                context_name=record.context,
-                for_update=True,
-            )
-            records = tuple(
-                self._read_payload(
-                    model_type=RepositoryHumanRolePolicyRecord,
-                    payload=row.payload,
-                )
-                for row in rows
-            )
-            plan = plan_repository_human_role_policy_append(records=records, record=record)
-            if plan.status == "replayed":
-                session.rollback()
-                return "replayed"
-            if plan.superseded_current_record is not None:
-                current_row = next(
-                    row for row in rows if row.record_id == plan.superseded_current_record.record_id
-                )
-                self._sync_repository_human_role_policy_row(
-                    current_row,
-                    plan.superseded_current_record,
-                )
-                session.flush()
-            session.add(self._repository_human_role_policy_row(record))
-            try:
-                session.flush()
-                session.commit()
-                return "written"
-            except IntegrityError as error:
-                session.rollback()
-                insert_error = error
-
-        current_records = self.list_repository_human_role_policy_records(
-            repository_id=record.repository_id,
-            product=record.product,
-            context=record.context,
-        )
-        replay_plan = plan_repository_human_role_policy_append(
-            records=current_records,
-            record=record,
-        )
-        if replay_plan.status == "replayed":
-            return "replayed"
-        assert insert_error is not None
-        raise insert_error
-
-    def read_repository_human_role_policy_record(
-        self,
-        record_id: str,
-    ) -> RepositoryHumanRolePolicyRecord:
-        return self._read_model(
-            model_type=RepositoryHumanRolePolicyRecord,
-            orm_model=LaunchplaneRepositoryHumanRolePolicyRow,
-            filters=(LaunchplaneRepositoryHumanRolePolicyRow.record_id == record_id,),
-        )
-
-    def list_repository_human_role_policy_records(
-        self,
-        *,
-        repository_id: str = "",
-        repository_owner_id: str = "",
-        repository: str = "",
-        product: str = "",
-        context: str = "",
-        status: str = "",
-        limit: int | None = None,
-    ) -> tuple[RepositoryHumanRolePolicyRecord, ...]:
-        filters: list[object] = []
-        normalized_repository = repository.strip().lower()
-        if repository_id:
-            filters.append(LaunchplaneRepositoryHumanRolePolicyRow.repository_id == repository_id)
-        if repository_owner_id:
-            filters.append(
-                LaunchplaneRepositoryHumanRolePolicyRow.repository_owner_id == repository_owner_id
-            )
-        if normalized_repository:
-            filters.append(
-                LaunchplaneRepositoryHumanRolePolicyRow.repository == normalized_repository
-            )
-        if product:
-            filters.append(LaunchplaneRepositoryHumanRolePolicyRow.product == product)
-        if context:
-            filters.append(LaunchplaneRepositoryHumanRolePolicyRow.context == context)
-        if status:
-            filters.append(LaunchplaneRepositoryHumanRolePolicyRow.status == status)
-        return self._list_models(
-            model_type=RepositoryHumanRolePolicyRecord,
-            orm_model=LaunchplaneRepositoryHumanRolePolicyRow,
-            filters=filters,
-            order_by=(
-                LaunchplaneRepositoryHumanRolePolicyRow.role_policy_revision.desc(),
-                LaunchplaneRepositoryHumanRolePolicyRow.repository_id.desc(),
-                LaunchplaneRepositoryHumanRolePolicyRow.product.desc(),
-                LaunchplaneRepositoryHumanRolePolicyRow.context.desc(),
-                LaunchplaneRepositoryHumanRolePolicyRow.record_id.desc(),
-            ),
-            limit=limit,
-        )
 
     def _trusted_maintenance_policy_row(
         self,
@@ -16124,43 +15647,6 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneRepositoryInventoryRow.inventory_revision.desc(),
                 LaunchplaneRepositoryInventoryRow.repository_id.desc(),
                 LaunchplaneRepositoryInventoryRow.record_id.desc(),
-            ),
-            limit=limit,
-        )
-
-    def list_manager_preview_approval_event_records(
-        self,
-        *,
-        product: str = "",
-        context: str = "",
-        repository: str = "",
-        pr_number: int | None = None,
-        preview_id: str = "",
-        action: str = "",
-        limit: int | None = None,
-    ) -> tuple[ManagerPreviewApprovalEventRecord, ...]:
-        filters: list[object] = []
-        if product:
-            filters.append(LaunchplaneManagerPreviewApprovalEventRow.product == product.lower())
-        if context:
-            filters.append(LaunchplaneManagerPreviewApprovalEventRow.context == context.lower())
-        if repository:
-            filters.append(
-                LaunchplaneManagerPreviewApprovalEventRow.repository == repository.lower()
-            )
-        if pr_number is not None:
-            filters.append(LaunchplaneManagerPreviewApprovalEventRow.pr_number == pr_number)
-        if preview_id:
-            filters.append(LaunchplaneManagerPreviewApprovalEventRow.preview_id == preview_id)
-        if action:
-            filters.append(LaunchplaneManagerPreviewApprovalEventRow.action == action)
-        return self._list_models(
-            model_type=ManagerPreviewApprovalEventRecord,
-            orm_model=LaunchplaneManagerPreviewApprovalEventRow,
-            filters=filters,
-            order_by=(
-                LaunchplaneManagerPreviewApprovalEventRow.occurred_at.desc(),
-                LaunchplaneManagerPreviewApprovalEventRow.event_id.desc(),
             ),
             limit=limit,
         )
@@ -38275,7 +37761,6 @@ class PostgresRecordStore(HumanSessionStore):
             "preview_records": 0,
             "preview_enablement": 0,
             "preview_generations": 0,
-            "manager_preview_approval_events": 0,
             "owner_acceptance_events": 0,
             "privileged_operation_events": 0,
             "privileged_operations": 0,
@@ -38401,12 +37886,6 @@ class PostgresRecordStore(HumanSessionStore):
         for generation_record in filesystem_store.list_preview_generation_records():
             self.write_preview_generation_record(generation_record)
             counts["preview_generations"] += 1
-        if hasattr(filesystem_store, "list_manager_preview_approval_event_records"):
-            for (
-                manager_approval_event
-            ) in filesystem_store.list_manager_preview_approval_event_records():
-                self.write_manager_preview_approval_event_record(manager_approval_event)
-                counts["manager_preview_approval_events"] += 1
         if hasattr(filesystem_store, "list_privileged_operation_records"):
             for privileged_operation in filesystem_store.list_privileged_operation_records():
                 events = tuple(

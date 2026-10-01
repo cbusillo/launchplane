@@ -1165,7 +1165,6 @@
 .tenant-admission-state[data-state="pass"],
 .tenant-admission-state[data-state="ready"],
 .tenant-admission-state[data-state="satisfied"],
-.tenant-admission-state[data-state="manager-approved"],
 .tenant-admission-state[data-state="maintenance-admitted"] {
   border-color: color-mix(in srgb, var(--prod) 45%, var(--border));
   background: var(--prod-soft);

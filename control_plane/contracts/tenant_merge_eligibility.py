@@ -11,18 +11,14 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 TenantRepositoryClassificationKind = Literal["engineering", "tenant_ui"]
 TenantRepositoryClassificationLookupStatus = Literal["available", "missing", "ambiguous", "unknown"]
-TenantAdmissionPathKind = Literal["trusted_maintenance", "manager_preview_approval"]
+TenantAdmissionPathKind = Literal["trusted_maintenance"]
 TenantAdmissionPathState = Literal["satisfied", "pending", "denied", "stale", "unavailable"]
 TenantMergeEligibilityStatus = Literal["admitted", "blocked"]
-TenantMergeEligibilityEvidenceKind = Literal[
-    "none", "trusted_maintenance", "manager_preview_approval"
-]
+TenantMergeEligibilityEvidenceKind = Literal["none", "trusted_maintenance"]
 TenantMergeEligibilityReasonCode = Literal[
     "engineering_normal_flow",
     "tenant_normal_flow",
     "trusted_maintenance_admitted",
-    "manager_preview_approved",
-    "manager_preview_required",
     "evidence_denied",
     "evidence_stale",
     "evidence_unavailable",
@@ -191,7 +187,6 @@ class TenantMergeEligibilityEvidenceInputs(BaseModel):
 
     schema_version: int = Field(default=1, ge=1)
     trusted_maintenance: TenantAdmissionPathResult | None = None
-    manager_preview_approval: TenantAdmissionPathResult | None = None
 
     @model_validator(mode="after")
     def _validate_inputs(self) -> TenantMergeEligibilityEvidenceInputs:
@@ -199,13 +194,6 @@ class TenantMergeEligibilityEvidenceInputs(BaseModel):
             raise ValueError("Unsupported tenant merge eligibility evidence input schema version.")
         if self.trusted_maintenance and self.trusted_maintenance.path_kind != "trusted_maintenance":
             raise ValueError("trusted_maintenance slot must have path_kind 'trusted_maintenance'")
-        if (
-            self.manager_preview_approval
-            and self.manager_preview_approval.path_kind != "manager_preview_approval"
-        ):
-            raise ValueError(
-                "manager_preview_approval slot must have path_kind 'manager_preview_approval'"
-            )
         return self
 
 
@@ -270,7 +258,6 @@ class TenantMergeEligibilityDecision(BaseModel):
             "engineering_normal_flow",
             "tenant_normal_flow",
             "trusted_maintenance_admitted",
-            "manager_preview_approved",
         }:
             raise ValueError("blocked tenant merge eligibility decision has admitting reason")
         computed_digest = tenant_merge_eligibility_decision_binding_sha256(self)
