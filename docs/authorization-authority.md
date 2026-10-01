@@ -750,18 +750,10 @@ That history does not describe the deployed Phase 2 worker flow.
 
 Authorization policy readers support schemas 2 and 3 for existing human,
 workflow, and terminal-agent identities. Owner-control challenge derivation,
-authorization diagnostics, feedback actor/worker resolution, repository human
-waiver capture and evaluation, and manager preview
-requirement/capture/evaluation preserve the same immutable identity, scope,
-role, current policy, expiry, and revocation checks across these versions. This
-does not register an ordinary-agent identity or enable ordinary-agent execution.
-
-Manager approval and human waiver evidence records store the actual evaluated
-policy version. Readers retain the legacy default of 2 for older evidence that
-omitted that field. Current evaluation rejects a recorded version inconsistent
-with the current policy, including inconsistent evidence that carries the
-correct policy digest. Policy identity, revision and digest remain required; a
-policy change does not carry prior acceptance forward automatically.
+authorization diagnostics, and feedback actor/worker resolution preserve the
+same immutable identity, scope, role, current policy, expiry, and revocation
+checks across these versions. This does not register an ordinary-agent identity
+or enable ordinary-agent execution.
 
 These compatibility paths do not widen authorization policy writers or the
 candidate-policy preview boundary. Their existing v2-only behavior and the

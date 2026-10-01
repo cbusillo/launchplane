@@ -70,7 +70,6 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "/v1/products/{product}/environments/{environment}/config/apply",
             "/v1/products/{product}/environments/{environment}/promotion/dry-run",
             "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch",
-            "/v1/tenant-admission/technical-human-waivers/apply",
             "/v1/tenant-admission/trusted-maintenance-policies/apply",
             "/v1/work-graph/rank",
         }
@@ -89,7 +88,6 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "/v1/secrets/reencrypt",
             "/v1/repository-inventory/apply",
             "/v1/tenant-admission/repository-classifications/apply",
-            "/v1/tenant-admission/repository-human-role-policies/apply",
             "/v1/tenant-admission/status/reconcile",
             "/v1/work-graph/tenant-admission/controller/run-once",
         }
