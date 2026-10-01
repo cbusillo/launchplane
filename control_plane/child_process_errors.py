@@ -58,11 +58,6 @@ _INTERNAL_HOST_PATTERN = re.compile(
     (?![a-z0-9_.-])
     """
 )
-# Any dotted name ending in a letters-only label, such as a public domain; a
-# module path or file name may be caught too, which only over-redacts.
-_HOST_NAME_PATTERN = re.compile(
-    r"(?i)(?<![\w.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?::\d{1,5})?(?![\w-])"
-)
 
 
 ProcessTool = Literal["child_process", "github_cli"]
@@ -90,32 +85,6 @@ def redact_untrusted_text(
     if maximum_length < 4:
         raise ValueError("maximum_length must be at least 4")
     text = _redact_text(value)
-    if not text:
-        text = _redact_text(fallback)
-    return _bound_text(text, maximum_length)
-
-
-def redact_failure_reason(
-    value: str,
-    *,
-    sensitive_values: tuple[str, ...] = (),
-    fallback: str,
-    maximum_length: int = _MAX_SAFE_DETAIL_LENGTH,
-) -> str:
-    """Return a failure reason safe for a record a read grant shows.
-
-    Beyond the shared redaction, this removes every host name, public or not, and
-    the literal values the caller names (provider target names and ids, domains,
-    runtime settings), so a reason copied off an operation record names no target.
-    """
-
-    if maximum_length < 4:
-        raise ValueError("maximum_length must be at least 4")
-    text = value
-    literals = {item.strip() for item in sensitive_values if len(item.strip()) >= 4}
-    for literal in sorted(literals, key=len, reverse=True):
-        text = re.sub(re.escape(literal), "[redacted-target]", text, flags=re.IGNORECASE)
-    text = _HOST_NAME_PATTERN.sub("[redacted-host]", _redact_text(text))
     if not text:
         text = _redact_text(fallback)
     return _bound_text(text, maximum_length)

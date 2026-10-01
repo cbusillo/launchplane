@@ -354,6 +354,23 @@ class FakePreviewProvider:
         raise AssertionError("a fresh preview operation is never observed")
 
 
+# Real shapes of provider, script and exception text a redactor misses.
+PROVIDER_FAILURE_TEXT = (
+    "Dokploy compose 'site-prod-app' (compose-A1b2c3D4e5) has no appName; "
+    'FATAL: database "cm_test" does not exist; ECONNREFUSED 203.0.113.42:22; '
+    "ENOTFOUND database"
+)
+PROVIDER_FAILURE_FRAGMENTS = (
+    "site-prod-app",
+    "compose-A1b2c3D4e5",
+    "cm_test",
+    "203.0.113.42",
+    "ENOTFOUND",
+    "ECONNREFUSED",
+    "appName",
+)
+
+
 class ProductReconcileTestCase(unittest.TestCase):
     def setUp(self) -> None:
         temporary_directory = TemporaryDirectory()
@@ -758,72 +775,59 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
 
         self.assertEqual(completed.state, "failed")
         self.assertIn("failed 3 times", completed.last_error)
-        self.assertIn("operation_failed: deploy failed", completed.last_error)
         self.assertEqual(len(self.store.list_odoo_stable_target_replacement_operation_records()), 3)
 
-    def test_failed_testing_deploy_reason_is_readable_from_the_reconcile_record(self) -> None:
-        # The operation's own status read needs the grant that starts a deploy;
-        # the product read shows this plan, so the reason must be on it, redacted.
-        self.store.write_dokploy_target_record(
-            DokployTargetRecord(
-                context="cm",
-                instance="testing",
-                target_name="cm-testing-app",
-                domains=("testing.cm-shop.example",),
-                env={"ODOO_ADMIN_PASSWORD": "hunter2-very-secret"},
-                updated_at="2026-09-30T09:00:00Z",
-            )
-        )
-        self.github.add_run(20, DEPLOYABLE)
-        self.request()
-        first = cast(str, self.reconcile()["queued_operation_id"])
-        operation = self.store.read_odoo_stable_target_replacement_operation_record(first)
-        result = OdooStableTargetReplacementApplyResult(
-            product="site",
-            context="cm",
-            instance="testing",
-            strategy="recreate-in-place",
-            deploy_status="pass",
-            health_status="fail",
-            target_id="dokploy-compose-0123",
-            target_name="cm-testing-app",
-        )
+    def fail_with_provider_text(self, operation_id: str) -> None:
+        operation = self.store.read_odoo_stable_target_replacement_operation_record(operation_id)
         self.store.write_odoo_stable_target_replacement_operation_record(
             operation.model_copy(
                 update={
                     "status": "fail",
                     "phase": "failed",
                     "finished_at": "2026-09-30T12:00:00Z",
-                    "result": result,
-                    "error_message": (
-                        "Health check of CM-TESTING-APP (dokploy-compose-0123) at "
-                        "https://testing.cm-shop.example/web/health failed on "
-                        "testing.cm-shop.example and db.provider.net with password "
-                        "hunter2-very-secret; token=ghp_abcdefghijklmnopqrstuvwxyz0123"
+                    "attempt": 1,
+                    "result": OdooStableTargetReplacementApplyResult(
+                        product="site",
+                        context="cm",
+                        instance="testing",
+                        strategy="recreate-in-place",
+                        deploy_status="pass",
+                        post_deploy_status="pass",
+                        health_status="fail",
+                        target_id="compose-A1b2c3D4e5",
+                        target_name="site-prod-app",
                     ),
+                    "error_message": PROVIDER_FAILURE_TEXT,
                 }
             )
         )
+
+    def test_failed_testing_deploy_reason_is_structured_with_no_provider_text(self) -> None:
+        # The operation's own status read needs the grant that starts a deploy, so
+        # the product read must say why; provider text is never copied there.
+        self.github.add_run(20, DEPLOYABLE)
+        for _attempt in range(3):
+            self.request()
+            self.fail_with_provider_text(cast(str, self.reconcile()["queued_operation_id"]))
         self.request()
 
-        view = product_reconcile_request_view(self.run_once())
+        with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+            completed = self.run_once()
 
-        plan = view.last_plan
-        self.assertEqual(plan["last_failed_operation_id"], first)
-        self.assertEqual(plan["last_failed_error_code"], "health_check_failed")
-        summary = cast(str, plan["last_failed_error_summary"])
-        self.assertTrue(summary.startswith("Health check of [redacted-target]"), summary)
-        for leaked in (
-            "cm-testing",
-            "dokploy-compose",
-            "cm-shop",
-            "provider.net",
-            "hunter2",
-            "ghp_",
-        ):
-            self.assertNotIn(leaked, summary.lower())
+        view = product_reconcile_request_view(completed)
+        self.assertEqual(view.last_plan["last_failed_error_code"], "health_check_failed")
+        self.assertEqual(
+            view.last_plan["last_failed_error_summary"],
+            "The health check did not pass. Steps: deploy pass, post-deploy pass, "
+            "setting overrides skipped, health fail, canonical skipped, logo skipped. "
+            "Worker attempt 1.",
+        )
+        self.assertIn("health_check_failed: The health check did not pass.", view.last_error)
+        read = view.model_dump_json()
+        for leaked in PROVIDER_FAILURE_FRAGMENTS:
+            self.assertNotIn(leaked, read)
 
-    def test_worker_error_without_a_result_keeps_its_own_error_code(self) -> None:
+    def test_an_operation_error_code_keeps_its_fixed_description(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
         self.request()
         first = cast(str, self.reconcile()["queued_operation_id"])
@@ -834,8 +838,8 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
                     "status": "fail",
                     "phase": "failed",
                     "finished_at": "2026-09-30T12:00:00Z",
-                    "error_code": "authorization_denied",
-                    "error_message": "Denied before a provider mutation.",
+                    "error_code": "operation_authorization_revoked",
+                    "error_message": "Revoked for site-prod-app on 203.0.113.42.",
                 }
             )
         )
@@ -843,8 +847,11 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
 
         plan = self.reconcile()
 
-        self.assertEqual(plan["last_failed_error_code"], "authorization_denied")
-        self.assertEqual(plan["last_failed_error_summary"], "Denied before a provider mutation.")
+        self.assertEqual(plan["last_failed_error_code"], "operation_authorization_revoked")
+        self.assertEqual(
+            plan["last_failed_error_summary"],
+            "The deploy's authorization was removed or narrowed before it ran.",
+        )
 
     def test_testing_is_left_alone_when_the_release_already_has_that_digest(self) -> None:
         self.github.add_run(20, DEPLOYABLE)

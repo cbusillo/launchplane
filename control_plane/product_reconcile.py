@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Literal, Protocol, cast
 from urllib.parse import quote, urlencode
@@ -35,7 +36,6 @@ from control_plane.build_provenance import (
     record_verified_build_artifact,
     verify_build_artifact,
 )
-from control_plane.child_process_errors import redact_failure_reason
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -135,7 +135,6 @@ PRODUCT_RECONCILE_LEASE_SECONDS = 20 * 60
 RECONCILE_SOURCE = "launchplane-reconcile"
 TESTING_DEPLOY_MAX_FAILED_ATTEMPTS = 3
 TESTING_DEPLOY_MAX_ATTEMPT_CHAIN = 20
-TESTING_FAILURE_SUMMARY_LENGTH = 240
 PREVIEW_APPLY_TIMEOUT_SECONDS = 600
 TESTING_BUILD_RUN_PAGE_SIZE = 50
 TESTING_VERIFY_LIMIT = 3
@@ -406,9 +405,7 @@ def reconcile_testing_target(
     if attempt.last_failed is not None:
         # The operation's own status read needs the grant that starts a deploy;
         # this plan is what the product read shows, so the reason is copied here.
-        error_code, error_summary = _testing_failure_reason(
-            record_store=record_store, operation=attempt.last_failed
-        )
+        error_code, error_summary = _testing_failure_reason(attempt.last_failed)
         plan.update(
             last_failed_operation_id=attempt.last_failed.operation_id,
             last_failed_error_code=error_code,
@@ -538,37 +535,61 @@ def _next_testing_attempt(
     )
 
 
+# What each failed testing attempt's code means, in Launchplane's own words. The
+# summary built from it never carries provider, script or exception text: that
+# text can name targets, hosts and databases no redactor reliably finds.
+TESTING_FAILURE_DESCRIPTIONS: dict[str, str] = {
+    "deploy_failed": "The deploy step failed.",
+    "post_deploy_override_failed": "Applying the lane's post-deploy setting overrides failed.",
+    "post_deploy_failed": "The post-deploy update failed.",
+    "post_deploy_not_run": "The deploy finished, but the post-deploy update did not run.",
+    "health_check_failed": "The health check did not pass.",
+    "canonical_check_failed": "The canonical URL check did not pass.",
+    "logo_check_failed": "The website logo check did not pass.",
+    "driver_result_failed": "The driver reported a failure outside its recorded steps.",
+    "operation_failed": "The deploy stopped with an error before the driver returned a result.",
+    "operation_cancelled": "The deploy was cancelled.",
+    "operation_authorization_reconcile_refused": (
+        "Launchplane's reconcile grant did not cover this deploy when it ran."
+    ),
+    "operation_authorization_revoked": (
+        "The deploy's authorization was removed or narrowed before it ran."
+    ),
+    "operation_authorization_policy_unavailable": (
+        "The authorization policy could not be read when the deploy ran."
+    ),
+    "operation_authorization_provenance_missing": (
+        "The deploy had no recorded authorization and could not run."
+    ),
+}
+_UNKNOWN_TESTING_FAILURE = "The deploy failed with a code this Launchplane does not describe."
+_ERROR_CODE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+
+
 def _testing_failure_reason(
-    *,
-    record_store: ProductReconcileStore,
     operation: OdooStableTargetReplacementOperationRecord,
 ) -> tuple[str, str]:
-    """The failed attempt's error code and a redacted one-line reason.
+    """The failed attempt's error code and a structured summary of it.
 
-    The operation's own ``error_code`` wins; one that has none is named by the
-    first failed step of its driver result, from a small documented set.
+    The code is the operation's own ``error_code``, or the first failed step of
+    its driver result. The summary is that code's fixed description plus the
+    result's step statuses and the worker attempt; never the error message.
     """
+    error_code = operation.error_code.strip()
+    if not _ERROR_CODE_PATTERN.match(error_code):
+        error_code = _testing_failure_code(operation)
+    parts = [TESTING_FAILURE_DESCRIPTIONS.get(error_code, _UNKNOWN_TESTING_FAILURE)]
     result = operation.result
-    sensitive: list[str] = []
     if result is not None:
-        sensitive.extend((result.target_name, result.target_id, result.image_reference))
-    try:
-        target = record_store.read_dokploy_target_record(
-            context_name=operation.context, instance_name=operation.instance
+        parts.append(
+            f"Steps: deploy {result.deploy_status}, post-deploy {result.post_deploy_status}, "
+            f"setting overrides {result.post_deploy_override_status}, "
+            f"health {result.health_status}, canonical {result.canonical_status}, "
+            f"logo {result.logo_status}."
         )
-    except (FileNotFoundError, ValueError):
-        target = None
-    if target is not None:
-        sensitive.extend((target.target_name, target.project_name, *target.domains))
-        sensitive.extend(value for value in target.env.values() if len(value) >= 8)
-    error_code = operation.error_code.strip() or _testing_failure_code(operation)
-    summary = redact_failure_reason(
-        operation.error_message,
-        sensitive_values=tuple(sensitive),
-        fallback="The operation recorded no reason.",
-        maximum_length=TESTING_FAILURE_SUMMARY_LENGTH,
-    )
-    return error_code, summary
+    if operation.attempt:
+        parts.append(f"Worker attempt {operation.attempt}.")
+    return error_code, " ".join(parts)
 
 
 def _testing_failure_code(operation: OdooStableTargetReplacementOperationRecord) -> str:
@@ -578,14 +599,15 @@ def _testing_failure_code(operation: OdooStableTargetReplacementOperationRecord)
     if result is None:
         return "operation_failed"
     steps = (
-        ("deploy_failed", result.deploy_status),
-        ("post_deploy_failed", result.post_deploy_status),
-        ("post_deploy_override_failed", result.post_deploy_override_status),
-        ("health_check_failed", result.health_status),
-        ("canonical_check_failed", result.canonical_status),
-        ("logo_check_failed", result.logo_status),
+        ("deploy_failed", result.deploy_status == "fail"),
+        ("post_deploy_override_failed", result.post_deploy_override_status == "fail"),
+        ("post_deploy_failed", result.post_deploy_status == "fail"),
+        ("post_deploy_not_run", result.post_deploy_status != "pass"),
+        ("health_check_failed", result.health_status == "fail"),
+        ("canonical_check_failed", result.canonical_status == "fail"),
+        ("logo_check_failed", result.logo_status == "fail"),
     )
-    return next((code for code, status in steps if status == "fail"), "operation_failed")
+    return next((code for code, failed in steps if failed), "driver_result_failed")
 
 
 def _plan_testing_target(

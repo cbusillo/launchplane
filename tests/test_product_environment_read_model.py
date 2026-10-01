@@ -1740,8 +1740,9 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         )
         self.assertEqual(activity.events[0].event_type, "authz_policy")
 
-    def test_failed_backup_gate_activity_says_why_redacted(self) -> None:
-        # The gate operation's own reads need the grant that ran it, or omit the message.
+    def test_failed_backup_gate_activity_says_why_without_provider_text(self) -> None:
+        # The gate operation's own reads need the grant that ran it, or omit the
+        # message; the activity read says why in Launchplane's own words only.
         profile = LaunchplaneProductProfileRecord.model_validate(
             _site_profile_payload(
                 preview_context="shared-preview",
@@ -1750,27 +1751,59 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             )
         )
         store = _ActivityRecordStore(profile, ())
-        failed_gate = SimpleNamespace(
-            record_id="backup-prod-2",
-            status="fail",
-            created_at="2026-05-02T10:55:00Z",
-            evidence={
-                "error_message": (
-                    "Snapshot of db.example-site.com failed: password=hunter2 rejected."
-                )
-            },
+        failed_gates = (
+            SimpleNamespace(
+                record_id="backup-prod-2",
+                status="fail",
+                source="launchplane-odoo-prod-backup-gate",
+                created_at="2026-05-02T10:55:00Z",
+                evidence={
+                    "error_message": (
+                        "Dokploy compose 'site-prod-app' (compose-A1b2c3D4e5) has no appName; "
+                        'FATAL: database "cm_test" does not exist'
+                    )
+                },
+            ),
+            SimpleNamespace(
+                record_id="backup-prod-3",
+                status="fail",
+                source="launchplane-production-backup-gate",
+                created_at="2026-05-02T10:56:00Z",
+                evidence={
+                    "provider_stage": "snapshot",
+                    "error_message": "ECONNREFUSED 203.0.113.42:22; ENOTFOUND database",
+                },
+            ),
         )
 
-        with patch.object(store, "list_backup_gate_records", return_value=(failed_gate,)):
+        with patch.object(store, "list_backup_gate_records", return_value=failed_gates):
             activity = build_product_activity_read_model(record_store=store, product="example-site")
 
-        summaries = [
-            event.summary for event in activity.events if event.event_type == "backup_gate"
-        ]
-        self.assertTrue(summaries)
-        for summary in summaries:
-            self.assertIn("Reason: Snapshot of [redacted-host] failed", summary)
-            self.assertNotIn("hunter2", summary)
+        summaries = {
+            event.records[0].record_id: event.summary
+            for event in activity.events
+            if event.event_type == "backup_gate"
+        }
+        self.assertTrue(
+            summaries["backup-prod-2"].endswith(
+                "Reason: The Odoo production database and filestore backup did not complete."
+            )
+        )
+        self.assertTrue(
+            summaries["backup-prod-3"].endswith(
+                "Reason: The production backup did not complete. Stage: snapshot."
+            )
+        )
+        read = activity.model_dump_json()
+        for leaked in (
+            "site-prod-app",
+            "compose-A1b2c3D4e5",
+            "cm_test",
+            "203.0.113.42",
+            "ENOTFOUND",
+            "appName",
+        ):
+            self.assertNotIn(leaked, read)
 
     def test_product_activity_authz_grant_uses_managed_mutation_delta(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(
