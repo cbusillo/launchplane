@@ -590,7 +590,6 @@ exist yet. Pin the full reviewed Launchplane commit SHA.
 
 This contract was shaped from the current preview paths in SYO, VeriReel, and
 Odoo CM. Odoo CM is the reference thin workflow after its preview feedback moved
-to Launchplane. The generic-web preview facade is the bounded proof for moving
-the remaining build, lifecycle, verification-evidence, and feedback composition
-behind one reusable entrypoint. SYO and VeriReel should not delete bespoke
-preview-control-plane logic until that proof passes against a disposable canary.
+to Launchplane. The generic-web preview facade moves the remaining build,
+lifecycle, verification-evidence, and feedback composition behind one reusable
+entrypoint.
