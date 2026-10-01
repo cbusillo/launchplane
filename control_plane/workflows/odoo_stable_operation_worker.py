@@ -90,6 +90,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     OdooStableTargetReplacementStore,
     execute_odoo_stable_target_replacement_apply,
 )
+from control_plane.release_review import require_unchanged_production_artifact
 from control_plane.product_reconcile import (
     PRODUCT_RECONCILE_LEASE_SECONDS,
     PRODUCT_RECONCILE_SWEEP_SECONDS,
@@ -1852,6 +1853,12 @@ def _execute_target_replacement_operation(
         authorization_guard.authorize_execution()
         if _reconcile_deploy_is_held(record_store=record_store, operation=operation):
             raise _StaffTestingHoldError
+        require_unchanged_production_artifact(
+            record_store=record_store,
+            product=operation.product,
+            instance=operation.request.instance,
+            artifact_id=operation.request.artifact_id,
+        )
         result = execute_odoo_stable_target_replacement_apply(
             control_plane_root=control_plane_root_path,
             record_store=cast(OdooStableTargetReplacementStore, record_store),

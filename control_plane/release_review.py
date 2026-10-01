@@ -359,3 +359,35 @@ def require_release_approval(
         source_commit and source_commit != candidate.source_commit
     ):
         raise click.ClickException("Promotion no longer matches the approved testing release.")
+
+
+class ProductionChangeRequiresPromotion(click.ClickException):
+    """A direct deploy tried to change what a live production lane runs."""
+
+    code = "promotion_required"
+
+
+def require_unchanged_production_artifact(
+    *, record_store: object, product: str, instance: str, artifact_id: str
+) -> None:
+    """Direct deploys may redeploy live production; changing it goes through promotion,
+    which carries the release and backup gates. Rollback is the recovery path. An
+    empty artifact_id redeploys what production runs."""
+    if instance != "prod" or not artifact_id:
+        return
+    store = cast(ReleaseReviewStore, record_store)
+    profile = store.read_product_profile_record(product)
+    if profile.production_use == "prelaunch":
+        return
+    try:
+        production = release_version(store=store, profile=profile, instance="prod")
+    except ReleaseEvidenceUnavailable as error:
+        raise ProductionChangeRequiresPromotion(
+            f"{error} A direct deploy cannot establish production; promote the release, "
+            "or record the product as prelaunch to bootstrap it."
+        ) from error
+    if artifact_id != production.artifact_id:
+        raise ProductionChangeRequiresPromotion(
+            "A direct deploy cannot change the artifact production runs; "
+            "promote the release, or roll back to recover."
+        )

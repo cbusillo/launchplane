@@ -14,7 +14,7 @@ import click
 
 from click import ClickException
 
-from control_plane.contracts.release_review import ReleaseReviewStatus
+from control_plane.contracts.release_review import ReleaseReviewStatus, ReleaseVersion
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.preview_generation_record import (
@@ -350,6 +350,84 @@ class GenericWebHttpTests(unittest.TestCase):
         _, kwargs = deploy.call_args
         self.assertEqual(kwargs["profile"].product, "sellyouroutboard")
         self.assertEqual(kwargs["lane"].context, "sellyouroutboard-testing")
+
+    def test_generic_web_deploy_route_cannot_change_live_production(self) -> None:
+        current = "ghcr.io/cbusillo/sellyouroutboard@sha256:current"
+        for requested, status in (("sha256:other", 409), ("sha256:current", 202)):
+            with self.subTest(requested=requested), TemporaryDirectory() as directory:
+                root = Path(directory)
+                store = PostgresRecordStore(
+                    database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+                )
+                store.ensure_schema()
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        _product_profile_payload_with_prod()
+                    )
+                )
+                _seed_generic_web_deploy_target_records(
+                    store=store,
+                    context="sellyouroutboard-testing",
+                    instance="prod",
+                    target_id="app-syo-prod",
+                    target_name="syo-prod",
+                )
+                app = create_launchplane_fastapi_test_app(
+                    local_record_store_for_tests=store,
+                    state_dir=root / "state",
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                        {
+                            "github_actions": [
+                                {
+                                    "repository": "every/verireel",
+                                    "workflow_refs": [
+                                        "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                                    ],
+                                    "event_names": ["pull_request"],
+                                    "products": ["sellyouroutboard"],
+                                    "contexts": ["sellyouroutboard-testing"],
+                                    "actions": ["generic_web_deploy.execute"],
+                                }
+                            ]
+                        }
+                    ),
+                    control_plane_root_path=root,
+                )
+                with (
+                    patch(
+                        "control_plane.release_review.release_version",
+                        return_value=ReleaseVersion(artifact_id=current, source_commit="a" * 40),
+                    ),
+                    patch(
+                        "control_plane.generic_web_deploy_http.execute_generic_web_deploy",
+                        return_value=_generic_web_deploy_result(),
+                    ) as deploy,
+                ):
+                    status_code, payload = _invoke_app(
+                        app,
+                        method="POST",
+                        path="/v1/drivers/generic-web/deploy",
+                        payload={
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                            "deploy": {
+                                "schema_version": 1,
+                                "product": "sellyouroutboard",
+                                "instance": "prod",
+                                "artifact_id": requested,
+                                "source_git_ref": "abc123",
+                            },
+                        },
+                        headers={"Idempotency-Key": "generic-web-deploy-syo-prod"},
+                    )
+
+                self.assertEqual(status_code, status)
+                if status == 409:
+                    self.assertEqual(payload["error"]["code"], "promotion_required")
+                    deploy.assert_not_called()
+                else:
+                    deploy.assert_called_once()
 
     def test_generic_web_deploy_route_accepts_base_driver_product(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

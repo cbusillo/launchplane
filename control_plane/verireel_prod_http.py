@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from control_plane.release_review import require_release_approval
+from control_plane.release_review import (
+    require_release_approval,
+    require_unchanged_production_artifact,
+)
 from typing import cast
 
 from pydantic import Field, model_validator
@@ -151,6 +154,12 @@ def apply_verireel_prod_deploy_result(
     record_store: object,
     request: VeriReelProdDeployEnvelope,
 ) -> tuple[dict[str, object], dict[str, object]]:
+    require_unchanged_production_artifact(
+        record_store=record_store,
+        product=request.product,
+        instance=request.deploy.instance,
+        artifact_id=request.deploy.artifact_id,
+    )
     driver_result = execute_verireel_stable_deploy(
         control_plane_root=control_plane_root,
         record_store=cast(VeriReelStableDeployStore, record_store),
