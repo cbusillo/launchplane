@@ -75391,6 +75391,36 @@
                     ],
                     "title": "ProductSecretConfigRequirement",
                     "type": "object"
+                  },
+                  "ProductSecretConfigRequirementRemoval": {
+                    "additionalProperties": false,
+                    "description": "Identity of a declared managed secret binding requirement to remove.",
+                    "properties": {
+                      "binding_key": {
+                        "title": "Binding Key",
+                        "type": "string"
+                      },
+                      "context": {
+                        "default": "",
+                        "title": "Context",
+                        "type": "string"
+                      },
+                      "instance": {
+                        "default": "",
+                        "title": "Instance",
+                        "type": "string"
+                      },
+                      "integration": {
+                        "default": "runtime_environment",
+                        "title": "Integration",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "binding_key"
+                    ],
+                    "title": "ProductSecretConfigRequirementRemoval",
+                    "type": "object"
                   }
                 },
                 "additionalProperties": false,
@@ -75419,6 +75449,22 @@
                   "reason": {
                     "title": "Reason",
                     "type": "string"
+                  },
+                  "remove_managed_secret_bindings": {
+                    "default": [],
+                    "items": {
+                      "$ref": "#/$defs/ProductSecretConfigRequirementRemoval"
+                    },
+                    "title": "Remove Managed Secret Bindings",
+                    "type": "array"
+                  },
+                  "remove_runtime_environment_keys": {
+                    "default": [],
+                    "items": {
+                      "$ref": "#/$defs/ProductRuntimeConfigRequirement"
+                    },
+                    "title": "Remove Runtime Environment Keys",
+                    "type": "array"
                   },
                   "runtime_environment_keys": {
                     "default": [],
@@ -75523,7 +75569,7 @@
             "description": "Service Unavailable"
           }
         },
-        "summary": "Add product expected config metadata"
+        "summary": "Add or remove product expected config metadata"
       }
     },
     "/v1/product-profiles/health-monitoring/apply": {

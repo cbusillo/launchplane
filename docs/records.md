@@ -934,12 +934,18 @@ product page rather than a whole-record write: the operator supplies a GitHub
 login, Launchplane resolves and stores the immutable numeric GitHub id, and no
 other profile field changes.
 
-Additive expected-config metadata changes use
+Expected-config metadata changes use
 `POST /v1/product-profiles/expected-config/apply`. The request carries
-`mode: "dry-run"` or `mode: "apply"`, a product key, a reason, and runtime key
-or managed secret binding requirements to append if absent. It does not accept
-secret plaintext, runtime values, repositories, lanes, domains, or promotion
-settings, and it never removes existing expected-config entries. The manual
+`mode: "dry-run"` or `mode: "apply"`, a product key, a reason, runtime key or
+managed secret binding requirements to append if absent, and
+`remove_runtime_environment_keys` or `remove_managed_secret_bindings`
+identities to drop if declared. A request may add, remove, or both, but may not
+add and remove the same identity. A removal that names an undeclared
+requirement is reported as `absent`, so dry-runs are honest and re-applies are
+idempotent. Removing a managed secret binding requirement never unbinds or
+deletes a stored secret; the response lists any configured binding that still
+holds a value under `still_bound`. It does not accept secret plaintext, runtime
+values, repositories, lanes, domains, or promotion settings. The manual
 `Product Expected Config` workflow is the operator path for shared/runtime
 metadata changes; real product, context, instance, and binding values are
 workflow inputs, not checked-in defaults. Because the route authorizes against
