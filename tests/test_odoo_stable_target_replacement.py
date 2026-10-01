@@ -3795,7 +3795,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
         ):
-            with self.assertRaisesRegex(click.ClickException, "ready replacement plan"):
+            with self.assertRaisesRegex(
+                OdooTargetReplacementStageError, "ready replacement plan"
+            ) as raised:
                 execute_odoo_stable_target_replacement_apply(
                     control_plane_root=Path("."),
                     record_store=store,
@@ -3807,6 +3809,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     dokploy_request=cast(DokployRequest, _request),
                     provider_effect_checkpoint=provider_effects.append,
                 )
+        self.assertEqual(raised.exception.code, "plan_not_ready")
 
         self.assertEqual(provider_effects, [])
 
@@ -3843,7 +3846,21 @@ class OdooTargetReplacementFailureStageTests(unittest.TestCase):
         self.assertIs(kept.exception, denial)
 
     def test_every_stage_code_has_a_testing_failure_description(self) -> None:
-        for code in ("post_deploy_setup_failed", "release_tuple_mint_failed"):
+        for code in (
+            "plan_build_failed",
+            "plan_not_ready",
+            "strategy_unsupported",
+            "target_not_compose",
+            "artifact_id_missing",
+            "source_ref_missing",
+            "artifact_repository_mismatch",
+            "artifact_source_ref_mismatch",
+            "artifact_required_modules_missing",
+            "health_verification_required",
+            "health_url_missing",
+            "post_deploy_setup_failed",
+            "release_tuple_mint_failed",
+        ):
             self.assertIn(code, TESTING_FAILURE_DESCRIPTIONS)
 
 

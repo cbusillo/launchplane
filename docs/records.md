@@ -1421,8 +1421,13 @@ records what it decided and did as `last_plan`:
   product read shows. The code is the operation's `error_code` (an
   authorization denial: `operation_authorization_reconcile_refused`,
   `operation_authorization_revoked`, `operation_authorization_policy_unavailable`,
-  `operation_authorization_provenance_missing`; a step after the provider
-  deploy that raised instead of returning a result:
+  `operation_authorization_provenance_missing`; a check before the provider
+  deploy that refused it: `plan_build_failed`, `plan_not_ready`,
+  `strategy_unsupported`, `target_not_compose`, `artifact_id_missing`,
+  `source_ref_missing`, `artifact_repository_mismatch`,
+  `artifact_source_ref_mismatch`, `artifact_required_modules_missing`,
+  `health_verification_required` or `health_url_missing`; a step after the
+  provider deploy that raised instead of returning a result:
   `post_deploy_setup_failed` when post-deploy could not start, or
   `release_tuple_mint_failed` when a passed deploy's release tuple could not
   be recorded; for an error the worker did not
