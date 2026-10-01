@@ -586,8 +586,8 @@ fresh removal; re-planning alone does not clear this condition.
 The five lifecycle actions are prepared together because an approved activation
 setup still writes only a qualification-only intent. They do not authorize the
 separate ordinary-agent policy, provider, or worker changes. The pilot is
-retired, and installing this set would be a grant, which is an operator
-decision. This composer is a constrained input path for an existing
+retired, so do not install this set; only its removal remains supported. This
+composer is a constrained input path for an existing
 policy administrator, not a replacement bootstrap or total-lockout recovery.
 
 ### Preparing Administrator Product Evidence Access
