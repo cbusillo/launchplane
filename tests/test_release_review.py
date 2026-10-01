@@ -300,6 +300,8 @@ class ReleaseReviewTests(unittest.TestCase):
         direct_deploy("testing", "artifact-testing")
         with self.assertRaisesRegex(ProductionChangeRequiresPromotion, "promote the release"):
             direct_deploy("prod", "artifact-testing")
+        with self.assertRaises(ProductionChangeRequiresPromotion):
+            direct_deploy(" Prod ", "artifact-testing")
 
         self.store.write_product_profile_record(
             profile().model_copy(update={"production_use": "unknown"})

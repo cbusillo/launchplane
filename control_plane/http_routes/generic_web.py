@@ -1353,7 +1353,7 @@ def build_generic_web_write_route_handlers(
                 message="Generic web deploy requests require an Idempotency-Key header.",
             )
         try:
-            if lane.instance == "prod":
+            if lane.instance.strip().lower() == "prod":
                 require_unchanged_production_artifact(
                     record_store=record_store,
                     product=profile.product,
@@ -1361,6 +1361,7 @@ def build_generic_web_write_route_handlers(
                     artifact_id=normalize_generic_web_artifact_id(
                         profile=profile, artifact_id=deploy_request.deploy.artifact_id
                     ),
+                    deploy_reference=deploy_request.deploy.deploy_reference,
                 )
         except ProductionChangeRequiresPromotion as error:
             raise dependencies.http_error(

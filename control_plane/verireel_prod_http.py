@@ -159,6 +159,7 @@ def apply_verireel_prod_deploy_result(
         product=request.product,
         instance=request.deploy.instance,
         artifact_id=request.deploy.artifact_id,
+        deploy_reference=request.deploy.deploy_reference,
     )
     driver_result = execute_verireel_stable_deploy(
         control_plane_root=control_plane_root,

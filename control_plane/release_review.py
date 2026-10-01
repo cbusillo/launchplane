@@ -368,12 +368,17 @@ class ProductionChangeRequiresPromotion(click.ClickException):
 
 
 def require_unchanged_production_artifact(
-    *, record_store: object, product: str, instance: str, artifact_id: str
+    *,
+    record_store: object,
+    product: str,
+    instance: str,
+    artifact_id: str,
+    deploy_reference: str = "",
 ) -> None:
     """Direct deploys may redeploy live production; changing it goes through promotion,
     which carries the release and backup gates. Rollback is the recovery path. An
     empty artifact_id redeploys what production runs."""
-    if instance != "prod" or not artifact_id:
+    if instance.strip().lower() != "prod" or not artifact_id:
         return
     store = cast(ReleaseReviewStore, record_store)
     profile = store.read_product_profile_record(product)
@@ -381,12 +386,25 @@ def require_unchanged_production_artifact(
         return
     try:
         production = release_version(store=store, profile=profile, instance="prod")
+        deployed_image = production.artifact_id
+        if deploy_reference.strip():
+            # The provider deploys the tag, so it must name the image production runs.
+            lane = next(lane for lane in profile.lanes if lane.instance == "prod")
+            identity = store.read_environment_inventory(
+                context_name=lane.context, instance_name="prod"
+            ).runtime_identity
+            deployed_image = identity.image_reference if identity is not None else ""
     except ReleaseEvidenceUnavailable as error:
         raise ProductionChangeRequiresPromotion(
             f"{error} A direct deploy cannot establish production; promote the release, "
             "or record the product as prelaunch to bootstrap it."
         ) from error
-    if artifact_id != production.artifact_id:
+    except FileNotFoundError as error:
+        raise ProductionChangeRequiresPromotion(
+            "Production has no recorded deployed image; promote the release."
+        ) from error
+    requested_image = deploy_reference.strip() or artifact_id
+    if artifact_id != production.artifact_id or requested_image != deployed_image:
         raise ProductionChangeRequiresPromotion(
             "A direct deploy cannot change the artifact production runs; "
             "promote the release, or roll back to recover."

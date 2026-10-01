@@ -14,7 +14,8 @@ import click
 
 from click import ClickException
 
-from control_plane.contracts.release_review import ReleaseReviewStatus, ReleaseVersion
+from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.release_review import ReleaseReviewStatus
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.preview_generation_record import (
@@ -352,9 +353,18 @@ class GenericWebHttpTests(unittest.TestCase):
         self.assertEqual(kwargs["lane"].context, "sellyouroutboard-testing")
 
     def test_generic_web_deploy_route_cannot_change_live_production(self) -> None:
-        current = "ghcr.io/cbusillo/sellyouroutboard@sha256:current"
-        for requested, status in (("sha256:other", 409), ("sha256:current", 202)):
-            with self.subTest(requested=requested), TemporaryDirectory() as directory:
+        repository = "ghcr.io/cbusillo/sellyouroutboard"
+        current = f"sha256:{'c' * 64}"
+        for requested, deploy_reference, status in (
+            (f"sha256:{'d' * 64}", "", 409),
+            (current, f"{repository}:sha-other", 409),
+            (current, "", 202),
+            (current, f"{repository}:sha-current", 202),
+        ):
+            with (
+                self.subTest(requested=requested, deploy_reference=deploy_reference),
+                TemporaryDirectory() as directory,
+            ):
                 root = Path(directory)
                 store = PostgresRecordStore(
                     database_url=_sqlite_database_url(root / "launchplane.sqlite3")
@@ -371,6 +381,30 @@ class GenericWebHttpTests(unittest.TestCase):
                     instance="prod",
                     target_id="app-syo-prod",
                     target_name="syo-prod",
+                )
+                store.write_environment_inventory(
+                    EnvironmentInventory(
+                        context="sellyouroutboard-testing",
+                        instance="prod",
+                        source_git_ref="a" * 40,
+                        deploy=DeploymentEvidence(
+                            status="pass",
+                            target_name="syo-prod",
+                            target_type="application",
+                            deploy_mode="test",
+                        ),
+                        runtime_identity=RuntimeIdentity(
+                            product="sellyouroutboard",
+                            context="sellyouroutboard-testing",
+                            instance="prod",
+                            deployment_record_id="deployment-syo-prod",
+                            artifact_id=f"{repository}@{current}",
+                            source_git_ref="a" * 40,
+                            image_reference=f"{repository}:sha-current",
+                        ),
+                        updated_at="2026-10-01T00:00:00Z",
+                        deployment_record_id="deployment-syo-prod",
+                    )
                 )
                 app = create_launchplane_fastapi_test_app(
                     local_record_store_for_tests=store,
@@ -394,16 +428,10 @@ class GenericWebHttpTests(unittest.TestCase):
                     ),
                     control_plane_root_path=root,
                 )
-                with (
-                    patch(
-                        "control_plane.release_review.release_version",
-                        return_value=ReleaseVersion(artifact_id=current, source_commit="a" * 40),
-                    ),
-                    patch(
-                        "control_plane.generic_web_deploy_http.execute_generic_web_deploy",
-                        return_value=_generic_web_deploy_result(),
-                    ) as deploy,
-                ):
+                with patch(
+                    "control_plane.generic_web_deploy_http.execute_generic_web_deploy",
+                    return_value=_generic_web_deploy_result(),
+                ) as deploy:
                     status_code, payload = _invoke_app(
                         app,
                         method="POST",
@@ -416,6 +444,7 @@ class GenericWebHttpTests(unittest.TestCase):
                                 "product": "sellyouroutboard",
                                 "instance": "prod",
                                 "artifact_id": requested,
+                                "deploy_reference": deploy_reference,
                                 "source_git_ref": "abc123",
                             },
                         },
