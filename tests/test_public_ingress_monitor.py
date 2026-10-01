@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -11,7 +12,9 @@ from urllib.request import Request
 from click.testing import CliRunner
 
 from control_plane.cli import main as launchplane_cli
+from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
 from control_plane.contracts.product_health_monitoring_migration import (
@@ -26,6 +29,7 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneHealthCheck,
 )
 from control_plane.contracts.promotion_record import DeploymentEvidence
+from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.route_binding_record import RouteBindingDomain
 from control_plane.contracts.route_binding_record import RouteBindingIngress
@@ -51,6 +55,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     public_ingress_incident_record_sha256,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.ship_request import ShipRequest
 from control_plane.workflows.public_ingress_monitor import (
     HttpObservation,
     PublicIngressNotificationDriverSet,
@@ -68,6 +73,11 @@ from control_plane.outbound_http import PublicTlsCertificate
 from control_plane.outbound_http import PublicTlsProbeResult
 from control_plane.outbox_worker import run_outbox_worker_once
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.workflows.generic_web_deploy_provider import (
+    GenericWebResolvedDeployTarget,
+    build_generic_web_provider_reconciliation_key,
+    build_generic_web_provider_target_key,
+)
 from tests.support.stores import _sqlite_database_url
 
 
@@ -424,6 +434,61 @@ def _constant_tls_probe(
         return probe_result
 
     return tls_get
+
+
+def _hold_deploy_fence(
+    store: PostgresRecordStore, *, idempotency_key: str, reconcile_required: bool = True
+) -> LaunchplaneIdempotencyRecord:
+    target = GenericWebResolvedDeployTarget(
+        ship_request=ShipRequest(
+            artifact_id="ghcr.io/cbusillo/example-site@sha256:abc123",
+            context="example-site",
+            instance="prod",
+            source_git_ref="abc123",
+            target_name="example-site-prod",
+            target_type="compose",
+            provider_id="dokploy",
+            target_category="compose",
+            provider_target_type="compose",
+            deploy_mode="compose",
+            provider_deploy_mode="compose",
+            destination_health=HealthcheckEvidence(status="skipped"),
+        ),
+        resolved_target=ResolvedTargetEvidence(
+            target_type="compose",
+            target_id="compose-example-site-prod",
+            target_name="example-site-prod",
+        ),
+        deploy_timeout_seconds=900,
+    )
+    reconciliation_key = build_generic_web_provider_reconciliation_key(
+        target, product="example-site"
+    )
+    reserved = store.reserve_mutation(
+        scope="cbusillo/example-site|deploy.yml|subject",
+        route_path="/v1/drivers/generic-web/deploy",
+        idempotency_key=idempotency_key,
+        request_fingerprint="fingerprint",
+        lease_owner="trace-original",
+        reconciliation_key=reconciliation_key,
+        provider_target_key=build_generic_web_provider_target_key(target),
+    ).record
+    checkpointed = store.checkpoint_mutation_provider_effect(
+        reservation=reserved, effect_phase="deploy_trigger"
+    ).record
+    assert checkpointed is not None
+    if not reconcile_required:
+        return checkpointed
+    held = store.mark_mutation_reconcile_required(
+        reservation=checkpointed, reconciliation_key=reconciliation_key
+    ).record
+    assert held is not None
+    return held
+
+
+def _minutes_after(timestamp: str, minutes: int) -> str:
+    moment = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    return (moment + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _notification_policy(
@@ -2265,6 +2330,103 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(github_calls[0][0], "create")
         self.assertEqual(email_subjects, ["[Launchplane] Public ingress opened: example-site/prod"])
         self.assertEqual(discord_posts[0][0], "https://discord.com/api/webhooks/test/webhook")
+
+    def test_postgres_monitor_reports_a_held_deploy_fence_until_it_clears(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            # A lane with no health checks still has its deploy fence watched.
+            store.write_product_profile_record(
+                _profile(lane=ProductLaneProfile(instance="prod", context="example-site"))
+            )
+            store.write_public_ingress_notification_policy_record(
+                _notification_policy(
+                    PublicIngressNotificationDestination(
+                        destination_id="github-main",
+                        kind="github_issue",
+                        github_repository="cbusillo/launchplane",
+                        github_label="public-ingress",
+                    )
+                )
+            )
+            held = _hold_deploy_fence(store, idempotency_key="generic-web-stable-deploy:run-7:1")
+
+            settling = run_public_ingress_monitor_once(
+                record_store=store, checked_at=_minutes_after(held.updated_at, 5)
+            )
+            stuck = run_public_ingress_monitor_once(
+                record_store=store, checked_at=_minutes_after(held.updated_at, 60)
+            )
+            outbox_rows = store.list_outbox_delivery_records(
+                states=("pending",), kind="public_ingress_notification"
+            )
+            store.write_idempotency_record(
+                held.model_copy(
+                    update={
+                        "state": "completed",
+                        "response_status_code": 202,
+                        "response_trace_id": "trace-recovery",
+                        "recorded_at": _minutes_after(held.updated_at, 90),
+                    }
+                )
+            )
+            cleared = run_public_ingress_monitor_once(
+                record_store=store, checked_at=_minutes_after(held.updated_at, 120)
+            )
+            idle = run_public_ingress_monitor_once(
+                record_store=store, checked_at=_minutes_after(held.updated_at, 150)
+            )
+            store.close()
+
+        self.assertEqual(settling.target_count, 1)
+        self.assertEqual(settling.pass_count, 1)
+        self.assertEqual(settling.open_incident_count, 0)
+        self.assertEqual(stuck.fail_count, 1)
+        self.assertEqual(stuck.open_incident_count, 1)
+        incident = stuck.incidents[0]
+        self.assertEqual(incident.failure_code, "deploy_fence_held")
+        self.assertEqual(incident.severity, "warning")
+        self.assertIn("generic-web-stable-deploy:run-7:1", stuck.records[0].summary)
+        self.assertIn("deploy_trigger", stuck.records[0].summary)
+        self.assertNotIn(held.scope, stuck.records[0].summary)
+        self.assertEqual(len(outbox_rows), 1)
+        self.assertEqual(outbox_rows[0].aggregate_id, incident.incident_id)
+        self.assertEqual(cleared.resolved_incident_count, 1)
+        self.assertEqual(idle.target_count, 0)
+
+    def test_monitor_flags_a_running_deploy_only_after_its_lease_expires(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(
+                _profile(lane=ProductLaneProfile(instance="prod", context="example-site"))
+            )
+            running = _hold_deploy_fence(
+                store,
+                idempotency_key="generic-web-stable-deploy:run-8:1",
+                reconcile_required=False,
+            )
+
+            live = run_public_ingress_monitor_once(
+                record_store=store, checked_at=_minutes_after(running.lease_expires_at, -1)
+            )
+            dead = run_public_ingress_monitor_once(
+                record_store=store, checked_at=_minutes_after(running.lease_expires_at, 1)
+            )
+            store.close()
+
+        self.assertEqual(live.pass_count, 1)
+        self.assertEqual(live.open_incident_count, 0)
+        self.assertEqual(dead.open_incident_count, 1)
+        self.assertEqual(dead.incidents[0].failure_code, "deploy_fence_held")
 
     def test_postgres_monitor_writes_github_notifications_to_outbox(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
