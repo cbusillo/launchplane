@@ -61,8 +61,11 @@ LAUNCHPLANE_TEST_POSTGRES_URL=postgresql+psycopg://... uv run --extra dev launch
 ```
 
 The URL is a temporary/root test service URL, not a Launchplane runtime
-credential. The harness creates and drops isolated databases, upgrades each from
-empty schema through Alembic `head`, verifies the exact checked-in schema head
+credential. The harness creates and drops isolated databases. It upgrades one
+empty database through Alembic `head` per process and clones it as a template
+for each test that only needs a head schema (`_head_postgres_database`); tests
+that prove a migration upgrade their own database from the revision they need.
+It verifies the exact checked-in schema head
 and critical indexes/types, and runs focused two-connection concurrency tests
 for mutation reservation/replay/conflict, reconciliation-key fencing, atomic
 business-write completion and rollback, operation claims, stale lease owners,
@@ -113,6 +116,14 @@ branches, and missing API evidence run the full suite. Construction branches
 must remain outside required workflow triggers. Concurrency and required checks
 are unchanged, and every published final candidate SHA still receives its own
 gate.
+
+The `ci-gate` job reports the run's wall time against a 10-minute pull-request
+budget in the job summary and raises a warning annotation when a run exceeds
+it. The report never fails the gate; an exceeded budget is a signal to measure
+and fix the slow lane. Only pushes to `main` save the uv dependency cache:
+pull-request caches are scoped to that pull request, so saving one re-uploads
+hundreds of megabytes that main and other pull requests cannot restore, and
+self-hosted runners already keep a local uv cache.
 
 Same-repo CI currently uses 12 unittest shards with a 20-test/30-second split
 threshold to keep large app and service targets under the tool wall-clock

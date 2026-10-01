@@ -26,6 +26,7 @@ from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideApplyResult
+from control_plane.contracts.odoo_stable_target_replacement import apply_artifact_odoo_version
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import PreviewPullRequestSummary
 from control_plane.contracts.preview_manifest import LaunchplaneResolvedPreviewManifest
@@ -3170,12 +3171,18 @@ def _sync_artifact_image_reference_for_target(
             )
         except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
             raise click.ClickException(str(error)) from error
+        declared_keys = control_plane_live_target_runtime.declared_runtime_keys_for_lane(
+            record_store=postgres_store,
+            context_name=context_name,
+            instance_name=instance_name,
+        )
+        artifact_odoo_version = apply_artifact_odoo_version(
+            desired_env_map,
+            artifact_manifest=artifact_manifest,
+            declared_keys=declared_keys,
+        )
         control_plane_live_target_runtime.require_declared_runtime_keys_present(
-            declared_keys=control_plane_live_target_runtime.declared_runtime_keys_for_lane(
-                record_store=postgres_store,
-                context_name=context_name,
-                instance_name=instance_name,
-            ),
+            declared_keys=declared_keys,
             available_keys=set(desired_env_map),
             target=f"Ship to {context_name}/{instance_name}",
         )
@@ -3215,6 +3222,7 @@ def _sync_artifact_image_reference_for_target(
             changed=desired_env_map != env_map,
         )
     )
+    runtime_source_evidence["artifact_odoo_version"] = artifact_odoo_version
     runtime_source_evidence["runtime_key_safety_status"] = str(runtime_key_safety["status"])
     runtime_source_evidence["runtime_key_safety_required"] = (
         "true" if runtime_key_safety["required"] else "false"

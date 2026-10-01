@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -42,6 +43,7 @@ from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
     OdooStableTargetReplacementApplyResult,
     OdooStableTargetReplacementRequest,
+    apply_artifact_odoo_version,
     merge_odoo_install_modules,
     missing_required_odoo_modules_from_artifact,
 )
@@ -69,6 +71,29 @@ from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import compose as dokploy_compose
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
 from control_plane.dokploy.api import JsonObject, JsonValue
+
+
+class OdooTargetReplacementStageError(click.ClickException):
+    """A check or step outside the driver's recorded results failed.
+
+    ``code`` names it so the operation record says where the deploy stopped;
+    the message, which can carry provider text, stays out of the code.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+@contextmanager
+def _failure_stage(code: str) -> Iterator[None]:
+    try:
+        yield
+    except click.ClickException as error:
+        if isinstance(getattr(error, "code", None), str):
+            # Already coded, such as an authorization denial: keep its own code.
+            raise
+        raise OdooTargetReplacementStageError(code, str(error)) from error
 
 
 class OdooStableTargetReplacementStore(RuntimeKeySafetyPolicyReadStore, Protocol):
@@ -1321,29 +1346,34 @@ def execute_odoo_stable_target_replacement_apply(
     dokploy_request: DokployRequest = dokploy_api.dokploy_request,
     provider_effect_checkpoint: Callable[[str], None] | None = None,
 ) -> OdooStableTargetReplacementApplyResult:
-    plan = build_odoo_stable_target_replacement_plan(
-        control_plane_root=control_plane_root,
-        record_store=record_store,
-        request=OdooStableTargetReplacementRequest(
-            product=request.product,
-            instance=request.instance,
-            strategy=request.strategy,
-            allow_empty_data=request.allow_empty_data,
-            data_source_mode=request.data_source_mode,
-            confirmation=request.confirmation,
-            artifact_id=request.artifact_id,
-            source_git_ref=request.source_git_ref,
-            expected_current_artifact_id=request.expected_current_artifact_id,
-        ),
-        dokploy_request=dokploy_request,
-    )
+    with _failure_stage("plan_build_failed"):
+        plan = build_odoo_stable_target_replacement_plan(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            request=OdooStableTargetReplacementRequest(
+                product=request.product,
+                instance=request.instance,
+                strategy=request.strategy,
+                allow_empty_data=request.allow_empty_data,
+                data_source_mode=request.data_source_mode,
+                confirmation=request.confirmation,
+                artifact_id=request.artifact_id,
+                source_git_ref=request.source_git_ref,
+                expected_current_artifact_id=request.expected_current_artifact_id,
+            ),
+            dokploy_request=dokploy_request,
+        )
     if plan.plan_status != "ready" or plan.current_target is None:
-        raise click.ClickException(
+        raise OdooTargetReplacementStageError(
+            "plan_not_ready",
             "Odoo target replacement apply requires a ready replacement plan: "
-            + "; ".join(plan.blockers or ("missing current target",))
+            + "; ".join(plan.blockers or ("missing current target",)),
         )
     if request.strategy != "recreate-in-place":
-        raise click.ClickException("Odoo target replacement apply supports recreate-in-place only.")
+        raise OdooTargetReplacementStageError(
+            "strategy_unsupported",
+            "Odoo target replacement apply supports recreate-in-place only.",
+        )
 
     profile = record_store.read_product_profile_record(request.product)
     lane = _read_lane(profile=profile, instance=request.instance)
@@ -1354,35 +1384,42 @@ def execute_odoo_stable_target_replacement_apply(
         context_name=plan.context, instance_name=plan.instance
     )
     if target_record.target_type != "compose":
-        raise click.ClickException("Odoo target replacement apply requires a compose target.")
+        raise OdooTargetReplacementStageError(
+            "target_not_compose", "Odoo target replacement apply requires a compose target."
+        )
     artifact_id = request.artifact_id or plan.expected_artifact_id
     source_git_ref = request.source_git_ref or plan.expected_source_git_ref
     if not artifact_id.strip():
-        raise click.ClickException(
-            "Odoo target replacement apply requires artifact_id or inventory artifact evidence."
+        raise OdooTargetReplacementStageError(
+            "artifact_id_missing",
+            "Odoo target replacement apply requires artifact_id or inventory artifact evidence.",
         )
     if not source_git_ref.strip():
-        raise click.ClickException(
-            "Odoo target replacement apply requires source_git_ref or inventory source git ref evidence."
+        raise OdooTargetReplacementStageError(
+            "source_ref_missing",
+            "Odoo target replacement apply requires source_git_ref or inventory source git ref evidence.",
         )
     artifact_manifest = record_store.read_artifact_manifest(artifact_id)
     if not artifact_manifest_matches_image_repository(
         artifact_manifest,
         expected_repository=profile.image.repository,
     ):
-        raise click.ClickException(
-            "Odoo target replacement artifact image repository does not match product profile."
+        raise OdooTargetReplacementStageError(
+            "artifact_repository_mismatch",
+            "Odoo target replacement artifact image repository does not match product profile.",
         )
     if artifact_manifest.source_commit != source_git_ref:
-        raise click.ClickException(
+        raise OdooTargetReplacementStageError(
+            "artifact_source_ref_mismatch",
             "Odoo target replacement apply source ref does not match stored artifact manifest. "
-            f"Request={source_git_ref} manifest={artifact_manifest.source_commit}."
+            f"Request={source_git_ref} manifest={artifact_manifest.source_commit}.",
         )
     missing_required_modules = missing_required_odoo_modules_from_artifact(artifact_manifest)
     if missing_required_modules:
-        raise click.ClickException(
+        raise OdooTargetReplacementStageError(
+            "artifact_required_modules_missing",
             "Odoo target replacement apply requires artifact odoo_install_modules to declare required module(s): "
-            + ", ".join(missing_required_modules)
+            + ", ".join(missing_required_modules),
         )
     image_reference = _artifact_image_reference(artifact_manifest)
     target_name = (
@@ -1432,12 +1469,14 @@ def execute_odoo_stable_target_replacement_apply(
     )
     if lane.odoo_data_policy.requires_runtime_identity:
         if not request.verify_health:
-            raise click.ClickException(
-                "Odoo target replacement requires health verification when the lane requires runtime identity."
+            raise OdooTargetReplacementStageError(
+                "health_verification_required",
+                "Odoo target replacement requires health verification when the lane requires runtime identity.",
             )
         if not health_url:
-            raise click.ClickException(
-                "Odoo target replacement runtime identity verification has no health URL."
+            raise OdooTargetReplacementStageError(
+                "health_url_missing",
+                "Odoo target replacement runtime identity verification has no health URL.",
             )
 
     record_store.write_deployment_record(
@@ -1758,6 +1797,11 @@ def execute_odoo_stable_target_replacement_apply(
         desired_env_map.pop(ODOO_INSTALL_MODULES_ENV_KEY, None)
         desired_env_map.update(runtime_environment_values)
         desired_env_map.update(runtime_override_environment)
+        runtime_source["artifact_odoo_version"] = apply_artifact_odoo_version(
+            desired_env_map,
+            artifact_manifest=artifact_manifest,
+            declared_keys=application_runtime_keys,
+        )
         addons_path = merge_required_odoo_addons_path(
             desired_env_map.get(ODOO_ADDONS_PATH_ENV_KEY, "")
         )
@@ -1946,20 +1990,21 @@ def execute_odoo_stable_target_replacement_apply(
     post_deploy_phase: OdooOverrideApplyPhase = (
         "restore" if plan.data_source_mode == "upstream_restore" else "deploy"
     )
-    post_deploy_result = execute_odoo_post_deploy(
-        control_plane_root=control_plane_root,
-        record_store=record_store,
-        request=OdooPostDeployRequest(
-            context=plan.context,
-            instance=plan.instance,
-            phase=post_deploy_phase,
-        ),
-        run_destructive_restore=plan.data_source_mode == "upstream_restore",
-        provider_effect_checkpoint=provider_effect_checkpoint,
-        schedule_execution_timeout_seconds=(
-            request.timeout_seconds if plan.data_source_mode == "upstream_restore" else None
-        ),
-    )
+    with _failure_stage("post_deploy_setup_failed"):
+        post_deploy_result = execute_odoo_post_deploy(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            request=OdooPostDeployRequest(
+                context=plan.context,
+                instance=plan.instance,
+                phase=post_deploy_phase,
+            ),
+            run_destructive_restore=plan.data_source_mode == "upstream_restore",
+            provider_effect_checkpoint=provider_effect_checkpoint,
+            schedule_execution_timeout_seconds=(
+                request.timeout_seconds if plan.data_source_mode == "upstream_restore" else None
+            ),
+        )
     post_deploy_evidence = PostDeployUpdateEvidence(
         attempted=True,
         status=post_deploy_result.post_deploy_status,
@@ -1994,17 +2039,18 @@ def execute_odoo_stable_target_replacement_apply(
         # Restore payloads leave out website bootstrap, so the restored copy
         # still carries the source's canonical URL. Apply the deploy-phase
         # settings without another restore before verifying the target.
-        bootstrap_result = execute_odoo_post_deploy(
-            control_plane_root=control_plane_root,
-            record_store=record_store,
-            request=OdooPostDeployRequest(
-                context=plan.context,
-                instance=plan.instance,
-                phase="deploy",
-            ),
-            run_destructive_restore=False,
-            provider_effect_checkpoint=provider_effect_checkpoint,
-        )
+        with _failure_stage("post_deploy_setup_failed"):
+            bootstrap_result = execute_odoo_post_deploy(
+                control_plane_root=control_plane_root,
+                record_store=record_store,
+                request=OdooPostDeployRequest(
+                    context=plan.context,
+                    instance=plan.instance,
+                    phase="deploy",
+                ),
+                run_destructive_restore=False,
+                provider_effect_checkpoint=provider_effect_checkpoint,
+            )
         post_deploy_evidence = PostDeployUpdateEvidence(
             attempted=True,
             status=bootstrap_result.post_deploy_status,
@@ -2155,12 +2201,13 @@ def execute_odoo_stable_target_replacement_apply(
     record_store.write_environment_inventory(
         build_environment_inventory(deployment_record=deployment_record, updated_at=finished_at)
     )
-    release_tuple_id = _write_release_tuple_from_deployment(
-        record_store=record_store,
-        deployment_record=deployment_record,
-        artifact_manifest=artifact_manifest,
-        minted_at=finished_at,
-    )
+    with _failure_stage("release_tuple_mint_failed"):
+        release_tuple_id = _write_release_tuple_from_deployment(
+            record_store=record_store,
+            deployment_record=deployment_record,
+            artifact_manifest=artifact_manifest,
+            minted_at=finished_at,
+        )
     return base_result.result(
         deploy_status="pass",
         release_tuple_id=release_tuple_id,

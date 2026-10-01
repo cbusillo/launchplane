@@ -187,7 +187,7 @@ def _ordinary_no_op_records() -> tuple[
             "kind": "no_op_already_contained",
         }
     )
-    provenance_payload = provenance.model_dump(mode="python")
+    provenance_payload = provenance.model_dump()
     provenance_payload.update(
         {
             "steps": (no_op_step,),
@@ -198,7 +198,7 @@ def _ordinary_no_op_records() -> tuple[
         }
     )
     no_op_provenance = type(provenance).model_validate(provenance_payload)
-    candidate_payload = candidate.model_dump(mode="python")
+    candidate_payload = candidate.model_dump()
     candidate_payload.update(
         {
             "candidate_sha": step.parent_sha,
@@ -485,6 +485,60 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
 
         self.assertEqual(policy_reads, 2)
         self.assertEqual(snapshot_reader.read_count, 2)
+
+    def test_a_changed_planned_entry_refuses_even_with_a_newer_pull_request_behind_it(
+        self,
+    ) -> None:
+        # Tolerating late arrivals must not hide a planned PR that moved or left (#2637).
+        candidate_record, landing_record, controller_state, _ = _guard_records()
+        entry = landing_record.landing_plan.entries[0]
+        late_arrival = _queued_pull_request(
+            number=2090, head_sha="e" * 40, created_at="2026-08-11T03:00:30Z"
+        )
+        cases = {
+            "head_moved": (
+                _queued_pull_request(
+                    number=entry.pull_request_number,
+                    head_sha="d" * 40,
+                    created_at="2026-08-11T03:00:00Z",
+                ),
+                late_arrival,
+            ),
+            "left_the_queue": (late_arrival,),
+        }
+        for case, pull_requests in cases.items():
+            with self.subTest(case=case):
+                evaluator = LiveMergeAdmissionEvaluator(
+                    store=object(),
+                    repository_evidence_provider=_UnusedRepositoryEvidenceProvider(),
+                    technical_check_client=_TechnicalCheckClient(),
+                    policy_record_provider=lambda: build_test_merge_train_policy_record(
+                        repository=REPOSITORY
+                    ),
+                    snapshot_reader=_StaticSnapshotReader(
+                        MergeTrainDryRunSnapshot(
+                            repository=REPOSITORY,
+                            base_branch="main",
+                            base_sha=BASE_SHA,
+                            pull_requests=pull_requests,
+                        )
+                    ),
+                )
+                with self.assertRaises(MergeAdmissionDeniedError) as denied:
+                    evaluator.evaluate(
+                        candidate_record=candidate_record,
+                        landing_plan_record=landing_record,
+                        entry=entry,
+                        observed_base_sha=BASE_SHA,
+                        observed_base_tree_sha="4" * 40,
+                        observed_head_sha=HEAD_SHA,
+                        observed_head_tree_sha="2" * 40,
+                        controller_state=controller_state,
+                        expected_lease_owner=controller_state.lease_owner,
+                        stack_collapse_record=None,
+                        evaluated_at="2026-08-11T03:01:00Z",
+                    )
+                self.assertEqual(denied.exception.reason_code, "landing_lineage_changed")
 
     def test_ordinary_proven_no_op_accepts_closed_or_merged_lifecycle_only(self) -> None:
         candidate_record, landing_record, controller_state, _, base_tree_sha = (
