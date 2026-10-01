@@ -16,9 +16,9 @@ contracts; they are not proof of current deployment or authorization. The
 reconciled target is tracked in issue `#2240`: one scoped delegated-engineering
 capability including diagnostic reads, equal Codex CLI and Codex Lab
 clients, narrow Owner review without operational authority, and provider-neutral
-Launchplane merge/delivery orchestration. That target remains inactive unless a
-reviewed `#2058` amendment authorizes its DB-native activation and rollback; a
-bounded pilot amendment does not lift the broader freeze.
+Launchplane merge/delivery orchestration. Its ordinary-agent delegated-delivery
+part is retired (see `DIRECTION.md`); the rest stays inactive until the operator
+approves its grants.
 
 It exists to keep new cross-product work aligned with Launchplane's target form:
 

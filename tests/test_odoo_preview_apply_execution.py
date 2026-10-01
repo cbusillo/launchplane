@@ -1,14 +1,21 @@
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+
+from control_plane import secrets as control_plane_secrets
+from control_plane.contracts.artifact_identity import ArtifactBuildFlags
 
 from control_plane.contracts.idempotency_record import build_launchplane_mutation_reservation_id
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.odoo_preview_apply_execution import run_odoo_preview_apply_operation
 from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_ROUTE,
+    OdooPreviewApplyConfigError,
     OdooPreviewApplyEnvelope,
+    _odoo_preview_service_environment,
     issue_odoo_preview_apply_plan,
     validate_odoo_preview_issued_plan,
 )
@@ -20,7 +27,10 @@ from control_plane.workflows.odoo_preview_runtime import (
 )
 from control_plane.contracts.odoo_preview_runtime_plan import OdooPreviewRuntimePlan
 from tests.support.profiles import _odoo_preview_profile_payload
-from tests.support.stores import _sqlite_database_url
+from tests.support.stores import (
+    _sqlite_database_url,
+    _write_odoo_preview_template_runtime_environment,
+)
 
 _HEAD_SHA = "c" * 40
 _IMAGE_DIGEST = "a" * 64
@@ -191,6 +201,77 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
         self.assertEqual(provider_operation_record.state, "completed")
         self.assertEqual(len(previews), 1)
         self.assertEqual(previews[0].state, "active")
+
+
+class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
+    def _service_environment(
+        self, *, manifest_odoo_version: str, site_odoo_version: str = ""
+    ) -> dict[str, str]:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            profile_payload = _odoo_preview_profile_payload()
+            profile_payload["expected_config"] = {
+                "runtime_environment_keys": [
+                    {"key": "ODOO_VERSION", "context": "cm", "instance": "testing"}
+                ]
+            }
+            profile = LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            store.write_product_profile_record(profile)
+            _write_odoo_preview_template_runtime_environment(store=store)
+            if site_odoo_version:
+                store.write_runtime_environment_record(
+                    RuntimeEnvironmentRecord(
+                        scope="instance",
+                        context="cm",
+                        instance="testing",
+                        env={"ODOO_DB_USER": "odoo", "ODOO_VERSION": site_odoo_version},
+                        updated_at="2026-05-09T12:30:00Z",
+                        source_label="test",
+                    )
+                )
+            apply_request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+            manifest = apply_request.apply.manifest
+            assert manifest is not None
+            if manifest_odoo_version:
+                manifest = manifest.model_copy(
+                    update={
+                        "build_flags": ArtifactBuildFlags(
+                            values={"odoo_version": manifest_odoo_version}
+                        )
+                    }
+                )
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                return _odoo_preview_service_environment(
+                    control_plane_root_path=root,
+                    record_store=store,
+                    profile=profile,
+                    plan=apply_request.apply.dry_run_plan,
+                    manifest=manifest,
+                    database_url=database_url,
+                ).values
+
+    def test_artifact_odoo_version_supplies_a_declared_key_the_site_lacks(self) -> None:
+        values = self._service_environment(manifest_odoo_version="19.0")
+
+        self.assertEqual(values["ODOO_VERSION"], "19.0")
+
+    def test_artifact_odoo_version_wins_over_the_site_setting(self) -> None:
+        values = self._service_environment(manifest_odoo_version="19.0", site_odoo_version="18.0")
+
+        self.assertEqual(values["ODOO_VERSION"], "19.0")
+
+    def test_manifest_without_odoo_version_still_refuses_the_missing_key(self) -> None:
+        with self.assertRaises(OdooPreviewApplyConfigError) as refusal:
+            self._service_environment(manifest_odoo_version="")
+
+        self.assertEqual(refusal.exception.missing_keys, ("ODOO_VERSION",))
 
 
 if __name__ == "__main__":

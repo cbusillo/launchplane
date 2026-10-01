@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import base64
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -294,40 +295,93 @@ def _alembic_config(database_url: str) -> AlembicConfig:
     return config
 
 
-@contextmanager
-def _isolated_postgres_database() -> Iterator[str]:
-    root_database_url = _postgres_root_database_url()
-    root_url = make_url(root_database_url)
+def _create_postgres_database(root_database_url: str, *, template: str = "") -> str:
     database_name = f"launchplane_test_{uuid4().hex}"
-    database_url = root_url.set(database=database_name).render_as_string(hide_password=False)
+    template_clause = f' TEMPLATE "{template}"' if template else ""
     root_engine = create_engine(root_database_url, isolation_level="AUTOCOMMIT")
     try:
         with root_engine.connect() as connection:
-            connection.execute(text(f'CREATE DATABASE "{database_name}"'))
-        try:
-            yield database_url
-        finally:
-            with root_engine.connect() as connection:
-                connection.execute(
-                    text(
-                        "select pg_terminate_backend(pid) "
-                        "from pg_stat_activity where datname = :database_name"
-                    ),
-                    {"database_name": database_name},
-                )
-                connection.execute(text(f'DROP DATABASE IF EXISTS "{database_name}"'))
+            connection.execute(text(f'CREATE DATABASE "{database_name}"{template_clause}'))
     finally:
         root_engine.dispose()
+    return database_name
+
+
+def _drop_postgres_database(root_database_url: str, database_name: str) -> None:
+    root_engine = create_engine(root_database_url, isolation_level="AUTOCOMMIT")
+    try:
+        with root_engine.connect() as connection:
+            connection.execute(
+                text(
+                    "select pg_terminate_backend(pid) "
+                    "from pg_stat_activity where datname = :database_name"
+                ),
+                {"database_name": database_name},
+            )
+            connection.execute(text(f'DROP DATABASE IF EXISTS "{database_name}"'))
+    finally:
+        root_engine.dispose()
+
+
+def _database_url(root_database_url: str, database_name: str) -> str:
+    return (
+        make_url(root_database_url)
+        .set(database=database_name)
+        .render_as_string(hide_password=False)
+    )
+
+
+@contextmanager
+def _isolated_postgres_database(*, template: str = "") -> Iterator[str]:
+    root_database_url = _postgres_root_database_url()
+    database_name = _create_postgres_database(root_database_url, template=template)
+    try:
+        yield _database_url(root_database_url, database_name)
+    finally:
+        _drop_postgres_database(root_database_url, database_name)
 
 
 def _upgrade_empty_database_to_head(database_url: str) -> None:
     alembic_command.upgrade(_alembic_config(database_url), "head")
 
 
+_head_template_lock = threading.Lock()
+_head_template_database_names: dict[str, str] = {}
+
+
+def _head_template_database(root_database_url: str) -> str:
+    """Upgrade one empty database to head per process and clone it for each test.
+
+    Running every migration for every test made this lane take ten minutes.
+    Tests that prove migrations themselves still upgrade their own database.
+    """
+    with _head_template_lock:
+        database_name = _head_template_database_names.get(root_database_url, "")
+        if database_name:
+            return database_name
+        database_name = _create_postgres_database(root_database_url)
+        try:
+            _upgrade_empty_database_to_head(_database_url(root_database_url, database_name))
+        except BaseException:
+            _drop_postgres_database(root_database_url, database_name)
+            raise
+        atexit.register(_drop_postgres_database, root_database_url, database_name)
+        _head_template_database_names[root_database_url] = database_name
+        return database_name
+
+
+@contextmanager
+def _head_postgres_database() -> Iterator[str]:
+    """Yield an isolated database already at the Alembic head."""
+    root_database_url = _postgres_root_database_url()
+    template = _head_template_database(root_database_url)
+    with _isolated_postgres_database(template=template) as database_url:
+        yield database_url
+
+
 @contextmanager
 def _store_for_fresh_head_database() -> Iterator[PostgresRecordStore]:
-    with _isolated_postgres_database() as database_url:
-        _upgrade_empty_database_to_head(database_url)
+    with _head_postgres_database() as database_url:
         store = PostgresRecordStore(database_url=database_url)
         try:
             store.verify_schema()
@@ -993,8 +1047,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             )
 
     def test_privileged_worker_requires_delivery_cleanup_index(self) -> None:
-        with _isolated_postgres_database() as database_url:
-            _upgrade_empty_database_to_head(database_url)
+        with _head_postgres_database() as database_url:
             store = build_privileged_operation_worker_store(database_url=database_url)
             cleanup = run_ordinary_agent_delivery_cleanup_once(
                 record_store=store,
@@ -1077,8 +1130,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         )
 
     def test_privileged_operation_worker_store_probes_schema_and_empty_poll(self) -> None:
-        with _isolated_postgres_database() as database_url:
-            _upgrade_empty_database_to_head(database_url)
+        with _head_postgres_database() as database_url:
             store = build_privileged_operation_worker_store(database_url=database_url)
             try:
                 records = execute_approved_privileged_operations_once(
@@ -1465,8 +1517,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
     def test_privileged_operation_worker_runtime_store_times_out_blocked_statement(
         self,
     ) -> None:
-        with _isolated_postgres_database() as database_url:
-            _upgrade_empty_database_to_head(database_url)
+        with _head_postgres_database() as database_url:
             with patch(
                 "control_plane.storage.factory."
                 "PRIVILEGED_OPERATION_WORKER_STATEMENT_TIMEOUT_MILLISECONDS",
@@ -1592,8 +1643,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertEqual(policy_digest, "a" * 64)
 
     def test_f4_accepts_previous_writer_shape(self) -> None:
-        with _isolated_postgres_database() as database_url:
-            _upgrade_empty_database_to_head(database_url)
+        with _head_postgres_database() as database_url:
             policy = LaunchplaneAuthzPolicy(
                 schema_version=2,
                 local_admins=(
@@ -1670,8 +1720,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         )
 
     def test_managed_writer_rejects_concurrent_stale_authz_replacement(self) -> None:
-        with _isolated_postgres_database() as database_url:
-            migrate_schema(database_url=database_url)
+        with _head_postgres_database() as database_url:
             base_rule = LocalAdminPolicyRule(
                 managed_set_id="operator.owner",
                 managed_rule_id="authz.admin",
@@ -1735,8 +1784,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertIn(active_records[0].record_id, {record.record_id for record in replacements})
 
     def test_privileged_policy_activation_uses_atomic_cas_and_idempotency(self) -> None:
-        with _isolated_postgres_database() as database_url:
-            migrate_schema(database_url=database_url)
+        with _head_postgres_database() as database_url:
             applying_identity = GitHubHumanIdentity(
                 login="postgres-owner",
                 github_id=123,
@@ -2153,8 +2201,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertNotIn("revision", stored_payload)
 
     def test_schema_verification_rejects_disabled_authz_policy_write_fence(self) -> None:
-        with _isolated_postgres_database() as database_url:
-            _upgrade_empty_database_to_head(database_url)
+        with _head_postgres_database() as database_url:
             engine = create_engine(database_url)
             try:
                 with engine.begin() as connection:
@@ -2170,8 +2217,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 engine.dispose()
 
     def test_schema_verification_rejects_disabled_merge_train_policy_write_fence(self) -> None:
-        with _isolated_postgres_database() as database_url:
-            _upgrade_empty_database_to_head(database_url)
+        with _head_postgres_database() as database_url:
             engine = create_engine(database_url)
             try:
                 with engine.begin() as connection:
@@ -2545,8 +2591,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
     def test_startup_verification_fails_closed_when_critical_index_is_missing(
         self,
     ) -> None:
-        with _isolated_postgres_database() as database_url:
-            _upgrade_empty_database_to_head(database_url)
+        with _head_postgres_database() as database_url:
             engine = create_engine(database_url)
             with engine.begin() as connection:
                 connection.execute(text("drop index launchplane_idempotency_scope_route_key_idx"))
@@ -2564,8 +2609,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
     def test_startup_verification_fails_closed_when_reservation_lease_index_is_missing(
         self,
     ) -> None:
-        with _isolated_postgres_database() as database_url:
-            _upgrade_empty_database_to_head(database_url)
+        with _head_postgres_database() as database_url:
             engine = create_engine(database_url)
             with engine.begin() as connection:
                 connection.execute(text("drop index launchplane_idempotency_state_lease_idx"))
@@ -2583,8 +2627,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
     def test_startup_verification_fails_closed_when_route_binding_index_is_missing(
         self,
     ) -> None:
-        with _isolated_postgres_database() as database_url:
-            _upgrade_empty_database_to_head(database_url)
+        with _head_postgres_database() as database_url:
             engine = create_engine(database_url)
             with engine.begin() as connection:
                 connection.execute(text("drop index launchplane_route_bindings_lookup_idx"))
@@ -2602,8 +2645,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
     def test_startup_verification_fails_closed_when_route_binding_payload_is_not_jsonb(
         self,
     ) -> None:
-        with _isolated_postgres_database() as database_url:
-            _upgrade_empty_database_to_head(database_url)
+        with _head_postgres_database() as database_url:
             engine = create_engine(database_url)
             with engine.begin() as connection:
                 connection.execute(
@@ -2626,8 +2668,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
     def test_startup_verification_fails_closed_when_route_binding_primary_key_is_missing(
         self,
     ) -> None:
-        with _isolated_postgres_database() as database_url:
-            _upgrade_empty_database_to_head(database_url)
+        with _head_postgres_database() as database_url:
             engine = create_engine(database_url)
             with engine.begin() as connection:
                 connection.execute(
@@ -2650,8 +2691,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
     def test_startup_verification_fails_closed_when_partial_predicate_is_missing(
         self,
     ) -> None:
-        with _isolated_postgres_database() as database_url:
-            _upgrade_empty_database_to_head(database_url)
+        with _head_postgres_database() as database_url:
             engine = create_engine(database_url)
             with engine.begin() as connection:
                 connection.execute(text("drop index launchplane_odoo_bootstrap_active_lane_uidx"))
@@ -2674,8 +2714,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 store.close()
 
     def test_startup_verification_rejects_wrong_authz_active_predicate(self) -> None:
-        with _isolated_postgres_database() as database_url:
-            _upgrade_empty_database_to_head(database_url)
+        with _head_postgres_database() as database_url:
             engine = create_engine(database_url)
             with engine.begin() as connection:
                 connection.execute(text("drop index launchplane_authz_policies_active_uidx"))
@@ -2699,8 +2738,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
     def test_startup_verification_fails_closed_when_outbox_claim_index_is_missing(
         self,
     ) -> None:
-        with _isolated_postgres_database() as database_url:
-            _upgrade_empty_database_to_head(database_url)
+        with _head_postgres_database() as database_url:
             engine = create_engine(database_url)
             with engine.begin() as connection:
                 connection.execute(text("drop index launchplane_outbox_deliveries_claim_idx"))
@@ -2718,8 +2756,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
     def test_startup_verification_fails_closed_when_outbox_payload_is_not_jsonb(
         self,
     ) -> None:
-        with _isolated_postgres_database() as database_url:
-            _upgrade_empty_database_to_head(database_url)
+        with _head_postgres_database() as database_url:
             engine = create_engine(database_url)
             with engine.begin() as connection:
                 connection.execute(
@@ -2868,8 +2905,7 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
     def test_owner_feedback_publishers_serialize_and_recover_one_receipt(self) -> None:
         from tests.test_product_review_status import _GitHub, _decision, _profile, _publisher
 
-        with _isolated_postgres_database() as database_url:
-            _upgrade_empty_database_to_head(database_url)
+        with _head_postgres_database() as database_url:
             stores = [PostgresRecordStore(database_url=database_url) for _ in range(2)]
             try:
                 decision = _decision(
@@ -3006,8 +3042,7 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             )
 
         for first_action in ("activation", "removal"):
-            with self.subTest(first_action=first_action), _isolated_postgres_database() as url:
-                migrate_schema(database_url=url)
+            with self.subTest(first_action=first_action), _head_postgres_database() as url:
                 base_store, active, replacement, activation, activation_event = arrange(url)
                 lock_acquired = threading.Event()
                 release_winner = threading.Event()
@@ -5881,8 +5916,7 @@ class RealPostgresChangeImpactAuditTests(unittest.TestCase):
             self.assertEqual(store.read_change_impact_policy_audit(first.record_id), original)
 
     def test_upgrade_preserves_legacy_policy_without_attributing_replay(self) -> None:
-        with _isolated_postgres_database() as database_url:
-            _upgrade_empty_database_to_head(database_url)
+        with _head_postgres_database() as database_url:
             store = PostgresRecordStore(database_url=database_url)
             first = _change_impact_policy()
             try:

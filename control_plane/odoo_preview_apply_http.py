@@ -24,6 +24,7 @@ from control_plane.contracts.artifact_dependency_provenance import (
     normalize_artifact_git_commit,
     normalize_artifact_sha256_digest,
 )
+from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.idempotency_record import (
     format_launchplane_mutation_timestamp,
     parse_launchplane_mutation_timestamp,
@@ -33,6 +34,7 @@ from control_plane.contracts.preview_mutation_request import (
     PreviewGenerationMutationRequest,
     PreviewMutationRequest,
 )
+from control_plane.contracts.odoo_stable_target_replacement import apply_artifact_odoo_version
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
@@ -182,6 +184,7 @@ def _build_odoo_preview_apply_inputs(
             record_store=record_store,
             profile=profile,
             plan=result.dry_run_plan,
+            manifest=result.plan_request.manifest,
             database_url=database_url,
         )
     except (FileNotFoundError, ValueError, click.ClickException):
@@ -398,6 +401,7 @@ def execute_odoo_preview_apply_result(
         record_store=record_store,
         profile=profile,
         plan=current_request.apply.dry_run_plan,
+        manifest=current_request.apply.manifest,
         database_url=database_url,
     ).values
     resolved_runtime_identity = runtime_identity
@@ -939,6 +943,7 @@ def _odoo_preview_service_environment(
     record_store: object,
     profile: LaunchplaneProductProfileRecord,
     plan: OdooPreviewDokployDryRunPlan,
+    manifest: ArtifactIdentityManifest | None,
     database_url: str | None,
 ) -> _OdooPreviewServiceEnvironment:
     if plan.operation == "destroy":
@@ -1000,6 +1005,10 @@ def _odoo_preview_service_environment(
         profile=profile,
         context_name=preview_profile.context,
         instance_name=template_instance,
+    )
+    # The preview runs the artifact being applied, so its recorded Odoo version wins.
+    apply_artifact_odoo_version(
+        environment_values, artifact_manifest=manifest, declared_keys=declared_keys
     )
     missing_env_keys = tuple(
         sorted(

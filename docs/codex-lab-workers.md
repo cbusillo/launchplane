@@ -87,8 +87,7 @@ direct record writes; its successful reruns and feedback sessions do not prove
 service authorization or atomic restart behavior. Direct-store delayed-feedback
 tests establish workspace retention only. Issue
 [#2328](https://github.com/cbusillo/launchplane/issues/2328) tracks the approved
-implementation and remaining service/PostgreSQL acceptance matrix under
-[#2058](https://github.com/cbusillo/launchplane/issues/2058).
+implementation and remaining service/PostgreSQL acceptance matrix.
 
 The [feedback continuation foundation](every-code-feedback-resume.md) adds strict
 contracts, isolated SQL evidence and inert launch protocol tests. It does not

@@ -327,5 +327,5 @@ context, provider target, runtime, and secret authority from DB-backed records.
 Authorization managed-set secrets are transitional desired input routed through
 the protected reconciliation workflow. They are not live policy authority and
 must not become a product catalog or the routine durable permissions editor.
-While the `#2058` authorization audit is open, do not add new routine managed
-sets or grants through those secrets; follow `authorization-authority.md`.
+Do not add new routine managed sets or grants through those secrets; granting
+access is a stop boundary, see `authorization-authority.md`.

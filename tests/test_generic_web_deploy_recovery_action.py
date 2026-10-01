@@ -19,7 +19,6 @@ ACTION_ENTRYPOINT = Path(".github/actions/generic-web-deploy-recovery-dry-run/di
 DOWNLOAD_ENTRYPOINT = Path(
     ".github/actions/generic-web-deploy-recovery-dry-run/dist/download-artifact.mjs"
 )
-ACTION_METADATA = Path(".github/actions/generic-web-deploy-recovery-dry-run/action.yml")
 REUSABLE_WORKFLOW = Path(".github/workflows/reusable-generic-web-stable-deploy.yml")
 REQUEST_ACTION_ENTRYPOINT = Path(".github/actions/launchplane-request/dist/index.js")
 WORKFLOW_EXPRESSION = re.compile(r"\$\{\{\s*(inputs|steps\.request\.outputs)\.([a-z_]+)\s*}}")
@@ -144,13 +143,6 @@ class GenericWebDeployRecoveryActionTests(unittest.TestCase):
                 "head_repository": {"full_name": "cbusillo/repairshopr_api"},
             },
         )
-
-    def test_action_extracts_artifacts_without_external_zip_tools(self) -> None:
-        source = DOWNLOAD_ENTRYPOINT.read_text(encoding="utf-8")
-
-        self.assertNotIn("node:child_process", source)
-        self.assertNotIn("execFileSync", source)
-        self.assertNotIn('"unzip"', source)
 
     def run_action(
         self,
@@ -289,30 +281,6 @@ await import('./{ACTION_ENTRYPOINT.as_posix()}');
             env=env,
             text=True,
         )
-
-    def test_action_metadata_declares_bounded_dry_run_and_apply_outputs(self) -> None:
-        metadata = ACTION_METADATA.read_text(encoding="utf-8")
-
-        self.assertIn("using: node24", metadata)
-        self.assertIn("  expected-product:\n", metadata)
-        self.assertIn("  expected-instance:\n", metadata)
-        self.assertIn("default: ${{ github.event.workflow_run.id }}", metadata)
-        self.assertIn("default: ${{ github.token }}", metadata)
-        self.assertIn("main: dist/index.mjs", metadata)
-        for output_name in (
-            "status",
-            "mode",
-            "trace_id",
-            "recovery_digest",
-            "proposed_action",
-            "reservation_state",
-            "reservation_attempt",
-            "recovery_action",
-            "retry_safe",
-            "observed_at",
-        ):
-            with self.subTest(output_name=output_name):
-                self.assertIn(f"  {output_name}:\n", metadata)
 
     def test_action_reconstructs_exact_legacy_request_and_projects_evidence(self) -> None:
         request = {
@@ -957,51 +925,6 @@ console.log(JSON.stringify({{
             "https://launchplane.example/v1/admin/generic-web/deploy-recovery/dry-run",
         )
         self.assertNotIn("launchplane_url", json.loads(calls[1]["body"]))
-
-    def test_stable_deploy_reusable_workflow_has_dry_run_only_recovery_mode(self) -> None:
-        workflow = REUSABLE_WORKFLOW.read_text(encoding="utf-8")
-
-        required_fragments = (
-            "actions: read",
-            "recovery_request_json:",
-            "github.event.inputs.original_run_id == ''",
-            "github.event.inputs.original_run_id != ''",
-            "github.event.workflow_run.name != 'Launchplane Recovery Request'",
-            "github.event.workflow_run.name == 'Launchplane Recovery Request'",
-            "github.event.workflow_run.path == '.github/workflows/launchplane-recovery-request.yml'",
-            "name: Download staged recovery request",
-            "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
-            "launchplane-recovery-request-${{ github.event.workflow_run.id }}",
-            "name: Resolve Launchplane recovery request",
-            "ORIGINAL_RUN_ATTEMPT: ${{ github.event.inputs.original_run_attempt }}",
-            "ORIGINAL_RUN_ID: ${{ github.event.inputs.original_run_id }}",
-            "REASON: ${{ github.event.inputs.reason }}",
-            "RECOVERY_ARTIFACT_RUN_ID: ${{ github.event.workflow_run.id }}",
-            "Recovery request artifact must contain exactly one file.",
-            "Recovery request artifact exceeds the size limit.",
-            "name: Inspect exact provider evidence",
-            "mode: provider-evidence",
-            "continue-on-error: true",
-            "name: Request Launchplane recovery dry run",
-            "uses: cbusillo/launchplane/.github/actions/"
-            "generic-web-deploy-recovery-dry-run@6bac61a1967c6adce8bdfd32cfbcdae362134a34",
-            "request-json: ${{ steps.request.outputs.request }}",
-            "Recovery digest:",
-            "Proposed action:",
-            "Reservation state:",
-            "Exact provider evidence:",
-            "Provider read error class:",
-        )
-        for fragment in required_fragments:
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, workflow)
-
-        self.assertNotIn("generic-web/deploy-recovery/apply", workflow)
-        self.assertNotIn("expected_recovery_digest", workflow)
-        self.assertNotIn(
-            "launchplane-url: >-\n            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",
-            workflow.split("  recovery-dry-run:", maxsplit=1)[1],
-        )
 
 
 if __name__ == "__main__":

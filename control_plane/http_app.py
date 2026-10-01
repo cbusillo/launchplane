@@ -290,7 +290,10 @@ from control_plane.http_routes.release_review import (
     ReleaseReviewRouteDependencies,
     register_release_review_routes,
 )
-from control_plane.release_review import current_release_review
+from control_plane.release_review import (
+    ProductionChangeRequiresPromotion,
+    current_release_review,
+)
 from control_plane.release_review_record import publish_release_decision
 from control_plane.trusted_maintenance_github_webhook import TRUSTED_MAINTENANCE_WEBHOOK_ROUTE
 from control_plane.github_app_webhook import GITHUB_APP_WEBHOOK_ROUTE
@@ -9635,6 +9638,13 @@ def create_launchplane_fastapi_app(
                     "operation": odoo_target_replacement_apply_operation_payload(error.operation),
                 },
             )
+        except ProductionChangeRequiresPromotion as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=error.code,
+                message=error.message,
+            ) from error
         except (ValueError, click.ClickException) as error:
             raise _launchplane_http_error(
                 status_code=400,
@@ -21763,6 +21773,13 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="not_found",
                 message=f"No Launchplane route for {_VERIREEL_PROD_DEPLOY_ROUTE}.",
+            ) from error
+        except ProductionChangeRequiresPromotion as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=error.code,
+                message=error.message,
             ) from error
         except (ValueError, click.ClickException) as error:
             raise_verireel_invalid_request_error(trace_id=trace_id, error=error)

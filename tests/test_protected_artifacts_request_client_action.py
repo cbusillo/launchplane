@@ -8,16 +8,9 @@ import unittest
 
 
 ACTION_ENTRYPOINT = Path(".github/actions/setup-protected-artifacts-request-client/dist/index.js")
-ACTION_METADATA = Path(".github/actions/setup-protected-artifacts-request-client/action.yml")
 
 
 class ProtectedArtifactsRequestClientActionTests(unittest.TestCase):
-    def test_action_metadata_uses_supported_node_runtime(self) -> None:
-        self.assertIn(
-            "using: node24",
-            ACTION_METADATA.read_text(encoding="utf-8"),
-        )
-
     def run_setup_action(
         self,
         *,

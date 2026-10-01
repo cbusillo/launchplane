@@ -9274,6 +9274,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
+            profile_payload = _generic_site_profile_payload(product="verireel")
+            profile_payload.update(driver_id="verireel", production_use="prelaunch")
+            FilesystemRecordStore(state_dir=state_dir).write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
             app = create_launchplane_fastapi_test_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
@@ -9347,6 +9352,66 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(payload["result"]["provider_target_type"], "application")
             self.assertNotIn("target_type", payload["result"])
             execute_mock.assert_called_once()
+
+    def test_verireel_prod_deploy_cannot_change_live_production(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            profile_payload = _generic_site_profile_payload(product="verireel")
+            profile_payload.update(driver_id="verireel", production_use="live")
+            FilesystemRecordStore(state_dir=state_dir).write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "every/verireel",
+                                "workflow_refs": [
+                                    "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                                ],
+                                "event_names": ["workflow_dispatch"],
+                                "products": ["verireel"],
+                                "contexts": ["verireel"],
+                                "actions": ["verireel_prod_deploy.execute"],
+                            }
+                        ]
+                    }
+                ),
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.verireel_prod_http.execute_verireel_stable_deploy"
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/prod-deploy",
+                    payload={
+                        "product": "verireel",
+                        "deploy": {
+                            "instance": "prod",
+                            "artifact_id": "ghcr.io/every/verireel-app:sha-abcdef1234567890",
+                            "source_git_ref": "abcdef1234567890",
+                        },
+                    },
+                    headers={"Idempotency-Key": "verireel-prod-deploy-live"},
+                )
+
+            self.assertEqual(status_code, 409)
+            self.assertEqual(payload["error"]["code"], "promotion_required")
+            execute_mock.assert_not_called()
 
     def test_verireel_prod_deploy_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -9422,6 +9487,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
             identity = _identity(
                 workflow_ref="every/verireel/.github/workflows/promote-image.yml@refs/heads/main",
                 event_name="workflow_dispatch",
+            )
+            profile_payload = _generic_site_profile_payload(product="verireel")
+            profile_payload.update(driver_id="verireel", production_use="prelaunch")
+            FilesystemRecordStore(state_dir=state_dir).write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
             )
             app = create_launchplane_fastapi_test_app(
                 state_dir=state_dir,

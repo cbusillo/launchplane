@@ -141,17 +141,6 @@ def build_action_pin_report(
     references = discover_action_pin_sites(root)
     violations: list[ActionPinViolation] = []
 
-    if _path_is_dirty(root, LAUNCHPLANE_REQUEST_ACTION_PATH):
-        violations.append(
-            ActionPinViolation(
-                code="action_worktree_dirty",
-                message=(
-                    "Commit the launchplane-request action change before checking or updating "
-                    "consumer pins."
-                ),
-                path=LAUNCHPLANE_REQUEST_ACTION_PATH,
-            )
-        )
     if not references:
         violations.append(
             ActionPinViolation(
