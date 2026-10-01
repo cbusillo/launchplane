@@ -116,11 +116,7 @@ from control_plane.contracts.promotion_record import (
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.repository_human_admission import (
-    RepositoryHumanRolePolicyProvenance,
     RepositoryHumanRolePolicyRecord,
-    TenantTechnicalHumanWaiverAuthorization,
-    TenantTechnicalHumanWaiverBinding,
-    TenantTechnicalHumanWaiverEventRecord,
 )
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
@@ -160,7 +156,6 @@ from control_plane.tenant_repository_classification import (
 from control_plane.repository_human_admission import (
     RepositoryHumanRolePolicyConflictError,
     RepositoryHumanRolePolicySequenceError,
-    TenantTechnicalHumanWaiverEventConflictError,
 )
 from control_plane.trusted_maintenance import (
     TrustedMaintenanceEvidenceConflictError,
@@ -261,82 +256,6 @@ def _repository_human_role_policy_record(
             "supersedes_record_id": supersedes_record_id,
         }
     )
-
-
-def _tenant_technical_human_waiver_event_record(
-    *,
-    source_event_id: str = "comment-1001",
-    action: str = "created",
-    repository_id: str = "1001",
-    repository_owner_id: str = "2001",
-    repository: str = "example/example-product",
-    product: str = "example-product",
-    context: str = "example-product",
-    pull_request_number: int = 17,
-    head_sha: str = "a" * 40,
-    role_policy_record_id: str = "repository-human-role-policy-1001-abc123-r1",
-    role_policy_revision: int = 1,
-    author_github_id: int = 301,
-    occurred_at: str = "2026-07-31T10:15:00Z",
-    expires_at: str = "2026-07-31T11:15:00Z",
-) -> TenantTechnicalHumanWaiverEventRecord:
-    classification_digest = "b" * 64
-    role_policy_digest = "c" * 64
-    authz_policy_digest = "d" * 64
-    binding = TenantTechnicalHumanWaiverBinding(
-        repository_id=repository_id,
-        repository_owner_id=repository_owner_id,
-        repository=repository,
-        product=product,
-        context=context,
-        pull_request_number=pull_request_number,
-        head_sha=head_sha,
-        classification_revision=1,
-        classification_digest=classification_digest,
-        role_policy_record_id=role_policy_record_id,
-        role_policy_revision=role_policy_revision,
-        role_policy_digest=role_policy_digest,
-        authz_policy_record_id="authz-policy-r1",
-        authz_policy_revision=1,
-        authz_policy_digest=authz_policy_digest,
-    )
-    provenance = RepositoryHumanRolePolicyProvenance(
-        repository_id=repository_id,
-        repository_owner_id=repository_owner_id,
-        repository=repository,
-        product=product,
-        context=context,
-        role_policy_record_id=role_policy_record_id,
-        role_policy_revision=role_policy_revision,
-        role_policy_digest=role_policy_digest,
-        role_policy_source="test-source",
-        authority_kind="repository_owner",
-        evaluated_at=occurred_at,
-    )
-    authorization = TenantTechnicalHumanWaiverAuthorization(
-        author_github_id=author_github_id,
-        author_login=f"human-{author_github_id}",
-        managed_set_id="tenant-human.example",
-        managed_rule_id="technical-waiver",
-        authz_policy_record_id="authz-policy-r1",
-        authz_policy_revision=1,
-        authz_policy_digest=authz_policy_digest,
-        authz_policy_source="test-authz",
-        role_policy_provenance=provenance,
-        authorized_at=occurred_at,
-    )
-    event_payload: dict[str, object] = {
-        "binding": binding,
-        "action": action,
-        "occurred_at": occurred_at,
-        "source_event_kind": "github_issue_comment",
-        "source_event_id": source_event_id,
-        "reason": "Owner approved technical handling.",
-        "authorization": authorization,
-    }
-    if expires_at:
-        event_payload["expires_at"] = expires_at
-    return TenantTechnicalHumanWaiverEventRecord.model_validate(event_payload)
 
 
 def _trusted_maintenance_policy_record(
@@ -1075,77 +994,6 @@ class FilesystemRecordStoreTests(unittest.TestCase):
         self.assertEqual([record.status for record in records], ["active", "superseded"])
         self.assertEqual(records[1].role_policy_digest, revision_1.role_policy_digest)
         self.assertEqual(records[0], revision_2)
-
-    def test_tenant_technical_human_waiver_events_are_append_only_and_filterable(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            state_dir = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=state_dir)
-            created = _tenant_technical_human_waiver_event_record()
-            conflicting_created = _tenant_technical_human_waiver_event_record(
-                occurred_at="2026-07-31T10:16:00Z",
-                expires_at="2026-07-31T11:16:00Z",
-            )
-            revoked = _tenant_technical_human_waiver_event_record(
-                source_event_id="comment-1002",
-                action="revoked",
-                occurred_at="2026-07-31T10:30:00Z",
-                expires_at="",
-            )
-            other_repository = _tenant_technical_human_waiver_event_record(
-                source_event_id="comment-other",
-                repository_id="1002",
-                repository_owner_id="2002",
-                repository="example/other-product",
-                product="other-product",
-                context="other-product",
-            )
-
-            first_write = store.write_tenant_technical_human_waiver_event_record(created)
-            replay = store.write_tenant_technical_human_waiver_event_record(created)
-            with self.assertRaises(TenantTechnicalHumanWaiverEventConflictError):
-                store.write_tenant_technical_human_waiver_event_record(conflicting_created)
-            revoked_write = store.write_tenant_technical_human_waiver_event_record(revoked)
-            store.write_tenant_technical_human_waiver_event_record(other_repository)
-            loaded = store.read_tenant_technical_human_waiver_event_record(created.event_id)
-            listed = store.list_tenant_technical_human_waiver_event_records(
-                repository_id=created.binding.repository_id,
-            )
-            exact_created = store.list_tenant_technical_human_waiver_event_records(
-                repository_id=created.binding.repository_id,
-                repository_owner_id=created.binding.repository_owner_id,
-                repository="Example/Example-Product",
-                product=created.binding.product,
-                context=created.binding.context,
-                binding_sha256=created.binding.binding_sha256,
-                pull_request_number=created.binding.pull_request_number,
-                head_sha=created.binding.head_sha,
-                classification_digest=created.binding.classification_digest,
-                role_policy_record_id=created.binding.role_policy_record_id,
-                role_policy_digest=created.binding.role_policy_digest,
-                authz_policy_record_id=created.binding.authz_policy_record_id,
-                authz_policy_digest=created.binding.authz_policy_digest,
-                action="created",
-                author_github_id=created.authorization.author_github_id,
-            )
-            waiver_events = store.list_tenant_technical_human_waiver_event_records(
-                waiver_id=created.waiver_id,
-                limit=1,
-            )
-            wrong_head = store.list_tenant_technical_human_waiver_event_records(
-                repository_id=created.binding.repository_id,
-                head_sha="b" * 40,
-            )
-
-        self.assertEqual(first_write, "written")
-        self.assertEqual(replay, "replayed")
-        self.assertEqual(revoked_write, "written")
-        self.assertEqual(loaded, created)
-        self.assertEqual(listed, (revoked, created))
-        self.assertEqual(exact_created, (created,))
-        self.assertEqual(waiver_events, (revoked,))
-        self.assertEqual(wrong_head, ())
 
     def test_trusted_maintenance_policies_are_single_active_revision_history(
         self,

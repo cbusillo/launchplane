@@ -3988,7 +3988,7 @@ export type TenantAdmissionPathResult = {
     evidence_digest: string;
     evidence_id: string;
     head_sha: string;
-    path_kind: 'trusted_maintenance' | 'technical_human_waiver' | 'manager_preview_approval';
+    path_kind: 'trusted_maintenance' | 'manager_preview_approval';
     pull_request_number: number;
     repository: string;
     repository_id: string;
@@ -4017,7 +4017,7 @@ export type TenantAdmissionRequiredTechnicalCheck = {
 };
 
 export type TenantAdmissionStatusReadModel = {
-    category: 'engineering' | 'eligible' | 'pending' | 'manager-approved' | 'technical-waived' | 'maintenance-admitted' | 'stale' | 'denied' | 'unavailable';
+    category: 'engineering' | 'eligible' | 'pending' | 'manager-approved' | 'maintenance-admitted' | 'stale' | 'denied' | 'unavailable';
     classification_digest: string;
     classification_kind: 'engineering' | 'tenant_ui' | '';
     classification_revision: number;
@@ -4070,11 +4070,11 @@ export type TenantMergeEligibilityDecision = {
     evaluated_at: string;
     evidence_digest: string;
     evidence_id: string;
-    evidence_kind: 'none' | 'trusted_maintenance' | 'technical_human_waiver' | 'manager_preview_approval';
+    evidence_kind: 'none' | 'trusted_maintenance' | 'manager_preview_approval';
     head_sha: string;
     product: string;
     pull_request_number: number;
-    reason_code: 'engineering_normal_flow' | 'tenant_normal_flow' | 'trusted_maintenance_admitted' | 'technical_human_waiver_admitted' | 'manager_preview_approved' | 'manager_preview_required' | 'evidence_denied' | 'evidence_stale' | 'evidence_unavailable' | 'evidence_identity_drift' | 'evidence_head_mismatch' | 'evidence_policy_drift' | 'classification_missing' | 'classification_unknown' | 'classification_ambiguous' | 'classification_identity_drift';
+    reason_code: 'engineering_normal_flow' | 'tenant_normal_flow' | 'trusted_maintenance_admitted' | 'manager_preview_approved' | 'manager_preview_required' | 'evidence_denied' | 'evidence_stale' | 'evidence_unavailable' | 'evidence_identity_drift' | 'evidence_head_mismatch' | 'evidence_policy_drift' | 'classification_missing' | 'classification_unknown' | 'classification_ambiguous' | 'classification_identity_drift';
     repository: string;
     repository_id: string;
     repository_owner_id: string;
@@ -4085,7 +4085,6 @@ export type TenantMergeEligibilityDecision = {
 export type TenantMergeEligibilityEvidenceInputs = {
     manager_preview_approval: TenantAdmissionPathResult | null;
     schema_version: number;
-    technical_human_waiver: TenantAdmissionPathResult | null;
     trusted_maintenance: TenantAdmissionPathResult | null;
 };
 

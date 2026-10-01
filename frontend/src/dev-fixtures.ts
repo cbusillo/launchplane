@@ -1891,7 +1891,7 @@ export function tenantAdmissionForFixture(
     repository_owner_id: "2001",
     schema_version: 1,
   };
-  const paths = {schema_version: 1, manager_preview_approval: null, technical_human_waiver: null, trusted_maintenance: null};
+  const paths = {schema_version: 1, manager_preview_approval: null, trusted_maintenance: null};
   const technicalChecks = classificationMissing
     ? null
     : {

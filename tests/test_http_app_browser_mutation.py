@@ -70,7 +70,6 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "/v1/products/{product}/environments/{environment}/config/apply",
             "/v1/products/{product}/environments/{environment}/promotion/dry-run",
             "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch",
-            "/v1/tenant-admission/technical-human-waivers/apply",
             "/v1/tenant-admission/trusted-maintenance-policies/apply",
             "/v1/work-graph/rank",
         }

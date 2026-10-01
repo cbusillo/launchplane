@@ -25,7 +25,6 @@ TenantAdmissionStatusCategory = Literal[
     "eligible",
     "pending",
     "manager-approved",
-    "technical-waived",
     "maintenance-admitted",
     "stale",
     "denied",
@@ -68,7 +67,6 @@ class TenantAdmissionStatusReadModel(BaseModel):
             raise ValueError("Eligible tenant status requires normal-flow admission.")
         admitted_categories = {
             "manager-approved": "manager_preview_approval",
-            "technical-waived": "technical_human_waiver",
             "maintenance-admitted": "trusted_maintenance",
         }
         expected_evidence_kind = admitted_categories.get(self.category)

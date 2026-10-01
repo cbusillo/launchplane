@@ -37,7 +37,7 @@ MERGE_COMMIT_SHA = "c" * 40
 
 
 class TenantAdmissionControllerTests(unittest.TestCase):
-    def test_tenant_is_ready_without_manager_or_waiver_records(self) -> None:
+    def test_tenant_ui_is_ready_on_classification_alone(self) -> None:
         transport = _TenantControllerTransport()
         result = evaluate_tenant_admission_candidate(
             request=_request(mutate=False),

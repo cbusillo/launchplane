@@ -30374,7 +30374,6 @@
           "path_kind": {
             "enum": [
               "trusted_maintenance",
-              "technical_human_waiver",
               "manager_preview_approval"
             ],
             "title": "Path Kind",
@@ -30545,7 +30544,6 @@
               "eligible",
               "pending",
               "manager-approved",
-              "technical-waived",
               "maintenance-admitted",
               "stale",
               "denied",
@@ -30876,7 +30874,6 @@
             "enum": [
               "none",
               "trusted_maintenance",
-              "technical_human_waiver",
               "manager_preview_approval"
             ],
             "title": "Evidence Kind",
@@ -30900,7 +30897,6 @@
               "engineering_normal_flow",
               "tenant_normal_flow",
               "trusted_maintenance_admitted",
-              "technical_human_waiver_admitted",
               "manager_preview_approved",
               "manager_preview_required",
               "evidence_denied",
@@ -30987,16 +30983,6 @@
             "title": "Schema Version",
             "type": "integer"
           },
-          "technical_human_waiver": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/TenantAdmissionPathResult"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "trusted_maintenance": {
             "anyOf": [
               {
@@ -31013,7 +30999,6 @@
         "required": [
           "manager_preview_approval",
           "schema_version",
-          "technical_human_waiver",
           "trusted_maintenance"
         ]
       },

@@ -155,7 +155,6 @@ from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.repository_human_admission import (
     RepositoryHumanRolePolicyRecord,
-    TenantTechnicalHumanWaiverEventRecord,
 )
 from control_plane.contracts.trusted_maintenance import (
     TrustedMaintenanceEvidenceRecord,
@@ -259,7 +258,6 @@ from control_plane.storage.product_authority_bundle import (
 )
 from control_plane.repository_human_admission import (
     plan_repository_human_role_policy_append,
-    plan_tenant_technical_human_waiver_event_append,
 )
 from control_plane.contracts.product_owner import (
     ProductOwnerPolicyConflictError,
@@ -2014,110 +2012,6 @@ class FilesystemRecordStore:
                 str(record.product),
                 str(record.system),
                 str(record.record_id),
-            ),
-            reverse=True,
-        )
-        if limit is not None:
-            records = records[:limit]
-        return tuple(records)
-
-    def write_tenant_technical_human_waiver_event_record(
-        self,
-        record: TenantTechnicalHumanWaiverEventRecord,
-    ) -> Literal["written", "replayed"]:
-        record_type = "launchplane_tenant_technical_human_waiver_events"
-        with self._product_authority_bundle_lock():
-            records = self._list_models_locked(
-                TenantTechnicalHumanWaiverEventRecord,
-                record_type,
-            )
-            plan = plan_tenant_technical_human_waiver_event_append(
-                records=records,
-                record=record,
-            )
-            if plan.status == "replayed":
-                return "replayed"
-            self._write_model_locked(record_type, record.event_id, record)
-            return "written"
-
-    def read_tenant_technical_human_waiver_event_record(
-        self,
-        event_id: str,
-    ) -> TenantTechnicalHumanWaiverEventRecord:
-        return self._read_model(
-            TenantTechnicalHumanWaiverEventRecord,
-            "launchplane_tenant_technical_human_waiver_events",
-            event_id,
-        )
-
-    def list_tenant_technical_human_waiver_event_records(
-        self,
-        *,
-        repository_id: str = "",
-        repository_owner_id: str = "",
-        repository: str = "",
-        product: str = "",
-        context: str = "",
-        waiver_id: str = "",
-        binding_sha256: str = "",
-        pull_request_number: int | None = None,
-        head_sha: str = "",
-        classification_digest: str = "",
-        role_policy_record_id: str = "",
-        role_policy_digest: str = "",
-        authz_policy_record_id: str = "",
-        authz_policy_digest: str = "",
-        action: str = "",
-        author_github_id: int | None = None,
-        limit: int | None = None,
-    ) -> tuple[TenantTechnicalHumanWaiverEventRecord, ...]:
-        normalized_repository = repository.strip().lower()
-        records = [
-            record
-            for record in self._list_models(
-                TenantTechnicalHumanWaiverEventRecord,
-                "launchplane_tenant_technical_human_waiver_events",
-            )
-            if (not repository_id or record.binding.repository_id == repository_id)
-            and (
-                not repository_owner_id or record.binding.repository_owner_id == repository_owner_id
-            )
-            and (not normalized_repository or record.binding.repository == normalized_repository)
-            and (not product or record.binding.product == product)
-            and (not context or record.binding.context == context)
-            and (not waiver_id or record.waiver_id == waiver_id)
-            and (not binding_sha256 or record.binding.binding_sha256 == binding_sha256)
-            and (
-                pull_request_number is None
-                or record.binding.pull_request_number == pull_request_number
-            )
-            and (not head_sha or record.binding.head_sha == head_sha)
-            and (
-                not classification_digest
-                or record.binding.classification_digest == classification_digest
-            )
-            and (
-                not role_policy_record_id
-                or record.binding.role_policy_record_id == role_policy_record_id
-            )
-            and (not role_policy_digest or record.binding.role_policy_digest == role_policy_digest)
-            and (
-                not authz_policy_record_id
-                or record.binding.authz_policy_record_id == authz_policy_record_id
-            )
-            and (
-                not authz_policy_digest or record.binding.authz_policy_digest == authz_policy_digest
-            )
-            and (not action or record.action == action)
-            and (
-                author_github_id is None
-                or record.authorization.author_github_id == author_github_id
-            )
-        ]
-        records.sort(
-            key=lambda record: (
-                record.occurred_at,
-                record.event_id,
             ),
             reverse=True,
         )
