@@ -4918,11 +4918,11 @@ class FastApiMergeTrainPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
             )
             with (
                 patch(
-                    "control_plane.merge_train_pr_feedback.find_github_issue_comment_by_marker",
+                    "control_plane.workflows.launchplane.find_github_issue_comment_by_marker",
                     return_value=None,
                 ) as find_comment,
                 patch(
-                    "control_plane.merge_train_pr_feedback.create_github_issue_comment",
+                    "control_plane.workflows.launchplane.create_github_issue_comment",
                     return_value={
                         "id": 123,
                         "html_url": "https://github.com/cbusillo/sellyouroutboard/pull/7#issuecomment-123",
@@ -4979,18 +4979,18 @@ class FastApiMergeTrainPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
             )
             with (
                 patch(
-                    "control_plane.merge_train_pr_feedback.find_github_issue_comment_by_marker",
+                    "control_plane.workflows.launchplane.find_github_issue_comment_by_marker",
                     return_value={"id": 456, "body": "old body"},
                 ) as find_comment,
                 patch(
-                    "control_plane.merge_train_pr_feedback.update_github_issue_comment",
+                    "control_plane.workflows.launchplane.update_github_issue_comment",
                     return_value={
                         "id": 456,
                         "html_url": "https://github.com/cbusillo/sellyouroutboard/pull/7#issuecomment-456",
                     },
                 ) as update_comment,
                 patch(
-                    "control_plane.merge_train_pr_feedback.create_github_issue_comment"
+                    "control_plane.workflows.launchplane.create_github_issue_comment"
                 ) as create_comment,
             ):
                 response = await _post_merge_train_pr_feedback(
@@ -5034,11 +5034,11 @@ class FastApiMergeTrainPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
             )
             with (
                 patch(
-                    "control_plane.merge_train_pr_feedback.find_github_issue_comment_by_marker",
+                    "control_plane.workflows.launchplane.find_github_issue_comment_by_marker",
                     return_value=None,
                 ),
                 patch(
-                    "control_plane.merge_train_pr_feedback.create_github_issue_comment",
+                    "control_plane.workflows.launchplane.create_github_issue_comment",
                     side_effect=ClickException("GitHub API returned 502"),
                 ) as create_comment,
             ):
@@ -5094,11 +5094,11 @@ class FastApiMergeTrainPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
             )
             with (
                 patch(
-                    "control_plane.merge_train_pr_feedback.find_github_issue_comment_by_marker",
+                    "control_plane.workflows.launchplane.find_github_issue_comment_by_marker",
                     return_value=None,
                 ) as find_comment,
                 patch(
-                    "control_plane.merge_train_pr_feedback.create_github_issue_comment",
+                    "control_plane.workflows.launchplane.create_github_issue_comment",
                     return_value={
                         "id": 123,
                         "html_url": "https://github.com/cbusillo/sellyouroutboard/pull/7#issuecomment-123",
@@ -5156,11 +5156,11 @@ class FastApiMergeTrainPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
             )
             with (
                 patch(
-                    "control_plane.merge_train_pr_feedback.find_github_issue_comment_by_marker",
+                    "control_plane.workflows.launchplane.find_github_issue_comment_by_marker",
                     return_value=None,
                 ),
                 patch(
-                    "control_plane.merge_train_pr_feedback.create_github_issue_comment",
+                    "control_plane.workflows.launchplane.create_github_issue_comment",
                     return_value={
                         "id": 123,
                         "html_url": "https://github.com/cbusillo/sellyouroutboard/pull/7#issuecomment-123",
@@ -5197,11 +5197,11 @@ class FastApiMergeTrainPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
             )
             with (
                 patch(
-                    "control_plane.merge_train_pr_feedback.find_github_issue_comment_by_marker",
+                    "control_plane.workflows.launchplane.find_github_issue_comment_by_marker",
                     return_value={"id": 456, "body": "old body"},
                 ),
                 patch(
-                    "control_plane.merge_train_pr_feedback.update_github_issue_comment",
+                    "control_plane.workflows.launchplane.update_github_issue_comment",
                     return_value={
                         "id": 456,
                         "html_url": "https://github.com/cbusillo/sellyouroutboard/pull/7#issuecomment-456",

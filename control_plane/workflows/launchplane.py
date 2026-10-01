@@ -4,7 +4,7 @@ import json
 import re
 import tomllib
 from pathlib import Path
-from typing import Protocol, TypedDict, get_args
+from typing import Literal, Protocol, TypedDict, get_args
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -918,23 +918,34 @@ def github_pr_owner(*, pr_url: str) -> str:
     return owner if isinstance(owner, str) else ""
 
 
+GITHUB_COMMENT_PAGE_SIZE = 100
+GITHUB_COMMENT_MAX_PAGES = 10
+
+
 def find_github_issue_comment_by_marker(
     *, owner: str, repo: str, issue_number: int, token: str, marker: str
 ) -> dict[str, object] | None:
-    payload = github_api_request(
-        path=f"/repos/{owner}/{repo}/issues/{issue_number}/comments",
-        token=token,
-    )
-    if not isinstance(payload, list):
-        raise click.ClickException(
-            f"GitHub issue comments response for {owner}/{repo}#{issue_number} must be a list."
+    """The first comment carrying the marker, searching at most the first 1,000 comments."""
+    for page in range(1, GITHUB_COMMENT_MAX_PAGES + 1):
+        payload = github_api_request(
+            path=(
+                f"/repos/{owner}/{repo}/issues/{issue_number}/comments"
+                f"?per_page={GITHUB_COMMENT_PAGE_SIZE}&page={page}"
+            ),
+            token=token,
         )
-    for item in payload:
-        if not isinstance(item, dict):
-            continue
-        body = item.get("body")
-        if isinstance(body, str) and marker in body:
-            return item
+        if not isinstance(payload, list):
+            raise click.ClickException(
+                f"GitHub issue comments response for {owner}/{repo}#{issue_number} must be a list."
+            )
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            body = item.get("body")
+            if isinstance(body, str) and marker in body:
+                return item
+        if len(payload) < GITHUB_COMMENT_PAGE_SIZE:
+            return None
     return None
 
 
@@ -968,6 +979,42 @@ def update_github_issue_comment(
             f"GitHub comment update response for {owner}/{repo} comment {comment_id} must be an object."
         )
     return payload
+
+
+class GitHubCommentUpsert(TypedDict):
+    action: Literal["created_comment", "updated_comment"]
+    comment_id: int
+    comment_url: str
+
+
+def upsert_github_issue_comment(
+    *, owner: str, repo: str, issue_number: int, token: str, marker: str, body: str
+) -> GitHubCommentUpsert:
+    """Edit the issue's comment that carries the marker, or add it: one comment per marker."""
+    existing_comment = find_github_issue_comment_by_marker(
+        owner=owner, repo=repo, issue_number=issue_number, token=token, marker=marker
+    )
+    if existing_comment is None:
+        created_comment = create_github_issue_comment(
+            owner=owner, repo=repo, issue_number=issue_number, token=token, body=body
+        )
+        created_comment_id = created_comment.get("id")
+        return {
+            "action": "created_comment",
+            "comment_id": created_comment_id if isinstance(created_comment_id, int) else 0,
+            "comment_url": _github_comment_url(created_comment),
+        }
+    existing_comment_id = existing_comment.get("id")
+    if not isinstance(existing_comment_id, int):
+        raise click.ClickException("Existing GitHub feedback comment is missing a numeric id.")
+    updated_comment = update_github_issue_comment(
+        owner=owner, repo=repo, comment_id=existing_comment_id, token=token, body=body
+    )
+    return {
+        "action": "updated_comment",
+        "comment_id": existing_comment_id,
+        "comment_url": _github_comment_url(updated_comment),
+    }
 
 
 def delete_github_issue_comment(*, owner: str, repo: str, comment_id: int, token: str) -> None:

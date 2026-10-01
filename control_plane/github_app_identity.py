@@ -32,6 +32,13 @@ _MERGE_TRAIN_TOKEN_PERMISSIONS = {
     "statuses": "read",
     "workflows": "write",
 }
+# A subset of the merge train's permissions: the event reconciler posts what it did
+# on the pull request, and finds the pull request a commit was merged from.
+_PULL_REQUEST_FEEDBACK_TOKEN_PERMISSIONS = {
+    "contents": "read",
+    "metadata": "read",
+    "pull_requests": "write",
+}
 _BUILD_PROVENANCE_TOKEN_PERMISSIONS = {
     "actions": "read",
     "contents": "read",
@@ -98,6 +105,7 @@ __all__ = [
     "resolve_advisory_github_app_identity",
     "mint_repository_installation_token",
     "mint_merge_train_installation_token",
+    "mint_pull_request_feedback_installation_token",
     "mint_ordinary_agent_installation_token",
     "mint_provider_delivery_inspection_token",
     "ordinary_agent_effect_permissions",
@@ -223,6 +231,34 @@ def mint_build_provenance_installation_token(
         allowed_token_permissions=_BUILD_PROVENANCE_TOKEN_PERMISSIONS,
         identity_label="Build provenance GitHub App",
         permission_boundary_label="build provenance read",
+        api_request=api_request,
+        now=now,
+    )
+
+
+def mint_pull_request_feedback_installation_token(
+    *,
+    identity: GitHubAppIdentity,
+    repository: str,
+    repository_id: str,
+    api_request: GitHubApiRequest = github_api_request,
+    now: datetime | None = None,
+) -> GitHubAppInstallationToken:
+    """Mint a token that only comments on one product repository's pull requests."""
+    return _mint_repository_installation_token(
+        identity=identity,
+        repository=repository,
+        repository_id=repository_id,
+        requested_permissions={
+            key: value
+            for key, value in _PULL_REQUEST_FEEDBACK_TOKEN_PERMISSIONS.items()
+            if key != "metadata"
+        },
+        required_installation_permissions=_PULL_REQUEST_FEEDBACK_TOKEN_PERMISSIONS,
+        allowed_installation_permissions=None,
+        allowed_token_permissions=_PULL_REQUEST_FEEDBACK_TOKEN_PERMISSIONS,
+        identity_label="Pull request feedback GitHub App",
+        permission_boundary_label="pull request feedback",
         api_request=api_request,
         now=now,
     )

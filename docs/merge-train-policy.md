@@ -109,6 +109,10 @@ A repository policy names one GitHub credential source:
   not stored as runtime configuration. No Administration permission is used.
   Every train token has this same permission set, including tokens resolved for
   reads; Workflows write lets branch updates and merges include workflow files.
+  The event reconciler also mints narrower tokens from a product repository's
+  App: a read-only build-provenance token, and a pull-request feedback token
+  with only Pull requests write and Contents read
+  ([event-driven deploys](event-driven-deploys.md#pull-request-feedback)).
   A missing installation grant is reported by name in service logs. Coordinate
   installation approval with this service capability: an older service with an
   installation permission ceiling will refuse a broader shared installation.

@@ -1,7 +1,8 @@
 # Event-Driven Deploys
 
 Status: issue #2605. The receiver, the reconciler, its acting on testing and
-previews, and the staff-testing hold on the testing lane are built. Depends on
+previews, and the staff-testing hold on the testing lane are built. Its pull
+request feedback is built (#2659). Depends on
 [artifact provenance](artifact-provenance.md).
 
 A product repository never calls Launchplane. Launchplane hears GitHub's
@@ -87,8 +88,8 @@ reservation. The webhook request never waits on a deploy.
     id and attempt), not just whether a preview exists, then apply or
     destroy.
   - The manifest is not recorded in the artifact store. The preview's slug
-    and URL come from the product profile as today. Post the result on the
-    PR.
+    and URL come from the product profile as today. The result is posted on
+    the PR; see [Pull request feedback](#pull-request-feedback).
   - Read the PR state again after taking the preview's reservation and just
     before the provider apply; if it closed, lost its label, or moved its
     head, the reservation is released with no provider effect and the
@@ -109,6 +110,53 @@ ids Launchplane records itself: the GitHub delivery id and the plan's top-level
 string in the plan and error goes through the shared redactor, which removes
 secret assignments, tokens, authorization headers, URLs, paths and long
 random strings.
+
+## Pull request feedback
+
+The reconciler says on the pull request what it did, so a product repository
+needs no workflow to report previews or testing deploys.
+
+- **Preview:** one comment on the PR, marked `<!-- launchplane-reconcile-preview -->`
+  and edited in place: waiting for a verified build of the head commit, ready
+  (with the preview URL), retired, or failed with a short, redacted reason
+  (`cleanup_failed` when a destroy failed). A plan that changes nothing, is
+  deferred, or is held for another driver says nothing.
+- **Testing:** one comment on the PR GitHub merged as the desired commit
+  (`merge_commit_sha` equals it), marked `<!-- launchplane-reconcile-testing -->`:
+  the deploy is queued, the testing lane runs it, it is waiting because the
+  lane is held for staff testing (with the hold's reason), or it failed three
+  times. A commit that no PR was merged as (a direct push) is announced
+  nowhere.
+- **Identity:** the comment is posted with the product repository's
+  merge-train GitHub App, the same App the build-provenance token comes from.
+  Each post mints a token for that one repository with only Pull requests
+  write and Contents read, a subset of what the train's own token has, so the
+  App needs no new permission. No App, key, or matching repository id means
+  nothing is posted; there is no fallback to another token.
+- **Recording:** posting never changes, fails, or rolls back the reconcile.
+  The plan keeps the outcome as `pr_feedback`: the status, PR number, the
+  body's `sha256`, `delivery_status` (`delivered`, `skipped` or `failed`),
+  the comment action and id, and any error. A preview's feedback is also
+  written as a preview PR feedback record, so it shows where the feedback
+  route's records do, and a failed delivery alerts through the product's
+  preview feedback notification policy.
+- **No churn:** a reconcile whose comment would be the same as the one it last
+  delivered posts nothing, so the half-hourly sweep doesn't rewrite comments.
+  A "queued" testing comment becomes "runs this change" at the next reconcile
+  after the deploy finishes, at the latest the next sweep.
+
+- **Owner review:** when the PR carries the product Owner's review label and
+  the preview is ready, the comment mentions the Owner with the link to record
+  Accept or Request changes, as the preview feedback route does; with no Owner
+  set it says the operator needs to set one. The link's origin is Launchplane's
+  own bootstrap `LAUNCHPLANE_PUBLIC_URL`, the setting the human session
+  manager's public origin comes from, which the workers share with the service.
+  Without it (or with an invalid one) the comment has no mention, the reconcile
+  is unaffected, and `pr_feedback.owner_review` says why (`no_public_origin` or
+  `invalid_public_origin`; otherwise `mentioned` or `owner_not_set`).
+- **Missing preview settings:** a preview refused because its runtime
+  environment is incomplete names the missing keys (names only, never values)
+  on the plan as `missing_keys`, in the request's error, and in the PR comment.
 
 ## Staff-testing hold
 

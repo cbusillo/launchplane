@@ -163,10 +163,28 @@ class OAuthLoginStateStore:
         return login_state
 
 
+LAUNCHPLANE_PUBLIC_URL_ENV_KEY = "LAUNCHPLANE_PUBLIC_URL"
+
+
+def launchplane_public_origin_from_env() -> str:
+    """Launchplane's browser origin from its bootstrap config, or "" when unset or invalid.
+
+    The same `LAUNCHPLANE_PUBLIC_URL` the human session manager's `public_origin` comes from,
+    for processes (such as the workers) that build browser links without a session manager.
+    """
+    public_url = os.environ.get(LAUNCHPLANE_PUBLIC_URL_ENV_KEY, "").strip()
+    if not public_url:
+        return ""
+    try:
+        return browser_origin_from_url(public_url)
+    except ValueError:
+        return ""
+
+
 def load_github_oauth_config_from_env() -> GitHubOAuthConfig | None:
     client_id = os.environ.get("LAUNCHPLANE_GITHUB_CLIENT_ID", "").strip()
     client_secret = os.environ.get("LAUNCHPLANE_GITHUB_CLIENT_SECRET", "").strip()
-    public_url = os.environ.get("LAUNCHPLANE_PUBLIC_URL", "").strip().rstrip("/")
+    public_url = os.environ.get(LAUNCHPLANE_PUBLIC_URL_ENV_KEY, "").strip().rstrip("/")
     session_secret = os.environ.get("LAUNCHPLANE_SESSION_SECRET", "").strip()
     if not (client_id and client_secret and public_url and session_secret):
         return None

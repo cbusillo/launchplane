@@ -1420,6 +1420,13 @@ records what it decided and did as `last_plan`:
   or moved its head, the reservation is released with no provider effect and
   the request returns to `pending` (`deferred: pull_request_moved`). A blocked plan or a failed provider result
   records the request `failed` with the plan.
+- both: `pr_feedback` records what the reconcile said on the PR, posted with a
+  pull-request-only token from the same merge-train App: status, PR number,
+  body `sha256`, `delivery_status`, comment action and id, and error. A
+  preview's feedback is also written as a preview PR feedback record. It is
+  carried to the next plan, and a reconcile that would post the same body
+  again posts nothing. Delivery never changes the request's outcome; see
+  [event-driven deploys](event-driven-deploys.md#pull-request-feedback).
 
 The testing replacement carries the `launchplane_reconcile` grant (see Durable
 Operation Authorization); a preview runs in-process after a direct check that
