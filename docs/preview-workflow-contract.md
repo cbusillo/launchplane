@@ -298,51 +298,9 @@ recorded in Launchplane.", and a leftover `launchplane/owner-acceptance` check
 run created by Launchplane's advisory app is updated once to `neutral` with the
 title "Retired". Neither signal is created where it does not already exist.
 
-Manager decisions and invalidations remain stored events, and promotion still
-reads them, until the release-approval change from issue `#2446` replaces that
-gate. The signed webhook still records an exact `/preview` command from an
-authorized manager and still records invalidation on pull-request close or
-preview-label removal. The only remaining writer of the status and command
-comment is the explicit operator route
-`POST /v1/manager-preview-approval/reconcile`. The rest of this section
-describes that retained mechanism and its history; it is not the Owner model.
-
-Manager approval is a Launchplane-owned interaction layered on the serving
-preview evidence. Product workflows do not parse approval comments, resolve a
-person, authorize an actor, compute fingerprints, or write GitHub status. The
-signed webhook handler does not check out or execute pull-request code.
-
-When an active managed policy grants `manager_preview_approval.write` for the
-product and preview context, Launchplane maintains one credential-owned PR
-comment containing the public preview URL, immutable serving identity, current
-decision, and these exact role-based commands:
-
-```text
-/preview approve <binding_sha256>
-/preview changes <binding_sha256> <reason>
-/preview revoke <binding_sha256> <reason>
-```
-
-The trusted status context is exactly `manager-preview-approval`. It is pending
-without an exact approval, successful only for the current head and serving
-generation, and non-successful for changes requested, revocation, stale or
-unavailable evidence, verification failure, destroy, PR close, preview-label
-removal, or authorization-policy drift. Required code-review approvals remain a
-separate repository rule and may remain zero.
-
-Stale approval history on an older binding does not prevent a new exact manager
-decision for complete current evidence. The webhook accepts the current
-fingerprint only while the pull request is open, its head matches the serving
-generation, and the exact current binding has not been superseded or invalidated.
-Unavailable evidence and exact terminal bindings remain non-actionable.
-
-When a recorded destroy or supersession ends the prior serving binding, a later
-verified replacement generation starts pending for its own exact fingerprint.
-The terminal event remains append-only audit evidence, but it does not carry a
-stale decision forward onto the replacement generation.
-
-Preview refresh, destroy, and verification never depend on manager approval
-and no longer attempt status reconciliation.
+Manager preview approval is retired. Its evaluator, webhook commands, reconcile
+route, and store methods are deleted; existing manager events stay in the
+database unread. Current approval uses product review and the release checklist.
 
 The `tenant-admission` status is a separate Launchplane projection of the current
 repository classification and candidate identity. It no longer evaluates manager,
@@ -358,14 +316,7 @@ reservation releases its target fence. The completed provider response stores
 those lifecycle record identities, so exact replay never synthesizes new
 evidence under changed profile authority. The service uses the issued plan as the stable generation
 identity and returns a non-passing conflict when a delayed refresh or destroy no
-longer owns the preview. Odoo destroy writes the approval invalidation event
-before its destroyed tombstone when a serving binding is available; this keeps
-the append-only event crash-durable.
-
-Rollback removes the repository's required `manager-preview-approval` status
-and removes or narrows the managed approval rule. This disables merge/promotion
-enforcement while preserving the append-only approval ledger and normal preview
-cleanup.
+longer owns the preview.
 
 ## Idempotency
 
@@ -590,7 +541,6 @@ exist yet. Pin the full reviewed Launchplane commit SHA.
 
 This contract was shaped from the current preview paths in SYO, VeriReel, and
 Odoo CM. Odoo CM is the reference thin workflow after its preview feedback moved
-to Launchplane. The generic-web preview facade is the bounded proof for moving
-the remaining build, lifecycle, verification-evidence, and feedback composition
-behind one reusable entrypoint. SYO and VeriReel should not delete bespoke
-preview-control-plane logic until that proof passes against a disposable canary.
+to Launchplane. The generic-web preview facade moves the remaining build,
+lifecycle, verification-evidence, and feedback composition behind one reusable
+entrypoint.

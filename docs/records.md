@@ -1422,8 +1422,12 @@ records what it decided and did as `last_plan`:
   authorization denial: `operation_authorization_reconcile_refused`,
   `operation_authorization_revoked`, `operation_authorization_policy_unavailable`,
   `operation_authorization_provenance_missing`; a check before the provider
-  deploy that refused it: `plan_build_failed`, `plan_not_ready`,
-  `strategy_unsupported`, `target_not_compose`, `artifact_id_missing`,
+  deploy that refused it: `plan_build_failed`,
+  `plan_not_ready.<blocker code>` (the plan's first entry in `blocker_codes`,
+  listed in `ODOO_TARGET_REPLACEMENT_PLAN_BLOCKER_CODES` in
+  `control_plane/contracts/odoo_stable_target_replacement.py`, such as
+  `plan_not_ready.volume_authority_drift`; bare `plan_not_ready` when the plan
+  has no blocker code), `strategy_unsupported`, `target_not_compose`, `artifact_id_missing`,
   `source_ref_missing`, `artifact_repository_mismatch`,
   `artifact_source_ref_mismatch`, `artifact_required_modules_missing`,
   `health_verification_required` or `health_url_missing`; a step after the
@@ -1441,7 +1445,9 @@ records what it decided and did as `last_plan`:
   result, and `operation_cancelled` for a cancelled attempt. The summary is
   structured and contains no provider, script or exception text: the code's
   fixed description (`TESTING_FAILURE_DESCRIPTIONS` in
-  `control_plane/product_reconcile.py`; an unknown code gets a generic one),
+  `control_plane/product_reconcile.py`; for `plan_not_ready.<blocker code>`,
+  the `plan_not_ready` description plus that blocker's from
+  `PLAN_BLOCKER_DESCRIPTIONS`; an unknown code gets a generic one),
   the result's step statuses, and the worker attempt. After three failed
   attempts of one artifact
   the request is `failed`, and its error ends with the last attempt's code and
@@ -2244,76 +2250,14 @@ run` is the foreground loop intended for an external process supervisor, and
 - Pure tenant merge eligibility matches this DB classification authority. A matching tenant UI candidate is eligible for the controller's separate required-check and exact source-control gates; retired human admission paths do not qualify a merge.
 - This record and pure evaluation remain separate from scheduler merge train admission (`merge_train_admission`).
 
-## Repository Human Admission Contracts
+## Retired Repository Human Admission Records
 
-- Repository human role-policy contracts bind one revision to exact numeric GitHub repository and owner IDs plus repository, product, and context. They name repository-owner humans, primary managers, optional backup managers, and direct time-bounded manager delegations without hard-coding people in code or checked-in configuration.
-- A delegation is valid only while its current role-policy revision is active and effective, its grantor remains a primary or backup manager, and its start, expiration, and revocation timestamps permit it. Silence or elapsed review time never creates approval authority.
-- Technical human waiver events are append-only create/revoke evidence. Creation
-  requires a browser-authenticated GitHub human session whose numeric
-  `github_id` is positive, whose ID is a current repository owner in exactly one
-  active role policy for the candidate repository/product/context, and whose ID
-  is explicitly present in exactly one managed schema-v2
-  `tenant_technical_human_waiver.write` GitHub-human authorization rule. Login,
-  org, team, role-only, local-admin/operator, GitHub Actions, terminal-agent, and
-  Every Code identities are never write authority for this record type.
-- Waiver evidence binds repository, product, context, pull request, exact head
-  SHA, classification revision/digest, role-policy revision/digest, active
-  authorization-policy revision/digest, human numeric identity, display login,
-  source event, reason, authoritative database/server occurrence time,
-  `recorded_at`, and optional creation expiration. Apply callers cannot provide
-  `occurred_at`, author ID, or author login; Launchplane builds the binding,
-  authorization provenance, event IDs, and digests inside the domain builder.
-  `recorded_at` equals the authoritative occurrence time. New commits or any
-  bound policy/classification/authz drift make prior evidence stale; revocation
-  wins a same-timestamp tie.
-- The role-policy read model is keyed by immutable `repository_id`, `product`,
-  and `context`. It returns `missing`, `available`, or fail-closed
-  `ambiguous` state plus the active current record when exactly one current tip
-  exists. Authorization uses `repository_human_role_policy.read` against the
-  submitted product/context and an explicit context target; repository names,
-  paths, actor strings, logins, and changed files are never authority hints.
-- Role-policy dry-run/apply accepts a strict envelope containing the candidate
-  role-policy record plus the caller's expected current tip record ID and digest
-  (both empty only for revision 1). Dry-run validates with filesystem or DB read
-  stores and writes nothing. Apply is PostgreSQL-only, requires a non-empty
-  `Idempotency-Key`, rejects terminal agents, authorizes
-  `repository_human_role_policy.write` against the submitted product/context,
-  and performs reservation, stream advisory lock, CAS/current-tip validation,
-  supersede plus insert, stored-response completion, and commit in one database
-  transaction. Same key plus same canonical request replays the stored HTTP 202
-  response; same key plus changed request returns `idempotency_key_reused`.
-  Repeating the exact currently active record under a new key also returns a
-  replay without adding history, but the request must retain its original
-  predecessor record ID and digest CAS.
-- Role-policy apply fails closed on missing, ambiguous, stale, scope-drifted,
-  conflicting, inactive, or sequence-invalid candidates. Request-provided
-  superseded records are ignored; the database writer derives supersession from
-  the locked current stream. The separate technical-human waiver apply route does
-  not add trusted-maintenance evidence, unified status, controller changes,
-  rollout decisions, UI controls, GitHub provider calls, or Launchplane
-  authz-policy mutation.
-- Filesystem storage can rehearse role-policy revision history and technical
-  human waiver event history locally. Shared PostgreSQL storage now persists
+- Repository human role policies (the manager and delegate roles) and the
+  technical human waiver are retired. Their routes, contracts, evaluation, and
+  store methods are deleted. Existing
   `launchplane_repository_human_role_policies` and
-  `launchplane_tenant_technical_human_waiver_events` with canonical payloads,
-  promoted filter/audit columns, serialized role-policy stream writes, one
-  active role-policy tip per repository/product/context, and append-only waiver
-  event replay/conflict semantics.
-- `POST /v1/tenant-admission/technical-human-waivers/apply` accepts strict
-  `mode: dry_run|apply` and `action: created|revoked` envelopes with candidate,
-  expected classification/role-policy/authz record IDs plus digests, source event
-  kind/id, reason, optional creation expiration, and revoke-only expected current
-  waiver ID plus event digest. Dry-run uses the pure read/planning helpers and
-  may run against rehearsal stores without writing. Apply is PostgreSQL-only,
-  requires a non-empty `Idempotency-Key`, scopes idempotency by numeric GitHub ID
-  (`github-human-id|<id>`), locks classification, role-policy, authz-policy, and
-  waiver binding/history authority in deterministic order, revalidates all
-  expected IDs/digests and lifecycle CAS under lock, appends the event, verifies
-  the resulting path, stores the HTTP response, and commits once. Same key plus
-  same canonical body replays the stored response with the original trace; same
-  key plus a changed body returns conflict; a different key revalidates current
-  authority and history.
-- Manager-preview authorization can carry the same role-policy provenance for primary, backup, or delegated managers. Legacy approval records remain readable, but they cannot satisfy an evaluation once a repository role policy is explicitly enforced.
+  `launchplane_tenant_technical_human_waiver_events` rows stay in the database
+  unread until the operator decides whether to drop them.
 - Trusted-maintenance policy records are a separate contract, not a human role
   policy and not a generic authz-policy reuse. Each policy revision is keyed by
   immutable numeric `repository_id` plus `repository_owner_id`, `repository`,
@@ -2355,8 +2299,8 @@ run` is the foreground loop intended for an external process supervisor, and
   /v1/work-graph/tenant-admission/trusted-maintenance-policy` requires
   `trusted_maintenance_policy.read`; `POST
   /v1/tenant-admission/trusted-maintenance-policies/apply` requires
-  `trusted_maintenance_policy.write`. Both actions are separate from repository
-  human role-policy actions and are scoped to the submitted product/context.
+  `trusted_maintenance_policy.write`. Both actions are scoped to the submitted
+  product/context.
   Apply is browser-GitHub-human-only, PostgreSQL-only, requires a non-empty
   `Idempotency-Key`, and reserves idempotency, locks the policy stream,
   validates CAS, writes/replays the response, and commits in one database
@@ -2423,9 +2367,8 @@ run` is the foreground loop intended for an external process supervisor, and
   separate requirements before a merge.
 - The public read model exposes the candidate, classification binding,
   decision, generation time, and `engineering`, `eligible`, `stale`, or
-  `unavailable`. Current paths are empty. Legacy path fields and categories
-  remain in stored-result contracts for historical readability. Current reads
-  do not consult manager, waiver, or maintenance admission records.
+  `unavailable`. The only path slot left is trusted maintenance, and current
+  reads leave it empty.
 - The classic GitHub `tenant-admission` commit status is a non-authoritative
   projection of that recomputation. Reconciliation first re-fetches the open PR
   and verifies its numeric base-repository ID, numeric owner ID, full name, and
@@ -2433,10 +2376,6 @@ run` is the foreground loop intended for an external process supervisor, and
   status on that exact SHA. GitHub read/write uncertainty returns retryable
   failure and never manufactures a passing decision. Engineering candidates do
   not require or receive this tenant-only projection.
-- Legacy manager-preview records that store only a bare repository name remain
-  compatible only when their bound PR URL is the canonical
-  `https://github.com/OWNER/REPO/pull/N` URL for the exact candidate. A different
-  owner, host, PR number, query, or fragment cannot satisfy tenant admission.
 - Merge-controller enforcement, branch protection, portfolio rollout, UI, and
   real repository policy values remain separate follow-up work. Blanket Bot
   bypass and changed-file, repository-name, branch, title, or label heuristics
@@ -2548,12 +2487,12 @@ delete provider values or deploy an application.
 
 ## Retired Manager Preview Approval Event Record
 
-Historical manager events remain append-only in their existing filesystem and
-PostgreSQL stores. Payloads, event IDs, binding digests, and migrations are
-unchanged. Their evaluator, command parser, reconcile endpoint, and projection
-writer are deleted. Preview refresh/destroy no longer creates manager events.
-Current approval uses product review and the release checklist; manager history
-cannot satisfy either gate.
+Manager preview approval is retired. Its contracts, evaluator, command parser,
+reconcile endpoint, projection writer, and store methods are deleted, and
+filesystem-to-database import no longer copies manager events. Existing
+`launchplane_manager_preview_approval_events` rows stay in the database unread
+until the operator decides whether to drop them. Current approval uses product
+review and the release checklist.
 
 The configured `/v1/manager-preview-approval/github-webhook` URL and its existing
 bootstrap secret remain solely as a transport compatibility boundary for signed

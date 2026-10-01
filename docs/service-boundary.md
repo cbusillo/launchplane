@@ -699,7 +699,6 @@ The cookie-capable mutation inventory is intentionally limited to:
 - `POST /v1/authz-policies/managed-rule-sets/reconcile`
 - `POST /v1/authz-policies/privileged-policy-operations/activation/dry-run`
 - `POST /v1/authz-policies/privileged-policy-operations/activation/apply`
-- `POST /v1/tenant-admission/technical-human-waivers/apply`
 - `POST /v1/tenant-admission/trusted-maintenance-policies/apply`
 
 Every other authenticated mutation route intentionally rejects session-cookie
@@ -707,10 +706,7 @@ authentication and continues to require its existing GitHub Actions OIDC,
 local-operator/admin bearer, Every Code worker, or webhook boundary. A valid
 `Authorization: Bearer` identity on the existing mixed-identity routes above
 also bypasses browser origin, fetch-metadata, and CSRF checks exactly as before;
-a cookie does not weaken or replace bearer verification. The tenant technical
-human waiver apply route is narrower: after the browser mutation boundary it
-requires a `GitHubHumanIdentity` with positive numeric `github_id` and rejects
-bearer-only/non-human identities. The operator UI exposes only the separately
+a cookie does not weaken or replace bearer verification. The operator UI exposes only the separately
 generated UI write slice; this inventory is a server-side cookie-capable surface
 list, not a promise of UI controls for every route. In particular, GitHub issue
 inbox reconciliation is displayed as unavailable because it remains a GitHub
@@ -747,31 +743,10 @@ ID/revision/digest, supersedes and inserts only when changed, completes replay
 evidence, and commits the transaction as one unit. No-op applies complete replay
 evidence without creating policy history.
 
-Manager approval of rendered previews is a separate Launchplane domain from
-Every Code preview-gate validation. `control_plane/manager_preview_approval.py`
-builds and evaluates exact preview bindings from the current preview record,
-serving generation, immutable artifact image digest, checked runtime identity,
-and active authorization policy. Manager-authored events require exactly one
-schema-v2 managed GitHub-human rule granting
-`manager_preview_approval.write`; that rule must include the actor's stable
-numeric GitHub id. The login is display evidence and may change without changing
-the authorized identity.
-
-The resulting `launchplane_manager_preview_approval_events` ledger is
-append-only in both filesystem rehearsal storage and PostgreSQL. Approval reads
-use `manager_preview_approval.read`, and the decision projection fails closed to
-pending, stale, or unavailable whenever current head, serving generation,
-artifact, manifest, runtime identity, verification, preview state, or policy
-does not exactly match the recorded event. This contract does not add a browser
-or GitHub mutation route by itself; GitHub comment handling, check projection,
-and promotion admission belong to the downstream interaction layer.
-
-People-based manager lookup remains private Every Code communication and
-planning context. It cannot populate, authorize, or override Launchplane runtime
-approval records. Tenant repositories own site code and thin workflow inputs;
-Launchplane owns authorization, durable approval evidence, and lifecycle
-invalidation. Preview destroy, PR close, label removal, and cleanup never call
-the approval decision as an admission gate.
+Manager approval of rendered previews is retired. Its contracts, evaluator, and
+store methods are deleted; existing `launchplane_manager_preview_approval_events`
+rows stay in the database unread. Current approval uses product review and the
+release checklist.
 
 Schema-v1 migration and unmanaged-rule adoption are never implicit. The caller
 must request `schema_migration = migrate_v1_to_v2` and/or
@@ -1009,23 +984,10 @@ changes nothing. Other events, unknown or ambiguous repositories, and `ping`
 return `202` and record nothing. The body only chooses the target; the future
 reconcile worker re-reads every fact from GitHub.
 
-The manager-preview webhook uses
-`LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET`, accepts signed
-`issue_comment.created` and selected pull-request lifecycle deliveries, and
-re-fetches comments, actor numeric identity, current PR head, current serving
-preview, and active managed policy before writing evidence. It reads GitHub with
-the Launchplane-managed token resolved for the product context; tenant workflow
-or PR code cannot supply that credential. The webhook no longer writes the
-`manager-preview-approval` status or its command comment; see
-[preview-workflow-contract.md](preview-workflow-contract.md#manager-preview-approval).
-
-`POST /v1/manager-preview-approval/reconcile` is the authenticated retry path.
-It requires `manager_preview_approval.read` authorization for the resolved
-product/context, re-fetches current GitHub and Launchplane evidence, and rewrites
-the credential-owned comment and current-head status. It is the only remaining
-writer of that status; managed authz policy apply and preview lifecycle routes
-no longer attempt reconciliation. Removing the managed
-approval rule is the rollback switch; records remain append-only.
+The `/v1/manager-preview-approval/github-webhook` URL and its
+`LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET` remain only as the transport
+for signed trusted-maintenance evidence. Manager approval itself is retired; the
+webhook records no approval and the manager reconcile route is deleted.
 
 The Every Code worker read, native claim, and status routes also accept a
 dedicated local-worker bearer token. Configure
@@ -3398,7 +3360,7 @@ alongside its logical `backup_record_id`. See the
 [shared backup promotion contract](production-backup-provider.md#promotion-enforcement)
 for freshness, exact revision binding, generic-web enforcement, and rollout.
 
-### Tenant Admission, Classification, And Role-Policy API Boundary
+### Tenant Admission And Classification API Boundary
 
 `GET /v1/work-graph/tenant-admission/repository-classification` and `POST /v1/tenant-admission/repository-classifications/apply` provide DB-backed authority for repository classification.
 
@@ -3413,110 +3375,14 @@ for freshness, exact revision binding, generic-web enforcement, and rollout.
   Pure tenant merge eligibility evaluation uses this DB authority without heuristics, PR label fallbacks, or wildcard matching. Both repository classifications use the normal technical merge flow. Retired manager, waiver, and maintenance admission paths no longer qualify a merge.
   This pure evaluator remains internal and separate from scheduler merge train admission (`merge_train_admission`).
 
-`GET /v1/work-graph/tenant-admission/repository-human-role-policy` and
-`POST /v1/tenant-admission/repository-human-role-policies/apply` provide the
-first hardened repository-human role-policy service boundary. This split is
-limited to current role-policy reads plus dry-run/apply writes.
-
-- `GET /v1/work-graph/tenant-admission/repository-human-role-policy?repository_id=...&product=...&context=...`:
-  Returns the current role-policy read model keyed by immutable repository ID,
-  product, and context. The model reports `missing`, `available`, or fail-closed
-  `ambiguous`; `available` includes the unique active current record, history
-  count, and `generated_at`. Requires `repository_human_role_policy.read`
-  authorization against the submitted product/context and an explicit
-  `AuthorizationTarget(scope="context")`.
-- `POST /v1/tenant-admission/repository-human-role-policies/apply`:
-  Accepts a strict envelope (`schema_version`, `mode: dry_run|apply`,
-  `expected_current_record_id`, `expected_current_role_policy_digest`,
-  `record`). Terminal agents are denied (HTTP 403). Requires
-  `repository_human_role_policy.write` authorization against the submitted
-  product/context and an explicit `AuthorizationTarget(scope="context")`.
-  Apply mode requires JSON with one exact bounded `Content-Length` (maximum
-  64 KiB), a non-empty `Idempotency-Key` header, and a `PostgresRecordStore`
-  using the `postgresql` dialect. Filesystem, SQLite-backed rehearsal stores,
-  and unsupported stores return HTTP 503 `database_storage_required` for live
-  apply. Dry-run mode may use rehearsal/read stores and writes nothing.
-  Launchplane reserves durable idempotency, locks the repository role-policy
-  stream, validates the expected current tip record ID and digest, supersedes
-  the active tip, inserts the candidate, completes the stored response, and
-  commits in one PostgreSQL transaction. Same key plus same canonical request
-  replays the stored HTTP 202 response. Same key plus a changed request returns
-  HTTP 409 `idempotency_key_reused`. Repeating the exact currently active record
-  under a new key also replays without adding history when the request retains
-  the original predecessor record ID and digest CAS. In-progress and reconciliation-required
-  reservations use the existing mutation error conventions.
-  Validation is fail-closed: revision 1 must have no current tip expectation;
-  later revisions must increment by one, identify and digest-match the active
-  current tip, and set `supersedes_record_id` to that current record. Missing,
-  ambiguous, stale, scope-drifted, inactive, sequence-invalid, or conflicting
-  candidates are rejected. Request-provided superseded records are not persisted
-  as authority; the database writer derives supersession from the locked stream.
-  These routes never infer authorization or runtime authority from repository
-  names, logins, changed files, paths, actor strings, or request-provided
-  superseded history.
-
-The role-policy route still does not add trusted-maintenance evidence, unified
-tenant-admission status, controller changes, or any Launchplane authorization-
-policy mutation.
-
-`POST /v1/tenant-admission/technical-human-waivers/apply` provides the focused
-human technical-waiver mutation boundary. The route accepts `mode: dry_run|apply`
-and `action: created|revoked` envelopes containing candidate, source event
-kind/id, reason, optional creation `expires_at`, expected current
-classification/role-policy/authz record IDs plus digests, and revoke-only
-expected current waiver ID plus event digest. The request never accepts
-`occurred_at`, author GitHub ID, or author login. Launchplane builds the binding,
-authorization provenance, event IDs, digests, and author display login from the
-browser session and current records.
-
-The route is browser-human-only. It first passes the normal browser session,
-origin, fetch-metadata, and single-use CSRF mutation boundary, then requires a
-`GitHubHumanIdentity` with `github_id > 0`. Local admins/operators, GitHub
-Actions, terminal agents, Every Code workers, bearer-only callers, and other
-non-human identities are rejected. Login is display/audit only; the route scopes
-idempotency as `github-human-id|<github_id>` and authorizes only when the active
-schema-v2 authz policy has exactly one managed
-`tenant_technical_human_waiver.write` GitHub-human rule whose `github_ids`
-explicitly contains that numeric caller ID. Login/org/team/role-only matching is
-insufficient. The caller must also be the current repository owner in exactly
-one active role-policy record for the candidate, and the current classification
-must exactly match the candidate and be `tenant_ui`.
-
-Dry-run uses the same pure read/planning helpers against rehearsal-capable stores
-and writes nothing. Apply requires JSON with one exact bounded `Content-Length`
-(maximum 64 KiB), a non-empty `Idempotency-Key` header, and a real PostgreSQL
-`PostgresRecordStore`; filesystem, SQLite-backed rehearsal stores, and
-unsupported stores return HTTP 503 `database_storage_required` for live apply.
-The PostgreSQL writer reserves idempotency, locks classification, role-policy,
-authz-policy, and waiver binding/history authority in deterministic order,
-re-reads and validates expected IDs/digests under lock, builds the event with the
-database/server timestamp as both `occurred_at` and `recorded_at`, validates
-create/revoke lifecycle and revoke CAS, appends the event, verifies the resulting
-tenant-admission path, stores the HTTP response, and commits once. Validation
-failures remove the reservation; completion failures roll back both event and
-reservation.
-
-Same key plus the same canonical request body replays the stored response with
-the original trace, while the same key plus a changed body returns HTTP 409
-`idempotency_key_reused`. A different key revalidates current authority and
-history, so classification, role-policy, authz-policy, head, revocation, or
-expiry drift cannot create a false success. Create may only produce a satisfied
-technical-waiver path. Revoke requires the exact current satisfied waiver and
-must produce a denied path. Exact create event replay is accepted only while the
-current lifecycle/CAS proves it is still safe; stale historical replay fails
-closed.
-
-This focused waiver slice does not add UI controls, GitHub provider calls,
-status/controller projection, trusted-maintenance evidence, rollout behavior,
-or authz-policy mutation. Existing tenant merge/admission behavior remains
-unchanged until later rollout work wires shared authority into admission
-decisions.
+Repository human role policies (the manager and delegate roles) and the
+technical human waiver are retired; their routes are deleted.
 
 `GET /v1/work-graph/tenant-admission/trusted-maintenance-policy` and
 `POST /v1/tenant-admission/trusted-maintenance-policies/apply` provide the
 focused trusted-maintenance policy read/apply boundary. The policy contract is a
-dedicated repository automation authority, not a human role-policy shortcut and
-not a generic Launchplane authz-policy reuse. Policy revisions and evidence are
+dedicated repository automation authority, not a generic Launchplane
+authz-policy reuse. Policy revisions and evidence are
 keyed to immutable numeric repository, actor, sender, and exact-head provenance;
 display logins are audit only, and no route may infer trust from repository
 names, branches, refs, files, labels, commit metadata, PR text, login strings,
@@ -3536,8 +3402,7 @@ or blanket bot status.
   operators/admin bearers, GitHub Actions, Every Code workers, bearer-only
   callers, and other non-human identities. It requires
   `trusted_maintenance_policy.write` authorization against the submitted
-  product/context and an explicit `AuthorizationTarget(scope="context")`; this
-  action is intentionally separate from `repository_human_role_policy.write`.
+  product/context and an explicit `AuthorizationTarget(scope="context")`.
   Apply mode requires JSON with one exact bounded `Content-Length` (maximum
   64 KiB), a non-empty `Idempotency-Key`, and a real PostgreSQL
   `PostgresRecordStore`. Filesystem, SQLite-backed rehearsal stores, and
@@ -3583,9 +3448,8 @@ and base branch. Ordinary repository-only agent context requests remain
 compatible and omit that section. Incomplete candidate input returns HTTP 400;
 tenant-admission authorization, storage, stale-head, or GitHub failures are
 reported on that section without dropping unrelated read-model sections. The
-agent endpoint never gains technical-waiver, role-policy, delegation, manager-
-approval, maintenance-policy, reconciliation, controller, or merge write
-authority.
+agent endpoint never gains maintenance-policy, reconciliation, controller, or
+merge write authority.
 
 `POST /v1/tenant-admission/status/reconcile` accepts a strict schema-v1 envelope
 containing that candidate. It is bearer-only, rejects terminal-agent identities,

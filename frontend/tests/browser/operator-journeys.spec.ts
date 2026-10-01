@@ -988,9 +988,6 @@ test.describe("operator journeys", () => {
       page.getByText("Manager preview approval", { exact: true }),
     ).toHaveCount(0);
     await expect(
-      page.getByText("Repository-owner technical waiver", { exact: true }),
-    ).toHaveCount(0);
-    await expect(
       page.getByRole("heading", { name: "Required checks" }),
     ).toBeVisible();
     await assertDocumentBasics(page);

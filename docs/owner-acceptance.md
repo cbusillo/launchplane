@@ -79,6 +79,6 @@ to an empty desired policy, allowing existing grants to be removed. It cannot be
 used to create replacement grants. No deployed authorization records are changed
 by this code deletion.
 
-Product-owner-policy, change-impact, manager/delegate/waiver, and ordinary-agent
+Product-owner-policy, change-impact, manager/delegate, and ordinary-agent
 machinery still have separate remaining deletion work under [DIRECTION.md](../DIRECTION.md).
 Their historical presence grants no authority to the current review flows.

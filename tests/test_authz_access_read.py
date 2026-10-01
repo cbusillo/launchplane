@@ -256,12 +256,6 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
                         ),
                     ),
                     patch(
-                        "control_plane.storage.postgres.PostgresRecordStore.write_repository_human_role_policy_record",
-                        side_effect=AssertionError(
-                            "repository scope reads must not mutate repository records"
-                        ),
-                    ),
-                    patch(
                         "control_plane.storage.postgres.PostgresRecordStore.write_every_code_work_request_record",
                         side_effect=AssertionError(
                             "repository scope reads must not mutate work graph"
@@ -396,10 +390,6 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
                 patch(
                     "control_plane.storage.postgres.PostgresRecordStore.list_product_profile_records",
                     side_effect=AssertionError("authorization must precede product reads"),
-                ),
-                patch(
-                    "control_plane.storage.postgres.PostgresRecordStore.list_repository_human_role_policy_records",
-                    side_effect=AssertionError("authorization must precede repository reads"),
                 ),
                 patch(
                     "control_plane.storage.postgres.PostgresRecordStore.list_every_code_work_request_records",

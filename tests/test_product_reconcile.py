@@ -853,6 +853,47 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
             "The deploy's authorization was removed or narrowed before it ran.",
         )
 
+    def test_a_blocked_plan_code_describes_its_blocker_without_message_text(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        operation_id = cast(str, self.reconcile()["queued_operation_id"])
+        expected = (
+            (
+                "plan_not_ready.volume_authority_drift",
+                "The replacement plan was blocked before the deploy started. Blocker: "
+                "The current target's Odoo volume settings do not match Launchplane's "
+                "stored settings.",
+            ),
+            (
+                "plan_not_ready.some_future_blocker",
+                "The replacement plan was blocked before the deploy started. Blocker: "
+                "Launchplane does not describe this blocker.",
+            ),
+        )
+        for error_code, summary in expected:
+            with self.subTest(error_code=error_code):
+                operation = self.store.read_odoo_stable_target_replacement_operation_record(
+                    operation_id
+                )
+                self.store.write_odoo_stable_target_replacement_operation_record(
+                    operation.model_copy(
+                        update={
+                            "status": "fail",
+                            "phase": "failed",
+                            "finished_at": "2026-09-30T12:00:00Z",
+                            "error_code": error_code,
+                            "error_message": "Volume drift on site-prod-app at 203.0.113.42.",
+                        }
+                    )
+                )
+                self.request()
+
+                plan = self.reconcile()
+
+                self.assertEqual(plan["last_failed_error_code"], error_code)
+                self.assertEqual(plan["last_failed_error_summary"], summary)
+                operation_id = cast(str, plan["queued_operation_id"])
+
     def test_testing_is_left_alone_when_the_release_already_has_that_digest(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
         self.store.write_release_tuple_record(
