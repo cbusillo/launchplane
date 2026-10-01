@@ -14486,6 +14486,17 @@ def create_launchplane_fastapi_app(
                     "Launchplane request payload on this route."
                 ),
             )
+        if (
+            result.status == "target_busy"
+            and result.record is not None
+            and result.record.state == "reconcile_required"
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="mutation_reconciliation_required",
+                message=_held_provider_target_message(result.record),
+            )
         if result.status in {"in_progress", "target_busy"}:
             raise _launchplane_http_error(
                 status_code=409,
@@ -14501,6 +14512,20 @@ def create_launchplane_fastapi_app(
                 message=reconcile_message,
             )
         raise RuntimeError(f"Unsupported provider mutation status: {result.status}")
+
+    def _held_provider_target_message(held: LaunchplaneIdempotencyRecord) -> str:
+        # Name the earlier request without its key or caller scope.
+        started_at = held.created_at or "an unknown time"
+        stopped = (
+            f"in its {held.provider_effect_phase} phase"
+            if held.provider_effect_phase
+            else "before any provider effect"
+        )
+        return (
+            f"The provider target is held by an earlier {held.route_path} request that "
+            f"started at {started_at} and stopped {stopped} with no known outcome. "
+            "Retrying will not clear it; recover that request first."
+        )
 
     def _provider_mutation_failure_message(response_payload: Mapping[str, object]) -> str:
         result_payload = response_payload.get("result")

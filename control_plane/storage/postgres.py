@@ -7630,6 +7630,23 @@ class PostgresRecordStore(HumanSessionStore):
                 return None
             return self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
 
+    def list_held_provider_target_reservations(
+        self,
+    ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
+        statement = (
+            select(LaunchplaneIdempotencyRow)
+            .where(
+                LaunchplaneIdempotencyRow.provider_target_key != "",
+                LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required")),
+            )
+            .order_by(LaunchplaneIdempotencyRow.provider_target_key)
+        )
+        with self._session_factory() as session:
+            return tuple(
+                self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
+                for row in session.scalars(statement)
+            )
+
     def lookup_existing_mutation_reservation(
         self,
         *,

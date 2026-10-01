@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -18,6 +18,10 @@ import ssl
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane import secrets as control_plane_secrets
+from control_plane.contracts.idempotency_record import (
+    LaunchplaneIdempotencyRecord,
+    parse_launchplane_mutation_timestamp,
+)
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.outbox_delivery import (
     OutboxDeliveryRecord,
@@ -98,6 +102,9 @@ from control_plane.outbound_http import PublicHttpDestinationError
 from control_plane.outbound_http import PublicTlsProbeResult
 from control_plane.outbound_http import probe_public_tls
 from control_plane.outbound_http import request_private_http
+from control_plane.workflows.generic_web_deploy_provider import (
+    decode_generic_web_provider_reconciliation_target,
+)
 from control_plane.outbound_http import request_public_http
 from control_plane.workflows.odoo_verification import (
     default_odoo_health_url,
@@ -110,6 +117,10 @@ MAX_REDIRECTS = 10
 USER_AGENT = "Launchplane public-ingress-monitor/1.0"
 PUBLIC_INGRESS_GITHUB_TOKEN_ENV_KEY = "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN"
 MISSING_AUTHORITY_SHA256 = "missing"
+DEPLOY_FENCE_PROVIDER = "launchplane"
+DEPLOY_FENCE_CHECK_NAME = "launchplane-deploy-fence"
+# Long enough for a same-key retry or a recovery already underway to settle.
+DEPLOY_FENCE_RECONCILE_GRACE = timedelta(minutes=15)
 
 
 PublicIngressRouteBindingSourceKind = Literal["operator", "backfill", "service"]
@@ -255,6 +266,7 @@ class PublicIngressMonitorTarget:
     )
     tls_stale_after: str = ""
     tls_provider_evidence: dict[str, str] | None = None
+    deploy_fence: LaunchplaneIdempotencyRecord | None = None
 
 
 @dataclass(frozen=True)
@@ -342,6 +354,10 @@ def discover_public_ingress_monitor_targets(
         for profile in (profiles or record_store.list_product_profile_records())
         if profile.is_active
     )
+    held_deploy_fences = _held_generic_web_deploy_fences(record_store)
+    open_deploy_fence_lanes = (
+        _open_deploy_fence_incident_lanes(record_store) if held_deploy_fences is not None else set()
+    )
     for profile in product_profiles:
         for lane in profile.lanes:
             for check in lane.health_monitoring.checks:
@@ -367,7 +383,84 @@ def discover_public_ingress_monitor_targets(
                 lane=lane,
             ):
                 targets.append(tls_target)
+            if held_deploy_fences is None or not _profile_uses_generic_web(profile):
+                continue
+            # Only lanes with a fence, or an open fence incident to resolve, get a probe.
+            fence = held_deploy_fences.get((lane.context, lane.instance))
+            if fence is not None or (
+                (profile.product, lane.context, lane.instance) in open_deploy_fence_lanes
+            ):
+                targets.append(
+                    _deploy_fence_monitor_target(profile=profile, lane=lane, fence=fence)
+                )
     return tuple(targets)
+
+
+def _open_deploy_fence_incident_lanes(
+    record_store: PublicIngressMonitorStore,
+) -> set[tuple[str, str, str]]:
+    return {
+        (incident.product, incident.context, incident.instance)
+        for incident in record_store.list_public_ingress_incident_records(
+            check_name=DEPLOY_FENCE_CHECK_NAME,
+            check_kind="provider",
+            status="open",
+        )
+    }
+
+
+@runtime_checkable
+class _HeldReservationReader(Protocol):
+    def list_held_provider_target_reservations(
+        self,
+    ) -> tuple[LaunchplaneIdempotencyRecord, ...]: ...
+
+
+def _held_generic_web_deploy_fences(
+    record_store: object,
+) -> dict[tuple[str, str], LaunchplaneIdempotencyRecord] | None:
+    if not isinstance(record_store, _HeldReservationReader):
+        return None
+    fences: dict[tuple[str, str], LaunchplaneIdempotencyRecord] = {}
+    for reservation in record_store.list_held_provider_target_reservations():
+        try:
+            target = decode_generic_web_provider_reconciliation_target(
+                reservation.reconciliation_key
+            )
+        except ValueError:
+            continue
+        fences[(target.context, target.instance)] = reservation
+    return fences
+
+
+def _deploy_fence_monitor_target(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    fence: LaunchplaneIdempotencyRecord | None,
+) -> PublicIngressMonitorTarget:
+    return PublicIngressMonitorTarget(
+        product=profile.product,
+        repository=profile.repository,
+        driver_id=profile.driver_id,
+        context=lane.context,
+        instance=lane.instance,
+        base_url="",
+        health_url="",
+        check_name=DEPLOY_FENCE_CHECK_NAME,
+        check_kind="provider",
+        profile_sha256=product_profile_record_sha256(profile),
+        monitoring_intent=lane.health_monitoring.monitoring_intent,
+        incident_eligible=product_lane_monitoring_incident_eligible(
+            monitoring_intent=lane.health_monitoring.monitoring_intent,
+            check_kind="provider",
+        ),
+        expected_runtime_identity=None,
+        require_runtime_identity=False,
+        provider=DEPLOY_FENCE_PROVIDER,
+        provider_check=DEPLOY_FENCE_CHECK_NAME,
+        deploy_fence=fence,
+    )
 
 
 def _health_check_monitor_target(
@@ -2110,6 +2203,8 @@ def _check_url(
             checked_at=checked_at,
         )
     if target.check_kind == "provider":
+        if _is_deploy_fence_target(target):
+            return _check_deploy_fence(target=target, checked_at=checked_at)
         return _provider_check_unavailable(target=target)
     if target.resolution_failure_code is not None:
         return PublicIngressTargetObservation(
@@ -2328,6 +2423,67 @@ def _provider_check_unavailable(
     )
 
 
+def _is_deploy_fence_target(target: PublicIngressMonitorTarget) -> bool:
+    return (
+        target.provider == DEPLOY_FENCE_PROVIDER
+        and target.provider_check == DEPLOY_FENCE_CHECK_NAME
+    )
+
+
+def _check_deploy_fence(
+    *,
+    target: PublicIngressMonitorTarget,
+    checked_at: str,
+) -> PublicIngressTargetObservation:
+    url = f"provider://{target.provider}/{target.provider_check}"
+    fence = target.deploy_fence
+    if fence is None or not _deploy_fence_is_stuck(fence, checked_at=checked_at):
+        return PublicIngressTargetObservation(
+            target="provider",
+            url=url,
+            status="pass",
+            summary="No unresolved deploy is holding this target.",
+        )
+    phase = fence.provider_effect_phase or "no provider effect"
+    return PublicIngressTargetObservation(
+        target="provider",
+        url=url,
+        status="fail",
+        failure_code="deploy_fence_held",
+        summary=(
+            f"Deploy {fence.idempotency_key!r} started at {fence.created_at or 'an unknown time'} "
+            f"and holds this target ({fence.state}, last at {phase}, since "
+            f"{fence.updated_at or 'an unknown time'}). Every later deploy is refused until "
+            "it is recovered with the generic-web deploy recovery dry-run."
+        ),
+    )
+
+
+def _deploy_fence_is_stuck(fence: LaunchplaneIdempotencyRecord, *, checked_at: str) -> bool:
+    observed_at = parse_launchplane_mutation_timestamp(checked_at, field_name="checked_at")
+    if fence.state == "running":
+        # The heartbeat renews a live deploy's lease, so an expired lease means it died.
+        return bool(fence.lease_expires_at) and (
+            parse_launchplane_mutation_timestamp(
+                fence.lease_expires_at, field_name="lease_expires_at"
+            )
+            <= observed_at
+        )
+    if not fence.updated_at:
+        return True
+    held_since = parse_launchplane_mutation_timestamp(fence.updated_at, field_name="updated_at")
+    if fence.lease_expires_at:
+        # A later refused deploy re-marks an expired fence and moves updated_at;
+        # the lease expiry it kept is when the fence really stopped.
+        held_since = min(
+            held_since,
+            parse_launchplane_mutation_timestamp(
+                fence.lease_expires_at, field_name="lease_expires_at"
+            ),
+        )
+    return held_since + DEPLOY_FENCE_RECONCILE_GRACE <= observed_at
+
+
 def _profile_uses_generic_web(profile: LaunchplaneProductProfileRecord) -> bool:
     if profile.driver_id == "generic-web":
         return True
@@ -2434,6 +2590,8 @@ def _record_summary(
     observations: list[PublicIngressTargetObservation],
 ) -> str:
     if status == "pass":
+        if _is_deploy_fence_target(target):
+            return f"No unresolved deploy is holding {target.product}/{target.instance}."
         return f"{_check_label(target)} is reachable for {target.product}/{target.instance}."
     failing = next(
         (observation for observation in observations if observation.status == "fail"), None
@@ -2448,6 +2606,8 @@ def _check_label(target: PublicIngressMonitorTarget) -> str:
         return "Public TLS"
     if target.check_kind == "private_http":
         return "Private health check"
+    if _is_deploy_fence_target(target):
+        return "Deploy fence"
     if target.check_kind == "provider":
         return "Provider health check"
     return "Public ingress"

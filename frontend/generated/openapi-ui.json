@@ -23742,6 +23742,7 @@
           "failure_code": {
             "enum": [
               "connection_timeout",
+              "deploy_fence_held",
               "dns_failure",
               "health_status_error",
               "http_error",
@@ -23928,6 +23929,7 @@
               {
                 "enum": [
                   "connection_timeout",
+                  "deploy_fence_held",
                   "dns_failure",
                   "health_status_error",
                   "http_error",
@@ -24182,6 +24184,7 @@
           "failure_code": {
             "enum": [
               "connection_timeout",
+              "deploy_fence_held",
               "dns_failure",
               "health_status_error",
               "http_error",
