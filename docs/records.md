@@ -1422,8 +1422,12 @@ records what it decided and did as `last_plan`:
   authorization denial: `operation_authorization_reconcile_refused`,
   `operation_authorization_revoked`, `operation_authorization_policy_unavailable`,
   `operation_authorization_provenance_missing`; a check before the provider
-  deploy that refused it: `plan_build_failed`, `plan_not_ready`,
-  `strategy_unsupported`, `target_not_compose`, `artifact_id_missing`,
+  deploy that refused it: `plan_build_failed`,
+  `plan_not_ready.<blocker code>` (the plan's first entry in `blocker_codes`,
+  listed in `ODOO_TARGET_REPLACEMENT_PLAN_BLOCKER_CODES` in
+  `control_plane/contracts/odoo_stable_target_replacement.py`, such as
+  `plan_not_ready.volume_authority_drift`; bare `plan_not_ready` when the plan
+  has no blocker code), `strategy_unsupported`, `target_not_compose`, `artifact_id_missing`,
   `source_ref_missing`, `artifact_repository_mismatch`,
   `artifact_source_ref_mismatch`, `artifact_required_modules_missing`,
   `health_verification_required` or `health_url_missing`; a step after the
@@ -1441,7 +1445,9 @@ records what it decided and did as `last_plan`:
   result, and `operation_cancelled` for a cancelled attempt. The summary is
   structured and contains no provider, script or exception text: the code's
   fixed description (`TESTING_FAILURE_DESCRIPTIONS` in
-  `control_plane/product_reconcile.py`; an unknown code gets a generic one),
+  `control_plane/product_reconcile.py`; for `plan_not_ready.<blocker code>`,
+  the `plan_not_ready` description plus that blocker's from
+  `PLAN_BLOCKER_DESCRIPTIONS`; an unknown code gets a generic one),
   the result's step statuses, and the worker attempt. After three failed
   attempts of one artifact
   the request is `failed`, and its error ends with the last attempt's code and
