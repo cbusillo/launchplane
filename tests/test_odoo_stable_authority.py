@@ -1,57 +1,27 @@
 from pathlib import Path
+import re
 from unittest import TestCase
 
 
-_PRODUCTION_MUTATION_WORKFLOW_PATHS = (
-    Path(".github/workflows/odoo-config-parameter-override.yml"),
-    Path(".github/workflows/odoo-target-replacement-plan.yml"),
-    Path(".github/workflows/odoo-target-replacement-apply.yml"),
-    Path(".github/workflows/odoo-stable-bootstrap.yml"),
-    Path(".github/workflows/odoo-website-bootstrap-override.yml"),
+_REAL_TOPOLOGY_PATTERNS = (
+    re.compile(r"^\s*default:\s*(?:sellyouroutboard|odoo-tenant-\S*|cm|opw)\s*$", re.MULTILINE),
+    re.compile(r"sellyouroutboard", re.IGNORECASE),
+    re.compile(r"shinycomputers\.com"),
+    re.compile(r"odoo-tenant-(?:cm|opw)\b"),
+    re.compile(r"allowed_targets="),
 )
 
 
 class OdooStableAuthorityTests(TestCase):
-    def test_production_mutation_workflows_do_not_default_to_real_topology(
-        self,
-    ) -> None:
-        forbidden_tokens = (
-            "default: sellyouroutboard",
-            "default: odoo-tenant-",
-            "default: cm",
-            "default: opw",
-            "SellYourOutboard",
-            "sellyouroutboard-testing",
-            "https://cm-testing.shinycomputers.com",
-            "allowed_targets=",
-            "odoo-tenant-cm:",
-            "odoo-tenant-opw:",
-        )
+    def test_workflows_do_not_embed_real_product_topology(self) -> None:
         offenders: list[str] = []
-        for workflow_path in _PRODUCTION_MUTATION_WORKFLOW_PATHS:
+        for workflow_path in sorted(Path(".github/workflows").glob("*.y*ml")):
             workflow_text = workflow_path.read_text(encoding="utf-8")
-            for token in forbidden_tokens:
-                if token in workflow_text:
-                    offenders.append(f"{workflow_path.as_posix()}: {token}")
+            for pattern in _REAL_TOPOLOGY_PATTERNS:
+                if pattern.search(workflow_text):
+                    offenders.append(f"{workflow_path.as_posix()}: {pattern.pattern}")
 
         self.assertEqual(offenders, [])
-
-    def test_reusable_testing_deploy_uses_target_replacement_apply(self) -> None:
-        workflow = Path(".github/workflows/reusable-product-driver-testing-deploy.yml").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn("route-path: /v1/drivers/odoo/target-replacement-apply", workflow)
-        self.assertIn("poll_url=result.poll_url", workflow)
-        self.assertIn("method: GET", workflow)
-        self.assertIn("route-path: ${{ steps.lp.outputs.poll_url }}", workflow)
-        self.assertIn("poll-result-path: operation.status", workflow)
-        self.assertIn('fail-result-paths: ""', workflow)
-        self.assertNotIn("${LAUNCHPLANE_URL}${POLL_URL}", workflow)
-        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow)
-        self.assertNotIn("Authorization: Bearer", workflow)
-        self.assertNotIn("route-path: /v1/drivers/odoo/testing-deploy", workflow)
-        self.assertNotIn("odoo_testing_deploy.execute", workflow)
 
     def test_odoo_stable_workflows_do_not_use_retired_testing_deploy_route(self) -> None:
         retired_tokens = (

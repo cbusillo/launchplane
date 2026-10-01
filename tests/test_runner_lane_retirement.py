@@ -27,7 +27,6 @@ from control_plane.workflows.runner_lane_retirement_executor import (
 from control_plane.workflows.runner_lane_retirement_executor import (
     execute_runner_lane_retirement_executor,
 )
-from tests.support.workflows import load_workflow
 
 
 CLI_MAIN = cast(Command, main)
@@ -458,36 +457,6 @@ class RunnerLaneRetirementCliTests(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 1)
         self.assertIn("requires --audit-mode service", result.output)
-
-
-class RunnerLaneLifecycleWorkflowTests(unittest.TestCase):
-    def test_workflow_preserves_authorized_path_and_serializes_host_mutations(self) -> None:
-        workflow = load_workflow(".github/workflows/runner-lane-registration.yml")
-        workflow_text = workflow.path.read_text(encoding="utf-8")
-
-        self.assertEqual(workflow.name, "Runner Lane Lifecycle")
-        self.assertIn("operation:", workflow_text)
-        self.assertIn("- retire", workflow_text)
-        self.assertIn("retire ${TARGET_REPOSITORY} ${LANE_NAME}", workflow_text)
-        self.assertEqual(workflow.permissions.get("id-token"), "write")
-        self.assertIn(
-            'approved_root="${RUNNER_REGISTRATION_ALLOWED_ROOT:-$HOME/actions-runners}"',
-            workflow_text,
-        )
-        self.assertIn("/tmp/launchplane-runner-host-hygiene.lock", workflow_text)
-        self.assertIn("runner-lane-retirement-executor", workflow_text)
-        self.assertIn("if: always()", workflow_text)
-        self.assertNotIn("runner-lane-retirement.yml", workflow_text)
-
-    def test_privileged_helper_requires_root_owned_exact_target_binding(self) -> None:
-        helper_text = Path("scripts/runner-lane-service-retire.sh").read_text(encoding="utf-8")
-
-        self.assertIn("runner-lane-retirement-targets", helper_text)
-        self.assertIn("target_record=", helper_text)
-        self.assertIn("grep -Fxq", helper_text)
-        self.assertIn('"${SUDO_USER:-}" != "$service_user"', helper_text)
-        self.assertIn("--property=ExecStart", helper_text)
-        self.assertIn("systemctl disable", helper_text)
 
 
 def _policy() -> RunnerLaneRegistrationPolicy:

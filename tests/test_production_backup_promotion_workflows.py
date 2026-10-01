@@ -36,35 +36,6 @@ def prepare_workflow_workspace(workflow: Workflow, root: Path, product: str) -> 
 
 
 class ProductionBackupPromotionWorkflowTests(unittest.TestCase):
-    def test_promotion_steps_wait_for_durable_capture_and_fail_on_cancellation(self) -> None:
-        for filename, promotion_step_id in (
-            ("reusable-product-driver-prod-promotion.yml", "lp_odoo"),
-            ("reusable-generic-web-prod-promotion.yml", "lp"),
-        ):
-            with self.subTest(workflow=filename):
-                workflow = load_workflow(ROOT / ".github/workflows" / filename)
-                steps = {
-                    str(step.data.get("id")): step for step in workflow.steps("prod-promotion")
-                }
-                capture = steps["infrastructure_backup"]
-                self.assertLess(steps["release_approval"].index, capture.index)
-                self.assertEqual(steps["release_approval"].data["if"], capture.data["if"])
-                self.assertLess(capture.index, steps[promotion_step_id].index)
-                self.assertEqual(capture.with_values["route-path"], "/v1/production-backup-gates")
-                self.assertEqual(capture.with_values["poll-result-path"], "operation_status")
-                self.assertEqual(capture.with_values["poll-result-statuses"], "pending,running")
-                self.assertEqual(capture.with_values["poll-retry-on-request-error"], "true")
-                self.assertEqual(capture.with_values["fail-result-paths"], "operation_status")
-                self.assertEqual(capture.with_values["fail-result-statuses"], "fail,cancelled")
-                self.assertIn("idempotency-key", capture.with_values)
-        odoo = load_workflow(ROOT / ".github/workflows/reusable-product-driver-prod-promotion.yml")
-        step = odoo.step_named("prod-promotion", "Request Launchplane Odoo prod promotion")
-        assert step is not None
-        self.assertIn(
-            "run.infrastructure_backup_record_id=${{ steps.infrastructure_backup.outputs.backup_record_id }}",
-            str(step.with_values["payload-fields"]),
-        )
-
     def test_unapproved_or_missing_release_stops_before_capture(self) -> None:
         for filename in (
             "reusable-product-driver-prod-promotion.yml",

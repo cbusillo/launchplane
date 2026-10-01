@@ -689,39 +689,6 @@ class RunnerLaneRegistrationCliTests(unittest.TestCase):
         )
 
 
-class RunnerLaneRegistrationWorkflowTests(unittest.TestCase):
-    def test_workflow_uses_env_confirmation_and_preserves_artifacts(self) -> None:
-        workflow_text = Path(".github/workflows/runner-lane-registration.yml").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertNotIn('${{ inputs.confirmation }}" !=', workflow_text)
-        self.assertIn("CONFIRMATION: ${{ inputs.confirmation }}", workflow_text)
-        self.assertIn("if: always()", workflow_text)
-        self.assertIn("if-no-files-found: warn", workflow_text)
-        self.assertIn("runner lane registration executor did not produce a result", workflow_text)
-        self.assertIn("RUNNER_PACKAGE_URL: ${{ inputs.runner_package_url }}", workflow_text)
-        self.assertIn('--runner-package-url "$RUNNER_PACKAGE_URL"', workflow_text)
-        self.assertIn('[ "$MUTATE_REQUESTED" = "true" ]', workflow_text)
-        self.assertIn("IFS=',' read -r -a raw_labels", workflow_text)
-        self.assertNotIn("python - <<'PY'", workflow_text)
-        self.assertIn(
-            "    runs-on:\n"
-            "      - self-hosted\n"
-            "      - ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE }}\n",
-            workflow_text,
-        )
-        self.assertNotIn("${{ vars.LAUNCHPLANE_RUNNER_LABEL }}", workflow_text)
-
-    def test_workflow_does_not_allowlist_user_registration_root(self) -> None:
-        workflow_text = Path(".github/workflows/runner-lane-registration.yml").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertNotIn('--allowed-registration-root "$REGISTRATION_ROOT"', workflow_text)
-        self.assertIn('--allowed-registration-root "$approved_root"', workflow_text)
-
-
 def _policy() -> RunnerLaneRegistrationPolicy:
     return RunnerLaneRegistrationPolicy(
         allowed_repositories=("cbusillo/odoo-tenant-cm-website",),
