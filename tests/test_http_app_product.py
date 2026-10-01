@@ -30,6 +30,7 @@ from control_plane.contracts.public_ingress_monitoring import (
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretSafetyRule
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssueFacts
 from control_plane.http_app import (
     create_launchplane_fastapi_app,
@@ -140,6 +141,48 @@ def _product_expected_config_payload() -> dict[str, object]:
             }
         ],
     }
+
+
+def _product_expected_config_removal_payload() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "product": "sellyouroutboard",
+        "mode": "dry-run",
+        "reason": "Sites build their own images.",
+        "source_label": "product-expected-config-test",
+        "remove_runtime_environment_keys": [
+            {"key": "ODOO_VERSION", "context": "sellyouroutboard-prod", "instance": ""}
+        ],
+        "remove_managed_secret_bindings": [
+            {
+                "binding_key": "SMTP_PASSWORD",
+                "integration": "runtime_environment",
+                "context": "sellyouroutboard-prod",
+                "instance": "prod",
+            }
+        ],
+    }
+
+
+def _profile_with_declared_expected_config() -> LaunchplaneProductProfileRecord:
+    return LaunchplaneProductProfileRecord.model_validate(
+        {
+            **_product_profile_payload(),
+            "expected_config": {
+                "runtime_environment_keys": [
+                    {"key": "ODOO_VERSION", "context": "sellyouroutboard-prod"},
+                    {"key": "ODOO_DB_NAME", "context": "sellyouroutboard-prod"},
+                ],
+                "managed_secret_bindings": [
+                    {
+                        "binding_key": "SMTP_PASSWORD",
+                        "context": "sellyouroutboard-prod",
+                        "instance": "prod",
+                    }
+                ],
+            },
+        }
+    )
 
 
 def _product_expected_config_identity() -> GitHubActionsIdentity:
@@ -2947,6 +2990,17 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
                 }
             ],
         )
+        self.assertEqual(set(payload["result"]["runtime_environment_keys"]), {"added", "unchanged"})
+        self.assertEqual(set(payload["result"]["managed_secret_bindings"]), {"added", "unchanged"})
+        self.assertEqual(
+            set(payload["result"]["summary"]),
+            {
+                "runtime_environment_key_add_count",
+                "managed_secret_binding_add_count",
+                "runtime_environment_key_unchanged_count",
+                "managed_secret_binding_unchanged_count",
+            },
+        )
         self.assertEqual(stored_profile.expected_config.managed_secret_bindings, ())
 
     async def test_apply_product_expected_config_persists_additive_binding(self) -> None:
@@ -3110,6 +3164,131 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["error"]["code"], "not_found")
+
+    async def test_apply_product_expected_config_removes_declared_requirements(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record_store.write_product_profile_record(_profile_with_declared_expected_config())
+            record_store.write_secret_binding(
+                SecretBinding(
+                    binding_id="binding-smtp",
+                    secret_id="secret-smtp",
+                    integration="runtime_environment",
+                    binding_key="SMTP_PASSWORD",
+                    context="sellyouroutboard-prod",
+                    instance="prod",
+                    created_at="2026-01-01T00:00:00Z",
+                    updated_at="2026-01-01T00:00:00Z",
+                )
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_expected_config_identity()),
+                authz_policy=_product_expected_config_policy(),
+                record_store_factory=lambda: record_store,
+            )
+
+            response = await _post_product_expected_config(
+                app, {**_product_expected_config_removal_payload(), "mode": "apply"}
+            )
+            stored_profile = record_store.read_product_profile_record("sellyouroutboard")
+            stored_bindings = record_store.list_secret_bindings()
+
+        self.assertEqual(response.status_code, 202)
+        result = response.json()["result"]
+        self.assertTrue(result["changed"])
+        self.assertEqual(
+            result["runtime_environment_keys"],
+            {
+                "added": [],
+                "unchanged": [],
+                "removed": [
+                    {"key": "ODOO_VERSION", "context": "sellyouroutboard-prod", "instance": ""}
+                ],
+                "absent": [],
+            },
+        )
+        self.assertEqual(
+            [item["binding_key"] for item in result["managed_secret_bindings"]["removed"]],
+            ["SMTP_PASSWORD"],
+        )
+        self.assertEqual(
+            result["managed_secret_bindings"]["still_bound"],
+            [
+                {
+                    "integration": "runtime_environment",
+                    "context": "sellyouroutboard-prod",
+                    "instance": "prod",
+                    "binding_key": "SMTP_PASSWORD",
+                }
+            ],
+        )
+        self.assertEqual(result["summary"]["managed_secret_binding_still_bound_count"], 1)
+        self.assertEqual(
+            [
+                requirement.key
+                for requirement in stored_profile.expected_config.runtime_environment_keys
+            ],
+            ["ODOO_DB_NAME"],
+        )
+        self.assertEqual(stored_profile.expected_config.managed_secret_bindings, ())
+        self.assertEqual([binding.status for binding in stored_bindings], ["configured"])
+
+    async def test_apply_product_expected_config_reports_absent_removal_without_write(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record_store.write_product_profile_record(_profile_with_declared_expected_config())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_expected_config_identity()),
+                authz_policy=_product_expected_config_policy(),
+                record_store_factory=lambda: record_store,
+            )
+            payload = {**_product_expected_config_removal_payload(), "mode": "apply"}
+
+            first_response = await _post_product_expected_config(app, payload)
+            profile_after_first = record_store.read_product_profile_record("sellyouroutboard")
+            second_response = await _post_product_expected_config(app, payload)
+            profile_after_second = record_store.read_product_profile_record("sellyouroutboard")
+
+        self.assertTrue(first_response.json()["result"]["changed"])
+        second_result = second_response.json()["result"]
+        self.assertEqual(second_response.status_code, 202)
+        self.assertFalse(second_result["changed"])
+        self.assertEqual(second_result["runtime_environment_keys"]["removed"], [])
+        self.assertEqual(
+            second_result["runtime_environment_keys"]["absent"],
+            [{"key": "ODOO_VERSION", "context": "sellyouroutboard-prod", "instance": ""}],
+        )
+        self.assertEqual(second_result["summary"]["managed_secret_binding_absent_count"], 1)
+        self.assertEqual(profile_after_second, profile_after_first)
+
+    async def test_apply_product_expected_config_rejects_add_and_remove_of_same_requirement(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_product_expected_config_identity()),
+            authz_policy=_product_expected_config_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_product_expected_config(
+            app,
+            {
+                **_product_expected_config_payload(),
+                "remove_managed_secret_bindings": [
+                    {
+                        "binding_key": "SMTP_PASSWORD",
+                        "integration": "runtime_environment",
+                        "context": "sellyouroutboard-prod",
+                        "instance": "prod",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
 
     async def test_apply_product_expected_config_rejects_empty_change(self) -> None:
         app = create_launchplane_fastapi_app(
