@@ -571,6 +571,49 @@ printf '%s\n' "$@" >>"$UV_CAPTURE_FILE"
         self.assertGreaterEqual(compose_text.count("- launchplane-external-network"), 3)
 
 
+class StartLaunchplaneMergeTrainWorkersScriptTests(unittest.TestCase):
+    def test_worker_startup_runs_the_scheduler_with_its_interval(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            bin_dir = temporary_directory / "bin"
+            capture_file = temporary_directory / "uv-args.txt"
+            bin_dir.mkdir()
+            uv_path = bin_dir / "uv"
+            uv_path.write_text(
+                """#!/bin/sh
+printf '%s\\n' "$@" >>"$UV_CAPTURE_FILE"
+""",
+                encoding="utf-8",
+            )
+            uv_path.chmod(uv_path.stat().st_mode | stat.S_IXUSR)
+
+            result = subprocess.run(
+                [str(repo_root / "scripts" / "start-launchplane-merge-train-workers.sh")],
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "UV_CAPTURE_FILE": str(capture_file),
+                    "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "runtime"),
+                    "LAUNCHPLANE_DATABASE_URL": "postgresql+psycopg://launchplane:test@db/launchplane",
+                    "LAUNCHPLANE_MERGE_TRAIN_SCHEDULER_INTERVAL_SECONDS": "120",
+                },
+                check=False,
+            )
+
+            captured_args = capture_file.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(
+            captured_args[:5],
+            ["run", "launchplane", "service", "merge-train-workers", "run"],
+        )
+        self.assertEqual(captured_args[captured_args.index("--interval-seconds") + 1], "120")
+        self.assertNotIn("postgresql+psycopg://launchplane:test@db/launchplane", captured_args)
+
+
 class StartLaunchplanePrivilegedOperationWorkersScriptTests(unittest.TestCase):
     def setUp(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

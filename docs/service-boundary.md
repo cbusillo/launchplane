@@ -1317,7 +1317,12 @@ admission store, live evidence adapter, controller lease, and append-only
 landing outcome behavior as controller mode. If those dependencies are
 unavailable, the route fails closed before GitHub mutation.
 
-`.github/workflows/merge-train-runner.yml` is the first external scheduler for
+Launchplane's merge-train worker (`service merge-train-workers run`) is the
+scheduler for this route: it runs each scheduler-enabled policy target on its
+own five-minute timer, calling the same admission and worker functions
+in-process. See [merge-train policy](merge-train-policy.md).
+
+`.github/workflows/merge-train-runner.yml` is the external caller for
 this route. It mints a GitHub Actions OIDC token for the Launchplane service,
 reads DB-backed policy targets for scheduled runs, reads admission, and calls
 one worker entrypoint only when the decision is `admitted`. Scheduled

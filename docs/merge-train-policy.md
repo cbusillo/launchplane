@@ -246,10 +246,10 @@ Each repository policy contains:
   service endpoint may run the policy.
 - `github_token`: Launchplane explicit GitHub credential source used for live GitHub
   API calls.
-- `scheduler`: Optional DB-backed scheduler intent for the GitHub Actions
-  scheduler. When enabled, the scheduler reads this target from the deployed
-  Launchplane API; checked-in workflows and GitHub variables are not target
-  authority.
+- `scheduler`: Optional DB-backed scheduler intent. When enabled, Launchplane's
+  merge-train worker runs this target on its own timer (and the GitHub Actions
+  schedule reads it from the deployed Launchplane API until that schedule is
+  removed); checked-in workflows and GitHub variables are not target authority.
 
 The default enqueue policy is intentionally narrow: the enqueue label must be
 present and the PR author must be a repo owner or repo admin. A repository may
@@ -1060,7 +1060,22 @@ authority. It records the observation without inventing admission history and
 releases only the exact legacy fence. It does not enable ordinary-agent
 execution or alter the scheduler policy.
 
-The GitHub Actions scheduler in `.github/workflows/merge-train-runner.yml` reads
+Launchplane runs the scheduled pass itself. The `launchplane-merge-train-workers`
+service (`launchplane service merge-train-workers run`) starts a pass every five
+minutes (`--interval-seconds`, or `LAUNCHPLANE_MERGE_TRAIN_SCHEDULER_INTERVAL_SECONDS`
+in the start script). Each pass reads the active policy record and, for every
+target with `scheduler.enabled = true`, reads admission and, when admitted, runs
+that target's `runner_mode` once with its `mutate` value, the same calls the
+routes below make. Scheduled passes are started by Launchplane, not by a caller,
+so they need no caller grant; the policy record's `scheduler` block is the
+switch. A failing or lease-held target does not stop the others, mutate passes
+deliver controller PR feedback, and each pass logs one JSON line per target.
+GitHub runs scheduled workflows on a best-effort basis and fired the
+five-minute workflow schedule only about every six hours, which is why the
+clock moved into Launchplane.
+
+Until it is removed, the GitHub Actions schedule in
+`.github/workflows/merge-train-runner.yml` still reads
 authorized policy targets from the native FastAPI
 `GET /v1/work-graph/merge-train/policy-targets` route on every scheduled run.
 Each target with `scheduler.enabled = true` gets its own run job in that pass
