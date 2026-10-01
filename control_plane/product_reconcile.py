@@ -35,6 +35,7 @@ from control_plane.build_provenance import (
     record_verified_build_artifact,
     verify_build_artifact,
 )
+from control_plane.child_process_errors import redact_failure_reason
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -134,6 +135,7 @@ PRODUCT_RECONCILE_LEASE_SECONDS = 20 * 60
 RECONCILE_SOURCE = "launchplane-reconcile"
 TESTING_DEPLOY_MAX_FAILED_ATTEMPTS = 3
 TESTING_DEPLOY_MAX_ATTEMPT_CHAIN = 20
+TESTING_FAILURE_SUMMARY_LENGTH = 240
 PREVIEW_APPLY_TIMEOUT_SECONDS = 600
 TESTING_BUILD_RUN_PAGE_SIZE = 50
 TESTING_VERIFY_LIMIT = 3
@@ -401,8 +403,17 @@ def reconcile_testing_target(
         ),
         idempotency_scope=idempotency_scope,
     )
-    if attempt.last_failed_operation_id:
-        plan["last_failed_operation_id"] = attempt.last_failed_operation_id
+    if attempt.last_failed is not None:
+        # The operation's own status read needs the grant that starts a deploy;
+        # this plan is what the product read shows, so the reason is copied here.
+        error_code, error_summary = _testing_failure_reason(
+            record_store=record_store, operation=attempt.last_failed
+        )
+        plan.update(
+            last_failed_operation_id=attempt.last_failed.operation_id,
+            last_failed_error_code=error_code,
+            last_failed_error_summary=error_summary,
+        )
     if attempt.deployed_operation_id:
         plan.update(
             action="none",
@@ -425,8 +436,9 @@ def reconcile_testing_target(
             plan,
             error=(
                 f"The testing deploy of {manifest.artifact_id} failed "
-                f"{attempt.failed_attempts} times (last {attempt.last_failed_operation_id}); "
-                "Launchplane stops retrying it until a newer build."
+                f"{attempt.failed_attempts} times; Launchplane stops retrying it until a "
+                f"newer build. Last attempt {attempt.last_failed_operation_id}: "
+                f"{plan['last_failed_error_code']}: {plan['last_failed_error_summary']}"
             ),
         )
     created_at = _utc_now()
@@ -467,8 +479,12 @@ class _TestingAttempt:
     idempotency_key: str
     active: OdooStableTargetReplacementOperationRecord | None = None
     failed_attempts: int = 0
-    last_failed_operation_id: str = ""
+    last_failed: OdooStableTargetReplacementOperationRecord | None = None
     deployed_operation_id: str = ""
+
+    @property
+    def last_failed_operation_id(self) -> str:
+        return self.last_failed.operation_id if self.last_failed is not None else ""
 
 
 def _next_testing_attempt(
@@ -486,7 +502,7 @@ def _next_testing_attempt(
     operation_store = odoo_target_replacement_apply_operation_store(record_store)
     key = base_key
     failed_attempts = 0
-    last_failed_operation_id = ""
+    last_failed: OdooStableTargetReplacementOperationRecord | None = None
     for _ in range(TESTING_DEPLOY_MAX_ATTEMPT_CHAIN):
         existing = find_odoo_target_replacement_apply_operation_by_idempotency_key(
             operation_store=operation_store,
@@ -497,14 +513,14 @@ def _next_testing_attempt(
             return _TestingAttempt(
                 idempotency_key=key,
                 failed_attempts=failed_attempts,
-                last_failed_operation_id=last_failed_operation_id,
+                last_failed=last_failed,
             )
         if existing.status not in ODOO_STABLE_TARGET_REPLACEMENT_TERMINAL_OPERATION_STATUSES:
             return _TestingAttempt(
                 idempotency_key=key,
                 active=existing,
                 failed_attempts=failed_attempts,
-                last_failed_operation_id=last_failed_operation_id,
+                last_failed=last_failed,
             )
         if existing.status == "pass":
             if testing_runs_desired():
@@ -514,12 +530,62 @@ def _next_testing_attempt(
                 )
         elif not is_staff_testing_hold_cancellation(existing):
             failed_attempts += 1
-            last_failed_operation_id = existing.operation_id
+            last_failed = existing
         # A passed attempt that testing no longer runs was rolled back: deploy again.
         key = f"{base_key}:after-{existing.operation_id}"
     raise ProductReconcileError(
         f"The testing deploy has more than {TESTING_DEPLOY_MAX_ATTEMPT_CHAIN} attempts."
     )
+
+
+def _testing_failure_reason(
+    *,
+    record_store: ProductReconcileStore,
+    operation: OdooStableTargetReplacementOperationRecord,
+) -> tuple[str, str]:
+    """The failed attempt's error code and a redacted one-line reason.
+
+    The operation's own ``error_code`` wins; one that has none is named by the
+    first failed step of its driver result, from a small documented set.
+    """
+    result = operation.result
+    sensitive: list[str] = []
+    if result is not None:
+        sensitive.extend((result.target_name, result.target_id, result.image_reference))
+    try:
+        target = record_store.read_dokploy_target_record(
+            context_name=operation.context, instance_name=operation.instance
+        )
+    except (FileNotFoundError, ValueError):
+        target = None
+    if target is not None:
+        sensitive.extend((target.target_name, target.project_name, *target.domains))
+        sensitive.extend(value for value in target.env.values() if len(value) >= 8)
+    error_code = operation.error_code.strip() or _testing_failure_code(operation)
+    summary = redact_failure_reason(
+        operation.error_message,
+        sensitive_values=tuple(sensitive),
+        fallback="The operation recorded no reason.",
+        maximum_length=TESTING_FAILURE_SUMMARY_LENGTH,
+    )
+    return error_code, summary
+
+
+def _testing_failure_code(operation: OdooStableTargetReplacementOperationRecord) -> str:
+    if operation.status == "cancelled":
+        return "operation_cancelled"
+    result = operation.result
+    if result is None:
+        return "operation_failed"
+    steps = (
+        ("deploy_failed", result.deploy_status),
+        ("post_deploy_failed", result.post_deploy_status),
+        ("post_deploy_override_failed", result.post_deploy_override_status),
+        ("health_check_failed", result.health_status),
+        ("canonical_check_failed", result.canonical_status),
+        ("logo_check_failed", result.logo_status),
+    )
+    return next((code for code, status in steps if status == "fail"), "operation_failed")
 
 
 def _plan_testing_target(

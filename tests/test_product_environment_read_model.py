@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import patch
 from typing import cast
 import unittest
 
@@ -1738,6 +1739,38 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             {link.record_id for event in activity.events for link in event.records},
         )
         self.assertEqual(activity.events[0].event_type, "authz_policy")
+
+    def test_failed_backup_gate_activity_says_why_redacted(self) -> None:
+        # The gate operation's own reads need the grant that ran it, or omit the message.
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(
+                preview_context="shared-preview",
+                testing_context="example-site-prod",
+                prod_context="example-site-prod",
+            )
+        )
+        store = _ActivityRecordStore(profile, ())
+        failed_gate = SimpleNamespace(
+            record_id="backup-prod-2",
+            status="fail",
+            created_at="2026-05-02T10:55:00Z",
+            evidence={
+                "error_message": (
+                    "Snapshot of db.example-site.com failed: password=hunter2 rejected."
+                )
+            },
+        )
+
+        with patch.object(store, "list_backup_gate_records", return_value=(failed_gate,)):
+            activity = build_product_activity_read_model(record_store=store, product="example-site")
+
+        summaries = [
+            event.summary for event in activity.events if event.event_type == "backup_gate"
+        ]
+        self.assertTrue(summaries)
+        for summary in summaries:
+            self.assertIn("Reason: Snapshot of [redacted-host] failed", summary)
+            self.assertNotIn("hunter2", summary)
 
     def test_product_activity_authz_grant_uses_managed_mutation_delta(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(

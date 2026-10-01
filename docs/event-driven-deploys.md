@@ -109,7 +109,11 @@ ids Launchplane records itself: the GitHub delivery id and the plan's top-level
 `*_id` fields, when they are a UUID or a `name-<hex>` id. Every other
 string in the plan and error goes through the shared redactor, which removes
 secret assignments, tokens, authorization headers, URLs, paths and long
-random strings.
+random strings. A failed testing deploy's reason is on the plan as
+`last_failed_error_code` and `last_failed_error_summary`, already redacted of
+host names and the lane's provider target, so the operator need not read the
+deploy operation, whose status read needs the grant that starts a deploy (see
+[records](records.md#reconciler)).
 
 ## Pull request feedback
 

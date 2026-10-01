@@ -9,6 +9,7 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from control_plane.child_process_errors import redact_failure_reason
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
@@ -77,6 +78,7 @@ ProductConfigItemStatus = Literal[
 ]
 ProductConfigInputKind = Literal["runtime_settings", "managed_secrets"]
 ProductConfigMode = Literal["dry-run", "apply"]
+BACKUP_GATE_FAILURE_SUMMARY_LENGTH = 240
 
 
 @dataclass(frozen=True, slots=True)
@@ -1264,11 +1266,26 @@ def _backup_gate_activity_events(
                 status=str(getattr(record, "status")),
                 occurred_at=str(getattr(record, "created_at")),
                 title=f"{profile.display_name} {lane.instance} backup gate",
-                summary=f"Backup gate {getattr(record, 'status')} for {lane.context}/{lane.instance}.",
+                summary=_backup_gate_summary(record, lane=lane),
                 records=(_record_link("backup_gate", str(getattr(record, "record_id"))),),
             )
         )
     return tuple(events)
+
+
+def _backup_gate_summary(record: object, *, lane: ProductLaneProfile) -> str:
+    """The gate's outcome; a failed gate's reason is read nowhere else without
+    the grant that ran it, so a redacted copy of it is shown here."""
+    status = str(getattr(record, "status"))
+    summary = f"Backup gate {status} for {lane.context}/{lane.instance}."
+    evidence = getattr(record, "evidence", None)
+    reason = evidence.get("error_message", "") if isinstance(evidence, dict) else ""
+    if status != "fail" or not reason.strip():
+        return summary
+    redacted = redact_failure_reason(
+        reason, fallback="", maximum_length=BACKUP_GATE_FAILURE_SUMMARY_LENGTH
+    )
+    return f"{summary} Reason: {redacted}"
 
 
 def _preview_activity_events(

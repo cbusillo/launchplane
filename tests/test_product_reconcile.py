@@ -52,6 +52,7 @@ from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_ROUTE,
     OdooPreviewApplyConfigError,
 )
+from control_plane.product_reconcile_read import product_reconcile_request_view
 from control_plane.product_review_status import owner_review_reference_url
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy, MergeTrainPolicyRecord
 from control_plane.github_app_identity import GitHubAppInstallationToken
@@ -757,7 +758,93 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
 
         self.assertEqual(completed.state, "failed")
         self.assertIn("failed 3 times", completed.last_error)
+        self.assertIn("operation_failed: deploy failed", completed.last_error)
         self.assertEqual(len(self.store.list_odoo_stable_target_replacement_operation_records()), 3)
+
+    def test_failed_testing_deploy_reason_is_readable_from_the_reconcile_record(self) -> None:
+        # The operation's own status read needs the grant that starts a deploy;
+        # the product read shows this plan, so the reason must be on it, redacted.
+        self.store.write_dokploy_target_record(
+            DokployTargetRecord(
+                context="cm",
+                instance="testing",
+                target_name="cm-testing-app",
+                domains=("testing.cm-shop.example",),
+                env={"ODOO_ADMIN_PASSWORD": "hunter2-very-secret"},
+                updated_at="2026-09-30T09:00:00Z",
+            )
+        )
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        first = cast(str, self.reconcile()["queued_operation_id"])
+        operation = self.store.read_odoo_stable_target_replacement_operation_record(first)
+        result = OdooStableTargetReplacementApplyResult(
+            product="site",
+            context="cm",
+            instance="testing",
+            strategy="recreate-in-place",
+            deploy_status="pass",
+            health_status="fail",
+            target_id="dokploy-compose-0123",
+            target_name="cm-testing-app",
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            operation.model_copy(
+                update={
+                    "status": "fail",
+                    "phase": "failed",
+                    "finished_at": "2026-09-30T12:00:00Z",
+                    "result": result,
+                    "error_message": (
+                        "Health check of CM-TESTING-APP (dokploy-compose-0123) at "
+                        "https://testing.cm-shop.example/web/health failed on "
+                        "testing.cm-shop.example and db.provider.net with password "
+                        "hunter2-very-secret; token=ghp_abcdefghijklmnopqrstuvwxyz0123"
+                    ),
+                }
+            )
+        )
+        self.request()
+
+        view = product_reconcile_request_view(self.run_once())
+
+        plan = view.last_plan
+        self.assertEqual(plan["last_failed_operation_id"], first)
+        self.assertEqual(plan["last_failed_error_code"], "health_check_failed")
+        summary = cast(str, plan["last_failed_error_summary"])
+        self.assertTrue(summary.startswith("Health check of [redacted-target]"), summary)
+        for leaked in (
+            "cm-testing",
+            "dokploy-compose",
+            "cm-shop",
+            "provider.net",
+            "hunter2",
+            "ghp_",
+        ):
+            self.assertNotIn(leaked, summary.lower())
+
+    def test_worker_error_without_a_result_keeps_its_own_error_code(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        first = cast(str, self.reconcile()["queued_operation_id"])
+        operation = self.store.read_odoo_stable_target_replacement_operation_record(first)
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            operation.model_copy(
+                update={
+                    "status": "fail",
+                    "phase": "failed",
+                    "finished_at": "2026-09-30T12:00:00Z",
+                    "error_code": "authorization_denied",
+                    "error_message": "Denied before a provider mutation.",
+                }
+            )
+        )
+        self.request()
+
+        plan = self.reconcile()
+
+        self.assertEqual(plan["last_failed_error_code"], "authorization_denied")
+        self.assertEqual(plan["last_failed_error_summary"], "Denied before a provider mutation.")
 
     def test_testing_is_left_alone_when_the_release_already_has_that_digest(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
