@@ -1421,7 +1421,10 @@ records what it decided and did as `last_plan`:
   product read shows. The code is the operation's `error_code` (an
   authorization denial: `operation_authorization_reconcile_refused`,
   `operation_authorization_revoked`, `operation_authorization_policy_unavailable`,
-  `operation_authorization_provenance_missing`), or, when it has none, the first
+  `operation_authorization_provenance_missing`; for an error the worker did not
+  expect, that error's own code when it has a code-shaped one, otherwise
+  `unexpected.<error class in snake case>`, never its message), or, when it has
+  none, the first
   failed step of its driver result: `deploy_failed`,
   `post_deploy_override_failed`, `post_deploy_failed`, `post_deploy_not_run`,
   `health_check_failed`, `canonical_check_failed`, `logo_check_failed`, or

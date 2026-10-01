@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import logging
+import re
 from pathlib import Path
 from threading import Event, Thread
 import time
@@ -1128,6 +1129,7 @@ def _execute_bootstrap_operation(
                 "updated_at": _utc_now_timestamp(),
                 "finished_at": _utc_now_timestamp(),
                 "lease_owner": lease_owner,
+                "error_code": _unexpected_error_code(error),
                 "error_message": str(error),
             }
         )
@@ -1149,6 +1151,19 @@ def _execute_bootstrap_operation(
         record=terminal_operation,
         lease_owner=lease_owner,
     )
+
+
+_ERROR_CODE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+
+
+def _unexpected_error_code(error: BaseException) -> str:
+    """A code for an error the worker did not expect: the error's own code when it
+    has a code-shaped one, otherwise its class name. Never its message."""
+    code = getattr(error, "code", "")
+    if isinstance(code, str) and _ERROR_CODE_PATTERN.match(code.strip()):
+        return code.strip()
+    name = re.sub(r"(?<!^)(?=[A-Z])", "_", type(error).__name__).lower()
+    return f"unexpected.{name}"[:64]
 
 
 def _lease_summary(
@@ -1345,6 +1360,7 @@ def _execute_prod_backup_restore_operation(
                 "updated_at": finished_at,
                 "finished_at": finished_at,
                 "lease_owner": lease_owner,
+                "error_code": _unexpected_error_code(error),
                 "error_message": str(error),
             }
         )
@@ -1774,6 +1790,7 @@ def _execute_retained_volume_backup_import_operation(
                 "updated_at": finished_at,
                 "finished_at": finished_at,
                 "lease_owner": lease_owner,
+                "error_code": _unexpected_error_code(error),
                 "error_message": str(error),
             }
         )
@@ -1890,6 +1907,7 @@ def _execute_target_replacement_operation(
                 "updated_at": _utc_now_timestamp(),
                 "finished_at": _utc_now_timestamp(),
                 "lease_owner": lease_owner,
+                "error_code": _unexpected_error_code(error),
                 "error_message": str(error),
             }
         )
