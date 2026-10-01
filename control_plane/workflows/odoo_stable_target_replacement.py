@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -69,6 +70,29 @@ from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import compose as dokploy_compose
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
 from control_plane.dokploy.api import JsonObject, JsonValue
+
+
+class OdooTargetReplacementStageError(click.ClickException):
+    """A step outside the driver's recorded results failed after the provider deploy.
+
+    ``code`` names the step so the operation record says where the deploy stopped;
+    the message, which can carry provider text, stays out of the code.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+@contextmanager
+def _failure_stage(code: str) -> Iterator[None]:
+    try:
+        yield
+    except click.ClickException as error:
+        if isinstance(getattr(error, "code", None), str):
+            # Already coded, such as an authorization denial: keep its own code.
+            raise
+        raise OdooTargetReplacementStageError(code, str(error)) from error
 
 
 class OdooStableTargetReplacementStore(RuntimeKeySafetyPolicyReadStore, Protocol):
@@ -1946,20 +1970,21 @@ def execute_odoo_stable_target_replacement_apply(
     post_deploy_phase: OdooOverrideApplyPhase = (
         "restore" if plan.data_source_mode == "upstream_restore" else "deploy"
     )
-    post_deploy_result = execute_odoo_post_deploy(
-        control_plane_root=control_plane_root,
-        record_store=record_store,
-        request=OdooPostDeployRequest(
-            context=plan.context,
-            instance=plan.instance,
-            phase=post_deploy_phase,
-        ),
-        run_destructive_restore=plan.data_source_mode == "upstream_restore",
-        provider_effect_checkpoint=provider_effect_checkpoint,
-        schedule_execution_timeout_seconds=(
-            request.timeout_seconds if plan.data_source_mode == "upstream_restore" else None
-        ),
-    )
+    with _failure_stage("post_deploy_setup_failed"):
+        post_deploy_result = execute_odoo_post_deploy(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            request=OdooPostDeployRequest(
+                context=plan.context,
+                instance=plan.instance,
+                phase=post_deploy_phase,
+            ),
+            run_destructive_restore=plan.data_source_mode == "upstream_restore",
+            provider_effect_checkpoint=provider_effect_checkpoint,
+            schedule_execution_timeout_seconds=(
+                request.timeout_seconds if plan.data_source_mode == "upstream_restore" else None
+            ),
+        )
     post_deploy_evidence = PostDeployUpdateEvidence(
         attempted=True,
         status=post_deploy_result.post_deploy_status,
@@ -1994,17 +2019,18 @@ def execute_odoo_stable_target_replacement_apply(
         # Restore payloads leave out website bootstrap, so the restored copy
         # still carries the source's canonical URL. Apply the deploy-phase
         # settings without another restore before verifying the target.
-        bootstrap_result = execute_odoo_post_deploy(
-            control_plane_root=control_plane_root,
-            record_store=record_store,
-            request=OdooPostDeployRequest(
-                context=plan.context,
-                instance=plan.instance,
-                phase="deploy",
-            ),
-            run_destructive_restore=False,
-            provider_effect_checkpoint=provider_effect_checkpoint,
-        )
+        with _failure_stage("post_deploy_setup_failed"):
+            bootstrap_result = execute_odoo_post_deploy(
+                control_plane_root=control_plane_root,
+                record_store=record_store,
+                request=OdooPostDeployRequest(
+                    context=plan.context,
+                    instance=plan.instance,
+                    phase="deploy",
+                ),
+                run_destructive_restore=False,
+                provider_effect_checkpoint=provider_effect_checkpoint,
+            )
         post_deploy_evidence = PostDeployUpdateEvidence(
             attempted=True,
             status=bootstrap_result.post_deploy_status,
@@ -2155,12 +2181,13 @@ def execute_odoo_stable_target_replacement_apply(
     record_store.write_environment_inventory(
         build_environment_inventory(deployment_record=deployment_record, updated_at=finished_at)
     )
-    release_tuple_id = _write_release_tuple_from_deployment(
-        record_store=record_store,
-        deployment_record=deployment_record,
-        artifact_manifest=artifact_manifest,
-        minted_at=finished_at,
-    )
+    with _failure_stage("release_tuple_mint_failed"):
+        release_tuple_id = _write_release_tuple_from_deployment(
+            record_store=record_store,
+            deployment_record=deployment_record,
+            artifact_manifest=artifact_manifest,
+            minted_at=finished_at,
+        )
     return base_result.result(
         deploy_status="pass",
         release_tuple_id=release_tuple_id,

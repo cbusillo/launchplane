@@ -56,8 +56,13 @@ from control_plane.dokploy import JsonObject, JsonValue
 from control_plane import runtime_platform_credentials
 from control_plane.runtime_environments import SiteRuntimeEnvironment
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
+from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
+from control_plane.product_reconcile import TESTING_FAILURE_DESCRIPTIONS
+from control_plane.workflows.odoo_stable_operation_worker import _unexpected_error_code
 from control_plane.workflows.odoo_stable_target_replacement import (
     DokployRequest,
+    OdooTargetReplacementStageError,
+    _failure_stage,
     _merge_required_odoo_install_modules,
     _read_lane,
     build_odoo_stable_target_replacement_plan,
@@ -3814,6 +3819,32 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     product="odoo-tenant-cm", instance="testing"
                 ),
             )
+
+
+class OdooTargetReplacementFailureStageTests(unittest.TestCase):
+    @staticmethod
+    def _raise_in_stage(error: click.ClickException) -> None:
+        with _failure_stage("post_deploy_setup_failed"):
+            raise error
+
+    def test_failure_stage_codes_an_uncoded_error_and_keeps_a_coded_one(self) -> None:
+        with self.assertRaises(OdooTargetReplacementStageError) as raised:
+            self._raise_in_stage(
+                click.ClickException("Odoo post-deploy target cm/testing is missing.")
+            )
+        self.assertEqual(raised.exception.code, "post_deploy_setup_failed")
+        self.assertEqual(_unexpected_error_code(raised.exception), "post_deploy_setup_failed")
+
+        denial = DurableOperationAuthorizationDeniedError(
+            code="operation_authorization_revoked", message="revoked"
+        )
+        with self.assertRaises(DurableOperationAuthorizationDeniedError) as kept:
+            self._raise_in_stage(denial)
+        self.assertIs(kept.exception, denial)
+
+    def test_every_stage_code_has_a_testing_failure_description(self) -> None:
+        for code in ("post_deploy_setup_failed", "release_tuple_mint_failed"):
+            self.assertIn(code, TESTING_FAILURE_DESCRIPTIONS)
 
 
 if __name__ == "__main__":
