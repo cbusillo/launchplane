@@ -107,6 +107,7 @@ jobs:
           ANCHOR_PR_URL: ${{ inputs.anchor_pr_url }}
           CONTEXT: ${{ inputs.context }}
           PRODUCT: ${{ inputs.product }}
+          RUN_URL_INPUT: ${{ inputs.run_url }}
           STATUS: ${{ inputs.status }}
         run: |
           set -euo pipefail
@@ -152,7 +153,7 @@ jobs:
               "$STATUS" \
               "$run_scope"
             echo "product=$PRODUCT"
-            echo "run_url=${{ inputs.run_url || '' }}"
+            echo "run_url=${RUN_URL_INPUT}"
             echo "source_url=$run_url"
             echo "status=$STATUS"
           } >>"$GITHUB_OUTPUT"

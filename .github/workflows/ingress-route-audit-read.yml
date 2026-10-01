@@ -183,9 +183,9 @@ jobs:
           {
             echo '## Ingress route audit read'
             echo
-            echo "- Product: ${{ inputs.product }}"
-            echo "- Context: ${{ inputs.context }}"
-            echo "- Record id: ${{ inputs.record_id || 'list' }}"
+            echo "- Product: ${PRODUCT}"
+            echo "- Context: ${CONTEXT}"
+            echo "- Record id: ${RECORD_ID:-list}"
             echo "- Status: $(jq -r '.status' "$result_file")"
             echo "- Count: $(jq -r '.count // 1' "$result_file")"
             echo "- Response: redacted"

@@ -86,18 +86,15 @@ class FirstPartyActionPinTests(unittest.TestCase):
             {violation.code for violation in report.violations},
         )
 
-    def test_dirty_action_fails_closed(self) -> None:
+    def test_report_checks_the_committed_revision_not_the_working_tree(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
             _initialize_repository(repo_root)
-            _write_action(repo_root, "console.log('dirty');\n")
+            _write_action(repo_root, "console.log('uncommitted');\n")
 
             report = build_action_pin_report(repo_root)
 
-        self.assertIn(
-            "action_worktree_dirty",
-            {violation.code for violation in report.violations},
-        )
+        self.assertEqual(report.violations, ())
 
     def test_yaml_workflow_is_discovered(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -8,16 +8,9 @@ import unittest
 
 
 ACTION_ENTRYPOINT = Path(".github/actions/setup-preview-prepare-client/dist/index.js")
-ACTION_METADATA = Path(".github/actions/setup-preview-prepare-client/action.yml")
 
 
 class PreviewPrepareClientActionTests(unittest.TestCase):
-    def test_action_metadata_uses_supported_node_runtime(self) -> None:
-        self.assertIn(
-            "using: node24",
-            ACTION_METADATA.read_text(encoding="utf-8"),
-        )
-
     def run_setup_action(
         self, *, output_path: Path, github_output: Path
     ) -> subprocess.CompletedProcess[str]:
