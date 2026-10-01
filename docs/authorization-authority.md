@@ -662,6 +662,15 @@ each must name an existing product profile record, no selected product may be
 recorded `live`, an empty selection is refused, and the list is deduplicated and
 sorted. Products are never hard-coded.
 
+The live boundary is also enforced when the access is used, not only at
+preparation. `POST /v1/product-profiles/expected-config/apply` refuses a local
+operator caller, in both dry-run and apply modes, when the target product's
+profile records `production_use: live`, with the fixed code
+`live_product_requires_operator`. A product approved while non-live and later
+recorded `live` is therefore not writable through this rule, even though the
+rule still names it. Workflow and local-admin callers of that route are
+unchanged.
+
 The principal is never supplied by the browser. The server uses the service's
 configured local-operator identity (`LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT` and
 `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL`, active only when the local-operator
@@ -681,6 +690,10 @@ replacement of this one rule. A set held by another identity, in another
 principal collection, with more than one rule, or with any other shape is a
 conflict that preparation does not adopt or repair. Replay recognizes only the
 exact shape, the configured identity, and the same normalized product list.
+The review uses the agent-operate wording only when the rule binds the
+service's configured local-operator identity (and, for removal, only when an
+identity is configured); a same-shape proposal for any other subject or token
+label gets the generic managed-policy review.
 
 Removal proposes an empty fragment for only this set and does not need the
 configured identity. Review names the selected products and states that the

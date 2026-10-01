@@ -602,6 +602,9 @@ def register_privileged_operation_routes(
                 record=record,
                 events=events,
                 generated_at=generated_at,
+                configured_local_operator_identity=(
+                    dependencies.read_configured_local_operator_identity()
+                ),
             )
         except PrivilegedOperationSemanticReviewError as error:
             raise dependencies.common.http_error(

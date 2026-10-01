@@ -3148,6 +3148,85 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
+    async def _post_expected_config_for_production_use(
+        self,
+        *,
+        production_use: str,
+        mode: str,
+        workflow: bool = False,
+    ) -> tuple[int, dict[str, object], LaunchplaneProductProfileRecord]:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "local_operators": [
+                    {
+                        "subjects": ["local-owner-agent"],
+                        "token_labels": ["local-owner-read"],
+                        "products": ["sellyouroutboard"],
+                        "contexts": ["launchplane"],
+                        "actions": ["product_profile.expected_config.apply"],
+                    }
+                ],
+                "github_actions": [
+                    rule.model_dump(mode="json")
+                    for rule in _product_expected_config_policy().github_actions
+                ],
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record_store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(
+                    {**_product_profile_payload(), "production_use": production_use}
+                )
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_expected_config_identity()),
+                authz_policy=policy,
+                record_store_factory=lambda: record_store,
+                bearer_identity_config=_local_operator_bearer_config(),
+            )
+            response = await _post_product_expected_config(
+                app,
+                {**_product_expected_config_payload(), "mode": mode},
+                authorization=("Bearer valid-token" if workflow else "Bearer local-operator-token"),
+                idempotency_key=f"expected-config-{production_use}-{mode}-{workflow}",
+            )
+            stored_profile = record_store.read_product_profile_record("sellyouroutboard")
+        return response.status_code, response.json(), stored_profile
+
+    async def test_apply_product_expected_config_local_operator_allowed_on_non_live(
+        self,
+    ) -> None:
+        for production_use in ("prelaunch", "unknown"):
+            with self.subTest(production_use=production_use):
+                status, payload, stored = await self._post_expected_config_for_production_use(
+                    production_use=production_use, mode="apply"
+                )
+                self.assertEqual(status, 202, payload)
+                self.assertEqual(len(stored.expected_config.managed_secret_bindings), 1)
+
+    async def test_apply_product_expected_config_refuses_local_operator_on_live(self) -> None:
+        for mode in ("dry-run", "apply"):
+            with self.subTest(mode=mode):
+                status, payload, stored = await self._post_expected_config_for_production_use(
+                    production_use="live", mode=mode
+                )
+                self.assertEqual(status, 403, payload)
+                error = cast(dict[str, object], payload["error"])
+                self.assertEqual(error["code"], "live_product_requires_operator")
+                self.assertIn("changed by the operator", str(error["message"]))
+                self.assertEqual(stored.expected_config.managed_secret_bindings, ())
+
+    async def test_apply_product_expected_config_workflow_still_allowed_on_live(self) -> None:
+        # This route accepts only bearer callers (workflows, local admins, local operators);
+        # the live refusal applies to the local operator credential alone.
+        status, payload, stored = await self._post_expected_config_for_production_use(
+            production_use="live", mode="apply", workflow=True
+        )
+        self.assertEqual(status, 202, payload)
+        self.assertEqual(len(stored.expected_config.managed_secret_bindings), 1)
+
     async def test_apply_product_expected_config_reports_missing_profile(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")

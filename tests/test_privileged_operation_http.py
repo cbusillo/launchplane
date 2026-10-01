@@ -887,6 +887,59 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(detail["code"], code)
                 self.assertEqual(records, ())
 
+    async def test_agent_operate_wording_requires_configured_operator_identity(self) -> None:
+        other = LocalOperatorIdentity(subject="other-agent", token_label="other-agent-token")
+        for review_identity, expected_title in (
+            (_OPERATE_IDENTITY, "Managed authorization policy review"),
+            (None, "Managed authorization policy review"),
+            (other, "Review agent operate access"),
+        ):
+            with self.subTest(review_identity=review_identity), TemporaryDirectory() as directory:
+                store = PostgresRecordStore(
+                    database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+                )
+                store.ensure_schema()
+                store.write_product_profile_record(
+                    _operate_product_profile("example-shop", "prelaunch")
+                )
+                policy = _policy()
+                policy_record = store.seed_authz_policy_if_absent(_policy_record(policy))
+                preparing_app = self._app(
+                    store=store,
+                    policy=policy,
+                    policy_record_reader=lambda: policy_record,
+                    configured_local_operator_identity=other,
+                )
+                reviewing_app = self._app(
+                    store=store,
+                    policy=policy,
+                    policy_record_reader=lambda: policy_record,
+                    configured_local_operator_identity=review_identity,
+                )
+                async with lifespan_client(preparing_app) as client:
+                    prepared = await client.post(
+                        "/v1/privileged-operations/authorization-candidates/prepare",
+                        json={
+                            "candidate_id": "agent-operate-product-setup",
+                            "intent": "add",
+                            "source_event_id": "ui:agent-operate:other-subject",
+                            "products": ["example-shop"],
+                        },
+                    )
+                async with lifespan_client(reviewing_app) as client:
+                    review = await client.get(
+                        f"/v1/privileged-operations/plans/{prepared.json()['operation_id']}/review"
+                    )
+                store.close()
+
+            self.assertEqual(prepared.status_code, 200, prepared.text)
+            self.assertEqual(review.status_code, 200, review.text)
+            semantic_review = review.json()["review"]
+            self.assertEqual(semantic_review["title"], expected_title)
+            if expected_title == "Managed authorization policy review":
+                self.assertNotIn("operator's agent", semantic_review["change"]["summary"])
+                self.assertNotIn("non-live", semantic_review["change"]["summary"])
+
     async def test_agent_operate_candidate_noops_and_removal(self) -> None:
         payload = _policy().model_dump(mode="json")
         payload["local_operators"] = [
@@ -933,7 +986,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             "source_event_id": "ui:agent-operate:remove",
         }
         results, records, reviews = await self._prepare_agent_operate(
-            payloads=(remove, remove), policy=installed, identity=None
+            payloads=(remove, remove), policy=installed
         )
         self.assertEqual(results[0]["state"], "planned", results[0])
         self.assertEqual(results[1]["operation_id"], results[0]["operation_id"])

@@ -52,6 +52,7 @@ from control_plane.authz_candidate_preparation import (
     is_ordinary_agent_delivery_administration_request,
     is_terminal_enrollment_requester_request,
 )
+from control_plane.service_auth import LocalOperatorIdentity
 from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationRevokeHumanEvidence,
     OrdinaryAgentDeliveryActivationSetupHumanEvidence,
@@ -346,6 +347,7 @@ def _build_privileged_operation_semantic_review(
     record: PrivilegedOperationRecord,
     events: tuple[PrivilegedOperationEventRecord, ...] = (),
     generated_at: datetime | None = None,
+    configured_local_operator_identity: LocalOperatorIdentity | None = None,
 ) -> PrivilegedOperationSemanticReview:
     observed_at = (generated_at or _utc_now()).astimezone(timezone.utc)
     try:
@@ -534,8 +536,17 @@ def _build_privileged_operation_semantic_review(
         is_terminal_enrollment_requester_removal = is_terminal_enrollment_requester_request(
             record.request, intent="remove"
         )
-        is_agent_operate = is_agent_operate_product_setup_request(record.request, intent="add")
-        is_agent_operate_removal = is_agent_operate_product_setup_request(
+        # The agent-operate wording names the operator's agent, so it is used only
+        # when the rule binds the service's configured local operator identity.
+        operator = configured_local_operator_identity
+        is_agent_operate = (
+            operator is not None
+            and is_agent_operate_product_setup_request(record.request, intent="add")
+            and record.request.desired_policy.local_operators[0].subjects == (operator.subject,)
+            and record.request.desired_policy.local_operators[0].token_labels
+            == (operator.token_label,)
+        )
+        is_agent_operate_removal = operator is not None and is_agent_operate_product_setup_request(
             record.request, intent="remove"
         )
         adds_candidate_access = bool(record.request.desired_policy.github_humans)
@@ -555,7 +566,8 @@ def _build_privileged_operation_semantic_review(
                 "Allow the operator's agent to declare expected settings on these non-live "
                 f"products: {operate_products}. This standing access remains until a "
                 "separately governed removal; the Approve-by deadline only bounds this plan. "
-                "It grants no release approval, deploy, secret, or live-product authority."
+                "It grants no release approval, deploy, secret, or live-product authority; "
+                "Launchplane refuses its use on any product later recorded live."
                 if is_agent_operate
                 else "Remove the operator's agent's standing access to declare expected "
                 "settings on products. Other agent access, including its read access, "
@@ -965,12 +977,14 @@ def privileged_operation_semantic_review(
     record: PrivilegedOperationRecord,
     events: tuple[PrivilegedOperationEventRecord, ...] = (),
     generated_at: datetime | None = None,
+    configured_local_operator_identity: LocalOperatorIdentity | None = None,
 ) -> PrivilegedOperationSemanticReview:
     try:
         return _build_privileged_operation_semantic_review(
             record=record,
             events=events,
             generated_at=generated_at,
+            configured_local_operator_identity=configured_local_operator_identity,
         )
     except ValidationError as error:
         raise PrivilegedOperationSemanticReviewError(

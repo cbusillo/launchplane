@@ -12232,6 +12232,16 @@ def create_launchplane_fastapi_app(
                 code="not_found",
                 message=str(error),
             ) from error
+        if isinstance(identity, LocalOperatorIdentity) and profile.production_use == "live":
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="live_product_requires_operator",
+                message=(
+                    "A live product's expected configuration is changed by the operator, "
+                    "not with the local operator credential the operator's agent uses."
+                ),
+            )
         secret_bindings: tuple[SecretBinding, ...] = ()
         if expected_config_request.remove_managed_secret_bindings:
             list_secret_bindings = getattr(record_store, "list_secret_bindings", None)
