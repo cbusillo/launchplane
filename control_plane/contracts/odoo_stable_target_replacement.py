@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -10,6 +10,7 @@ from control_plane.workflows.odoo_verification import OdooVerificationEvidence
 
 
 LAUNCHPLANE_REQUIRED_ODOO_MODULES = ("launchplane_settings", "disable_odoo_online")
+ODOO_VERSION_ENV_KEY = "ODOO_VERSION"
 
 
 def merge_odoo_install_modules(*module_groups: str | Iterable[str]) -> str:
@@ -25,6 +26,36 @@ def merge_odoo_install_modules(*module_groups: str | Iterable[str]) -> str:
                 continue
             merged_modules.append(normalized_module_name)
     return ",".join(merged_modules)
+
+
+def artifact_odoo_version(artifact_manifest: ArtifactIdentityManifest | None) -> str:
+    """The Odoo version the artifact was built for; empty for manifests that predate it."""
+
+    if artifact_manifest is None:
+        return ""
+    return artifact_manifest.build_flags.values.get("odoo_version", "").strip()
+
+
+def apply_artifact_odoo_version(
+    environment: dict[str, str],
+    *,
+    artifact_manifest: ArtifactIdentityManifest | None,
+    declared_keys: Collection[str],
+) -> str:
+    """Set ODOO_VERSION from the artifact being deployed and return the value set.
+
+    The artifact is the record of what was built, so its version wins over a site or
+    global setting. It is set only where the lane declares the key or already carries
+    it, so a lane that never received ODOO_VERSION does not start receiving it here.
+    """
+
+    odoo_version = artifact_odoo_version(artifact_manifest)
+    if not odoo_version:
+        return ""
+    if ODOO_VERSION_ENV_KEY not in declared_keys and ODOO_VERSION_ENV_KEY not in environment:
+        return ""
+    environment[ODOO_VERSION_ENV_KEY] = odoo_version
+    return odoo_version
 
 
 def missing_required_odoo_modules_from_artifact(

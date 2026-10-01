@@ -148,8 +148,8 @@ or trigger another policy proposal/apply cycle for each internal route.
 Execution still revalidates scope, expiry, revocation, technical evidence,
 Owner acceptance when product experience changes, idempotency, and effect
 fences. The delegation cannot mint broader authority or manufacture Owner
-acceptance. Activation requires the separately reviewed `#2058` amendment; the
-current intent and route-specific checks above remain authoritative until then.
+acceptance. This delegated design is retired (see `DIRECTION.md`); the current
+intent and route-specific checks above remain authoritative.
 
 ## Redaction And Provenance
 

@@ -43,6 +43,7 @@ from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
     OdooStableTargetReplacementApplyResult,
     OdooStableTargetReplacementRequest,
+    apply_artifact_odoo_version,
     merge_odoo_install_modules,
     missing_required_odoo_modules_from_artifact,
 )
@@ -1782,6 +1783,11 @@ def execute_odoo_stable_target_replacement_apply(
         desired_env_map.pop(ODOO_INSTALL_MODULES_ENV_KEY, None)
         desired_env_map.update(runtime_environment_values)
         desired_env_map.update(runtime_override_environment)
+        runtime_source["artifact_odoo_version"] = apply_artifact_odoo_version(
+            desired_env_map,
+            artifact_manifest=artifact_manifest,
+            declared_keys=application_runtime_keys,
+        )
         addons_path = merge_required_odoo_addons_path(
             desired_env_map.get(ODOO_ADDONS_PATH_ENV_KEY, "")
         )
