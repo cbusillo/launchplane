@@ -52,6 +52,7 @@ from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_ROUTE,
     OdooPreviewApplyConfigError,
 )
+from control_plane.product_reconcile_read import product_reconcile_request_view
 from control_plane.product_review_status import owner_review_reference_url
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy, MergeTrainPolicyRecord
 from control_plane.github_app_identity import GitHubAppInstallationToken
@@ -351,6 +352,23 @@ class FakePreviewProvider:
 
     def observe_apply(self, **_kwargs: object) -> tuple[str, None, bool]:
         raise AssertionError("a fresh preview operation is never observed")
+
+
+# Real shapes of provider, script and exception text a redactor misses.
+PROVIDER_FAILURE_TEXT = (
+    "Dokploy compose 'site-prod-app' (compose-A1b2c3D4e5) has no appName; "
+    'FATAL: database "cm_test" does not exist; ECONNREFUSED 203.0.113.42:22; '
+    "ENOTFOUND database"
+)
+PROVIDER_FAILURE_FRAGMENTS = (
+    "site-prod-app",
+    "compose-A1b2c3D4e5",
+    "cm_test",
+    "203.0.113.42",
+    "ENOTFOUND",
+    "ECONNREFUSED",
+    "appName",
+)
 
 
 class ProductReconcileTestCase(unittest.TestCase):
@@ -759,6 +777,82 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
         self.assertIn("failed 3 times", completed.last_error)
         self.assertEqual(len(self.store.list_odoo_stable_target_replacement_operation_records()), 3)
 
+    def fail_with_provider_text(self, operation_id: str) -> None:
+        operation = self.store.read_odoo_stable_target_replacement_operation_record(operation_id)
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            operation.model_copy(
+                update={
+                    "status": "fail",
+                    "phase": "failed",
+                    "finished_at": "2026-09-30T12:00:00Z",
+                    "attempt": 1,
+                    "result": OdooStableTargetReplacementApplyResult(
+                        product="site",
+                        context="cm",
+                        instance="testing",
+                        strategy="recreate-in-place",
+                        deploy_status="pass",
+                        post_deploy_status="pass",
+                        health_status="fail",
+                        target_id="compose-A1b2c3D4e5",
+                        target_name="site-prod-app",
+                    ),
+                    "error_message": PROVIDER_FAILURE_TEXT,
+                }
+            )
+        )
+
+    def test_failed_testing_deploy_reason_is_structured_with_no_provider_text(self) -> None:
+        # The operation's own status read needs the grant that starts a deploy, so
+        # the product read must say why; provider text is never copied there.
+        self.github.add_run(20, DEPLOYABLE)
+        for _attempt in range(3):
+            self.request()
+            self.fail_with_provider_text(cast(str, self.reconcile()["queued_operation_id"]))
+        self.request()
+
+        with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+            completed = self.run_once()
+
+        view = product_reconcile_request_view(completed)
+        self.assertEqual(view.last_plan["last_failed_error_code"], "health_check_failed")
+        self.assertEqual(
+            view.last_plan["last_failed_error_summary"],
+            "The health check did not pass. Steps: deploy pass, post-deploy pass, "
+            "setting overrides skipped, health fail, canonical skipped, logo skipped. "
+            "Worker attempt 1.",
+        )
+        self.assertIn("health_check_failed: The health check did not pass.", view.last_error)
+        read = view.model_dump_json()
+        for leaked in PROVIDER_FAILURE_FRAGMENTS:
+            self.assertNotIn(leaked, read)
+
+    def test_an_operation_error_code_keeps_its_fixed_description(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        first = cast(str, self.reconcile()["queued_operation_id"])
+        operation = self.store.read_odoo_stable_target_replacement_operation_record(first)
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            operation.model_copy(
+                update={
+                    "status": "fail",
+                    "phase": "failed",
+                    "finished_at": "2026-09-30T12:00:00Z",
+                    "error_code": "operation_authorization_revoked",
+                    "error_message": "Revoked for site-prod-app on 203.0.113.42.",
+                }
+            )
+        )
+        self.request()
+
+        plan = self.reconcile()
+
+        self.assertEqual(plan["last_failed_error_code"], "operation_authorization_revoked")
+        self.assertEqual(
+            plan["last_failed_error_summary"],
+            "The deploy's authorization was removed or narrowed before it ran.",
+        )
+
     def test_testing_is_left_alone_when_the_release_already_has_that_digest(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
         self.store.write_release_tuple_record(
@@ -1024,7 +1118,12 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
             (feedback["status"], feedback["delivery_status"], feedback["delivery_action"]),
             ("destroyed", "delivered", "updated_comment"),
         )
-        (record,) = self.store.list_preview_pr_feedback_records(context_name="cm")
+        # Feedback record ids carry the request second, so a run that crosses a second
+        # boundary keeps one record per second; the newest is the retirement.
+        record = max(
+            self.store.list_preview_pr_feedback_records(context_name="cm"),
+            key=lambda item: item.requested_at,
+        )
         self.assertEqual((record.status, record.delivery_status), ("destroyed", "delivered"))
 
     def test_failed_preview_says_why_on_the_pr(self) -> None:

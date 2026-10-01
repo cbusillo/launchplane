@@ -1415,8 +1415,25 @@ records what it decided and did as `last_plan`:
   including one awaiting provider reconciliation. When that attempt ended
   (`fail`, `cancelled`, or `pass` while testing no longer runs the artifact),
   the next attempt's key appends `:after-<previous operation id>`, and the plan
-  names `last_failed_operation_id`. After three failed attempts of one artifact
-  the request is `failed`. A lane with another active operation leaves the
+  names `last_failed_operation_id` with why it failed: `last_failed_error_code`
+  and `last_failed_error_summary`. The operation's own status read needs the
+  grant that starts a deploy, so the reason is copied onto this plan, which the
+  product read shows. The code is the operation's `error_code` (an
+  authorization denial: `operation_authorization_reconcile_refused`,
+  `operation_authorization_revoked`, `operation_authorization_policy_unavailable`,
+  `operation_authorization_provenance_missing`), or, when it has none, the first
+  failed step of its driver result: `deploy_failed`,
+  `post_deploy_override_failed`, `post_deploy_failed`, `post_deploy_not_run`,
+  `health_check_failed`, `canonical_check_failed`, `logo_check_failed`, or
+  `driver_result_failed`; `operation_failed` when the worker stopped before a
+  result, and `operation_cancelled` for a cancelled attempt. The summary is
+  structured and contains no provider, script or exception text: the code's
+  fixed description (`TESTING_FAILURE_DESCRIPTIONS` in
+  `control_plane/product_reconcile.py`; an unknown code gets a generic one),
+  the result's step statuses, and the worker attempt. After three failed
+  attempts of one artifact
+  the request is `failed`, and its error ends with the last attempt's code and
+  summary. A lane with another active operation leaves the
   request `pending` (`deferred: lane_busy`).
 - preview: `apply`, `destroy`, `wait` (open and labeled but no verified build
   yet), or `none`. An apply or destroy issues the preview plan the inputs route
@@ -1620,6 +1637,13 @@ state/
 - One file per backup gate run that can authorize a promotion.
 - Record the destination environment, evidence source, pass/fail status, and
   concrete backup evidence such as snapshot or archive identifiers.
+- A failed gate's event on the product activity read
+  (`GET /v1/products/{product}/activity`, `product_environment.read`) ends with
+  `Reason: ...`: a fixed description keyed by the gate's source, plus the
+  production backup provider's `provider_stage` when it is one of its fixed
+  stages. `evidence.error_message` is never shown there: it is provider and
+  script text. The gate operation's own reads need the grant that ran it or
+  return only its code.
 - Odoo prod backup-gate records are created by the Launchplane Odoo driver after
   a real compose-local DB dump and filestore archive capture. They should not be
   synthesized with generic operator assertions for release drills. Passing

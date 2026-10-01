@@ -80,6 +80,25 @@ ProductConfigItemStatus = Literal[
 ]
 ProductConfigInputKind = Literal["runtime_settings", "managed_secrets"]
 ProductConfigMode = Literal["dry-run", "apply"]
+# A failed gate's reason in Launchplane's own words, keyed by the source that
+# wrote it. Its stored error text can name targets, hosts and databases, so it
+# is never shown; the gate operation's own reads need the grant that ran it.
+BACKUP_GATE_FAILURE_DESCRIPTIONS: dict[str, str] = {
+    "launchplane-odoo-prod-backup-gate": (
+        "The Odoo production database and filestore backup did not complete."
+    ),
+    "launchplane-odoo-prod-backup-verification": "The Odoo backup verification did not pass.",
+    "launchplane-odoo-prod-retained-volume-backup-import": (
+        "The retained-volume backup import did not complete."
+    ),
+    "launchplane-verireel-prod-backup-gate": "The production backup did not complete.",
+    "launchplane-production-backup-gate": "The production backup did not complete.",
+}
+_UNKNOWN_BACKUP_GATE_FAILURE = "The backup gate failed."
+# The production backup provider records which of its fixed stages it reached.
+_BACKUP_PROVIDER_STAGES = frozenset(
+    {"preflight", "snapshot", "independent_backup", "snapshot_retention"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1271,11 +1290,27 @@ def _backup_gate_activity_events(
                 status=str(getattr(record, "status")),
                 occurred_at=str(getattr(record, "created_at")),
                 title=f"{profile.display_name} {lane.instance} backup gate",
-                summary=f"Backup gate {getattr(record, 'status')} for {lane.context}/{lane.instance}.",
+                summary=_backup_gate_summary(record, lane=lane),
                 records=(_record_link("backup_gate", str(getattr(record, "record_id"))),),
             )
         )
     return tuple(events)
+
+
+def _backup_gate_summary(record: object, *, lane: ProductLaneProfile) -> str:
+    """The gate's outcome; a failed gate adds a fixed reason keyed by its source."""
+    status = str(getattr(record, "status"))
+    summary = f"Backup gate {status} for {lane.context}/{lane.instance}."
+    if status != "fail":
+        return summary
+    reason = BACKUP_GATE_FAILURE_DESCRIPTIONS.get(
+        str(getattr(record, "source", "")), _UNKNOWN_BACKUP_GATE_FAILURE
+    )
+    evidence = getattr(record, "evidence", None)
+    stage = evidence.get("provider_stage", "") if isinstance(evidence, dict) else ""
+    if stage in _BACKUP_PROVIDER_STAGES:
+        reason = f"{reason} Stage: {stage.replace('_', ' ')}."
+    return f"{summary} Reason: {reason}"
 
 
 def _preview_activity_events(

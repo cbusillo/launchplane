@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Literal, Protocol, cast
 from urllib.parse import quote, urlencode
@@ -401,8 +402,15 @@ def reconcile_testing_target(
         ),
         idempotency_scope=idempotency_scope,
     )
-    if attempt.last_failed_operation_id:
-        plan["last_failed_operation_id"] = attempt.last_failed_operation_id
+    if attempt.last_failed is not None:
+        # The operation's own status read needs the grant that starts a deploy;
+        # this plan is what the product read shows, so the reason is copied here.
+        error_code, error_summary = _testing_failure_reason(attempt.last_failed)
+        plan.update(
+            last_failed_operation_id=attempt.last_failed.operation_id,
+            last_failed_error_code=error_code,
+            last_failed_error_summary=error_summary,
+        )
     if attempt.deployed_operation_id:
         plan.update(
             action="none",
@@ -425,8 +433,9 @@ def reconcile_testing_target(
             plan,
             error=(
                 f"The testing deploy of {manifest.artifact_id} failed "
-                f"{attempt.failed_attempts} times (last {attempt.last_failed_operation_id}); "
-                "Launchplane stops retrying it until a newer build."
+                f"{attempt.failed_attempts} times; Launchplane stops retrying it until a "
+                f"newer build. Last attempt {attempt.last_failed_operation_id}: "
+                f"{plan['last_failed_error_code']}: {plan['last_failed_error_summary']}"
             ),
         )
     created_at = _utc_now()
@@ -467,8 +476,12 @@ class _TestingAttempt:
     idempotency_key: str
     active: OdooStableTargetReplacementOperationRecord | None = None
     failed_attempts: int = 0
-    last_failed_operation_id: str = ""
+    last_failed: OdooStableTargetReplacementOperationRecord | None = None
     deployed_operation_id: str = ""
+
+    @property
+    def last_failed_operation_id(self) -> str:
+        return self.last_failed.operation_id if self.last_failed is not None else ""
 
 
 def _next_testing_attempt(
@@ -486,7 +499,7 @@ def _next_testing_attempt(
     operation_store = odoo_target_replacement_apply_operation_store(record_store)
     key = base_key
     failed_attempts = 0
-    last_failed_operation_id = ""
+    last_failed: OdooStableTargetReplacementOperationRecord | None = None
     for _ in range(TESTING_DEPLOY_MAX_ATTEMPT_CHAIN):
         existing = find_odoo_target_replacement_apply_operation_by_idempotency_key(
             operation_store=operation_store,
@@ -497,14 +510,14 @@ def _next_testing_attempt(
             return _TestingAttempt(
                 idempotency_key=key,
                 failed_attempts=failed_attempts,
-                last_failed_operation_id=last_failed_operation_id,
+                last_failed=last_failed,
             )
         if existing.status not in ODOO_STABLE_TARGET_REPLACEMENT_TERMINAL_OPERATION_STATUSES:
             return _TestingAttempt(
                 idempotency_key=key,
                 active=existing,
                 failed_attempts=failed_attempts,
-                last_failed_operation_id=last_failed_operation_id,
+                last_failed=last_failed,
             )
         if existing.status == "pass":
             if testing_runs_desired():
@@ -514,12 +527,87 @@ def _next_testing_attempt(
                 )
         elif not is_staff_testing_hold_cancellation(existing):
             failed_attempts += 1
-            last_failed_operation_id = existing.operation_id
+            last_failed = existing
         # A passed attempt that testing no longer runs was rolled back: deploy again.
         key = f"{base_key}:after-{existing.operation_id}"
     raise ProductReconcileError(
         f"The testing deploy has more than {TESTING_DEPLOY_MAX_ATTEMPT_CHAIN} attempts."
     )
+
+
+# What each failed testing attempt's code means, in Launchplane's own words. The
+# summary built from it never carries provider, script or exception text: that
+# text can name targets, hosts and databases no redactor reliably finds.
+TESTING_FAILURE_DESCRIPTIONS: dict[str, str] = {
+    "deploy_failed": "The deploy step failed.",
+    "post_deploy_override_failed": "Applying the lane's post-deploy setting overrides failed.",
+    "post_deploy_failed": "The post-deploy update failed.",
+    "post_deploy_not_run": "The deploy finished, but the post-deploy update did not run.",
+    "health_check_failed": "The health check did not pass.",
+    "canonical_check_failed": "The canonical URL check did not pass.",
+    "logo_check_failed": "The website logo check did not pass.",
+    "driver_result_failed": "The driver reported a failure outside its recorded steps.",
+    "operation_failed": "The deploy stopped with an error before the driver returned a result.",
+    "operation_cancelled": "The deploy was cancelled.",
+    "operation_authorization_reconcile_refused": (
+        "Launchplane's reconcile grant did not cover this deploy when it ran."
+    ),
+    "operation_authorization_revoked": (
+        "The deploy's authorization was removed or narrowed before it ran."
+    ),
+    "operation_authorization_policy_unavailable": (
+        "The authorization policy could not be read when the deploy ran."
+    ),
+    "operation_authorization_provenance_missing": (
+        "The deploy had no recorded authorization and could not run."
+    ),
+}
+_UNKNOWN_TESTING_FAILURE = "The deploy failed with a code this Launchplane does not describe."
+_ERROR_CODE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+
+
+def _testing_failure_reason(
+    operation: OdooStableTargetReplacementOperationRecord,
+) -> tuple[str, str]:
+    """The failed attempt's error code and a structured summary of it.
+
+    The code is the operation's own ``error_code``, or the first failed step of
+    its driver result. The summary is that code's fixed description plus the
+    result's step statuses and the worker attempt; never the error message.
+    """
+    error_code = operation.error_code.strip()
+    if not _ERROR_CODE_PATTERN.match(error_code):
+        error_code = _testing_failure_code(operation)
+    parts = [TESTING_FAILURE_DESCRIPTIONS.get(error_code, _UNKNOWN_TESTING_FAILURE)]
+    result = operation.result
+    if result is not None:
+        parts.append(
+            f"Steps: deploy {result.deploy_status}, post-deploy {result.post_deploy_status}, "
+            f"setting overrides {result.post_deploy_override_status}, "
+            f"health {result.health_status}, canonical {result.canonical_status}, "
+            f"logo {result.logo_status}."
+        )
+    if operation.attempt:
+        parts.append(f"Worker attempt {operation.attempt}.")
+    return error_code, " ".join(parts)
+
+
+def _testing_failure_code(operation: OdooStableTargetReplacementOperationRecord) -> str:
+    if operation.status == "cancelled":
+        return "operation_cancelled"
+    result = operation.result
+    if result is None:
+        return "operation_failed"
+    steps = (
+        ("deploy_failed", result.deploy_status == "fail"),
+        ("post_deploy_override_failed", result.post_deploy_override_status == "fail"),
+        ("post_deploy_failed", result.post_deploy_status == "fail"),
+        ("post_deploy_not_run", result.post_deploy_status != "pass"),
+        ("health_check_failed", result.health_status == "fail"),
+        ("canonical_check_failed", result.canonical_status == "fail"),
+        ("logo_check_failed", result.logo_status == "fail"),
+    )
+    return next((code for code, failed in steps if failed), "driver_result_failed")
 
 
 def _plan_testing_target(
