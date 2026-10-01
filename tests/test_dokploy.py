@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -27,6 +28,7 @@ from control_plane.odoo_instance_overrides import LAUNCHPLANE_INSTANCE_OVERRIDES
 from control_plane.odoo_instance_overrides import LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY
 from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
 from control_plane import secrets as control_plane_secrets
+from control_plane.cli import ARTIFACT_IMAGE_REFERENCE_ENV_KEY
 from control_plane.cli import main
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import (
@@ -4311,13 +4313,17 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         self.assertEqual(rendered, "KEEP=1\nADD=2")
 
     def test_launchplane_compose_exports_runtime_image_reference(self) -> None:
-        compose_text = Path("docker-compose.yml").read_text()
+        compose_text = Path("docker-compose.yml").read_text(encoding="utf-8")
+        image_references = set(re.findall(r"(?m)^\s+image:\s*(\S+)\s*$", compose_text))
 
-        self.assertIn("image: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}", compose_text)
-        self.assertIn(
-            "DOCKER_IMAGE_REFERENCE: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}",
-            compose_text,
-        )
+        self.assertTrue(image_references)
+        for image_reference in image_references:
+            with self.subTest(image_reference=image_reference):
+                self.assertIn(f"${{{ARTIFACT_IMAGE_REFERENCE_ENV_KEY}", image_reference)
+                self.assertIn(
+                    f"{ARTIFACT_IMAGE_REFERENCE_ENV_KEY}: {image_reference}",
+                    compose_text,
+                )
 
     def test_render_odoo_raw_compose_file_pins_artifact_image_and_services(self) -> None:
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(

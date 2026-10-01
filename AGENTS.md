@@ -93,6 +93,11 @@ Treat this file as the launch checklist for each engineering session in
 - Add targeted tests whenever contract or storage behavior changes. Broaden to
   integration or full-suite proof when the changed behavior, a failure, or the
   configured review/CI gate justifies it.
+- A test must fail when the product breaks and pass when someone makes an
+  intended change. No test may assert a literal defined elsewhere (a version,
+  toolchain, pin, hash, or count) or assert workflow, config, or docs text;
+  run the script or check agreement with the one source instead. Verification
+  code must not depend on working-tree state. See `docs/style/testing.md`.
 
 ## Repo Boundaries
 

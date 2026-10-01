@@ -3,6 +3,18 @@ title: Testing Style
 ---
 
 - Add targeted unit tests for storage, contracts, and workflow mapping.
+- A test stays only if it fails when the product is broken and passes when
+  someone makes an intended change. A version, toolchain, or dependency bump,
+  or an edit to a workflow step's wording, should need no test edit.
+- Do not assert a literal defined elsewhere (versions, pins, image digests,
+  hashes, counts, operation tables). Check agreement with the one source, or
+  keep a byte-exact gate only on a real generated artifact or immutable
+  evidence.
+- Do not assert workflow, action, config, or docs text. Run the embedded script
+  with inputs and check what it does, or enforce a rule that holds for every
+  workflow (fork isolation, pinned actions, permissions).
+- Verification code must not depend on working-tree state; read live state
+  only on the path that acts on it.
 - Prefer deterministic file-system tests using `TemporaryDirectory`.
 - Test fail-closed behavior explicitly.
 - Keep fixtures small and inline unless they are reused heavily.
@@ -188,15 +200,18 @@ that proof. Deployed OIDC smoke remains a separate non-destructive evidence
 layer because it validates service authentication and deployment wiring rather
 than deterministic UI behavior.
 
-Workflow contract tests should parse workflow YAML through
-`tests/support/workflows.py` and assert named invariants instead of mirroring
-large YAML snippets, substring counts, or indentation-sensitive job fragments.
-Use semantic checks for event shape, fork-hosted versus same-repository
-self-hosted runner isolation, OIDC and permission requirements,
-`launchplane-request` inputs, artifact retention, immutable timing snapshots,
-and aggregate gate dependencies. Keep direct text assertions only for embedded
-script behavior that is not represented as YAML structure, and make invariant
-failures name both the workflow file and the violated invariant.
+Workflows are checked where they execute: CI runs them, and `security.yml` runs
+actionlint and zizmor over every workflow. Do not add a test that re-reads one
+workflow to check that it says what it says. Workflow tests take one of three
+forms:
+
+- Run an embedded script step with inputs (through `tests/support/workflows.py`
+  `load_workflow` and `step_named`) and assert its output or exit code.
+- Enforce a rule over every workflow, such as fork pull requests never reaching
+  self-hosted runners or remote actions being pinned to a full commit SHA, and
+  name the workflow file and violated rule on failure.
+- Check that two real files agree, such as an operator wrapper's inputs and the
+  pinned worker it forwards to.
 
 ## HTTP and ASGI contracts
 
