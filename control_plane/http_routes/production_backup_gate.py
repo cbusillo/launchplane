@@ -35,7 +35,7 @@ PRODUCTION_BACKUP_GATE_OPERATION_ROUTE = "/v1/production-backup-gates/operations
 @dataclass(frozen=True, slots=True)
 class ProductionBackupGateRouteDependencies:
     common: ReadRouteDependencies
-    read_write_identity: Callable[..., LaunchplaneIdentity]
+    read_mutation_identity: Callable[..., LaunchplaneIdentity]
     cancel_pending_operation: Callable[..., VeriReelProdBackupGateOperationRecord]
 
 
@@ -73,7 +73,7 @@ def register_production_backup_gate_routes(
 
     def enqueue_backup(
         request: ProductionBackupGateRequest,
-        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_mutation_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key", max_length=256)] = "",
     ) -> ProductionBackupGateResponse:
@@ -213,7 +213,7 @@ def register_production_backup_gate_routes(
         product: Annotated[str, Query(min_length=1)],
         context: Annotated[str, Query(min_length=1)],
         instance: Annotated[str, Query(min_length=1)],
-        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_mutation_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
     ) -> ProductionBackupGateResponse:
         trace_id = common.next_trace_id()

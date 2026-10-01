@@ -603,3 +603,64 @@
     width: 100%;
   }
 }
+
+.odoo-release-review {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.odoo-release-review[data-approved="false"] svg {
+  color: var(--warning);
+}
+
+.odoo-release-blockers {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.odoo-release-steps {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.odoo-release-steps li {
+  display: grid;
+  grid-template-columns: auto minmax(10rem, max-content) minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+
+.odoo-release-steps li[data-state="failed"] svg {
+  color: var(--danger);
+}
+
+.odoo-release-steps li[data-state="passed"] svg {
+  color: var(--prod);
+}
+
+.odoo-release-facts {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+
+.odoo-release-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 640px) {
+  .odoo-release-steps li {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .odoo-release-steps li > span {
+    grid-column: 2;
+  }
+}

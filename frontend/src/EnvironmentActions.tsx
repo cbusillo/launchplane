@@ -17,6 +17,7 @@ import {
 } from "./action-model";
 import type { BrowserActionKind } from "./browser-operation";
 import type { DevFixtureMode } from "./dev-fixture-loader";
+import { OdooReleasePanel } from "./OdooReleasePanel";
 import { ProductPromotionFlow } from "./ProductPromotionFlow";
 import { EvidenceBadge, MissingEvidenceState, humanize } from "./ProductOps";
 import { EnvironmentReadinessPanel } from "./EnvironmentReadiness";
@@ -58,7 +59,13 @@ export function EnvironmentActionsView({
 
   return (
     <section className="environment-actions-view">
-      {detail.environment === "prod" ? (
+      {detail.environment === "prod" && detail.driver_extensions.odoo ? (
+        <OdooReleasePanel
+          detail={detail}
+          fixtureMode={!!fixtureMode}
+          onRefresh={onRefresh}
+        />
+      ) : detail.environment === "prod" ? (
         <ProductPromotionFlow
           detail={detail}
           fixtureMode={fixtureMode}

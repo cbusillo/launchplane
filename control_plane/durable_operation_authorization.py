@@ -76,6 +76,22 @@ class DurableOperationAuthorizationGuard:
             raise
         self.provider_effect_authorized = True
 
+    def recheck_provider_effect(self, _phase: str) -> None:
+        """Re-read authority at a phase boundary even after an earlier effect.
+
+        ``checkpoint_provider_effect`` checks once and then stays authorized so a
+        revocation cannot stop half-applied provider work. A worker calls this at
+        a boundary that starts a new effect worth refusing, such as the deploy
+        after a backup.
+        """
+
+        try:
+            self._authorize()
+        except DurableOperationAuthorizationDeniedError as error:
+            self.denial_error = error
+            raise
+        self.provider_effect_authorized = True
+
     def _authorize(self) -> None:
         if self.authorization is None:
             raise DurableOperationAuthorizationDeniedError(
@@ -103,6 +119,19 @@ class DurableOperationAuthorizationGuard:
                 code="operation_authorization_policy_unavailable",
                 message="The active authorization policy is unavailable for durable execution.",
             ) from error
+        if self.authorization.grant == "policy_administrator":
+            if not durable_operation_administrator_grant_allows(
+                authorization=self.authorization,
+                policy_record=policy_record,
+            ):
+                raise DurableOperationAuthorizationDeniedError(
+                    code="operation_authorization_administrator_revoked",
+                    message=(
+                        "The active authorization policy no longer names the recorded caller "
+                        "as its administrator."
+                    ),
+                )
+            return
         if not durable_operation_authorization_allows(
             authorization=self.authorization,
             policy_record=policy_record,
@@ -145,15 +174,19 @@ def capture_durable_operation_authorization(
     policy_record: LaunchplaneAuthzPolicyRecord,
     authorized_at: str,
 ) -> DurableOperationAuthorization:
-    match policy_record.policy.schema_version:
-        case 2:
-            policy_schema_version: Literal[2, 3] = 2
-        case 3:
-            policy_schema_version = 3
-        case _:
-            raise DurableOperationAuthorizationCaptureError(
-                "Durable operations require schema-v2 or schema-v3 managed authz policy."
-            )
+    policy_schema_version = _durable_policy_schema_version(policy_record)
+    administrator_authorization = _policy_administrator_authorization(
+        identity=identity,
+        action=action,
+        product=product,
+        context=context,
+        instances=instances,
+        policy_record=policy_record,
+        policy_schema_version=policy_schema_version,
+        authorized_at=authorized_at,
+    )
+    if administrator_authorization is not None:
+        return administrator_authorization
     target = AuthorizationTarget(scope="instance", instances=instances)
     try:
         managed_rule = require_single_managed_rule_identity(
@@ -197,15 +230,19 @@ def capture_explicit_action_durable_operation_authorization(
 ) -> DurableOperationAuthorization:
     """Capture authority only from a rule that names the requested action."""
 
-    match policy_record.policy.schema_version:
-        case 2:
-            policy_schema_version: Literal[2, 3] = 2
-        case 3:
-            policy_schema_version = 3
-        case _:
-            raise DurableOperationAuthorizationCaptureError(
-                "Durable operations require schema-v2 or schema-v3 managed authz policy."
-            )
+    policy_schema_version = _durable_policy_schema_version(policy_record)
+    administrator_authorization = _policy_administrator_authorization(
+        identity=identity,
+        action=action,
+        product=product,
+        context=context,
+        instances=instances,
+        policy_record=policy_record,
+        policy_schema_version=policy_schema_version,
+        authorized_at=authorized_at,
+    )
+    if administrator_authorization is not None:
+        return administrator_authorization
     target = AuthorizationTarget(scope="instance", instances=instances)
     try:
         managed_rule = require_single_explicit_action_managed_rule_identity(
@@ -234,6 +271,78 @@ def capture_explicit_action_durable_operation_authorization(
         policy_source=policy_record.source,
         authorized_at=authorized_at,
         caller=durable_operation_caller_identity(identity),
+    )
+
+
+def _durable_policy_schema_version(
+    policy_record: LaunchplaneAuthzPolicyRecord,
+) -> Literal[2, 3]:
+    match policy_record.policy.schema_version:
+        case 2:
+            return 2
+        case 3:
+            return 3
+        case _:
+            raise DurableOperationAuthorizationCaptureError(
+                "Durable operations require schema-v2 or schema-v3 managed authz policy."
+            )
+
+
+def _policy_administrator_authorization(
+    *,
+    identity: LaunchplaneIdentity,
+    action: str,
+    product: str,
+    context: str,
+    instances: tuple[str, ...],
+    policy_record: LaunchplaneAuthzPolicyRecord,
+    policy_schema_version: Literal[2, 3],
+    authorized_at: str,
+) -> DurableOperationAuthorization | None:
+    """The policy administrator's own grant, or None for everyone else.
+
+    Only a signed-in person the active policy names as administrator by immutable
+    GitHub id gets it; the worker re-checks that naming before acting.
+    """
+
+    if not isinstance(
+        identity, GitHubHumanIdentity
+    ) or not policy_record.policy.names_administrator(identity):
+        return None
+    return DurableOperationAuthorization(
+        action=action,
+        product=product,
+        context=context,
+        instances=instances,
+        policy_record_id=policy_record.record_id,
+        policy_revision=policy_record.revision,
+        policy_schema_version=policy_schema_version,
+        policy_sha256=policy_record.policy_sha256,
+        policy_source=policy_record.source,
+        authorized_at=authorized_at,
+        caller=durable_operation_caller_identity(identity),
+        grant="policy_administrator",
+    )
+
+
+def durable_operation_administrator_grant_allows(
+    *,
+    authorization: DurableOperationAuthorization,
+    policy_record: LaunchplaneAuthzPolicyRecord,
+) -> bool:
+    """Whether the active policy still names the recorded caller as its administrator."""
+
+    if authorization.grant != "policy_administrator" or policy_record.status != "active":
+        return False
+    schema_transition = (
+        authorization.policy_schema_version,
+        policy_record.policy.schema_version,
+    )
+    if schema_transition not in _DURABLE_OPERATION_POLICY_SCHEMA_TRANSITIONS:
+        return False
+    identity = launchplane_identity_from_durable_caller(authorization.caller)
+    return isinstance(identity, GitHubHumanIdentity) and policy_record.policy.names_administrator(
+        identity
     )
 
 

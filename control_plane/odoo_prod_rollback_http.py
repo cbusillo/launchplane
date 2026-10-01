@@ -13,8 +13,8 @@ from control_plane.odoo_product_driver_http import (
     OdooRouteDependencyError,
     resolve_odoo_product_route,
 )
+from control_plane.contracts.odoo_prod_rollback_operation import OdooProdRollbackRequest
 from control_plane.workflows.odoo_prod_rollback import (
-    OdooProdRollbackRequest,
     OdooProdRollbackStore,
     execute_odoo_prod_rollback,
 )
@@ -74,11 +74,14 @@ def execute_odoo_prod_rollback_result(
         request=request.rollback,
     )
     records: dict[str, object] = {
+        "artifact_id": driver_result.artifact_id,
         "promotion_record_id": driver_result.promotion_record_id,
         "deployment_record_id": driver_result.deployment_record_id,
         "release_tuple_id": driver_result.release_tuple_id,
     }
     result: dict[str, object] = {
+        "artifact_id": driver_result.artifact_id,
+        "source_channel": driver_result.source_channel,
         "promotion_record_id": driver_result.promotion_record_id,
         "deployment_record_id": driver_result.deployment_record_id,
         "release_tuple_id": driver_result.release_tuple_id,
@@ -87,6 +90,7 @@ def execute_odoo_prod_rollback_result(
         "rollback_started_at": driver_result.rollback_started_at,
         "rollback_finished_at": driver_result.rollback_finished_at,
         "post_deploy_status": driver_result.post_deploy_status,
+        "error_message": driver_result.error_message,
     }
     return records, result
 

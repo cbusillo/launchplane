@@ -1640,7 +1640,7 @@ class ProductReconcileWorkerTests(ProductReconcileTestCase):
 
         self.assertEqual(result.status, "idle")
         self.assertEqual(store.claims[-1], "claim_next_product_reconcile_request")
-        self.assertEqual(len(store.claims), 5)
+        self.assertEqual(len(store.claims), 7)
 
     def test_worker_reports_a_reconcile_it_ran(self) -> None:
         self.request()

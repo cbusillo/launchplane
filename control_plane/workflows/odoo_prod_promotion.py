@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from control_plane.release_review import require_release_approval
 from typing import Literal, Protocol
@@ -127,6 +128,7 @@ def execute_odoo_prod_promotion(
     database_url: str | None,
     record_store: OdooProdPromotionStore,
     request: OdooProdPromotionRequest,
+    provider_effect_checkpoint: Callable[[str], None] | None = None,
 ) -> OdooProdPromotionResult:
     del state_dir, database_url
     product = _resolve_product_profile_key(product=request.product, context=request.context)
@@ -200,7 +202,9 @@ def execute_odoo_prod_promotion(
                     health_timeout_seconds=request.health_timeout_seconds,
                     no_cache=request.no_cache,
                 ),
-                provider_effect_checkpoint=backup_checkpoint,
+                provider_effect_checkpoint=_checkpoint_chain(
+                    provider_effect_checkpoint, backup_checkpoint
+                ),
             )
         infrastructure_backup.evidence.update(backup_checkpoint.evidence)
         deployment_record = _read_deployment_record_if_present(
@@ -257,6 +261,19 @@ def execute_odoo_prod_promotion(
             release_tuple_id="",
             error_message=str(error),
         )
+
+
+def _checkpoint_chain(
+    first: Callable[[str], None] | None, second: Callable[[str], None]
+) -> Callable[[str], None]:
+    if first is None:
+        return second
+
+    def checkpoint(phase: str) -> None:
+        first(phase)
+        second(phase)
+
+    return checkpoint
 
 
 def _promotion_record_id(*, context: str, from_instance: str, to_instance: str) -> str:

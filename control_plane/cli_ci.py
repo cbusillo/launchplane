@@ -45,6 +45,7 @@ POSTGRES_INTEGRATION_MODULES = (
     "tests.test_merge_train_historical_disposition_http",
     "tests.test_production_backup_gate.ProductionBackupGatePostgresTests",
     "tests.test_http_production_backup_gate.ProductionBackupGatePostgresHttpTests",
+    "tests.test_odoo_prod_promotion_operation.OdooSynchronousLaneReservationPostgresTests",
 )
 
 

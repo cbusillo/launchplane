@@ -8,6 +8,9 @@ import type {
   ApproveHumanPrivilegedOperationData,
   DispatchProductPromotionWorkflowData,
   DryRunProductPromotionData,
+  EnqueueOdooProdPromotionData,
+  EnqueueOdooProdRollbackData,
+  EnqueueProductionBackupGateData,
   RankWorkGraphSnapshotData,
   RevokeHumanPrivilegedOperationData,
   PlanOrdinaryAgentDeliveryActivationData,
@@ -35,6 +38,12 @@ export const BROWSER_WRITE_ROUTES = {
     "/v1/products/{product}/environments/{environment}/promotion/dry-run" satisfies DryRunProductPromotionData["url"],
   productPromotionWorkflowDispatch:
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch" satisfies DispatchProductPromotionWorkflowData["url"],
+  productionBackupGateEnqueue:
+    "/v1/production-backup-gates" satisfies EnqueueProductionBackupGateData["url"],
+  odooProdPromotionEnqueue:
+    "/v1/odoo-prod-promotions" satisfies EnqueueOdooProdPromotionData["url"],
+  odooProdRollbackEnqueue:
+    "/v1/odoo-prod-rollbacks" satisfies EnqueueOdooProdRollbackData["url"],
   workGraphRank:
     "/v1/work-graph/rank" satisfies RankWorkGraphSnapshotData["url"],
   productReviewDecision:

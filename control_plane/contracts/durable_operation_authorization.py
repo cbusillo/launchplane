@@ -24,15 +24,13 @@ DurableOperationIdentityType = Literal[
 ]
 # "policy_rule": a caller's managed authz rule, re-checked against the active policy.
 # "launchplane_reconcile": Launchplane's own reconciler; no caller and no policy rule.
-DurableOperationGrant = Literal["policy_rule", "launchplane_reconcile"]
+# "policy_administrator": the signed-in person the active policy names as its
+# administrator by immutable GitHub id; re-checked against the active policy.
+DurableOperationGrant = Literal["policy_rule", "launchplane_reconcile", "policy_administrator"]
 LAUNCHPLANE_RECONCILE_SUBJECT = "launchplane-reconciler"
-_POLICY_RULE_TEXT_FIELDS = (
-    "managed_set_id",
-    "managed_rule_id",
-    "policy_record_id",
-    "policy_sha256",
-    "policy_source",
-)
+_MANAGED_RULE_TEXT_FIELDS = ("managed_set_id", "managed_rule_id")
+_POLICY_PROVENANCE_TEXT_FIELDS = ("policy_record_id", "policy_sha256", "policy_source")
+_POLICY_RULE_TEXT_FIELDS = (*_MANAGED_RULE_TEXT_FIELDS, *_POLICY_PROVENANCE_TEXT_FIELDS)
 _CALLER_TEXT_FIELDS = (
     "subject",
     "token_label",
@@ -154,7 +152,16 @@ class DurableOperationAuthorization(BaseModel):
             return self
         if self.caller.identity_type == "launchplane_reconcile":
             raise ValueError("The Launchplane reconcile identity has no policy-rule grant.")
-        for field_name in _POLICY_RULE_TEXT_FIELDS:
+        required_text_fields: tuple[str, ...] = _POLICY_RULE_TEXT_FIELDS
+        if self.grant == "policy_administrator":
+            if self.caller.identity_type != "github_human" or self.caller.role != "admin":
+                raise ValueError(
+                    "A policy administrator grant requires a GitHub human caller with role admin."
+                )
+            if any(getattr(self, field_name) for field_name in _MANAGED_RULE_TEXT_FIELDS):
+                raise ValueError("A policy administrator grant carries no managed rule.")
+            required_text_fields = _POLICY_PROVENANCE_TEXT_FIELDS
+        for field_name in required_text_fields:
             if not getattr(self, field_name):
                 raise ValueError(f"Durable operation authorization requires {field_name}.")
         if self.policy_revision < 1:
@@ -167,11 +174,15 @@ class DurableOperationAuthorization(BaseModel):
 
     @model_serializer(mode="wrap")
     def _serialize_authorization(self, handler: SerializerFunctionWrapHandler) -> object:
-        # A policy-rule grant serializes exactly as it did before the grant field existed.
+        # A policy-rule grant serializes exactly as it did before the grant field existed;
+        # the other grants omit the fields they never carry.
         payload = handler(self)
         if isinstance(payload, dict):
             if self.grant == "policy_rule":
                 payload.pop("grant", None)
+            elif self.grant == "policy_administrator":
+                for field_name in _MANAGED_RULE_TEXT_FIELDS:
+                    payload.pop(field_name, None)
             else:
                 for field_name in (
                     *_POLICY_RULE_TEXT_FIELDS,
