@@ -81,6 +81,8 @@ services:
     image: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}
     pull_policy: always
     restart: unless-stopped
+    # A stop finishes the target in progress; killing a landing midway wedges the train.
+    stop_grace_period: 5m
     depends_on:
       launchplane:
         condition: service_healthy

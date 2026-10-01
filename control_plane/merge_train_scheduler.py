@@ -96,6 +96,7 @@ def run_merge_train_scheduler_pass(
     record_store: object,
     control_plane_root: Path,
     now: Callable[[], str] = utc_now_timestamp,
+    should_stop: Callable[[], bool] = lambda: False,
 ) -> tuple[MergeTrainScheduledTargetResult, ...]:
     try:
         policy_record = resolve_merge_train_policy_record(record_store)
@@ -106,9 +107,19 @@ def run_merge_train_scheduler_pass(
         key=lambda policy: (policy.repository, policy.base_branch),
     )
     results: list[MergeTrainScheduledTargetResult] = []
-    for repository_policy in scheduled_policies:
+    for listed_policy in scheduled_policies:
+        # Shutting down: finish the current target, never start another.
+        if should_stop():
+            break
+        repository_policy = listed_policy
         # Each train is independent: one failing target never stops the others.
         try:
+            # An earlier target can take minutes; act only on the policy as it is now.
+            policy_record = resolve_merge_train_policy_record(record_store)
+            current_policy = _current_scheduled_policy(policy_record, listed_policy)
+            if current_policy is None:
+                continue
+            repository_policy = current_policy
             result = _run_scheduled_target(
                 record_store=record_store,
                 control_plane_root=control_plane_root,
@@ -156,6 +167,7 @@ def run_merge_train_scheduler_loop(
             results = run_merge_train_scheduler_pass(
                 record_store=record_store,
                 control_plane_root=control_plane_root,
+                should_stop=scheduler_stop_event.is_set,
             )
         except Exception:  # noqa: BLE001 - a bad pass (say, an unreadable policy) waits one interval.
             _LOGGER.exception("Scheduled merge train pass failed.")
@@ -169,6 +181,18 @@ def run_merge_train_scheduler_loop(
         elapsed = monotonic() - started_at
         scheduler_stop_event.wait(timeout=max(0.0, interval_seconds - elapsed))
     return passes
+
+
+def _current_scheduled_policy(
+    policy_record: MergeTrainPolicyRecord, listed_policy: MergeTrainRepositoryPolicy
+) -> MergeTrainRepositoryPolicy | None:
+    try:
+        current_policy = policy_record.policy.find_repository_policy(
+            repository=listed_policy.repository, base_branch=listed_policy.base_branch
+        )
+    except ValueError:
+        return None
+    return current_policy if current_policy.scheduler.enabled else None
 
 
 def _run_scheduled_target(
