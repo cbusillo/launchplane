@@ -143,6 +143,34 @@ class ProductReconcileRequestViewTests(unittest.TestCase):
 
         self.assertEqual(product_reconcile_request_view(record).last_delivery_id, _DELIVERY_ID)
 
+    def test_shows_every_key_a_failed_testing_deploy_names(self) -> None:
+        keys = [f"ODOO_TUNING_SETTING_{index:02d}" for index in range(60)]
+        summary = f"The deploy plan was not ready. Keys: {', '.join(keys)}."
+        record = ProductReconcileRequestRecord(
+            target_key="cm:testing",
+            product="cm",
+            target_kind="testing",
+            state="failed",
+            requested_at="2026-09-30T18:48:00Z",
+            updated_at="2026-09-30T18:48:00Z",
+            request_count=1,
+            last_plan={
+                "last_failed_operation_id": _OPERATION_ID,
+                "last_failed_error_summary": summary,
+            },
+            last_error=(
+                f"Last attempt {_OPERATION_ID}: plan_not_ready.runtime_keys_undeclared "
+                f"with token {_SECRETS[1]}"
+            ),
+        )
+
+        view = product_reconcile_request_view(record)
+
+        self.assertGreater(len(summary), 400)
+        self.assertEqual(view.last_plan["last_failed_error_summary"], summary)
+        self.assertIn(_OPERATION_ID, view.last_error)
+        self.assertNotIn(_SECRETS[1], view.last_error)
+
 
 if __name__ == "__main__":
     unittest.main()

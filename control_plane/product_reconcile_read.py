@@ -6,6 +6,9 @@ the service. Exact commit SHAs and image digests stay readable: they are what an
 operator compares against the build they expect. So do the ids Launchplane records
 itself, the GitHub delivery id and the plan's top-level `*_id` fields, when they
 have an id's shape; the shared redactor would otherwise take their hex for a token.
+The same ids stay readable where the saved error names them. A failed testing deploy's
+summary gets a longer limit: Launchplane writes it from a fixed description and
+validated key names, and a plan blocker can name dozens of keys.
 """
 
 import re
@@ -21,6 +24,8 @@ from control_plane.contracts.product_reconcile import (
 )
 
 _MAX_TEXT_LENGTH = 400
+_MAX_FAILURE_SUMMARY_LENGTH = 1500
+_FAILURE_SUMMARY_KEY = "last_failed_error_summary"
 _MAX_DEPTH = 4
 _MAX_ITEMS = 50
 _IDENTIFIER_PATTERN = re.compile(r"^(?:[0-9a-f]{40}|sha256:[0-9a-f]{64})$")
@@ -59,9 +64,14 @@ def product_reconcile_request_view(
 ) -> ProductReconcileRequestView:
     plan = _safe_value(record.last_plan, depth=0)
     plan = plan if isinstance(plan, dict) else {}
+    recorded_ids: list[str] = []
     for key, item in record.last_plan.items():
-        if key in plan and key.endswith("_id") and _is_recorded_id(item):
+        if key in plan and key.endswith("_id") and isinstance(item, str) and _is_recorded_id(item):
             plan[key] = item
+            recorded_ids.append(item)
+    summary = record.last_plan.get(_FAILURE_SUMMARY_KEY)
+    if isinstance(summary, str):
+        plan[_FAILURE_SUMMARY_KEY] = _safe_text(summary, maximum_length=_MAX_FAILURE_SUMMARY_LENGTH)
     return ProductReconcileRequestView(
         target_key=record.target_key,
         target_kind=record.target_kind,
@@ -76,7 +86,7 @@ def product_reconcile_request_view(
             if _is_recorded_id(record.last_delivery_id)
             else _safe_text(record.last_delivery_id)
         ),
-        last_error=_safe_text(record.last_error),
+        last_error=_safe_text_naming_ids(record.last_error, recorded_ids),
         last_plan=plan,
     )
 
@@ -100,8 +110,20 @@ def _is_recorded_id(value: JsonValue) -> bool:
     return isinstance(value, str) and _RECORDED_ID_PATTERN.match(value) is not None
 
 
-def _safe_text(value: str) -> str:
+def _safe_text(value: str, *, maximum_length: int = _MAX_TEXT_LENGTH) -> str:
     text = value.strip()
     if not text or _IDENTIFIER_PATTERN.match(text):
         return text
-    return redact_untrusted_text(text, fallback=_REDACTED, maximum_length=_MAX_TEXT_LENGTH)
+    return redact_untrusted_text(text, fallback=_REDACTED, maximum_length=maximum_length)
+
+
+def _safe_text_naming_ids(value: str, recorded_ids: list[str]) -> str:
+    """Redact the text but keep the ids the plan already shows, which it often names."""
+    placeholders = {f"recorded{index}": item for index, item in enumerate(recorded_ids)}
+    text = value
+    for placeholder, item in placeholders.items():
+        text = text.replace(item, placeholder)
+    text = _safe_text(text)
+    for placeholder, item in reversed(placeholders.items()):
+        text = re.sub(rf"\b{placeholder}\b", item, text)
+    return text
