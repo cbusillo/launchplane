@@ -945,10 +945,13 @@ requirement is reported as `absent`, so dry-runs are honest and re-applies are
 idempotent. Removing a managed secret binding requirement never unbinds or
 deletes a stored secret; the response lists any configured binding that still
 holds a value under `still_bound`. It does not accept secret plaintext, runtime
-values, repositories, lanes, domains, or promotion settings. The manual
-`Product Expected Config` workflow is the operator path for shared/runtime
-metadata changes; real product, context, instance, and binding values are
-workflow inputs, not checked-in defaults. Because the route authorizes against
+values, repositories, lanes, domains, or promotion settings. The operator
+helper (`product-expected-config-dry-run`, then `product-expected-config-apply`
+with the reviewed dry-run evidence) is the supported path for additions and
+removals; real product, context, instance, and binding values come from the
+operator's private payload file, not checked-in defaults. The manual
+`Product Expected Config` workflow only adds requirements and is frozen under
+issue #2058. Because the route authorizes against
 the target product in the Launchplane service context, product-specific workflow
 authority must come from managed authz reconciliation through the service or
 operator UI, not a checked-in product catalog.
