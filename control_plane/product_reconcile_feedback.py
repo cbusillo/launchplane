@@ -35,6 +35,7 @@ from control_plane.contracts.product_reconcile import ProductReconcileRequestRec
 from control_plane.preview_pr_feedback_notifications import (
     deliver_preview_pr_feedback_notifications,
 )
+from control_plane.product_review_status import owner_review_reference_url
 from control_plane.testing_lane_hold import STAFF_TESTING_HOLD_REASON
 from control_plane.workflows.launchplane import github_api_request, upsert_github_issue_comment
 from control_plane.workflows.preview_pr_feedback import render_preview_pr_feedback_markdown
@@ -62,6 +63,7 @@ class _Feedback:
     revision: str = ""
     failure_summary: str = ""
     commit: str = ""
+    owner_review: str = ""
 
 
 def post_reconcile_feedback(
@@ -71,6 +73,7 @@ def post_reconcile_feedback(
     plan: dict[str, object],
     error: str,
     feedback_token: FeedbackTokenFactory,
+    public_origin: Callable[[], str],
     source: str,
     recorded_at: str,
 ) -> dict[str, object] | None:
@@ -85,7 +88,13 @@ def post_reconcile_feedback(
         profile = cast(ReconcileFeedbackStore, record_store).read_product_profile_record(
             request.product
         )
-        feedback = _decide_feedback(request=request, profile=profile, plan=plan, error=error)
+        feedback = _decide_feedback(
+            request=request,
+            profile=profile,
+            plan=plan,
+            error=error,
+            public_origin=public_origin,
+        )
         if feedback is None:
             return previous_entry
         body_sha256 = f"sha256:{hashlib.sha256(feedback.body.encode()).hexdigest()}"
@@ -125,12 +134,19 @@ def _decide_feedback(
     profile: LaunchplaneProductProfileRecord,
     plan: dict[str, object],
     error: str,
+    public_origin: Callable[[], str],
 ) -> _Feedback | None:
     if plan.get("deferred"):
         # A busy lane or a moved PR runs again and says what it did then.
         return None
     if request.target_kind == "preview":
-        return _preview_feedback(request=request, profile=profile, plan=plan, error=error)
+        return _preview_feedback(
+            request=request,
+            profile=profile,
+            plan=plan,
+            error=error,
+            public_origin=public_origin,
+        )
     return _testing_feedback(plan=plan, error=error)
 
 
@@ -140,6 +156,7 @@ def _preview_feedback(
     profile: LaunchplaneProductProfileRecord,
     plan: dict[str, object],
     error: str,
+    public_origin: Callable[[], str],
 ) -> _Feedback | None:
     action = plan.get("action")
     revision = _text(plan.get("head_sha"))
@@ -161,6 +178,14 @@ def _preview_feedback(
     else:
         return None
     assert request.pull_request_number is not None
+    owner_review = ""
+    owner_review_url = ""
+    if status == "ready" and plan.get("owner_review_requested") is True:
+        owner_review, owner_review_url = _owner_review(
+            profile=profile,
+            pull_request_number=request.pull_request_number,
+            public_origin=public_origin,
+        )
     body = render_preview_pr_feedback_markdown(
         marker=PREVIEW_FEEDBACK_MARKER,
         status=status,
@@ -170,6 +195,9 @@ def _preview_feedback(
         failure_summary=failure_summary,
         waiting_for=waiting_for,
         preview_label=profile.preview.enable_label,
+        owner_review_requested=owner_review in {"mentioned", "owner_not_set"},
+        owner_login=profile.owner.github_login,
+        owner_review_url=owner_review_url,
     )
     return _Feedback(
         status=status,
@@ -178,7 +206,35 @@ def _preview_feedback(
         preview_url=preview_url,
         revision=revision,
         failure_summary=failure_summary,
+        owner_review=owner_review,
     )
+
+
+def _owner_review(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    pull_request_number: int,
+    public_origin: Callable[[], str],
+) -> tuple[str, str]:
+    """How a PR marked for Owner review is answered, and the Owner's review link.
+
+    As on the feedback route: the Owner is mentioned with a link to record the
+    decision, or the comment says no Owner is set. Without Launchplane's public
+    origin there is no link, so there is no mention, and the plan says why.
+    """
+    if not profile.owner.is_set:
+        return "owner_not_set", ""
+    origin = public_origin()
+    if not origin:
+        return "no_public_origin", ""
+    try:
+        return "mentioned", owner_review_reference_url(
+            public_origin=origin,
+            repository=profile.repository,
+            pull_request_number=pull_request_number,
+        )
+    except ValueError:
+        return "invalid_public_origin", ""
 
 
 def _testing_feedback(*, plan: dict[str, object], error: str) -> _Feedback | None:
@@ -273,6 +329,8 @@ def _deliver(
         "comment_id": delivery.comment_id,
         "error": delivery.error,
     }
+    if feedback.owner_review:
+        entry["owner_review"] = feedback.owner_review
     if request.target_kind == "preview":
         entry["feedback_id"] = _record_preview_feedback(
             record_store=record_store,

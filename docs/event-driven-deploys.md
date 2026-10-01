@@ -145,8 +145,18 @@ needs no workflow to report previews or testing deploys.
   A "queued" testing comment becomes "runs this change" at the next reconcile
   after the deploy finishes, at the latest the next sweep.
 
-The Owner review mention that the preview feedback route adds for a PR marked
-for Owner review is not part of this comment yet.
+- **Owner review:** when the PR carries the product Owner's review label and
+  the preview is ready, the comment mentions the Owner with the link to record
+  Accept or Request changes, as the preview feedback route does; with no Owner
+  set it says the operator needs to set one. The link's origin is Launchplane's
+  own bootstrap `LAUNCHPLANE_PUBLIC_URL`, the setting the human session
+  manager's public origin comes from, which the workers share with the service.
+  Without it (or with an invalid one) the comment has no mention, the reconcile
+  is unaffected, and `pr_feedback.owner_review` says why (`no_public_origin` or
+  `invalid_public_origin`; otherwise `mentioned` or `owner_not_set`).
+- **Missing preview settings:** a preview refused because its runtime
+  environment is incomplete names the missing keys (names only, never values)
+  on the plan as `missing_keys`, in the request's error, and in the PR comment.
 
 ## Staff-testing hold
 

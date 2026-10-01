@@ -48,7 +48,11 @@ from control_plane.contracts.durable_operation_authorization import (
 from control_plane.launchplane_reconcile_authorization import (
     build_launchplane_reconcile_authorization,
 )
-from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_APPLY_ROUTE
+from control_plane.odoo_preview_apply_http import (
+    ODOO_PREVIEW_APPLY_ROUTE,
+    OdooPreviewApplyConfigError,
+)
+from control_plane.product_review_status import owner_review_reference_url
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy, MergeTrainPolicyRecord
 from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.product_reconcile import (
@@ -362,6 +366,7 @@ class ProductReconcileTestCase(unittest.TestCase):
         self.provider = FakePreviewProvider()
         self.root = Path(temporary_directory.name)
         self.comments = FakeGitHubComments()
+        self.public_origin = "https://launchplane.example.test"
         for module in (
             "control_plane.workflows.launchplane",
             "control_plane.product_reconcile_feedback",
@@ -384,6 +389,7 @@ class ProductReconcileTestCase(unittest.TestCase):
             control_plane_root=self.root,
             preview_hooks=self.provider.hooks(),
             feedback_token=lambda _store, _profile: "feedback-token",
+            public_origin=lambda: self.public_origin,
         )
         assert completed is not None
         return completed
@@ -1033,6 +1039,60 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
 
         self.assertIn("preview refresh failed for PR #5", self.comment_body())
         self.assertIn("image pull denied", self.comment_body())
+
+    def test_ready_preview_mentions_the_owner_only_on_a_marked_pr(self) -> None:
+        payload = _profile()
+        payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        cases = (
+            (5, [LABEL, "owner-review"], self.public_origin, "mentioned"),
+            (6, [LABEL], self.public_origin, None),
+            (7, [LABEL, "owner-review"], "", "no_public_origin"),
+        )
+        for number, labels, origin, owner_review in cases:
+            with self.subTest(number=number):
+                self.github.pull_request["labels"] = [{"name": label} for label in labels]
+                self.public_origin = origin
+                self.request("preview", number)
+
+                feedback = cast(dict[str, object], self.reconcile()["pr_feedback"])
+
+                (comment,) = self.comments.on(number)
+                body = cast(str, comment["body"])
+                self.assertIn(f"preview is ready for PR #{number}", body)
+                self.assertEqual(feedback.get("owner_review"), owner_review)
+                if owner_review == "mentioned":
+                    self.assertIn("@site-owner this change is ready for you to look at.", body)
+                    link = owner_review_reference_url(
+                        public_origin="https://launchplane.example.test",
+                        repository=REPOSITORY,
+                        pull_request_number=number,
+                    )
+                    self.assertIn(link, body)
+                else:
+                    self.assertNotIn("@site-owner", body)
+
+    def test_incomplete_preview_environment_names_the_missing_keys(self) -> None:
+        def incomplete_inputs(**_kwargs: object) -> dict[str, object]:
+            raise OdooPreviewApplyConfigError(
+                context="cm",
+                instance="testing",
+                missing_keys=("ODOO_DB_PASSWORD", "ODOO_ADMIN_LOGIN"),
+            )
+
+        self.provider.build_inputs = incomplete_inputs  # type: ignore[method-assign]
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+
+        failed = self.run_once()
+
+        self.assertEqual(failed.state, "failed")
+        self.assertEqual(failed.last_plan["missing_keys"], ["ODOO_ADMIN_LOGIN", "ODOO_DB_PASSWORD"])
+        self.assertIn("Missing: ODOO_ADMIN_LOGIN, ODOO_DB_PASSWORD.", failed.last_error)
+        self.assertIn("ODOO_ADMIN_LOGIN, ODOO_DB_PASSWORD", self.comment_body())
 
     def test_feedback_that_cannot_be_posted_never_fails_the_preview(self) -> None:
         self.comments.fail_writes = True

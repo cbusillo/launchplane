@@ -115,6 +115,7 @@ from control_plane.product_repository_identity import (
     resolve_product_repository_identity,
 )
 from control_plane.provider_operations import DurableProviderOperationStore
+from control_plane.service_human_auth import launchplane_public_origin_from_env
 from control_plane.testing_lane_hold import (
     STAFF_TESTING_HOLD_REASON,
     is_staff_testing_hold_cancellation,
@@ -651,6 +652,8 @@ def _plan_preview_target(
         return without_preview("pull_request_not_open")
     if profile.preview.enable_label not in _labels(pull_request):
         return without_preview("preview_label_missing")
+    # The agent that opened the PR marks it for the Owner with a label.
+    plan["owner_review_requested"] = profile.owner.review_label in _labels(pull_request)
     try:
         verified = verify_build_artifact(
             transport=transport,
@@ -813,7 +816,14 @@ def _run_preview_operation(
     except _PullRequestMovedError:
         plan["deferred"] = "pull_request_moved"
         return ReconcileOutcome(plan, deferred=True)
-    except (OdooPreviewPlanProvenanceError, OdooPreviewApplyConfigError) as error:
+    except OdooPreviewApplyConfigError as error:
+        # Key names, never values: what the operator must set before the preview can run.
+        plan["missing_keys"] = list(error.missing_keys)
+        missing = f" Missing: {', '.join(error.missing_keys)}." if error.missing_keys else ""
+        return ReconcileOutcome(
+            plan, error=f"The preview {operation} was refused: {error.format_message()}{missing}"
+        )
+    except OdooPreviewPlanProvenanceError as error:
         return ReconcileOutcome(plan, error=f"The preview {operation} was refused: {error}")
     except (FileNotFoundError, ValueError, click.ClickException) as error:
         return ReconcileOutcome(plan, error=f"The preview {operation} failed: {error}")
@@ -866,6 +876,7 @@ def run_product_reconcile_once(
     control_plane_root: Path | None = None,
     preview_hooks: PreviewProviderHooks = PreviewProviderHooks(),
     feedback_token: FeedbackTokenFactory = resolve_pull_request_feedback_token,
+    public_origin: Callable[[], str] = launchplane_public_origin_from_env,
 ) -> ProductReconcileRequestRecord | None:
     """Claim one request, reconcile it, and record the plan; one bad target never stops the worker."""
     request = record_store.claim_next_product_reconcile_request(lease_owner, lease_seconds)
@@ -892,6 +903,7 @@ def run_product_reconcile_once(
         plan=plan,
         error=outcome.error,
         feedback_token=feedback_token,
+        public_origin=public_origin,
         source=RECONCILE_SOURCE,
         recorded_at=_utc_now(),
     )
