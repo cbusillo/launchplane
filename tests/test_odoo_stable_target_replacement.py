@@ -49,6 +49,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
 )
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.odoo_stable_target_replacement import (
+    ODOO_TARGET_REPLACEMENT_PLAN_BLOCKER_CODES,
     OdooStableTargetReplacementApplyRequest,
     OdooStableTargetReplacementApplyResult,
     OdooStableTargetReplacementRequest,
@@ -58,7 +59,10 @@ from control_plane import runtime_platform_credentials
 from control_plane.runtime_environments import SiteRuntimeEnvironment
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
-from control_plane.product_reconcile import TESTING_FAILURE_DESCRIPTIONS
+from control_plane.product_reconcile import (
+    PLAN_BLOCKER_DESCRIPTIONS,
+    TESTING_FAILURE_DESCRIPTIONS,
+)
 from control_plane.workflows.odoo_stable_operation_worker import _unexpected_error_code
 from control_plane.workflows.odoo_stable_target_replacement import (
     DokployRequest,
@@ -1375,6 +1379,10 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertEqual(plan.plan_status, "blocked")
         self.assertIn("Launchplane has no Dokploy target record for this lane.", plan.blockers)
         self.assertIn("Launchplane has no Dokploy target-id record for this lane.", plan.blockers)
+        self.assertEqual(len(plan.blocker_codes), len(plan.blockers))
+        self.assertEqual(
+            plan.blocker_codes[:2], ("target_record_missing", "target_id_record_missing")
+        )
 
     def test_build_plan_reports_missing_product_profile_as_operator_error(self) -> None:
         with self.assertRaises(click.ClickException) as raised_error:
@@ -1483,6 +1491,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertIn("ODOO_DATA_VOLUME", blocker)
         self.assertNotIn("cm_testing_odoo_data", blocker)
         self.assertNotIn("cm_testing_replacement_data", blocker)
+        self.assertIn("volume_authority_drift", plan.blocker_codes)
         self.assertEqual(
             next(step for step in plan.steps if step.step_id == "volume-contract").status,
             "blocked",
@@ -3796,7 +3805,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={"deploymentId": "deploy-123", "status": "success"},
             ),
         ):
-            with self.assertRaisesRegex(click.ClickException, "ready replacement plan"):
+            with self.assertRaisesRegex(
+                OdooTargetReplacementStageError, "ready replacement plan"
+            ) as raised:
                 execute_odoo_stable_target_replacement_apply(
                     control_plane_root=Path("."),
                     record_store=store,
@@ -3808,11 +3819,12 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     dokploy_request=cast(DokployRequest, _request),
                     provider_effect_checkpoint=provider_effects.append,
                 )
+        self.assertEqual(raised.exception.code, "plan_not_ready.current_artifact_changed")
 
         self.assertEqual(provider_effects, [])
 
     def test_apply_refuses_blocked_plan(self) -> None:
-        with self.assertRaises(click.ClickException):
+        with self.assertRaises(OdooTargetReplacementStageError) as raised:
             execute_odoo_stable_target_replacement_apply(
                 control_plane_root=Path("."),
                 record_store=_Store(),
@@ -3820,6 +3832,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     product="odoo-tenant-cm", instance="testing"
                 ),
             )
+        # The code names the first blocker; the message keeps the human text.
+        self.assertEqual(raised.exception.code, "plan_not_ready.target_record_missing")
+        self.assertIn("no Dokploy target record", str(raised.exception))
 
 
 class OdooStableTargetReplacementOdooVersionTests(unittest.TestCase):
@@ -4015,8 +4030,27 @@ class OdooTargetReplacementFailureStageTests(unittest.TestCase):
         self.assertIs(kept.exception, denial)
 
     def test_every_stage_code_has_a_testing_failure_description(self) -> None:
-        for code in ("post_deploy_setup_failed", "release_tuple_mint_failed"):
+        for code in (
+            "plan_build_failed",
+            "plan_not_ready",
+            "strategy_unsupported",
+            "target_not_compose",
+            "artifact_id_missing",
+            "source_ref_missing",
+            "artifact_repository_mismatch",
+            "artifact_source_ref_mismatch",
+            "artifact_required_modules_missing",
+            "health_verification_required",
+            "health_url_missing",
+            "post_deploy_setup_failed",
+            "release_tuple_mint_failed",
+        ):
             self.assertIn(code, TESTING_FAILURE_DESCRIPTIONS)
+
+    def test_every_plan_blocker_code_has_a_description_and_fits_the_error_code(self) -> None:
+        for code in ODOO_TARGET_REPLACEMENT_PLAN_BLOCKER_CODES:
+            self.assertIn(code, PLAN_BLOCKER_DESCRIPTIONS)
+            self.assertRegex(f"plan_not_ready.{code}", r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 
 
 if __name__ == "__main__":

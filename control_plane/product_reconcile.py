@@ -548,6 +548,25 @@ TESTING_FAILURE_DESCRIPTIONS: dict[str, str] = {
     "logo_check_failed": "The website logo check did not pass.",
     "driver_result_failed": "The driver reported a failure outside its recorded steps.",
     "operation_failed": "The deploy stopped with an error before the driver returned a result.",
+    "plan_build_failed": "Building the replacement plan failed before the deploy started.",
+    "plan_not_ready": "The replacement plan was blocked before the deploy started.",
+    "strategy_unsupported": "The deploy asked for a replacement strategy Launchplane does not run.",
+    "target_not_compose": "The lane's Dokploy target is not a compose target.",
+    "artifact_id_missing": "The deploy named no artifact and the lane records none.",
+    "source_ref_missing": "The deploy named no source commit and the lane records none.",
+    "artifact_repository_mismatch": (
+        "The artifact's image repository does not match the product profile's image repository."
+    ),
+    "artifact_source_ref_mismatch": (
+        "The deploy's source commit does not match the artifact manifest's source commit."
+    ),
+    "artifact_required_modules_missing": (
+        "The artifact does not declare the Odoo modules Launchplane requires."
+    ),
+    "health_verification_required": (
+        "The lane requires runtime identity, but the deploy turned health verification off."
+    ),
+    "health_url_missing": "The lane requires runtime identity, but it has no health URL.",
     "post_deploy_setup_failed": (
         "The deploy finished, but the post-deploy update could not start: its target or "
         "setting overrides could not be read."
@@ -570,6 +589,50 @@ TESTING_FAILURE_DESCRIPTIONS: dict[str, str] = {
     ),
 }
 _UNKNOWN_TESTING_FAILURE = "The deploy failed with a code this Launchplane does not describe."
+# What each replacement-plan blocker code means, for ``plan_not_ready.<code>``.
+PLAN_BLOCKER_DESCRIPTIONS: dict[str, str] = {
+    "target_record_missing": "The lane has no Dokploy target record.",
+    "target_id_record_missing": "The lane has no Dokploy target-id record.",
+    "target_not_compose": "The lane's Dokploy target is not a compose target.",
+    "allow_empty_data_required": (
+        "A prelaunch rebuild request did not explicitly allow empty data."
+    ),
+    "volume_authority_unresolved": (
+        "Launchplane could not resolve the lane's stored Odoo volume settings."
+    ),
+    "prelaunch_rebuild_policy_refused": "The lane's prelaunch rebuild policy refused the request.",
+    "volume_env_keys_missing": "The current target is missing required Odoo volume settings.",
+    "volume_authority_drift": (
+        "The current target's Odoo volume settings do not match Launchplane's stored settings."
+    ),
+    "domains_missing": "The current target has no domains to carry over.",
+    "runtime_keys_undeclared": (
+        "The lane configures settings its product profile does not declare."
+    ),
+    "upstream_restore_environment_invalid": (
+        "The lane's upstream-restore settings are missing or invalid."
+    ),
+    "live_runtime_keys_invalid": (
+        "The lane's runtime settings could not be checked against its product profile."
+    ),
+    "compose_or_override_render_failed": (
+        "Launchplane could not render the replacement compose file or setting overrides."
+    ),
+    "current_artifact_changed": ("The lane's current artifact changed after the readiness check."),
+    "artifact_manifest_missing": "Launchplane has no manifest for the deploy's artifact.",
+    "artifact_repository_mismatch": (
+        "The artifact's image repository does not match the product profile's image repository."
+    ),
+    "artifact_source_ref_missing": "The deploy has no source commit evidence for its artifact.",
+    "artifact_source_ref_mismatch": (
+        "The deploy's source commit does not match the artifact manifest's source commit."
+    ),
+    "artifact_required_modules_missing": (
+        "The artifact does not declare the Odoo modules Launchplane requires."
+    ),
+}
+_UNKNOWN_PLAN_BLOCKER = "Launchplane does not describe this blocker."
+_PLAN_NOT_READY_PREFIX = "plan_not_ready."
 _ERROR_CODE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 
 
@@ -589,6 +652,13 @@ def _testing_failure_reason(
         # The worker names an error it did not expect by its class, never its message.
         description = (
             "The deploy stopped with an unexpected error before the driver returned a result."
+        )
+    elif error_code.startswith(_PLAN_NOT_READY_PREFIX):
+        # The apply names the plan's first blocker by its code, never its message.
+        blocker_code = error_code.removeprefix(_PLAN_NOT_READY_PREFIX)
+        description = (
+            f"{TESTING_FAILURE_DESCRIPTIONS['plan_not_ready']} Blocker: "
+            f"{PLAN_BLOCKER_DESCRIPTIONS.get(blocker_code, _UNKNOWN_PLAN_BLOCKER)}"
         )
     else:
         description = TESTING_FAILURE_DESCRIPTIONS.get(error_code, _UNKNOWN_TESTING_FAILURE)

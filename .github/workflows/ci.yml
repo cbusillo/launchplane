@@ -110,6 +110,9 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          # Pull request caches are scoped to that PR, so saving one re-uploads
+          # ~400 MB that main and other PRs cannot restore. Only main seeds it.
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
         run: uv python install 3.13
@@ -144,6 +147,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
         run: uv python install 3.13
@@ -335,6 +339,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
         run: uv python install 3.13
@@ -382,6 +387,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
         run: uv python install 3.13
@@ -483,6 +489,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
         run: uv python install 3.13
@@ -560,6 +567,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
         run: uv python install 3.13
@@ -613,6 +621,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
         run: uv python install 3.13
@@ -673,6 +682,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
         run: uv python install 3.13
@@ -689,6 +699,8 @@ jobs:
     runs-on:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    # A lock wait without a timeout would otherwise hold a runner for six hours.
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:17@sha256:0af65001d05296a2ead57ac4a6412433d8913d1bb5d0c88435a7d1e1ee5cb04b
@@ -713,6 +725,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
         run: uv python install 3.13
@@ -743,8 +756,28 @@ jobs:
       always() &&
       (github.event_name == 'pull_request' || github.event_name == 'push')
     permissions:
+      actions: read
       contents: read
     steps:
+      - name: Report CI time against budget
+        # Reports only; a slow run is a signal to fix a lane, not a failure.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_TIME_BUDGET_SECONDS: "600"
+        run: |
+          set -euo pipefail
+          started_at="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --jq .run_started_at)"
+          elapsed=$(( $(date -u +%s) - $(date -u -d "${started_at}" +%s) ))
+          message="CI took $((elapsed / 60))m $((elapsed % 60))s; budget is $((CI_TIME_BUDGET_SECONDS / 60))m."
+          echo "${message}" >> "${GITHUB_STEP_SUMMARY}"
+          if [ "${elapsed}" -gt "${CI_TIME_BUDGET_SECONDS}" ]; then
+            echo "::warning title=CI time budget exceeded::${message} See docs/style/testing.md."
+          else
+            echo "${message}"
+          fi
+
       - name: Require successful CI path
         env:
           BASE_REPOSITORY: ${{ github.repository }}

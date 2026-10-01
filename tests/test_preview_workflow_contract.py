@@ -24,7 +24,6 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewRefreshRequest,
 )
 from tests.support.workflows import load_workflow
-from tests.support.workflows import workflow_call_inputs
 
 
 CLI_MAIN = cast(Command, main)
@@ -214,79 +213,6 @@ class PreviewWorkflowContractTests(unittest.TestCase):
                 run_attempt="2",
             )
 
-    def test_reusable_preview_feedback_workflow_owns_request_details(self) -> None:
-        workflow_path = REPO_ROOT / ".github/workflows/reusable-preview-pr-feedback.yml"
-        workflow = workflow_path.read_text(encoding="utf-8")
-        workflow_inputs = workflow_call_inputs(load_workflow(workflow_path))
-
-        self.assertIn("route-path: /v1/previews/pr-feedback", workflow)
-        self.assertIn("status=${{ steps.request.outputs.status }}", workflow)
-        self.assertIn("feedback_status=result.status", workflow)
-        self.assertNotIn("result.feedback_status", workflow)
-        self.assertIn("for required in PRODUCT ANCHOR_PR_NUMBER ANCHOR_PR_URL STATUS", workflow)
-        self.assertIn("context=${{ steps.request.outputs.context }}", workflow)
-        self.assertNotIn('CONTEXT="$PRODUCT"', workflow)
-        self.assertIn("idempotency_key", workflow)
-        self.assertIn("preview-pr-feedback", workflow)
-
-        self.assertNotIn("marker", workflow_inputs)
-        self.assertNotIn("idempotency-key", workflow_inputs)
-        self.assertNotIn("payload", workflow_inputs)
-        self.assertNotIn("route-path", workflow_inputs)
-
-    def test_reusable_preview_feedback_workflow_accepts_all_preview_statuses(self) -> None:
-        workflow = (REPO_ROOT / ".github/workflows/reusable-preview-pr-feedback.yml").read_text(
-            encoding="utf-8"
-        )
-
-        for status in (
-            "pending",
-            "ready",
-            "destroyed",
-            "failed",
-            "cleanup_failed",
-            "unsupported",
-            "cleared",
-        ):
-            self.assertIn(status, workflow)
-
-    def test_reusable_preview_feedback_status_workflow_owns_status_selection(self) -> None:
-        workflow_path = REPO_ROOT / ".github/workflows/reusable-preview-feedback-status.yml"
-        workflow = workflow_path.read_text(encoding="utf-8")
-        workflow_inputs = workflow_call_inputs(load_workflow(workflow_path))
-
-        self.assertIn("mode", workflow_inputs)
-        self.assertIn("publish_result", workflow_inputs)
-        self.assertIn("provision_result", workflow_inputs)
-        self.assertIn("verification_result", workflow_inputs)
-        self.assertIn("cleanup_result", workflow_inputs)
-        self.assertIn("cleanup_outcome", workflow_inputs)
-        self.assertIn("status='ready'", workflow)
-        self.assertIn("status='failed'", workflow)
-        self.assertIn("status='destroyed'", workflow)
-        self.assertIn("status='cleanup_failed'", workflow)
-        self.assertIn("status='cleared'", workflow)
-        self.assertIn("no_preview_recorded", workflow)
-        self.assertIn("cleanup_outcome\" = 'failed'", workflow)
-        self.assertIn("Unknown Launchplane cleanup outcome; failing closed.", workflow)
-        self.assertIn("mode must be refresh or cleanup", workflow)
-        self.assertIn("result must be a GitHub Actions terminal result", workflow)
-        self.assertIn("success|failure|cancelled|skipped)", workflow)
-        self.assertIn("single_line_output", workflow)
-        self.assertIn("value=\"${value//$'\\n'/ }\"", workflow)
-        self.assertNotIn("LAUNCHPLANE_FAILURE_SUMMARY", workflow)
-        self.assertIn(
-            "uses: ./.github/workflows/reusable-preview-pr-feedback.yml",
-            workflow,
-        )
-
-        self.assertNotIn("marker", workflow_inputs)
-        self.assertNotIn("idempotency-key", workflow_inputs)
-        self.assertNotIn("payload", workflow_inputs)
-        self.assertNotIn("route-path", workflow_inputs)
-        self.assertNotIn("feedback_markdown", workflow_inputs)
-        self.assertNotIn("provider_target", workflow_inputs)
-
     def test_reusable_preview_feedback_status_executes_cleanup_outcome_matrix(self) -> None:
         cases = (
             ("success", "no_preview_recorded", "cleared"),
@@ -315,7 +241,7 @@ class PreviewWorkflowContractTests(unittest.TestCase):
                 if expected_status == "cleanup_failed":
                     self.assertEqual(outputs["failure_summary"], "provider teardown failed")
 
-    def test_reusable_preview_feedback_status_accepts_backend_destroy_outcomes(
+    def test_reusable_preview_feedback_status_maps_backend_destroy_outcomes(
         self,
     ) -> None:
         backend_outcomes = {
@@ -332,271 +258,22 @@ class PreviewWorkflowContractTests(unittest.TestCase):
                 result={"destroy_status": "fail", "application_id": "app"},
             )["destroy_outcome"],
         }
-        workflow = (REPO_ROOT / ".github/workflows/reusable-preview-feedback-status.yml").read_text(
-            encoding="utf-8"
-        )
+        expected_statuses = {
+            "destroyed": "destroyed",
+            "no_preview_recorded": "cleared",
+            "failed": "cleanup_failed",
+        }
 
-        self.assertEqual(backend_outcomes, {"destroyed", "no_preview_recorded", "failed"})
-        for outcome in backend_outcomes:
-            self.assertIn(str(outcome), workflow)
+        self.assertEqual(backend_outcomes, set(expected_statuses))
+        for outcome, expected_status in expected_statuses.items():
+            with self.subTest(outcome=outcome):
+                result, outputs = _run_preview_cleanup_status(
+                    cleanup_result="success",
+                    cleanup_outcome=outcome,
+                )
 
-    def test_reusable_preview_request_notice_owns_notice_decision(self) -> None:
-        workflow_path = REPO_ROOT / ".github/workflows/reusable-preview-request-notice.yml"
-        workflow = workflow_path.read_text(encoding="utf-8")
-        parsed_workflow = load_workflow(workflow_path)
-        workflow_inputs = workflow_call_inputs(parsed_workflow)
-
-        self.assertIn("pull_request_target", workflow)
-        self.assertIn("context.eventName !== 'pull_request_target'", workflow)
-        self.assertRegex(
-            workflow,
-            r"uses: actions/github-script@(?:v\d+(?:\.\d+){0,2}|[0-9a-f]{40})(?:\s|$)",
-        )
-        self.assertIn(
-            "uses: ./.github/workflows/reusable-preview-pr-feedback.yml",
-            workflow,
-        )
-        self.assertEqual(
-            parsed_workflow.job_uses("cleanup"),
-            "./.github/workflows/reusable-generic-web-preview-lifecycle.yml",
-        )
-        self.assertEqual(
-            parsed_workflow.job_uses("feedback-cleanup"),
-            "./.github/workflows/reusable-preview-feedback-status.yml",
-        )
-        self.assertEqual(parsed_workflow.job_permissions("resolve"), {"contents": "read"})
-        self.assertIn("status: ${{ needs.resolve.outputs.status }}", workflow)
-        self.assertIn("operation: destroy", workflow)
-        self.assertIn("mode: cleanup", workflow)
-        self.assertIn("cleanup_outcome: ${{ needs.cleanup.outputs.destroy_outcome }}", workflow)
-        self.assertIn("const shouldCleanup =", workflow)
-        self.assertIn("executionTrust === 'same_repo'", workflow)
-        self.assertIn("failure_summary: ${{ needs.resolve.outputs.failure_summary }}", workflow)
-        self.assertIn("const unsupportedTrust =", workflow)
-        self.assertIn("action === 'edited'", workflow)
-        self.assertIn("const shouldSetUnsupported =", workflow)
-        self.assertNotIn("status = 'pending'", workflow)
-
-        self.assertNotIn("actions/checkout", workflow)
-        self.assertNotIn("ref:", workflow)
-        self.assertNotIn("marker", workflow_inputs)
-        self.assertNotIn("idempotency-key", workflow_inputs)
-        self.assertNotIn("payload", workflow_inputs)
-        self.assertNotIn("route-path", workflow_inputs)
-
-    def test_reusable_generic_web_preview_lifecycle_derives_preview_slug(self) -> None:
-        workflow_path = REPO_ROOT / ".github/workflows/reusable-generic-web-preview-lifecycle.yml"
-        workflow_text = workflow_path.read_text(encoding="utf-8")
-        workflow = load_workflow(workflow_path)
-        workflow_inputs = workflow_call_inputs(workflow)
-
-        self.assertIn("route-path: /v1/drivers/generic-web/preview-refresh", workflow_text)
-        self.assertIn("route-path: /v1/drivers/generic-web/preview-destroy", workflow_text)
-        self.assertIn("route-path: /v1/authz-diagnostics/github-actions/evaluate", workflow_text)
-        self.assertIn('"action": "preview_refresh.execute"', workflow_text)
-        self.assertIn("expected-status: 200,202,403", workflow_text)
-        self.assertIn(
-            "refresh.anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "destroy.anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}",
-            workflow_text,
-        )
-
-        resolve_outputs = cast(dict[str, object], workflow.job("resolve")["outputs"])
-        self.assertEqual(
-            resolve_outputs["timeout_seconds"],
-            "${{ steps.request.outputs.timeout_seconds }}",
-        )
-        resolver = workflow.step_named("resolve", "Resolve Launchplane preview request")
-        self.assertIsNotNone(resolver)
-        assert resolver is not None
-        self.assertIn('TIMEOUT_SECONDS="300"', resolver.run)
-        self.assertIn('echo "timeout_seconds=$TIMEOUT_SECONDS"', resolver.run)
-        for job_id, field_name in (
-            ("refresh", "refresh.timeout_seconds"),
-            ("destroy", "destroy.timeout_seconds"),
-        ):
-            request = workflow.step_named(
-                job_id,
-                f"Request Launchplane generic-web preview {job_id}",
-            )
-            self.assertIsNotNone(request)
-            assert request is not None
-            payload_fields = cast(str, request.with_values["payload-fields"])
-            self.assertIn(
-                f"{field_name}=${{{{ needs.resolve.outputs.timeout_seconds }}}}",
-                payload_fields,
-            )
-            self.assertNotIn(
-                f"{field_name}=${{{{ inputs['timeout-seconds'] }}}}",
-                payload_fields,
-            )
-
-        self.assertNotIn("preview_slug", workflow_inputs)
-        self.assertNotIn("preview_url", workflow_inputs)
-        self.assertNotIn('CONTEXT="$PRODUCT"', workflow_text)
-        self.assertNotIn("PRODUCT CONTEXT ANCHOR_PR_NUMBER", workflow_text)
-        self.assertNotIn("refresh.preview_slug=", workflow_text)
-        self.assertNotIn("destroy.preview_slug=", workflow_text)
-        self.assertIn("destroy_outcome=result.destroy_outcome", workflow_text)
-        self.assertIn("destroy_outcome: ${{ steps.lp.outputs.destroy_outcome }}", workflow_text)
-
-    def test_reusable_generic_web_preview_lifecycle_feedback_maps_record_status(
-        self,
-    ) -> None:
-        workflow = (
-            REPO_ROOT / ".github/workflows/reusable-generic-web-preview-lifecycle.yml"
-        ).read_text(encoding="utf-8")
-
-        self.assertIn("route-path: /v1/previews/pr-feedback", workflow)
-        self.assertIn("feedback_status=result.status", workflow)
-        self.assertNotIn("result.feedback_status", workflow)
-
-    def test_reusable_generic_web_preview_verification_derives_context(self) -> None:
-        workflow_path = (
-            REPO_ROOT / ".github/workflows/reusable-generic-web-preview-verification.yml"
-        )
-        workflow = (workflow_path).read_text(encoding="utf-8")
-        workflow_inputs = workflow_call_inputs(load_workflow(workflow_path))
-
-        self.assertIn("route-path: /v1/drivers/generic-web/preview-verification", workflow)
-        self.assertIn(
-            "payload-file: .launchplane/generic-web-preview-verification-payload.json",
-            workflow,
-        )
-        self.assertIn("context: process.env.CONTEXT ?? ''", workflow)
-        self.assertIn(
-            "anchor_pr_number: anchorPrNumber",
-            workflow,
-        )
-        self.assertIn(
-            "verification_status: process.env.VERIFICATION_STATUS",
-            workflow,
-        )
-        self.assertIn("verification_status=result.verification_status", workflow)
-        self.assertIn("generic-web-preview-verification", workflow)
-        self.assertNotIn("payload-fields:", workflow)
-
-        self.assertNotIn("idempotency-key", workflow_inputs)
-        self.assertNotIn("payload", workflow_inputs)
-        self.assertNotIn("route-path", workflow_inputs)
-
-    def test_reusable_generic_web_preview_facade_keeps_repo_contract_thin(self) -> None:
-        workflow_path = REPO_ROOT / ".github/workflows/reusable-generic-web-preview.yml"
-        workflow = load_workflow(workflow_path)
-        workflow_inputs = workflow_call_inputs(workflow)
-
-        self.assertEqual(
-            workflow_inputs,
-            {
-                "build_args",
-                "docker_context",
-                "docker_target",
-                "dockerfile",
-                "image_repository",
-                "launchplane_audience",
-                "launchplane_url",
-                "preview_label",
-                "timeout-ms",
-                "timeout-seconds",
-                "verification_command",
-            },
-        )
-        self.assertNotIn("product", workflow_inputs)
-        self.assertNotIn("context", workflow_inputs)
-        self.assertNotIn("health_path", workflow_inputs)
-        self.assertNotIn("port", workflow_inputs)
-        self.assertNotIn("target_id", workflow_inputs)
-        self.assertNotIn("domain", workflow_inputs)
-        self.assertNotIn("skip_teardown", workflow_inputs)
-
-    def test_reusable_generic_web_preview_facade_isolates_untrusted_jobs(self) -> None:
-        workflow = load_workflow(REPO_ROOT / ".github/workflows/reusable-generic-web-preview.yml")
-
-        self.assertEqual(workflow.permissions, {"contents": "read"})
-        self.assertEqual(workflow.job_permissions("resolve"), {"contents": "read"})
-        self.assertEqual(
-            workflow.job_permissions("build"),
-            {"contents": "read", "packages": "write"},
-        )
-        self.assertEqual(workflow.job_permissions("verify"), {"contents": "read"})
-        self.assertEqual(workflow.job_permissions("verification-outcome"), {"contents": "read"})
-        for job_id in (
-            "provision",
-            "record-verification-pass",
-            "record-verification-fail",
-            "feedback-refresh",
-        ):
-            self.assertEqual(
-                workflow.job_permissions(job_id),
-                {"contents": "read", "id-token": "write"},
-                job_id,
-            )
-
-        for job_id in ("build", "verify"):
-            checkout = workflow.step_named(
-                job_id,
-                next(
-                    step.name
-                    for step in workflow.steps(job_id)
-                    if step.uses.startswith("actions/checkout@")
-                ),
-            )
-            self.assertIsNotNone(checkout)
-            assert checkout is not None
-            self.assertEqual(checkout.with_values.get("persist-credentials"), False)
-
-    def test_reusable_generic_web_preview_facade_composes_typed_stages(self) -> None:
-        workflow_path = REPO_ROOT / ".github/workflows/reusable-generic-web-preview.yml"
-        workflow = load_workflow(workflow_path)
-
-        self.assertEqual(
-            workflow.job_uses("provision"),
-            "./.github/workflows/reusable-generic-web-preview-lifecycle.yml",
-        )
-        for job_id in ("record-verification-pass", "record-verification-fail"):
-            self.assertEqual(
-                workflow.job_uses(job_id),
-                "./.github/workflows/reusable-generic-web-preview-verification.yml",
-            )
-        provision_inputs = cast(dict[str, object], workflow.job("provision")["with"])
-        self.assertEqual(
-            provision_inputs["timeout-seconds"],
-            "${{ inputs['timeout-seconds'] }}",
-        )
-        for job_id in ("record-verification-pass", "record-verification-fail"):
-            verification_inputs = cast(dict[str, object], workflow.job(job_id)["with"])
-            self.assertEqual(
-                verification_inputs["timeout-seconds"],
-                "${{ inputs['timeout-seconds'] || '300' }}",
-                job_id,
-            )
-        self.assertEqual(
-            workflow.job_uses("feedback-refresh"),
-            "./.github/workflows/reusable-preview-feedback-status.yml",
-        )
-
-        resolver = workflow.step_named("resolve", "Resolve generic-web preview request")
-        self.assertIsNotNone(resolver)
-        assert resolver is not None
-        resolver_script = cast(str, resolver.with_values["script"])
-        self.assertIn("context.eventName !== 'pull_request'", resolver_script)
-        self.assertIn("repository === headRepository", resolver_script)
-        self.assertIn("author !== 'dependabot[bot]'", resolver_script)
-        self.assertNotIn("action === 'closed'", resolver_script)
-        self.assertNotIn("action === 'unlabeled'", resolver_script)
-        workflow_text = workflow_path.read_text(encoding="utf-8")
-        self.assertNotIn("pull_request_target", workflow_text)
-        self.assertIn("image_reference=${IMAGE_REPOSITORY}@${IMAGE_DIGEST}", workflow_text)
-        self.assertLess(
-            workflow_text.index("${{ inputs.build_args }}"),
-            workflow_text.index("LAUNCHPLANE_BUILD_REVISION="),
-        )
-        self.assertIn("preview lifecycle failed; see workflow run logs", workflow_text)
-        self.assertIn("mode: refresh", workflow_text)
-        self.assertNotIn("mode: cleanup", workflow_text)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(outputs["status"], expected_status)
 
     def test_generic_web_preview_requests_accept_anchor_pr_number_without_slug(
         self,

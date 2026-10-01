@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -11,6 +11,33 @@ from control_plane.workflows.odoo_verification import OdooVerificationEvidence
 
 LAUNCHPLANE_REQUIRED_ODOO_MODULES = ("launchplane_settings", "disable_odoo_online")
 ODOO_VERSION_ENV_KEY = "ODOO_VERSION"
+
+# Stable codes for why a replacement plan is blocked, kept beside each human
+# blocker message. A code never carries provider or exception text.
+OdooTargetReplacementPlanBlockerCode = Literal[
+    "target_record_missing",
+    "target_id_record_missing",
+    "target_not_compose",
+    "allow_empty_data_required",
+    "volume_authority_unresolved",
+    "prelaunch_rebuild_policy_refused",
+    "volume_env_keys_missing",
+    "volume_authority_drift",
+    "domains_missing",
+    "runtime_keys_undeclared",
+    "upstream_restore_environment_invalid",
+    "live_runtime_keys_invalid",
+    "compose_or_override_render_failed",
+    "current_artifact_changed",
+    "artifact_manifest_missing",
+    "artifact_repository_mismatch",
+    "artifact_source_ref_missing",
+    "artifact_source_ref_mismatch",
+    "artifact_required_modules_missing",
+]
+ODOO_TARGET_REPLACEMENT_PLAN_BLOCKER_CODES: tuple[str, ...] = get_args(
+    OdooTargetReplacementPlanBlockerCode
+)
 
 
 def merge_odoo_install_modules(*module_groups: str | Iterable[str]) -> str:

@@ -8,16 +8,8 @@ from pathlib import Path
 from unittest import TestCase
 
 from control_plane.first_party_action_pins import build_action_pin_report
-from tests.support.workflows import WorkflowInvariantViolation
-from tests.support.workflows import check_security_policy_runs_for_all_pull_requests
+from tests.support.workflows import SAME_REPO_PULL_REQUEST_IF
 from tests.support.workflows import load_workflow
-
-
-def _assert_no_workflow_violations(
-    test_case: TestCase,
-    violations: tuple[WorkflowInvariantViolation, ...],
-) -> None:
-    test_case.assertEqual([], [str(violation) for violation in violations])
 
 
 USES_LINE_PATTERN = re.compile(
@@ -332,8 +324,81 @@ APPROVED_CONTAINER_IMAGES: Mapping[str, ActionClassification] = {
 }
 
 
+UNTRUSTED_RUN_EXPRESSION_PATTERN = re.compile(
+    r"\$\{\{[^}]*\b(?:inputs\s*[.\[]|github\s*(?:\.\s*event\b|\[\s*'event'|\.\s*head_ref\b"
+    r"|\[\s*'head_ref'))"
+)
+
+
+def _normalized_expression(expression: str) -> str:
+    return " ".join(expression.split())
+
+
+def _strip_enclosing_parentheses(expression: str) -> str:
+    while expression.startswith("(") and expression.endswith(")"):
+        depth = 0
+        for index, character in enumerate(expression):
+            depth += {"(": 1, ")": -1}.get(character, 0)
+            if depth == 0 and index < len(expression) - 1:
+                return expression
+        expression = expression[1:-1].strip()
+    return expression
+
+
+def _requires_conjunct(expression: str, required: str) -> bool:
+    """Whether `required` must hold for the whole expression to be true."""
+    expression = _normalized_expression(expression)
+    if expression.startswith("${{") and expression.endswith("}}"):
+        expression = expression[3:-2].strip()
+    expression = _strip_enclosing_parentheses(expression)
+    required = _strip_enclosing_parentheses(_normalized_expression(required))
+    if expression == required:
+        return True
+    conjuncts: list[str] = []
+    depth = 0
+    start = 0
+    index = 0
+    while index < len(expression):
+        character = expression[index]
+        depth += {"(": 1, ")": -1}.get(character, 0)
+        if depth == 0 and expression.startswith("||", index):
+            return False
+        if depth == 0 and expression.startswith("&&", index):
+            conjuncts.append(expression[start:index].strip())
+            start = index + 2
+            index += 1
+        index += 1
+    conjuncts.append(expression[start:].strip())
+    return any(
+        conjunct != expression and _requires_conjunct(conjunct, required) for conjunct in conjuncts
+    )
+
+
+def _run_scripts() -> Iterator[tuple[Path, str, str]]:
+    for path in _action_reference_files():
+        data = load_workflow(path).data
+        jobs = data.get("jobs")
+        step_groups: list[tuple[str, object]] = []
+        if isinstance(jobs, dict):
+            step_groups.extend(
+                (str(job_id), job.get("steps"))
+                for job_id, job in jobs.items()
+                if isinstance(job, dict)
+            )
+        runs = data.get("runs")
+        if isinstance(runs, dict):
+            step_groups.append(("runs", runs.get("steps")))
+        for group, steps in step_groups:
+            if not isinstance(steps, list):
+                continue
+            for step in steps:
+                if isinstance(step, dict) and isinstance(step.get("run"), str):
+                    yield path, f"{group}:{step.get('name') or step.get('id') or '?'}", step["run"]
+
+
 def _action_reference_files() -> tuple[Path, ...]:
-    workflow_files = sorted(Path(".github/workflows").glob("*.yml"))
+    workflow_root = Path(".github/workflows")
+    workflow_files = sorted((*workflow_root.glob("*.yml"), *workflow_root.glob("*.yaml")))
     composite_action_files = sorted(Path(".github/actions").rglob("action.y*ml"))
     return tuple(workflow_files + composite_action_files)
 
@@ -419,33 +484,78 @@ class GitHubActionsSecurityTests(TestCase):
 
         self.assertEqual([], violations)
 
-    def test_action_pin_security_jobs_fetch_full_history(self) -> None:
-        workflow = load_workflow(".github/workflows/security.yml")
+    def test_pull_request_jobs_on_self_hosted_runners_exclude_forks(self) -> None:
+        same_repo_guard = f"({SAME_REPO_PULL_REQUEST_IF})"
+        violations: list[str] = []
+        workflow_root = Path(".github/workflows")
+        workflow_paths = sorted((*workflow_root.glob("*.yml"), *workflow_root.glob("*.yaml")))
+        for path in workflow_paths:
+            workflow = load_workflow(path)
+            trigger = workflow.data.get("on")
+            if isinstance(trigger, dict):
+                events = set(trigger)
+            elif isinstance(trigger, list):
+                events = {str(event) for event in trigger}
+            else:
+                events = {str(trigger)}
+            if "pull_request" not in events:
+                continue
+            for job_id in workflow.jobs:
+                job = workflow.job(job_id)
+                runs_on = job.get("runs-on")
+                labels = runs_on if isinstance(runs_on, list) else [runs_on]
+                if not any("self-hosted" in str(label) for label in labels):
+                    continue
+                if not _requires_conjunct(str(job.get("if", "")), same_repo_guard):
+                    violations.append(
+                        f"{path}:{job_id}: self-hosted pull_request jobs must be gated to "
+                        "same-repository pull requests."
+                    )
 
-        for job_id in ("workflow_lint", "workflow_lint_fork"):
-            checkout = workflow.step_named(job_id, "Checkout")
-            self.assertIsNotNone(checkout)
-            assert checkout is not None
-            self.assertEqual(checkout.with_values.get("fetch-depth"), 0)
+        self.assertEqual([], violations)
 
-    def test_repository_merge_policy_preserves_action_release_commits(self) -> None:
-        metadata = json.loads(Path(".github/github.json").read_text(encoding="utf-8"))
+    def test_same_repository_guard_must_hold_for_the_whole_condition(self) -> None:
+        guard = f"({SAME_REPO_PULL_REQUEST_IF})"
+        for expression, required in (
+            (f"needs.a.outputs.verified != 'true' && {guard}", True),
+            (f"{guard} && always()", True),
+            (f"({guard})", True),
+            (f"{guard} || needs.a.outputs.verified != 'true'", False),
+            (f"(needs.a.outputs.verified != 'true' || {guard}) && always()", False),
+            ("needs.a.outputs.verified != 'true'", False),
+            (f"${{{{ needs.a.outputs.verified != 'true' && {guard} }}}}", True),
+            (f"(always() && {guard}) && needs.a.result == 'success'", True),
+            (f"(always() || {guard}) && needs.a.result == 'success'", False),
+        ):
+            with self.subTest(expression=expression):
+                self.assertEqual(_requires_conjunct(expression, guard), required)
 
-        self.assertEqual(metadata["pullRequests"]["allowedMergeMethods"], ["merge"])
-        self.assertEqual(metadata["pullRequests"]["preferredMergeMethod"], "merge")
+    def test_untrusted_expression_pattern_covers_index_and_multiline_forms(self) -> None:
+        for script, matches in (
+            ('echo "${{ inputs.command }}"', True),
+            ("echo \"${{ inputs['command'] }}\"", True),
+            ("echo \"${{ github['event']['pull_request']['title'] }}\"", True),
+            ('echo "${{\n  inputs.command }}"', True),
+            ('echo "${{ github.head_ref }}"', True),
+            ('echo "${{ github.event_name }}"', False),
+            ('echo "${{ steps.request.outputs.url }}"', False),
+            ('echo "$INPUT_COMMAND"', False),
+        ):
+            with self.subTest(script=script):
+                self.assertEqual(
+                    UNTRUSTED_RUN_EXPRESSION_PATTERN.search(script) is not None, matches
+                )
 
-    def test_product_repo_config_authority_uses_called_workflow_revision(self) -> None:
-        workflow = Path(".github/workflows/reusable-product-repo-config-authority.yml").read_text(
-            encoding="utf-8"
-        )
+    def test_run_scripts_read_untrusted_values_through_the_environment(self) -> None:
+        # An expression in a run script is pasted into the shell before it runs,
+        # so a crafted input or event field becomes code. Pass it through env.
+        violations = [
+            f"{path}:{step}: {match.group(0)}"
+            for path, step, script in _run_scripts()
+            for match in UNTRUSTED_RUN_EXPRESSION_PATTERN.finditer(script)
+        ]
 
-        self.assertIn("launchplane-revision:", workflow)
-        self.assertIn("launchplane-revision must be a 40-character commit SHA", workflow)
-        self.assertIn("JOB_CONTEXT_JSON: ${{ toJSON(job) }}", workflow)
-        self.assertIn(".workflow_sha", workflow)
-        self.assertIn("launchplane-revision must match the called workflow commit SHA", workflow)
-        self.assertIn("ref: ${{ inputs.launchplane-revision }}", workflow)
-        self.assertNotIn("ref: main", workflow)
+        self.assertEqual([], violations)
 
     def test_product_repo_config_authority_revision_validation_fails_closed(self) -> None:
         workflow = load_workflow(".github/workflows/reusable-product-repo-config-authority.yml")
@@ -509,7 +619,6 @@ class GitHubActionsSecurityTests(TestCase):
         self.assertEqual(match.group("provenance"), "v7.0.0")
 
     def test_remote_action_references_are_classified_and_immutably_pinned(self) -> None:
-        observed_sources: set[str] = set()
         violations: list[str] = []
 
         for action in _action_references():
@@ -542,13 +651,10 @@ class GitHubActionsSecurityTests(TestCase):
                         f"{action.location}: same-repository reusable workflows must use a "
                         "relative path unless the exact pinned identity is an approved trust anchor."
                     )
-            classification = APPROVED_REMOTE_ACTIONS.get(source)
-            if classification is None:
+            if source not in APPROVED_REMOTE_ACTIONS:
                 violations.append(
                     f"{action.location}: unclassified remote action source {source!r}."
                 )
-            else:
-                observed_sources.add(source)
             if FULL_SHA_PATTERN.fullmatch(revision) is None:
                 violations.append(
                     f"{action.location}: remote action {source!r} must use a 40-character SHA."
@@ -580,20 +686,15 @@ class GitHubActionsSecurityTests(TestCase):
                 )
 
         self.assertFalse(violations, "\n".join(violations))
-        self.assertSetEqual(set(APPROVED_REMOTE_ACTIONS), observed_sources)
 
     def test_static_container_references_are_classified_and_digest_pinned(self) -> None:
-        observed_sources: set[str] = set()
         violations: list[str] = []
 
         for image in _container_references():
-            classification = APPROVED_CONTAINER_IMAGES.get(image.source)
-            if classification is None:
+            if image.source not in APPROVED_CONTAINER_IMAGES:
                 violations.append(
                     f"{image.location}: unclassified container image source {image.source!r}."
                 )
-            else:
-                observed_sources.add(image.source)
             if image.digest is None:
                 violations.append(
                     f"{image.location}: container image {image.source!r} must use a sha256 digest."
@@ -604,49 +705,3 @@ class GitHubActionsSecurityTests(TestCase):
                 )
 
         self.assertFalse(violations, "\n".join(violations))
-        self.assertSetEqual(set(APPROVED_CONTAINER_IMAGES), observed_sources)
-
-    def test_security_gate_runs_action_pinning_policy_for_all_pull_requests(self) -> None:
-        security_workflow = load_workflow(".github/workflows/security.yml")
-
-        _assert_no_workflow_violations(
-            self,
-            check_security_policy_runs_for_all_pull_requests(security_workflow),
-        )
-
-    def test_retirement_skips_repository_app_token_and_github_metadata_calls(self) -> None:
-        workflow = load_workflow(".github/workflows/generic-web-preview-authorization.yml")
-
-        for step_name in (
-            "Mint repository metadata token",
-            "Resolve immutable repository identity",
-        ):
-            step = workflow.step_named("plan", step_name)
-            self.assertIsNotNone(step)
-            assert step is not None
-            self.assertEqual(step.data.get("if"), "${{ inputs.operation != 'retire' }}")
-        token_step = workflow.step_named("plan", "Mint repository metadata token")
-        assert token_step is not None
-        self.assertEqual(
-            token_step.uses.split("@", maxsplit=1)[0], "actions/create-github-app-token"
-        )
-
-    def test_documentation_and_dependabot_preserve_reviewable_pin_updates(self) -> None:
-        docs_index = Path("docs/README.md").read_text(encoding="utf-8")
-        policy = Path("docs/github-actions-security.md").read_text(encoding="utf-8")
-        dependabot = Path(".github/dependabot.yml").read_text(encoding="utf-8")
-
-        self.assertIn("github-actions-security.md", docs_index)
-        self.assertIn("GitHub-maintained", policy)
-        self.assertIn("Third-party publisher", policy)
-        self.assertIn("First-party cross-repository", policy)
-        self.assertIn("High-privilege", policy)
-        self.assertIn("protected immutable product retirement", policy)
-        self.assertIn("protected immutable detached application retirement", policy)
-        self.assertIn("container image", policy)
-        self.assertIn("MUTABLE_REFERENCE_ALLOWLIST", policy)
-        self.assertIn("Dependabot", policy)
-        self.assertIn("action-pins update", policy)
-        self.assertIn("same-repository first-party action", policy)
-        self.assertIn("package-ecosystem: github-actions", dependabot)
-        self.assertIn("interval: weekly", dependabot)

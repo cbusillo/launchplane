@@ -112,7 +112,7 @@ class TenantMergeEligibilityTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             TenantAdmissionPathResult.model_validate(
                 {
-                    "path_kind": "manager_preview_approval",
+                    "path_kind": "trusted_maintenance",
                     "state": "satisfied",
                     "evidence_id": "mgr-1",
                     "evidence_digest": "d" * 64,

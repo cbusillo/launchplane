@@ -44,6 +44,7 @@ from control_plane.odoo_stable_bootstrap_http import (
     OdooStableBootstrapEnvelope,
     enqueue_odoo_stable_bootstrap_operation,
 )
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.odoo_stable_operation_worker import (
     OdooStableOperationWorkerLoopResult,
@@ -53,6 +54,7 @@ from control_plane.workflows.odoo_stable_operation_worker import (
     run_odoo_stable_operation_worker_loop,
     run_odoo_stable_operation_worker_once,
 )
+from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from tests.support.durable_operations import (
     durable_operation_authorization_payload,
     durable_operation_policy_record,
@@ -71,6 +73,11 @@ _BOOTSTRAP_AUTHORIZATION = durable_operation_authorization_payload(
 _REPLACEMENT_AUTHORIZATION = durable_operation_authorization_payload(
     action="odoo_target_replacement_apply.execute",
     managed_rule_id="cm-testing-target-replacement",
+)
+_PROD_REPLACEMENT_AUTHORIZATION = durable_operation_authorization_payload(
+    action="odoo_target_replacement_apply.execute",
+    managed_rule_id="cm-prod-target-replacement",
+    instances=("prod",),
 )
 _RESTORE_AUTHORIZATION = durable_operation_authorization_payload(
     action="odoo_prod_backup_restore_apply.execute",
@@ -241,6 +248,7 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
         self.authorization_policy_record = durable_operation_policy_record(
             _BOOTSTRAP_AUTHORIZATION,
             _REPLACEMENT_AUTHORIZATION,
+            _PROD_REPLACEMENT_AUTHORIZATION,
             _RESTORE_AUTHORIZATION,
             _RETAINED_PLAN_AUTHORIZATION,
             _RETAINED_APPLY_AUTHORIZATION,
@@ -900,6 +908,51 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             self.assertEqual(operation.deployment_record_id, "deployment-cm-testing")
             self.assertEqual(operation.lease_owner, "worker-a")
             execute_mock.assert_called_once()
+
+    def test_worker_refuses_to_change_live_production_before_provider_mutation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(
+                    _odoo_profile_payload_with_prod_lane()
+                )
+            )
+            payload = _replacement_payload("operation-cm-prod")
+            request = cast(dict[str, object], payload["request"])
+            payload.update(
+                instance="prod",
+                authorization=_PROD_REPLACEMENT_AUTHORIZATION,
+                request={
+                    **request,
+                    "instance": "prod",
+                    "confirmation": "",
+                    "data_source_mode": "existing",
+                    "allow_empty_data": False,
+                    "artifact_id": "artifact-cm-new",
+                    "source_git_ref": "a" * 40,
+                },
+            )
+            store.write_odoo_stable_target_replacement_operation_record(
+                OdooStableTargetReplacementOperationRecord.model_validate(payload)
+            )
+
+            with (
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_stable_target_replacement_apply",
+                ) as execute_mock,
+                self.assertLogs(level=logging.ERROR),
+            ):
+                run_odoo_stable_operation_worker_once(
+                    record_store=store, control_plane_root_path=root, lease_owner="worker-a"
+                )
+
+            operation = store.read_odoo_stable_target_replacement_operation_record(
+                "operation-cm-prod"
+            )
+            self.assertEqual(operation.status, "fail")
+            self.assertEqual(operation.error_code, "promotion_required")
+            execute_mock.assert_not_called()
 
     def test_operator_target_replacement_runs_while_testing_is_held(self) -> None:
         # The staff-testing hold stops Launchplane's own reconcile deploys, not an operator's.

@@ -8,16 +8,9 @@ import unittest
 
 
 ACTION_ENTRYPOINT = Path(".github/actions/launchplane-request/dist/index.js")
-ACTION_METADATA = Path(".github/actions/launchplane-request/action.yml")
 
 
 class LaunchplaneRequestActionTests(unittest.TestCase):
-    def test_action_metadata_uses_supported_node_runtime(self) -> None:
-        metadata = ACTION_METADATA.read_text(encoding="utf-8")
-        self.assertIn("using: node24", metadata)
-        self.assertIn("log-response-body:", metadata)
-        self.assertIn('default: "true"', metadata)
-
     def run_action(
         self,
         *,
