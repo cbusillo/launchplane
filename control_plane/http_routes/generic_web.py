@@ -24,6 +24,10 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.release_review import ReleaseReviewStatus
 from control_plane.drivers import native_routes
+from control_plane.release_review import (
+    ProductionChangeRequiresPromotion,
+    require_unchanged_production_artifact,
+)
 from control_plane.workflows.generic_web_promotion import (
     GenericWebPromotionStore,
     resolve_generic_web_promotion_inputs,
@@ -1348,6 +1352,31 @@ def build_generic_web_write_route_handlers(
                 code="idempotency_key_required",
                 message="Generic web deploy requests require an Idempotency-Key header.",
             )
+        try:
+            if lane.instance.strip().lower() == "prod":
+                require_unchanged_production_artifact(
+                    record_store=record_store,
+                    product=profile.product,
+                    instance=lane.instance,
+                    artifact_id=normalize_generic_web_artifact_id(
+                        profile=profile, artifact_id=deploy_request.deploy.artifact_id
+                    ),
+                    deploy_reference=deploy_request.deploy.deploy_reference,
+                )
+        except ProductionChangeRequiresPromotion as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=error.code,
+                message=error.message,
+            ) from error
+        except click.ClickException as error:
+            raise dependencies.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
         raw_payload = await request.json()
         payload_fingerprint = dependencies.idempotency_request_fingerprint(
             route_path=_GENERIC_WEB_DEPLOY_ROUTE,

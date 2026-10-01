@@ -109,11 +109,15 @@ promotion wrapper also checks it. Readiness and direct dry-runs remain available
 while an Owner decision is pending. Recording a decision never merges, backs up,
 dispatches a workflow, or deploys.
 
-This gate covers promotion, not the existing direct stable-deploy,
-target-replacement, and rollback operations. Those retain their separate
-operator authorization boundaries and must not be used to bypass a refused
-release. Closing direct production-deploy paths while preserving authorized
-recovery is separate work.
+Direct deploys cannot change what a production lane runs. The generic-web
+deploy, VeriReel prod-deploy, and Odoo target-replacement apply routes, and the
+worker that runs queued target replacements, refuse a production artifact other
+than the recorded one with `409 promotion_required` before any provider call.
+They can still redeploy the current artifact, for example after a settings
+change. A new release goes through promotion, which carries this gate and the
+backup gate; rollback stays the recovery path. Only a product recorded as
+`prelaunch` is exempt, which is also how an initial production lane is
+bootstrapped.
 
 An initial product needs a verified prelaunch production-lane baseline before
 this comparison can run. Missing production records do not prove that no live

@@ -871,6 +871,10 @@ hard-code provider targets, Dokploy operations, runtime domains, managed secrets
 or fixed product topology; Launchplane resolves those from DB-backed product and
 target records.
 
+This route can redeploy a production lane but not change its artifact unless the
+product is recorded as `prelaunch`; a production release goes through promotion
+(see [release review](release-review.md)).
+
 For this compatibility shape, `.github/workflows/launchplane-deploy.yml` is the
 supported thin connector workflow name. It should call:
 
