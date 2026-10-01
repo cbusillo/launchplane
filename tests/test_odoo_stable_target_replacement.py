@@ -12,6 +12,7 @@ from control_plane.odoo_instance_overrides import LAUNCHPLANE_INSTANCE_OVERRIDES
 from control_plane.odoo_instance_overrides import LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY
 from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
 from control_plane.contracts.artifact_identity import (
+    ArtifactBuildFlags,
     ArtifactImageReference,
     ArtifactIdentityManifest,
 )
@@ -3822,6 +3823,177 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     product="odoo-tenant-cm", instance="testing"
                 ),
             )
+
+
+class OdooStableTargetReplacementOdooVersionTests(unittest.TestCase):
+    def _apply(
+        self,
+        *,
+        declare_odoo_version: bool,
+        manifest_odoo_version: str,
+        site_values: dict[str, str],
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        profile = _profile()
+        if declare_odoo_version:
+            profile = profile.model_copy(
+                update={
+                    "expected_config": ProductExpectedConfigProfile(
+                        runtime_environment_keys=(
+                            *profile.expected_config.runtime_environment_keys,
+                            ProductRuntimeConfigRequirement(key="ODOO_VERSION"),
+                        )
+                    )
+                }
+            )
+        artifact_manifest = _artifact_manifest()
+        if manifest_odoo_version:
+            artifact_manifest = artifact_manifest.model_copy(
+                update={
+                    "build_flags": ArtifactBuildFlags(
+                        values={"odoo_version": manifest_odoo_version}
+                    )
+                }
+            )
+        store = _Store(
+            profile=profile,
+            target_record=_target_record(),
+            target_id_record=_target_id_record(),
+            inventory=_inventory(),
+            artifact_manifest=artifact_manifest,
+        )
+        persisted_env = ""
+        rendered_compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            hold_web_until_integration_readback=False,
+            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:artifact",
+            domain_hosts=("cm-testing.shinycomputers.com",),
+            runtime_port=8069,
+        )
+
+        def _fetch_target_payload(**_: object) -> JsonValue:
+            return {
+                "name": "cm-testing",
+                "sourceType": "raw",
+                "composePath": "docker-compose.yml",
+                "composeFile": rendered_compose_file,
+                "env": persisted_env
+                or "\n".join(
+                    (
+                        *_DATABASE_ENV_LINES,
+                        "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                        "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                        "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                    )
+                ),
+                "appName": "cm-testing",
+                "serverId": "server-123",
+                "deployments": [{"deploymentId": "deploy-123", "status": "done"}],
+            }
+
+        def _update_env(*, env_text: str, **_: object) -> None:
+            nonlocal persisted_env
+            persisted_env = env_text
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
+                side_effect=_fetch_target_payload,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-123", "status": "success"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment(site_values),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source",
+                return_value={"source_type": "raw", "changed": "true"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.render_odoo_raw_compose_file",
+                return_value=rendered_compose_file,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.ensure_compose_web_domain_route"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.fetch_dokploy_converted_compose_file",
+                return_value=rendered_compose_file,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.update_dokploy_target_env",
+                side_effect=_update_env,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.trigger_deployment"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.wait_for_target_deployment"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.execute_odoo_post_deploy",
+                return_value=OdooPostDeployResult(
+                    context="cm",
+                    instance="testing",
+                    phase="deploy",
+                    post_deploy_status="pass",
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.verify_odoo_stable_readiness",
+                return_value=_verification_result(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.wait_for_runtime_identity_healthcheck_with_retry",
+                side_effect=_matching_runtime_identity_healthcheck,
+            ),
+        ):
+            result = execute_odoo_stable_target_replacement_apply(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=OdooStableTargetReplacementApplyRequest(
+                    product="odoo-tenant-cm", instance="testing"
+                ),
+                dokploy_request=cast(DokployRequest, _request),
+            )
+
+        self.assertEqual(result.deploy_status, "pass")
+        return control_plane_dokploy.parse_dokploy_env_text(persisted_env), result.runtime_source
+
+    def test_artifact_odoo_version_wins_over_the_site_setting(self) -> None:
+        env_map, runtime_source = self._apply(
+            declare_odoo_version=True,
+            manifest_odoo_version="19.0",
+            site_values={"ODOO_VERSION": "18.0"},
+        )
+
+        self.assertEqual(env_map["ODOO_VERSION"], "19.0")
+        self.assertEqual(runtime_source["artifact_odoo_version"], "19.0")
+
+    def test_manifest_without_odoo_version_keeps_the_site_setting(self) -> None:
+        env_map, runtime_source = self._apply(
+            declare_odoo_version=True,
+            manifest_odoo_version="",
+            site_values={"ODOO_VERSION": "18.0"},
+        )
+
+        self.assertEqual(env_map["ODOO_VERSION"], "18.0")
+        self.assertEqual(runtime_source["artifact_odoo_version"], "")
+
+    def test_artifact_odoo_version_does_not_reach_a_lane_that_does_not_declare_it(self) -> None:
+        env_map, runtime_source = self._apply(
+            declare_odoo_version=False,
+            manifest_odoo_version="19.0",
+            site_values={},
+        )
+
+        self.assertNotIn("ODOO_VERSION", env_map)
+        self.assertEqual(runtime_source["artifact_odoo_version"], "")
 
 
 class OdooTargetReplacementFailureStageTests(unittest.TestCase):

@@ -660,9 +660,9 @@ Authorization checks the dedicated
 `generic_web_deploy_recovery_provider_evidence.read` action first and accepts
 `generic_web_deploy.execute` as the more-privileged compatibility path. The
 compatibility path avoids a new production grant for the existing protected
-recovery workflow while authorization redesign issue `#2058` remains open. It
-must be removed under `#2167` once DB-native policy administration can grant the
-dedicated read action to the exact workflow identity.
+recovery workflow. It must be removed under `#2167` once DB-native policy
+administration can grant the dedicated read action to the exact workflow
+identity.
 
 Stage 2 apply is explicit and digest-gated. Operators call
 `POST /v1/admin/generic-web/deploy-recovery/apply` with the same request body as
@@ -804,7 +804,8 @@ Apply atomically commits the active-policy compare-and-swap and completed
 `Idempotency-Key` replay evidence. Managed reconciliation is the sole policy
 write implementation currently available for every principal type. That is an
 implementation fact, not approval for GitHub to remain durable desired-policy
-authority. Follow `authorization-authority.md` and the active `#2058` freeze.
+authority. Follow `authorization-authority.md`; a new grant is an operator
+decision.
 
 `POST /v1/authz-diagnostics/github-actions/evaluate` is a read-only diagnostic
 route for GitHub Actions callers. It evaluates only the calling OIDC identity
@@ -905,7 +906,7 @@ Successful and partial reads perform no policy, session, idempotency, outbox,
 provider, runtime, workflow, secret, deployment, or durable-operation mutation.
 A denied request may append the ordinary redacted denial record, which contains
 no candidate or repository identity. Landing the route does not grant
-production access and does not relax #2058.
+production access.
 
 Standard `authorization_denied` HTTP failures with a captured policy evaluation
 write a redacted `launchplane_authz_denials` audit record on a best-effort basis.
@@ -1043,9 +1044,9 @@ wrapper, add a distinct exact rule for the next reusable-worker SHA through the
 currently authorized worker, apply the reviewed expansion, then advance the
 wrapper. The former temporary deploy selector for first-time policy-admin
 recovery no longer exists. Do not reintroduce it or represent image rollback as
-DB-policy recovery. A missing authorized administrator is a `#2058` architecture
-blocker until a bounded, independently protected DB-policy recovery contract is
-designed and reviewed.
+DB-policy recovery. A missing authorized administrator is an architecture
+blocker to report to the operator until a bounded, independently protected
+DB-policy recovery contract is designed and reviewed.
 
 The reusable authz worker requires an exact expected managed-set identity from
 every reviewed wrapper. The worker rejects protected
@@ -1806,8 +1807,7 @@ The manual Merge Train Policy Import workflow uses GitHub OIDC with
 `merge_train.policy_import` authority for product/context `launchplane`. It does
 not inherit Launchplane self-deploy authority; use that workflow for DB-backed
 merge-train policy imports instead of direct DB writes from a local checkout.
-While issue `#2058` keeps routine workflow/local authorization grants frozen,
-new reviewed merge-train policy imports must go through
+New reviewed merge-train policy imports go through
 `managed-merge-train-policy-import` privileged operations. Do not add a workflow
 secret/grant, local-operator grant, raw route proxy, or direct database fallback
 to perform a policy import; activate only the exact
@@ -2761,6 +2761,12 @@ workflow grant, after that.
 - For Odoo artifacts, the stored artifact manifest carries `odoo_install_modules`.
   Stable target replacement merges that list into `ODOO_INSTALL_MODULES` with
   Launchplane's required safety modules before deploying the target.
+- When the manifest records `build_flags.values.odoo_version`, stable target
+  replacement (and so promotion and rollback), backup restore, ship and Odoo
+  preview apply set the runtime `ODOO_VERSION` from it, overriding any site or
+  global value, for lanes that declare `ODOO_VERSION` or already carry it.
+  Deployment evidence records the value as `artifact_odoo_version`. Older
+  manifests without it keep the environment's value.
 - With no explicit artifact id, the Odoo prod rollback driver redeploys the
   artifact of the previous passing prod deployment: the newest passing one whose
   artifact differs from the lane's latest deployment. It writes rollback
@@ -3509,13 +3515,8 @@ job_workflow_ref=cbusillo/launchplane/.github/workflows/reusable-product-retirem
 ```
 
 This describes an existing transitional authorization path, not approval to
-create or expand it. While #2058 remains open, new grants and managed-set
-changes are frozen. The only exceptions are those permitted by the
-[Active Freeze](authorization-authority.md#active-freeze): explicitly reviewed
-maintenance of an already-authorized transitional path or a documented
-bootstrap/break-glass recovery operation, with separate approval required by
-the owning issue and operator boundary. Routine authority migration belongs to
-issues #2061 and #2182.
+create or expand it. New grants and managed-set changes are a stop boundary;
+see [Who Can Do What](authorization-authority.md#who-can-do-what).
 
 ## Detached Application Retirement
 
@@ -3566,12 +3567,11 @@ Managed authz routing is reserved through the
 `detached-application-retirement` selector, managed-set ID
 `operator.detached-application-retirement`, and secret name
 `LAUNCHPLANE_AUTHZ_DETACHED_APPLICATION_RETIREMENT_MANAGED_SET_JSON`. Neither
-phase creates or populates that secret or reconciles a live rule. The remaining
-sequence is blocked by the #2058 authorization freeze. Merge/deploy of code may
-continue, but do not configure a new caller/worker grant through the managed
-authz workflow. After #2061 and #2182 provide the reviewed DB-native migration
-path, register the exact caller and worker there, then run the reviewed plan and
-apply sequence. Never substitute a mutable ref, a checked-in target value, or a
+phase creates or populates that secret or reconciles a live rule. Merge/deploy
+of code may continue, but do not configure a new caller/worker grant through the
+managed authz workflow. Registering the exact caller and worker is a grant, so
+ask the operator, then use the DB-native administration route and run the
+reviewed plan and apply sequence. Never substitute a mutable ref, a checked-in target value, or a
 local CLI live-target fallback.
 
 ## Privileged-Operation Canary

@@ -419,7 +419,9 @@ the source and registry tokens. During the rollout, a tenant revision that does
 not declare these values still gets them from the Launchplane
 `ODOO_DEVKIT_REPOSITORY`, `ODOO_SHARED_ADDONS_REPOSITORY`, `ODOO_VERSION` and
 base-image records, which publish-inputs keeps returning until those records
-are retired. Reusable Odoo workflows read the
+are retired. When deploying an artifact whose manifest records the Odoo
+version, Launchplane sets the runtime `ODOO_VERSION` from the manifest rather
+than from its own setting. Reusable Odoo workflows read the
 Launchplane service URL from `LAUNCHPLANE_PUBLIC_URL` by default and derive the
 GitHub OIDC audience from that URL host unless the caller passes an explicit
 `launchplane_audience` input. The reusable jobs run on GitHub-hosted runners
