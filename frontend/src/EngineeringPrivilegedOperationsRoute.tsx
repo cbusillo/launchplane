@@ -4,6 +4,7 @@ import { useCallback, useRef, useState } from "react";
 import {
   LaunchplaneApiError,
   approvePrivilegedOperation,
+  listProductProfiles,
   planOrdinaryAgentDeliveryActivation,
   prepareAuthorizationCandidate,
   readOrdinaryAgentDeliveryActivationOptions,
@@ -181,7 +182,10 @@ function DefaultPrivilegedOperationsRoute({
             ) : null}
             {descriptorId === "managed-authz-policy-set" &&
             operationId === null ? (
-              <AccessPolicyComposer refresh={resource.refresh} />
+              <AccessPolicyComposer
+                fixtureMode={fixtureMode}
+                refresh={resource.refresh}
+              />
             ) : null}
             <PrivilegedOperationPlanList data={data} refresh={resource.refresh} />
           </>
@@ -191,7 +195,13 @@ function DefaultPrivilegedOperationsRoute({
   );
 }
 
-function AccessPolicyComposer({ refresh }: { refresh: () => void }) {
+function AccessPolicyComposer({
+  fixtureMode,
+  refresh,
+}: {
+  fixtureMode: DevFixtureMode;
+  refresh: () => void;
+}) {
   return (
     <div className="privileged-operation-access-policy-options">
       <AuthorizationCandidateCard
@@ -217,8 +227,216 @@ function AccessPolicyComposer({ refresh }: { refresh: () => void }) {
         alreadyRemovedMessage="Project evidence access is already removed."
         refresh={refresh}
       />
+      <AgentOperateCandidateCard fixtureMode={fixtureMode} refresh={refresh} />
     </div>
   );
+}
+
+type AgentOperateProductChoice = { product: string; displayName: string };
+
+const AGENT_OPERATE_CANDIDATE_ID: AuthorizationCandidateId =
+  "agent-operate-product-setup";
+
+function AgentOperateCandidateCard({
+  fixtureMode,
+  refresh,
+}: {
+  fixtureMode: DevFixtureMode;
+  refresh: () => void;
+}) {
+  const loader = useCallback(
+    async (signal: AbortSignal): Promise<AgentOperateProductChoice[]> => {
+      const profiles = fixtureMode
+        ? (await fixtureDelay(signal), agentOperateProfilesFixture())
+        : (await listProductProfiles(signal)).profiles;
+      return profiles
+        .filter((profile) => profile.production_use !== "live")
+        .map((profile) => ({
+          product: profile.product,
+          displayName: profile.display_name || profile.product,
+        }))
+        .sort((left, right) => left.product.localeCompare(right.product));
+    },
+    [fixtureMode],
+  );
+  const products = useEngineeringResource(
+    loader,
+    `agent-operate-products:${fixtureMode}`,
+  );
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const [pendingIntent, setPendingIntent] =
+    useState<AuthorizationCandidateIntent | null>(null);
+  const [message, setMessage] = useState("");
+  const [traceId, setTraceId] = useState("");
+  const retryKeys = useRef<Partial<Record<string, string>>>({});
+
+  function toggle(product: string) {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(product)) next.delete(product);
+      else next.add(product);
+      return next;
+    });
+  }
+
+  async function prepare(
+    intent: AuthorizationCandidateIntent,
+    available: readonly AgentOperateProductChoice[],
+  ) {
+    const chosen =
+      intent === "add"
+        ? available
+            .map((choice) => choice.product)
+            .filter((product) => selected.has(product))
+        : [];
+    if (intent === "add" && chosen.length === 0) {
+      setMessage("Choose at least one product.");
+      setTraceId("");
+      return;
+    }
+    setPendingIntent(intent);
+    setMessage("");
+    setTraceId("");
+    const retryKey = `${intent}:${chosen.join(",")}`;
+    const sourceEventId =
+      retryKeys.current[retryKey] ??
+      `ui:authorization-candidate:${AGENT_OPERATE_CANDIDATE_ID}:${intent}:${crypto.randomUUID()}`;
+    retryKeys.current[retryKey] = sourceEventId;
+    try {
+      const response = await prepareAuthorizationCandidate(
+        AGENT_OPERATE_CANDIDATE_ID,
+        intent,
+        sourceEventId,
+        undefined,
+        intent === "add" ? chosen : undefined,
+      );
+      setTraceId(response.trace_id);
+      if (response.state === "planned" && response.operation_id) {
+        delete retryKeys.current[retryKey];
+        window.location.assign(
+          `/ui/engineering/privileged-operations?operation_id=${encodeURIComponent(response.operation_id)}`,
+        );
+        return;
+      }
+      if (response.state === "planned") {
+        setMessage("The plan was prepared, but its review is not available yet.");
+      } else {
+        delete retryKeys.current[retryKey];
+        setMessage(
+          intent === "add"
+            ? "Agent operate access already covers exactly these products."
+            : "Agent operate access is already removed.",
+        );
+        refresh();
+      }
+    } catch (error) {
+      if (error instanceof LaunchplaneApiError) {
+        setMessage(error.message);
+        setTraceId(error.traceId);
+      } else {
+        setMessage("The access policy plan could not be prepared.");
+      }
+    } finally {
+      setPendingIntent(null);
+    }
+  }
+
+  return (
+    <section
+      aria-labelledby="agent-operate-product-setup-heading"
+      className="privileged-operation-card"
+    >
+      <header>
+        <div>
+          <span className="engineering-kicker">Access policy</span>
+          <h2 id="agent-operate-product-setup-heading">
+            Prepare agent operate access
+          </h2>
+          <p>
+            Let the operator's agent declare expected settings on the selected
+            non-live products. Live products are not listed. This creates a plan
+            for review and changes nothing until it is approved. It does not
+            allow release approval or deploys. If installed, the access stays
+            until a separate removal plan is approved.
+          </p>
+        </div>
+      </header>
+      <EngineeringResourceGate
+        noun="Products"
+        refresh={products.refresh}
+        state={products.state}
+      >
+        {(choices) => (
+          <>
+            {choices.length ? (
+              <fieldset className="agent-operate-products">
+                <legend>Non-live products</legend>
+                {choices.map((choice) => (
+                  <label key={choice.product}>
+                    <input
+                      checked={selected.has(choice.product)}
+                      disabled={pendingIntent !== null}
+                      onChange={() => toggle(choice.product)}
+                      type="checkbox"
+                    />{" "}
+                    {choice.displayName}
+                    {choice.displayName !== choice.product ? (
+                      <> ({choice.product})</>
+                    ) : null}
+                  </label>
+                ))}
+              </fieldset>
+            ) : (
+              <p role="status">No non-live products are recorded.</p>
+            )}
+            <div className="privileged-operation-actions activation-plan-actions">
+              <button
+                disabled={pendingIntent !== null || selected.size === 0}
+                onClick={() => void prepare("add", choices)}
+                type="button"
+              >
+                {pendingIntent === "add"
+                  ? "Preparing access…"
+                  : "Prepare operate access"}
+              </button>
+              <button
+                disabled={pendingIntent !== null}
+                onClick={() => void prepare("remove", choices)}
+                type="button"
+              >
+                {pendingIntent === "remove"
+                  ? "Preparing removal…"
+                  : "Prepare operate removal"}
+              </button>
+            </div>
+          </>
+        )}
+      </EngineeringResourceGate>
+      {message ? (
+        <p className="privileged-operation-terminal-reason" role="status">
+          {message}
+          {traceId ? (
+            <>
+              <br />
+              Trace: {traceId}
+            </>
+          ) : null}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+function agentOperateProfilesFixture(): Array<{
+  product: string;
+  display_name: string;
+  production_use: "unknown" | "prelaunch" | "live";
+}> {
+  return [
+    { product: "example-shop", display_name: "Example Shop", production_use: "prelaunch" },
+    { product: "example-docs", display_name: "Example Docs", production_use: "unknown" },
+    { product: "example-live", display_name: "Example Live", production_use: "live" },
+  ];
 }
 
 function AuthorizationCandidateCard({

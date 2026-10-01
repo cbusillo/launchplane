@@ -46,6 +46,7 @@ from control_plane.contracts.privileged_operation import (
     privileged_operation_request_digest_candidates,
 )
 from control_plane.authz_candidate_preparation import (
+    is_agent_operate_product_setup_request,
     is_administrator_product_evidence_read_request,
     is_legacy_administrator_product_evidence_read_request,
     is_ordinary_agent_delivery_administration_request,
@@ -533,9 +534,34 @@ def _build_privileged_operation_semantic_review(
         is_terminal_enrollment_requester_removal = is_terminal_enrollment_requester_request(
             record.request, intent="remove"
         )
+        is_agent_operate = is_agent_operate_product_setup_request(record.request, intent="add")
+        is_agent_operate_removal = is_agent_operate_product_setup_request(
+            record.request, intent="remove"
+        )
         adds_candidate_access = bool(record.request.desired_policy.github_humans)
         authz_review_title: PrivilegedOperationSemanticReviewTitle
-        if is_ordinary_agent_delivery_policy:
+        if is_agent_operate or is_agent_operate_removal:
+            authz_review_title = (
+                "Review agent operate access"
+                if is_agent_operate
+                else "Review removing agent operate access"
+            )
+            operate_products = (
+                ", ".join(record.request.desired_policy.local_operators[0].products)
+                if is_agent_operate
+                else ""
+            )
+            authz_change_summary = (
+                "Allow the operator's agent to declare expected settings on these non-live "
+                f"products: {operate_products}. This standing access remains until a "
+                "separately governed removal; the Approve-by deadline only bounds this plan. "
+                "It grants no release approval, deploy, secret, or live-product authority."
+                if is_agent_operate
+                else "Remove the operator's agent's standing access to declare expected "
+                "settings on products. Other agent access, including its read access, "
+                "is not changed."
+            )
+        elif is_ordinary_agent_delivery_policy:
             context = record.request.ordinary_agent_preparation_context
             assert context is not None
             ordinary_rule = next(

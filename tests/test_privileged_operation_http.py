@@ -38,6 +38,7 @@ from control_plane.contracts.privileged_operation import (
     ManagedAuthzPolicySetHumanEvidence,
     ManagedAuthzPolicySetProposalInput,
     ManagedMergeTrainPolicyImportProposalInput,
+    PrivilegedOperationRecord,
     ORDINARY_AGENT_DELIVERY_ACTIVATION_READ_ACTION,
     PRIVILEGED_OPERATION_SUMMARY_READ_ACTION,
     PRIVILEGED_POLICY_OPERATION_SUMMARY_READ_ACTION,
@@ -71,7 +72,12 @@ from control_plane.service_auth import (
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
     LocalAdminIdentity,
+    LocalOperatorIdentity,
     TerminalAgentIdentity,
+)
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductImageProfile,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import (
@@ -246,6 +252,26 @@ def _policy(
     )
 
 
+_OPERATE_IDENTITY = LocalOperatorIdentity(
+    subject="operator-agent", token_label="operator-agent-token"
+)
+
+
+def _operate_product_profile(product: str, production_use: str) -> LaunchplaneProductProfileRecord:
+    return LaunchplaneProductProfileRecord.model_validate(
+        {
+            "product": product,
+            "production_use": production_use,
+            "display_name": product.title(),
+            "repository": f"example/{product}",
+            "driver_id": "generic-web",
+            "image": ProductImageProfile().model_dump(mode="json"),
+            "updated_at": "2026-10-01T12:00:00+00:00",
+            "source": "test:agent-operate",
+        }
+    )
+
+
 def _policy_with_product_evidence(*, github_id: int = 123) -> LaunchplaneAuthzPolicy:
     payload = _policy().model_dump(mode="json")
     payload["github_humans"].extend(
@@ -405,6 +431,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         mutation_human_reader: Mock | None = None,
         agent_identity: TerminalAgentIdentity | None = None,
         configured_terminal_identity: TerminalAgentIdentity | None = None,
+        configured_local_operator_identity: LocalOperatorIdentity | None = None,
         policy_record_reader: Callable[[], object] | None = None,
     ) -> FastAPI:
         app = FastAPI()
@@ -447,6 +474,9 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 policy_reader=lambda: policy,
                 policy_record_reader=policy_record_reader or (lambda: _policy_record(policy)),
                 read_configured_terminal_identity=lambda: configured_terminal_identity,
+                read_configured_local_operator_identity=(
+                    lambda: configured_local_operator_identity
+                ),
             ),
         )
         return app
@@ -703,6 +733,218 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["state"], "already_satisfied")
         self.assertNotIn("operation_id", response.json())
         self.assertEqual(records, ())
+
+    async def _prepare_agent_operate(
+        self,
+        *,
+        payloads: tuple[dict[str, object], ...],
+        policy: LaunchplaneAuthzPolicy | None = None,
+        identity: LocalOperatorIdentity | None = _OPERATE_IDENTITY,
+    ) -> tuple[list[dict[str, object]], tuple[object, ...], list[str]]:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            for product, production_use in (
+                ("example-shop", "prelaunch"),
+                ("example-docs", "unknown"),
+                ("example-live", "live"),
+            ):
+                store.write_product_profile_record(
+                    _operate_product_profile(product, production_use)
+                )
+            active_policy = policy or _policy()
+            policy_record = store.seed_authz_policy_if_absent(_policy_record(active_policy))
+            app = self._app(
+                store=store,
+                policy=active_policy,
+                policy_record_reader=lambda: policy_record,
+                configured_local_operator_identity=identity,
+            )
+            results: list[dict[str, object]] = []
+            reviews: list[str] = []
+            async with lifespan_client(app) as client:
+                for payload in payloads:
+                    response = await client.post(
+                        "/v1/privileged-operations/authorization-candidates/prepare",
+                        json=payload,
+                    )
+                    body = response.json()
+                    results.append({"status": response.status_code, **body})
+                    operation_id = body.get("operation_id")
+                    if response.status_code == 200 and operation_id:
+                        review = await client.get(
+                            f"/v1/privileged-operations/plans/{operation_id}/review"
+                        )
+                        reviews.append(review.text)
+            records = store.list_privileged_operation_records(limit=None)
+            active_policy_record = store.list_authz_policy_records(status="active", limit=2)[0]
+            store.close()
+        self.assertEqual(policy_record, active_policy_record)
+        return results, records, reviews
+
+    async def test_agent_operate_candidate_plans_once_for_server_derived_operator(self) -> None:
+        payload: dict[str, object] = {
+            "candidate_id": "agent-operate-product-setup",
+            "intent": "add",
+            "source_event_id": "ui:agent-operate:add",
+            "products": ["example-shop", "example-docs", "example-shop"],
+        }
+        results, records, reviews = await self._prepare_agent_operate(
+            payloads=(
+                payload,
+                payload,
+                {**payload, "products": ["example-shop"]},
+            )
+        )
+
+        self.assertEqual(results[0]["status"], 200, results[0])
+        self.assertEqual(results[0]["state"], "planned")
+        self.assertEqual(results[1]["operation_id"], results[0]["operation_id"])
+        self.assertEqual(results[2]["status"], 409, results[2])
+        self.assertEqual(len(records), 1)
+        planned = records[0]
+        assert isinstance(planned, PrivilegedOperationRecord)
+        assert isinstance(planned.request, ManagedAuthzPolicySetProposalInput)
+        self.assertEqual(planned.request.managed_set_id, "operator.agent-operate")
+        (rule,) = planned.request.desired_policy.local_operators
+        self.assertEqual(rule.subjects, ("operator-agent",))
+        self.assertEqual(rule.token_labels, ("operator-agent-token",))
+        self.assertEqual(rule.products, ("example-docs", "example-shop"))
+        self.assertEqual(rule.actions, ("product_profile.expected_config.apply",))
+        self.assertEqual(planned.request.desired_policy.github_humans, ())
+        review = json.loads(reviews[0])["review"]
+        self.assertEqual(review["title"], "Review agent operate access")
+        self.assertIn("example-docs, example-shop", review["change"]["summary"])
+        self.assertIn("no release approval", review["change"]["summary"])
+        self.assertNotIn("operator-agent-token", reviews[0])
+
+    async def test_agent_operate_candidate_refuses_unsafe_selection_or_missing_operator(
+        self,
+    ) -> None:
+        base = {
+            "candidate_id": "agent-operate-product-setup",
+            "intent": "add",
+            "source_event_id": "ui:agent-operate:refused",
+        }
+        cases: tuple[tuple[dict[str, object], LocalOperatorIdentity | None, int, str], ...] = (
+            (
+                {**base, "products": ["example-live"]},
+                _OPERATE_IDENTITY,
+                409,
+                "authorization_candidate_product_live",
+            ),
+            (
+                {**base, "products": ["missing-product"]},
+                _OPERATE_IDENTITY,
+                409,
+                "authorization_candidate_product_unavailable",
+            ),
+            (
+                {**base, "products": []},
+                _OPERATE_IDENTITY,
+                409,
+                "authorization_candidate_products_required",
+            ),
+            (
+                {**base, "products": ["example-shop"]},
+                None,
+                409,
+                "authorization_candidate_principal_unavailable",
+            ),
+            (
+                {**base, "intent": "remove", "products": ["example-shop"]},
+                _OPERATE_IDENTITY,
+                422,
+                "",
+            ),
+            (
+                {
+                    **base,
+                    "candidate_id": "administrator-product-evidence-read",
+                    "products": ["example-shop"],
+                },
+                _OPERATE_IDENTITY,
+                422,
+                "",
+            ),
+            (
+                {**base, "products": ["example-shop"], "subject": "caller-subject"},
+                _OPERATE_IDENTITY,
+                422,
+                "",
+            ),
+        )
+        for payload, identity, status, code in cases:
+            with self.subTest(payload=payload, identity=identity):
+                results, records, _reviews = await self._prepare_agent_operate(
+                    payloads=(payload,), identity=identity
+                )
+                self.assertEqual(results[0]["status"], status, results[0])
+                if code:
+                    detail = cast(dict[str, object], results[0]["detail"])
+                    self.assertEqual(detail["code"], code)
+                self.assertEqual(records, ())
+
+    async def test_agent_operate_candidate_noops_and_removal(self) -> None:
+        payload = _policy().model_dump(mode="json")
+        payload["local_operators"] = [
+            {
+                "managed_set_id": "operator.agent-operate",
+                "managed_rule_id": "agent-operate-product-setup",
+                "subjects": ["operator-agent"],
+                "token_labels": ["operator-agent-token"],
+                "products": ["example-shop"],
+                "contexts": ["launchplane"],
+                "actions": ["product_profile.expected_config.apply"],
+            }
+        ]
+        installed = LaunchplaneAuthzPolicy.model_validate(payload)
+        results, records, _reviews = await self._prepare_agent_operate(
+            payloads=(
+                {
+                    "candidate_id": "agent-operate-product-setup",
+                    "intent": "add",
+                    "source_event_id": "ui:agent-operate:noop",
+                    "products": ["example-shop"],
+                },
+            ),
+            policy=installed,
+        )
+        self.assertEqual(results[0]["state"], "already_satisfied")
+        self.assertEqual(records, ())
+
+        results, records, _reviews = await self._prepare_agent_operate(
+            payloads=(
+                {
+                    "candidate_id": "agent-operate-product-setup",
+                    "intent": "remove",
+                    "source_event_id": "ui:agent-operate:absent-remove",
+                },
+            ),
+        )
+        self.assertEqual(results[0]["state"], "already_satisfied")
+        self.assertEqual(records, ())
+
+        remove: dict[str, object] = {
+            "candidate_id": "agent-operate-product-setup",
+            "intent": "remove",
+            "source_event_id": "ui:agent-operate:remove",
+        }
+        results, records, reviews = await self._prepare_agent_operate(
+            payloads=(remove, remove), policy=installed, identity=None
+        )
+        self.assertEqual(results[0]["state"], "planned", results[0])
+        self.assertEqual(results[1]["operation_id"], results[0]["operation_id"])
+        self.assertEqual(len(records), 1)
+        planned = records[0]
+        assert isinstance(planned, PrivilegedOperationRecord)
+        assert isinstance(planned.request, ManagedAuthzPolicySetProposalInput)
+        self.assertEqual(planned.request.desired_policy.local_operators, ())
+        self.assertEqual(
+            json.loads(reviews[0])["review"]["title"], "Review removing agent operate access"
+        )
 
     async def test_product_evidence_candidate_plans_once_with_clear_human_review(self) -> None:
         with TemporaryDirectory() as directory:

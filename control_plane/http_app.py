@@ -760,6 +760,7 @@ from control_plane.service_auth import (
     LocalAdminIdentity,
     LocalOperatorIdentity,
     TerminalAgentIdentity,
+    configured_local_operator_identity,
     configured_terminal_agent_identity,
     TokenVerifier,
     agent_authz_audit,
@@ -5002,6 +5003,9 @@ def create_launchplane_fastapi_app(
         policy_reader=lambda: resolved_authz_policy_runtime.policy,
         policy_record_reader=lambda: read_active_authz_policy_record(get_record_store()),
         read_configured_terminal_identity=lambda: configured_terminal_agent_identity(
+            bearer_identity_config or BearerIdentityConfig()
+        ),
+        read_configured_local_operator_identity=lambda: configured_local_operator_identity(
             bearer_identity_config or BearerIdentityConfig()
         ),
     )
