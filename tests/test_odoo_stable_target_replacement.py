@@ -1492,6 +1492,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertNotIn("cm_testing_odoo_data", blocker)
         self.assertNotIn("cm_testing_replacement_data", blocker)
         self.assertIn("volume_authority_drift", plan.blocker_codes)
+        self.assertIn("ODOO_DATA_VOLUME", plan.blocker_keys["volume_authority_drift"])
         self.assertEqual(
             next(step for step in plan.steps if step.step_id == "volume-contract").status,
             "blocked",
@@ -3478,6 +3479,12 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                             )
                         error_message = str(refusal.exception)
                         self.assertEqual(store.deployment_records, [])
+                        # The undeclared key names travel as structured data.
+                        self.assertEqual(plan.blocker_keys["runtime_keys_undeclared"], (key,))
+                        self.assertIsInstance(refusal.exception, OdooTargetReplacementStageError)
+                        stage_error = cast(OdooTargetReplacementStageError, refusal.exception)
+                        self.assertEqual(stage_error.code, "plan_not_ready.runtime_keys_undeclared")
+                        self.assertEqual(stage_error.detail_keys, (key,))
                         self.assertTrue(all(blocker in error_message for blocker in plan.blockers))
                 if key in {"ADDON_FEATURE", "addon_feature"}:
                     self.assertIn("1 undeclared provider-only env key(s)", error_message)
@@ -3835,6 +3842,19 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         # The code names the first blocker; the message keeps the human text.
         self.assertEqual(raised.exception.code, "plan_not_ready.target_record_missing")
         self.assertIn("no Dokploy target record", str(raised.exception))
+        self.assertEqual(raised.exception.detail_keys, ())
+
+    def test_stage_error_keeps_only_env_key_names(self) -> None:
+        error = OdooTargetReplacementStageError(
+            "plan_not_ready.runtime_keys_undeclared",
+            "message",
+            ("ODOO_DB_NAME", "addon_feature", "1BAD", "SECRET=value", "", "ODOO_DB_NAME"),
+        )
+        self.assertEqual(error.detail_keys, ("ODOO_DB_NAME",))
+        many = tuple(f"KEY_{index:02d}" for index in range(40))
+        self.assertEqual(
+            OdooTargetReplacementStageError("code", "message", many).detail_keys, many[:32]
+        )
 
 
 class OdooStableTargetReplacementOdooVersionTests(unittest.TestCase):

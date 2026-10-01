@@ -46,6 +46,9 @@ from control_plane.odoo_stable_bootstrap_http import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.workflows.odoo_stable_target_replacement import (
+    OdooTargetReplacementStageError,
+)
 from control_plane.workflows.odoo_stable_operation_worker import (
     OdooStableOperationWorkerLoopResult,
     _unexpected_error_code,
@@ -1065,6 +1068,41 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             self.assertEqual(operation.phase, "failed")
             self.assertEqual(operation.error_message, "provider unavailable")
             self.assertEqual(operation.error_code, "unexpected.runtime_error")
+
+    def test_worker_records_the_key_names_a_blocked_plan_names(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_odoo_stable_target_replacement_operation_record(
+                OdooStableTargetReplacementOperationRecord.model_validate(_replacement_payload())
+            )
+
+            with (
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_stable_target_replacement_apply",
+                    side_effect=OdooTargetReplacementStageError(
+                        "plan_not_ready.runtime_keys_undeclared",
+                        "Odoo target replacement requires product-profile declarations for "
+                        "env key(s): ODOO_WEB_HOST_PORT.",
+                        ("ODOO_WEB_HOST_PORT", "not a key"),
+                    ),
+                ),
+                self.assertLogs(level=logging.ERROR),
+            ):
+                run_odoo_stable_operation_worker_once(
+                    record_store=store,
+                    control_plane_root_path=root,
+                    lease_owner="worker-a",
+                    lease_seconds=300,
+                    heartbeat_seconds=60,
+                )
+
+            operation = store.read_odoo_stable_target_replacement_operation_record(
+                "operation-cm-testing"
+            )
+            self.assertEqual(operation.status, "fail")
+            self.assertEqual(operation.error_code, "plan_not_ready.runtime_keys_undeclared")
+            self.assertEqual(operation.error_detail_keys, ("ODOO_WEB_HOST_PORT",))
 
     def test_worker_keeps_an_unexpected_error_s_own_code(self) -> None:
         class CodedError(Exception):

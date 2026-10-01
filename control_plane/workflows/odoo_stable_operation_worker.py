@@ -50,6 +50,7 @@ from control_plane.contracts.odoo_stable_target_replacement import (
 )
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
+    safe_error_detail_keys,
 )
 from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
 from control_plane.durable_operation_authorization import (
@@ -88,6 +89,7 @@ from control_plane.workflows.odoo_prod_retained_volume_backup_import import (
 )
 from control_plane.workflows.odoo_stable_target_replacement import (
     OdooStableTargetReplacementStore,
+    OdooTargetReplacementStageError,
     execute_odoo_stable_target_replacement_apply,
 )
 from control_plane.release_review import require_unchanged_production_artifact
@@ -1916,6 +1918,11 @@ def _execute_target_replacement_operation(
                 "lease_owner": lease_owner,
                 "error_code": _unexpected_error_code(error),
                 "error_message": str(error),
+                "error_detail_keys": (
+                    safe_error_detail_keys(error.detail_keys)
+                    if isinstance(error, OdooTargetReplacementStageError)
+                    else ()
+                ),
             }
         )
     else:

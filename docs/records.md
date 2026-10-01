@@ -1448,7 +1448,11 @@ records what it decided and did as `last_plan`:
   `control_plane/product_reconcile.py`; for `plan_not_ready.<blocker code>`,
   the `plan_not_ready` description plus that blocker's from
   `PLAN_BLOCKER_DESCRIPTIONS`; an unknown code gets a generic one),
-  the result's step statuses, and the worker attempt. After three failed
+  `Keys: A, B.` when the operation's `error_detail_keys` names the env keys a
+  key-list blocker is about (`runtime_keys_undeclared`,
+  `volume_env_keys_missing`, `volume_authority_drift`: the plan's
+  `blocker_keys`, names matching `^[A-Z][A-Z0-9_]{0,63}$` only, at most 32,
+  never values), the result's step statuses, and the worker attempt. After three failed
   attempts of one artifact
   the request is `failed`, and its error ends with the last attempt's code and
   summary. A lane with another active operation leaves the
