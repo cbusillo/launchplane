@@ -110,7 +110,8 @@ budget in the job summary and raises a warning annotation when a run exceeds
 it. The report never fails the gate; an exceeded budget is a signal to measure
 and fix the slow lane. Only pushes to `main` save the uv dependency cache:
 pull-request caches are scoped to that pull request, so saving one re-uploads
-hundreds of megabytes that no later run can restore.
+hundreds of megabytes that main and other pull requests cannot restore, and
+self-hosted runners already keep a local uv cache.
 
 Same-repo CI currently uses 12 unittest shards with a 20-test/30-second split
 threshold to keep large app and service targets under the tool wall-clock

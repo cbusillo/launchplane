@@ -158,21 +158,6 @@ class AgentOperatorContractTests(unittest.TestCase):
         with self.assertRaisesRegex(AgentOperatorContractError, "Idempotency metadata"):
             build_agent_operator_contract(openapi_document=unexpected_header)
 
-    def test_contract_build_is_independent_of_current_working_directory(self) -> None:
-        expected = build_agent_operator_contract(source_commit_sha="a" * 40)
-        frontend_directory = Path("frontend").resolve()
-
-        with (
-            patch.object(contract_module, "canonical_openapi_document", canonical_openapi_document),
-            patch.object(
-                contract_module, "build_deterministic_export_app", build_deterministic_export_app
-            ),
-            chdir(frontend_directory),
-        ):
-            artifact = build_agent_operator_contract(source_commit_sha="a" * 40)
-
-        self.assertEqual(artifact, expected)
-
     def test_structural_and_agent_owned_semantics_change_digest(self) -> None:
         document = copy.deepcopy(self.document)
         changed_document = copy.deepcopy(document)
@@ -260,6 +245,16 @@ class AgentOperatorContractTests(unittest.TestCase):
             checked["semantic_digest_sha256"],
             generated["semantic_digest_sha256"],
         )
+
+
+class AgentOperatorContractWorkingDirectoryTests(unittest.TestCase):
+    def test_contract_build_is_independent_of_current_working_directory(self) -> None:
+        expected = build_agent_operator_contract(source_commit_sha="a" * 40)
+
+        with chdir(Path("frontend").resolve()):
+            artifact = build_agent_operator_contract(source_commit_sha="a" * 40)
+
+        self.assertEqual(artifact, expected)
 
 
 if __name__ == "__main__":

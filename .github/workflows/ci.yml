@@ -111,7 +111,7 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
           # Pull request caches are scoped to that PR, so saving one re-uploads
-          # ~400 MB that no later run can restore. Only main seeds the cache.
+          # ~400 MB that main and other PRs cannot restore. Only main seeds it.
           save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
