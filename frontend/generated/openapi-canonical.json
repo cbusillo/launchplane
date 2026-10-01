@@ -39953,9 +39953,7 @@
             "type": "string"
           },
           "path_kind": {
-            "enum": [
-              "trusted_maintenance"
-            ],
+            "const": "trusted_maintenance",
             "title": "Path Kind",
             "type": "string"
           },
