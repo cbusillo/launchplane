@@ -2845,7 +2845,7 @@ break-glass authority for forward production changes.
 - Restore Launchplane itself through
   [Launchplane Service Deploy Posture](#launchplane-service-deploy-posture),
   including its manual break-glass rollback of Launchplane's own image, before
-  resuming merges or promotions.
+  moving any live site forward again.
 - Once Launchplane is back, confirm its inventory for each live site matches
   what the provider is serving before the next promotion, which takes the
   normal path with a fresh backup gate.
