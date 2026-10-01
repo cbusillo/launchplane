@@ -79,6 +79,7 @@ PublicIngressTargetKind = Literal[
 ]
 PublicIngressFailureCode = Literal[
     "connection_timeout",
+    "deploy_fence_held",
     "dns_failure",
     "health_status_error",
     "http_error",
@@ -1110,7 +1111,7 @@ def public_ingress_failure_layer(code: PublicIngressFailureCode) -> PublicIngres
         "monitoring_intent_changed",
     }:
         return "configuration"
-    if code == "provider_check_unavailable":
+    if code in {"deploy_fence_held", "provider_check_unavailable"}:
         return "provider"
     return "unknown"
 
@@ -1118,7 +1119,7 @@ def public_ingress_failure_layer(code: PublicIngressFailureCode) -> PublicIngres
 def public_ingress_incident_severity(
     code: PublicIngressFailureCode,
 ) -> PublicIngressIncidentSeverity:
-    if code == "tls_expiring":
+    if code in {"deploy_fence_held", "tls_expiring"}:
         return "warning"
     return "critical"
 

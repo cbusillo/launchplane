@@ -402,6 +402,16 @@ def require_trusted_maintenance_evidence_store(
     return cast(TrustedMaintenanceEvidenceStore, record_store)
 
 
+def normalize_trusted_maintenance_policy_lookup_scope(
+    *, repository_id: str, product: str, context: str
+) -> tuple[str, str, str]:
+    return (
+        _required_decimal_id(repository_id, "repository_id"),
+        _required_token(product, "product"),
+        _required_token(context, "context"),
+    )
+
+
 def get_trusted_maintenance_policy_read_model(
     *,
     repository_id: str,

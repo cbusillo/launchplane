@@ -62,8 +62,8 @@ generic dashboard assumptions.
 In the rebuilt UI, an operator who discovers that a product profile or scoped
 workflow grant is missing must see which product record, provider target, runtime
 configuration, secret bindings, and grants are missing. The operator reviews a
-dry-run, applies only the missing authority through the service, runs an
-isolated preview canary, destroys it, and sees clean lifecycle evidence.
+dry-run, applies only the missing authority through the service, and sees the
+product's next preview refresh and lifecycle evidence come back clean.
 
 ### Diagnose A Public TLS Failure
 

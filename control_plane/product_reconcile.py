@@ -589,6 +589,50 @@ TESTING_FAILURE_DESCRIPTIONS: dict[str, str] = {
     ),
 }
 _UNKNOWN_TESTING_FAILURE = "The deploy failed with a code this Launchplane does not describe."
+# What each replacement-plan blocker code means, for ``plan_not_ready.<code>``.
+PLAN_BLOCKER_DESCRIPTIONS: dict[str, str] = {
+    "target_record_missing": "The lane has no Dokploy target record.",
+    "target_id_record_missing": "The lane has no Dokploy target-id record.",
+    "target_not_compose": "The lane's Dokploy target is not a compose target.",
+    "allow_empty_data_required": (
+        "A prelaunch rebuild request did not explicitly allow empty data."
+    ),
+    "volume_authority_unresolved": (
+        "Launchplane could not resolve the lane's stored Odoo volume settings."
+    ),
+    "prelaunch_rebuild_policy_refused": "The lane's prelaunch rebuild policy refused the request.",
+    "volume_env_keys_missing": "The current target is missing required Odoo volume settings.",
+    "volume_authority_drift": (
+        "The current target's Odoo volume settings do not match Launchplane's stored settings."
+    ),
+    "domains_missing": "The current target has no domains to carry over.",
+    "runtime_keys_undeclared": (
+        "The lane configures settings its product profile does not declare."
+    ),
+    "upstream_restore_environment_invalid": (
+        "The lane's upstream-restore settings are missing or invalid."
+    ),
+    "live_runtime_keys_invalid": (
+        "The lane's runtime settings could not be checked against its product profile."
+    ),
+    "compose_or_override_render_failed": (
+        "Launchplane could not render the replacement compose file or setting overrides."
+    ),
+    "current_artifact_changed": ("The lane's current artifact changed after the readiness check."),
+    "artifact_manifest_missing": "Launchplane has no manifest for the deploy's artifact.",
+    "artifact_repository_mismatch": (
+        "The artifact's image repository does not match the product profile's image repository."
+    ),
+    "artifact_source_ref_missing": "The deploy has no source commit evidence for its artifact.",
+    "artifact_source_ref_mismatch": (
+        "The deploy's source commit does not match the artifact manifest's source commit."
+    ),
+    "artifact_required_modules_missing": (
+        "The artifact does not declare the Odoo modules Launchplane requires."
+    ),
+}
+_UNKNOWN_PLAN_BLOCKER = "Launchplane does not describe this blocker."
+_PLAN_NOT_READY_PREFIX = "plan_not_ready."
 _ERROR_CODE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 
 
@@ -598,8 +642,9 @@ def _testing_failure_reason(
     """The failed attempt's error code and a structured summary of it.
 
     The code is the operation's own ``error_code``, or the first failed step of
-    its driver result. The summary is that code's fixed description plus the
-    result's step statuses and the worker attempt; never the error message.
+    its driver result. The summary is that code's fixed description plus any
+    validated env-key names, the result's step statuses and the worker attempt;
+    never the error message.
     """
     error_code = operation.error_code.strip()
     if not _ERROR_CODE_PATTERN.match(error_code):
@@ -609,9 +654,19 @@ def _testing_failure_reason(
         description = (
             "The deploy stopped with an unexpected error before the driver returned a result."
         )
+    elif error_code.startswith(_PLAN_NOT_READY_PREFIX):
+        # The apply names the plan's first blocker by its code, never its message.
+        blocker_code = error_code.removeprefix(_PLAN_NOT_READY_PREFIX)
+        description = (
+            f"{TESTING_FAILURE_DESCRIPTIONS['plan_not_ready']} Blocker: "
+            f"{PLAN_BLOCKER_DESCRIPTIONS.get(blocker_code, _UNKNOWN_PLAN_BLOCKER)}"
+        )
     else:
         description = TESTING_FAILURE_DESCRIPTIONS.get(error_code, _UNKNOWN_TESTING_FAILURE)
     parts = [description]
+    if operation.error_detail_keys:
+        # Env-key names the record validated, such as undeclared runtime keys.
+        parts.append(f"Keys: {', '.join(sorted(operation.error_detail_keys))}.")
     result = operation.result
     if result is not None:
         parts.append(

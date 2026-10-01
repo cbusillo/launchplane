@@ -197,10 +197,8 @@ from control_plane.http_routes import (
     register_repository_inventory_write_routes,
     register_production_backup_authority_read_routes,
     register_production_backup_authority_write_routes,
-    REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE,
     TENANT_ADMISSION_CONTROLLER_RUN_ONCE_ROUTE,
     TENANT_ADMISSION_STATUS_RECONCILE_ROUTE,
-    TENANT_TECHNICAL_HUMAN_WAIVER_APPLY_ROUTE,
     TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE,
     TRUSTED_MAINTENANCE_POLICY_APPLY_ROUTE,
     TenantAdmissionReadRouteDependencies,
@@ -942,8 +940,6 @@ _TESTING_HOLD_NOT_FOUND_MESSAGE = "Odoo product lane was not found for the reque
 _PRODUCT_OWNER_SETTING_MAX_BODY_BYTES = 16 * 1024
 _SECRET_REENCRYPT_MAX_BODY_BYTES = 64 * 1024
 _TENANT_REPOSITORY_CLASSIFICATION_MAX_BODY_BYTES = 64 * 1024
-_REPOSITORY_HUMAN_ROLE_POLICY_MAX_BODY_BYTES = 64 * 1024
-_TENANT_TECHNICAL_HUMAN_WAIVER_MAX_BODY_BYTES = 64 * 1024
 _TENANT_ADMISSION_CONTROLLER_RUN_ONCE_MAX_BODY_BYTES = 64 * 1024
 _TENANT_ADMISSION_STATUS_RECONCILE_MAX_BODY_BYTES = 64 * 1024
 _TRUSTED_MAINTENANCE_POLICY_MAX_BODY_BYTES = 64 * 1024
@@ -1097,18 +1093,6 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE: (
         "Tenant repository classification",
         _TENANT_REPOSITORY_CLASSIFICATION_MAX_BODY_BYTES,
-        True,
-        True,
-    ),
-    REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE: (
-        "Repository human role policy",
-        _REPOSITORY_HUMAN_ROLE_POLICY_MAX_BODY_BYTES,
-        True,
-        True,
-    ),
-    TENANT_TECHNICAL_HUMAN_WAIVER_APPLY_ROUTE: (
-        "Tenant technical human waiver",
-        _TENANT_TECHNICAL_HUMAN_WAIVER_MAX_BODY_BYTES,
         True,
         True,
     ),
@@ -14502,6 +14486,17 @@ def create_launchplane_fastapi_app(
                     "Launchplane request payload on this route."
                 ),
             )
+        if (
+            result.status == "target_busy"
+            and result.record is not None
+            and result.record.state == "reconcile_required"
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="mutation_reconciliation_required",
+                message=_held_provider_target_message(result.record),
+            )
         if result.status in {"in_progress", "target_busy"}:
             raise _launchplane_http_error(
                 status_code=409,
@@ -14517,6 +14512,20 @@ def create_launchplane_fastapi_app(
                 message=reconcile_message,
             )
         raise RuntimeError(f"Unsupported provider mutation status: {result.status}")
+
+    def _held_provider_target_message(held: LaunchplaneIdempotencyRecord) -> str:
+        # Name the earlier request without its key or caller scope.
+        started_at = held.created_at or "an unknown time"
+        stopped = (
+            f"in its {held.provider_effect_phase} phase"
+            if held.provider_effect_phase
+            else "before any provider effect"
+        )
+        return (
+            f"The provider target is held by an earlier {held.route_path} request that "
+            f"started at {started_at} and stopped {stopped} with no known outcome. "
+            "Retrying will not clear it; recover that request first."
+        )
 
     def _provider_mutation_failure_message(response_payload: Mapping[str, object]) -> str:
         result_payload = response_payload.get("result")
