@@ -207,6 +207,7 @@ jobs:
           DEPLOY_REFERENCE: ${{ inputs.deploy_reference }}
           EXPLICIT_REQUEST: ${{ inputs.recovery_request_json }}
           INSTANCE: ${{ inputs.instance }}
+          RECOVERY_LAUNCHPLANE_URL: ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
           ORIGINAL_RUN_ATTEMPT: ${{ github.event.inputs.original_run_attempt }}
           ORIGINAL_RUN_ID: ${{ github.event.inputs.original_run_id }}
           PRODUCT: ${{ inputs.product }}
@@ -254,7 +255,7 @@ jobs:
               fi
             done
 
-            launchplane_url_json='${{ toJSON(inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL) }}'
+            launchplane_url_json="$(jq -cn --arg value "$RECOVERY_LAUNCHPLANE_URL" '$value')"
             request="$(jq -cn \
               --argjson launchplane_url "$launchplane_url_json" \
               --arg product "$PRODUCT" \

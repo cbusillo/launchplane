@@ -35,6 +35,7 @@ from control_plane.odoo_product_driver_http import (
     resolve_odoo_product_route,
 )
 from control_plane.odoo_stable_lane import OdooStableLaneOperationConflictError
+from control_plane.release_review import require_unchanged_production_artifact
 
 
 ODOO_TARGET_REPLACEMENT_APPLY_ROUTE = "/v1/drivers/odoo/target-replacement-apply"
@@ -158,6 +159,12 @@ def enqueue_odoo_target_replacement_apply_operation(
             existing_operation
         )
 
+    require_unchanged_production_artifact(
+        record_store=record_store,
+        product=request.replacement.product,
+        instance=request.replacement.instance,
+        artifact_id=request.replacement.artifact_id,
+    )
     _validate_target_replacement_apply_artifact_authority(
         operation_store=operation_store,
         replacement_request=request.replacement,
