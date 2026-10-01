@@ -2390,7 +2390,8 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.deploy_calls = 0
 
-            def resolve_deploy_target(self, **_kwargs: object) -> GenericWebResolvedDeployTarget:
+            @staticmethod
+            def resolve_deploy_target(**_kwargs: object) -> GenericWebResolvedDeployTarget:
                 return _generic_web_recovery_target()
 
             def execute_artifact_deploy(self, **_kwargs: object) -> GenericWebDeployResult:

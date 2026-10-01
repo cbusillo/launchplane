@@ -412,8 +412,11 @@ def _open_deploy_fence_incident_lanes(
 def _held_generic_web_deploy_fences(
     record_store: object,
 ) -> dict[tuple[str, str], LaunchplaneIdempotencyRecord] | None:
-    list_held = getattr(record_store, "list_held_provider_target_reservations", None)
-    if not callable(list_held):
+    list_held = cast(
+        Callable[[], tuple[object, ...]] | None,
+        getattr(record_store, "list_held_provider_target_reservations", None),
+    )
+    if list_held is None:
         return None
     fences: dict[tuple[str, str], LaunchplaneIdempotencyRecord] = {}
     for reservation in list_held():
