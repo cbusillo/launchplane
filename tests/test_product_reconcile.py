@@ -894,6 +894,50 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
                 self.assertEqual(plan["last_failed_error_summary"], summary)
                 operation_id = cast(str, plan["queued_operation_id"])
 
+    def test_an_undeclared_keys_failure_names_the_keys_without_message_text(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        operation_id = cast(str, self.reconcile()["queued_operation_id"])
+        operation = self.store.read_odoo_stable_target_replacement_operation_record(operation_id)
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            operation.model_copy(
+                update={
+                    "status": "fail",
+                    "phase": "failed",
+                    "finished_at": "2026-09-30T12:00:00Z",
+                    "error_code": "plan_not_ready.runtime_keys_undeclared",
+                    "error_message": "Undeclared ODOO_WEB_HOST_PORT on 203.0.113.42.",
+                    # Stored unvalidated here; the read drops what is not a key name.
+                    "error_detail_keys": ("ODOO_WEB_HOST_PORT", "203.0.113.42", "ODOO_DB_NAME"),
+                }
+            )
+        )
+        self.request()
+
+        plan = self.reconcile()
+
+        self.assertEqual(plan["last_failed_error_code"], "plan_not_ready.runtime_keys_undeclared")
+        self.assertEqual(
+            plan["last_failed_error_summary"],
+            "The replacement plan was blocked before the deploy started. Blocker: "
+            "The lane configures settings its product profile does not declare. "
+            "Keys: ODOO_DB_NAME, ODOO_WEB_HOST_PORT.",
+        )
+        self.assertNotIn("203.0.113.42", cast(str, plan["last_failed_error_summary"]))
+
+    def test_an_operation_stored_before_detail_keys_still_loads(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        operation_id = cast(str, self.reconcile()["queued_operation_id"])
+        payload = self.store.read_odoo_stable_target_replacement_operation_record(
+            operation_id
+        ).model_dump(mode="json")
+        payload.pop("error_detail_keys")
+
+        operation = OdooStableTargetReplacementOperationRecord.model_validate(payload)
+
+        self.assertEqual(operation.error_detail_keys, ())
+
     def test_testing_is_left_alone_when_the_release_already_has_that_digest(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
         self.store.write_release_tuple_record(

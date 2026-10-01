@@ -642,8 +642,9 @@ def _testing_failure_reason(
     """The failed attempt's error code and a structured summary of it.
 
     The code is the operation's own ``error_code``, or the first failed step of
-    its driver result. The summary is that code's fixed description plus the
-    result's step statuses and the worker attempt; never the error message.
+    its driver result. The summary is that code's fixed description plus any
+    validated env-key names, the result's step statuses and the worker attempt;
+    never the error message.
     """
     error_code = operation.error_code.strip()
     if not _ERROR_CODE_PATTERN.match(error_code):
@@ -663,6 +664,9 @@ def _testing_failure_reason(
     else:
         description = TESTING_FAILURE_DESCRIPTIONS.get(error_code, _UNKNOWN_TESTING_FAILURE)
     parts = [description]
+    if operation.error_detail_keys:
+        # Env-key names the record validated, such as undeclared runtime keys.
+        parts.append(f"Keys: {', '.join(sorted(operation.error_detail_keys))}.")
     result = operation.result
     if result is not None:
         parts.append(

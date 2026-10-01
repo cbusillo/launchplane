@@ -25,6 +25,9 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideApplyPhase
+from control_plane.contracts.odoo_stable_target_replacement_operation import (
+    safe_error_detail_keys,
+)
 from control_plane.contracts.odoo_runtime_environment import (
     LAUNCHPLANE_REQUIRED_ODOO_ADDON_PATHS,
     merge_required_odoo_addons_path,
@@ -81,9 +84,11 @@ class OdooTargetReplacementStageError(click.ClickException):
     the message, which can carry provider text, stays out of the code.
     """
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, detail_keys: tuple[str, ...] = ()) -> None:
         super().__init__(message)
         self.code = code
+        # Env-key names the failure is about; names only, never values.
+        self.detail_keys = safe_error_detail_keys(detail_keys)
 
 
 @contextmanager
@@ -157,8 +162,9 @@ def _runtime_configuration_blockers(
     application_runtime_keys: set[str],
     data_source_mode: str,
     retired_provider_keys: set[str] | None = None,
-) -> tuple[tuple[OdooTargetReplacementPlanBlockerCode, str], ...]:
-    """Each configuration blocker as its stable code and its human message."""
+) -> tuple[tuple[OdooTargetReplacementPlanBlockerCode, str, tuple[str, ...]], ...]:
+    """Each configuration blocker as its stable code, its human message and the
+    env-key names it is about."""
     configured_keys = (current_env.keys() | resolved_runtime_values.keys()) - (
         retired_provider_keys or set()
     )
@@ -181,7 +187,7 @@ def _runtime_configuration_blockers(
     undeclared_keys = sorted(
         required_declarations - application_runtime_keys - ODOO_REPLACEMENT_DRIVER_ENV_KEYS
     )
-    blockers: list[tuple[OdooTargetReplacementPlanBlockerCode, str]] = []
+    blockers: list[tuple[OdooTargetReplacementPlanBlockerCode, str, tuple[str, ...]]] = []
     if undeclared_keys:
         blockers.append(
             (
@@ -189,6 +195,7 @@ def _runtime_configuration_blockers(
                 "Odoo target replacement requires product-profile declarations for env key(s): "
                 + ", ".join(undeclared_keys)
                 + ". Repair the lane's expected configuration before replacement.",
+                tuple(undeclared_keys),
             )
         )
     if data_source_mode == "upstream_restore":
@@ -203,7 +210,7 @@ def _runtime_configuration_blockers(
             )
         except click.ClickException as error:
             # This validator reports fixed schema keys only, never their values.
-            blockers.append(("upstream_restore_environment_invalid", str(error)))
+            blockers.append(("upstream_restore_environment_invalid", str(error), ()))
     return tuple(blockers)
 
 
@@ -259,6 +266,8 @@ class OdooStableTargetReplacementPlan(BaseModel):
     blockers: tuple[str, ...] = ()
     # One stable code per blocker, in the same order as ``blockers``.
     blocker_codes: tuple[str, ...] = ()
+    # Env-key names a key-list blocker is about, by blocker code.
+    blocker_keys: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     warnings: tuple[str, ...] = ()
     steps: tuple[OdooStableTargetReplacementStep, ...] = ()
 
@@ -1108,10 +1117,16 @@ def build_odoo_stable_target_replacement_plan(
     )
     blockers: list[str] = []
     blocker_codes: list[str] = []
+    blocker_keys: dict[str, tuple[str, ...]] = {}
 
-    def block(code: OdooTargetReplacementPlanBlockerCode, message: str) -> None:
+    def block(
+        code: OdooTargetReplacementPlanBlockerCode, message: str, keys: tuple[str, ...] = ()
+    ) -> None:
         blocker_codes.append(code)
         blockers.append(message)
+        safe_keys = safe_error_detail_keys(keys)
+        if safe_keys:
+            blocker_keys[code] = safe_keys
 
     warnings: list[str] = []
     current_target: OdooStableTargetRuntimeSnapshot | None = None
@@ -1176,6 +1191,7 @@ def build_odoo_stable_target_replacement_plan(
                 "volume_env_keys_missing",
                 "Current target is missing required Odoo volume env keys: "
                 + ", ".join(current_target.required_volume_keys_missing),
+                current_target.required_volume_keys_missing,
             )
         if request.data_source_mode == "existing" and desired_volume_values:
             volume_authority_drift_keys = tuple(
@@ -1189,6 +1205,7 @@ def build_odoo_stable_target_replacement_plan(
                     "volume_authority_drift",
                     "Existing-data target replacement requires live Odoo volume values to match "
                     "DB-backed desired authority for: " + ", ".join(volume_authority_drift_keys),
+                    volume_authority_drift_keys,
                 )
         if not current_target.domain_hosts:
             block(
@@ -1230,7 +1247,7 @@ def build_odoo_stable_target_replacement_plan(
                 retired_keys=retired_provider_keys,
                 application_keys=application_runtime_keys | ODOO_REPLACEMENT_DRIVER_ENV_KEYS,
             )
-            for code, message in _runtime_configuration_blockers(
+            for code, message, keys in _runtime_configuration_blockers(
                 compose_file=dokploy_compose.render_odoo_raw_compose_file(
                     image_reference=profile.image.repository,
                     hold_web_until_integration_readback=(
@@ -1245,7 +1262,7 @@ def build_odoo_stable_target_replacement_plan(
                 data_source_mode=request.data_source_mode,
                 retired_provider_keys=retired_provider_keys,
             ):
-                block(code, message)
+                block(code, message, keys)
         except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
             block("live_runtime_keys_invalid", str(error))
         except click.ClickException:
@@ -1343,6 +1360,7 @@ def build_odoo_stable_target_replacement_plan(
         retired_provider_keys=tuple(sorted(retired_provider_keys)),
         blockers=blockers_tuple,
         blocker_codes=tuple(blocker_codes),
+        blocker_keys=blocker_keys,
         warnings=tuple(warnings),
         steps=_build_steps(
             current_target=current_target,
@@ -1413,6 +1431,7 @@ def execute_odoo_stable_target_replacement_apply(
             _plan_not_ready_code(plan),
             "Odoo target replacement apply requires a ready replacement plan: "
             + "; ".join(plan.blockers or ("missing current target",)),
+            plan.blocker_keys.get(plan.blocker_codes[0], ()) if plan.blocker_codes else (),
         )
     if request.strategy != "recreate-in-place":
         raise OdooTargetReplacementStageError(
@@ -1732,7 +1751,7 @@ def execute_odoo_stable_target_replacement_apply(
         )
         if configuration_blockers:
             raise click.ClickException(
-                "; ".join(message for _code, message in configuration_blockers)
+                "; ".join(message for _code, message, _keys in configuration_blockers)
             )
         undeclared_provider_keys = {
             key

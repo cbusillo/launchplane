@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from collections.abc import Iterable
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -45,6 +47,18 @@ ODOO_STABLE_TARGET_REPLACEMENT_TERMINAL_OPERATION_STATUSES: frozenset[
 ] = frozenset(_TERMINAL_OPERATION_STATUSES)
 
 
+# An env-key identifier, such as one a Launchplane compose template references.
+# Key names, never values: safe to copy onto product-readable records.
+_ERROR_DETAIL_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+ERROR_DETAIL_KEYS_MAX = 32
+
+
+def safe_error_detail_keys(keys: Iterable[object]) -> tuple[str, ...]:
+    """The env-key names among ``keys``, sorted and unique, capped; anything else dropped."""
+    names = {key for key in keys if isinstance(key, str) and _ERROR_DETAIL_KEY_PATTERN.match(key)}
+    return tuple(sorted(names))[:ERROR_DETAIL_KEYS_MAX]
+
+
 class OdooStableTargetReplacementOperationRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -73,6 +87,8 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
     cancellation: DurableOperationCancellation | None = None
     error_code: str = ""
     error_message: str = ""
+    # Env-key names the failure is about, such as undeclared runtime keys.
+    error_detail_keys: tuple[str, ...] = ()
     runner_trace_id: str = ""
 
     @model_validator(mode="after")
@@ -114,6 +130,7 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
         self.deployment_record_id = self.deployment_record_id.strip()
         self.error_code = self.error_code.strip()
         self.error_message = self.error_message.strip()
+        self.error_detail_keys = safe_error_detail_keys(self.error_detail_keys)
         self.runner_trace_id = self.runner_trace_id.strip()
         if self.product != self.request.product:
             raise ValueError("Odoo stable target replacement operation product must match request.")
