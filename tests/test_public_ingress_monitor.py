@@ -452,7 +452,7 @@ def _hold_deploy_fence(
             provider_target_type="compose",
             deploy_mode="compose",
             provider_deploy_mode="compose",
-            destination_health=HealthcheckEvidence(status="skipped"),
+            destination_health=HealthcheckEvidence(),
         ),
         resolved_target=ResolvedTargetEvidence(
             target_type="compose",

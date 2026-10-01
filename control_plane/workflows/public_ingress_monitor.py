@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -409,19 +409,20 @@ def _open_deploy_fence_incident_lanes(
     }
 
 
+@runtime_checkable
+class _HeldReservationReader(Protocol):
+    def list_held_provider_target_reservations(
+        self,
+    ) -> tuple[LaunchplaneIdempotencyRecord, ...]: ...
+
+
 def _held_generic_web_deploy_fences(
     record_store: object,
 ) -> dict[tuple[str, str], LaunchplaneIdempotencyRecord] | None:
-    list_held = cast(
-        Callable[[], tuple[object, ...]] | None,
-        getattr(record_store, "list_held_provider_target_reservations", None),
-    )
-    if list_held is None:
+    if not isinstance(record_store, _HeldReservationReader):
         return None
     fences: dict[tuple[str, str], LaunchplaneIdempotencyRecord] = {}
-    for reservation in list_held():
-        if not isinstance(reservation, LaunchplaneIdempotencyRecord):
-            continue
+    for reservation in record_store.list_held_provider_target_reservations():
         try:
             target = decode_generic_web_provider_reconciliation_target(
                 reservation.reconciliation_key
