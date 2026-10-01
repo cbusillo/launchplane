@@ -26,6 +26,7 @@ from control_plane.contracts.product_reconcile import (
 _MAX_TEXT_LENGTH = 400
 _MAX_FAILURE_SUMMARY_LENGTH = 1500
 _FAILURE_SUMMARY_KEY = "last_failed_error_summary"
+_UNBOUNDED_TEXT_LENGTH = 100_000
 _MAX_DEPTH = 4
 _MAX_ITEMS = 50
 _IDENTIFIER_PATTERN = re.compile(r"^(?:[0-9a-f]{40}|sha256:[0-9a-f]{64})$")
@@ -123,7 +124,10 @@ def _safe_text_naming_ids(value: str, recorded_ids: list[str]) -> str:
     text = value
     for placeholder, item in placeholders.items():
         text = text.replace(item, placeholder)
-    text = _safe_text(text)
+    # Bound after the ids are back, so they cannot push the text past the limit.
+    text = _safe_text(text, maximum_length=_UNBOUNDED_TEXT_LENGTH)
     for placeholder, item in reversed(placeholders.items()):
         text = re.sub(rf"\b{placeholder}\b", item, text)
-    return text
+    if len(text) <= _MAX_TEXT_LENGTH:
+        return text
+    return text[: _MAX_TEXT_LENGTH - 3].rstrip() + "..."

@@ -160,7 +160,7 @@ class ProductReconcileRequestViewTests(unittest.TestCase):
             },
             last_error=(
                 f"Last attempt {_OPERATION_ID}: plan_not_ready.runtime_keys_undeclared "
-                f"with token {_SECRETS[1]}"
+                f"with token {_SECRETS[1]}. {summary}"
             ),
         )
 
@@ -170,6 +170,7 @@ class ProductReconcileRequestViewTests(unittest.TestCase):
         self.assertEqual(view.last_plan["last_failed_error_summary"], summary)
         self.assertIn(_OPERATION_ID, view.last_error)
         self.assertNotIn(_SECRETS[1], view.last_error)
+        self.assertLessEqual(len(view.last_error), 400)
 
 
 if __name__ == "__main__":
