@@ -10,8 +10,8 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import cache
 from urllib.parse import unquote
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, MutableMapping
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, MutableMapping
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path as FilePath
 from typing import Annotated, Any, Literal, NoReturn, NotRequired, Protocol, Self, TypedDict, cast
@@ -6756,6 +6756,37 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
+    # Synchronous Odoo release routes hold the lane for their whole run, through
+    # the same reservation durable enqueues and worker claims respect.
+    @contextmanager
+    def synchronous_odoo_lane(
+        *,
+        record_store: object,
+        trace_id: str,
+        product: str,
+        context: str,
+        instance: str,
+        reserve: bool = True,
+    ) -> Iterator[None]:
+        reservation = optional_callable_attribute(record_store, "odoo_synchronous_lane_reservation")
+        if not reserve or reservation is None:
+            yield
+            return
+        with reservation(product=product, context=context, instance=instance) as owner:
+            if owner is not None:
+                description = (
+                    "a synchronous release"
+                    if owner.operation_kind == "synchronous_release"
+                    else f"{owner.operation_kind} {owner.operation_id}"
+                )
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="lane_busy",
+                    message=f"Another Odoo operation is active on this lane ({description}).",
+                )
+            yield
+
     async def write_odoo_post_deploy(
         request: Request,
         identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
@@ -6851,11 +6882,19 @@ def create_launchplane_fastapi_app(
             return replay_response
 
         try:
-            records, driver_result = execute_odoo_post_deploy_result(
-                control_plane_root=resolved_control_plane_root,
+            with synchronous_odoo_lane(
                 record_store=record_store,
-                request=post_deploy_request,
-            )
+                trace_id=trace_id,
+                product=authorization_product,
+                context=post_deploy_request.post_deploy.context,
+                instance=post_deploy_request.post_deploy.instance,
+                reserve=post_deploy_request.post_deploy.instance == "prod",
+            ):
+                records, driver_result = execute_odoo_post_deploy_result(
+                    control_plane_root=resolved_control_plane_root,
+                    record_store=record_store,
+                    request=post_deploy_request,
+                )
         except FileNotFoundError as error:
             raise _launchplane_http_error(
                 status_code=404,
@@ -9557,37 +9596,19 @@ def create_launchplane_fastapi_app(
         if replay_response is not None:
             return replay_response
 
-        # A queued release (or any other durable Odoo operation) on this lane must
-        # not race a synchronous rollback from a site workflow.
-        read_active_lane_owner = optional_callable_attribute(
-            record_store, "active_odoo_stable_lane_operation_owner"
-        )
-        active_lane_owner = (
-            read_active_lane_owner(
+        try:
+            with synchronous_odoo_lane(
+                record_store=record_store,
+                trace_id=trace_id,
                 product=authorization_product,
                 context=rollback_request.rollback.context,
                 instance=rollback_request.rollback.instance,
-            )
-            if read_active_lane_owner is not None
-            else None
-        )
-        if active_lane_owner is not None:
-            raise _launchplane_http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="lane_busy",
-                message=(
-                    "Another Odoo operation is active on this prod lane "
-                    f"({active_lane_owner.operation_kind} {active_lane_owner.operation_id})."
-                ),
-            )
-
-        try:
-            records, driver_result = execute_odoo_prod_rollback_result(
-                control_plane_root=resolved_control_plane_root,
-                record_store=record_store,
-                request=rollback_request,
-            )
+            ):
+                records, driver_result = execute_odoo_prod_rollback_result(
+                    control_plane_root=resolved_control_plane_root,
+                    record_store=record_store,
+                    request=rollback_request,
+                )
         except OdooProdRollbackTargetMissingError as error:
             raise _launchplane_http_error(
                 status_code=409,
@@ -9728,13 +9749,20 @@ def create_launchplane_fastapi_app(
             return replay_response
 
         try:
-            records, driver_result = execute_odoo_prod_promotion_result(
-                control_plane_root=resolved_control_plane_root,
-                state_dir=resolved_state_dir,
-                database_url=getattr(record_store, "database_url", database_url),
+            with synchronous_odoo_lane(
                 record_store=record_store,
-                request=promotion_request,
-            )
+                trace_id=trace_id,
+                product=authorization_product,
+                context=promotion_request.promotion.context,
+                instance=promotion_request.promotion.to_instance,
+            ):
+                records, driver_result = execute_odoo_prod_promotion_result(
+                    control_plane_root=resolved_control_plane_root,
+                    state_dir=resolved_state_dir,
+                    database_url=getattr(record_store, "database_url", database_url),
+                    record_store=record_store,
+                    request=promotion_request,
+                )
         except FileNotFoundError as error:
             raise _launchplane_http_error(
                 status_code=404,
@@ -10007,13 +10035,20 @@ def create_launchplane_fastapi_app(
             return replay_response
 
         try:
-            records, driver_result = execute_odoo_prod_promotion_run_result(
-                control_plane_root=resolved_control_plane_root,
-                state_dir=resolved_state_dir,
-                database_url=getattr(record_store, "database_url", database_url),
+            with synchronous_odoo_lane(
                 record_store=record_store,
-                request=run_request,
-            )
+                trace_id=trace_id,
+                product=authorization_product,
+                context=run_request.run.context,
+                instance=run_request.run.to_instance,
+            ):
+                records, driver_result = execute_odoo_prod_promotion_run_result(
+                    control_plane_root=resolved_control_plane_root,
+                    state_dir=resolved_state_dir,
+                    database_url=getattr(record_store, "database_url", database_url),
+                    record_store=record_store,
+                    request=run_request,
+                )
         except OdooProdPromotionRouteDependencyError:
             return driver_route_dependency_not_found_response(
                 trace_id=trace_id,

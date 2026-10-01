@@ -1,3 +1,4 @@
+import os
 import unittest
 from dataclasses import replace
 from collections.abc import Callable
@@ -61,9 +62,11 @@ from tests.http_app_test_support import (
     _github_oauth_config,
     _RejectingVerifier,
 )
+from tests.support.auth import _identity as _workflow_identity, _StubVerifier
 from tests.support.http import get, request
 from tests.support.profiles import _odoo_preview_profile_payload
 from tests.test_odoo_stable_operation_worker import _restore_operation
+from tests.test_postgres_integration import _store_for_fresh_head_database
 
 _ADMINISTRATOR_POLICY = LaunchplaneAuthzPolicy.model_validate(
     {
@@ -818,6 +821,67 @@ class OdooProdPromotionOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.json()["error"]["code"], "rollback_target_missing")
             self.assertEqual(store.list_odoo_prod_rollback_operation_records(), ())
 
+    async def test_synchronous_promotions_refuse_while_a_queued_release_holds_the_lane(
+        self,
+    ) -> None:
+        promotion_payload = {
+            "product": "odoo-tenant-cm",
+            "promotion": {
+                "context": "cm",
+                "artifact_id": "artifact-cm-new",
+                "backup_record_id": "backup-gate-cm-prod-run-1",
+                "infrastructure_backup_record_id": "infrastructure-cm-prod",
+                "source_git_ref": "848bf1b69ff3adbe9b255c61c7b8f5ca04efbcbb",
+            },
+        }
+        for route, payload, target in (
+            (
+                "/v1/drivers/odoo/prod-promotion-run",
+                self._payload(),
+                "control_plane.odoo_prod_promotion_http.execute_odoo_prod_promotion_run",
+            ),
+            (
+                "/v1/drivers/odoo/prod-promotion",
+                promotion_payload,
+                "control_plane.odoo_prod_promotion_http.execute_odoo_prod_promotion",
+            ),
+        ):
+            with self.subTest(route), TemporaryDirectory() as directory:
+                store = _store(directory)
+                store.create_odoo_prod_rollback_operation_record_if_no_active_lane(
+                    _rollback_operation()
+                )
+                # The realistic caller: a site's release workflow over OIDC.
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_workflow_identity()),
+                    authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                        {
+                            "github_actions": [
+                                {
+                                    "repository": "every/verireel",
+                                    "actions": [
+                                        "odoo_prod_promotion.execute",
+                                        ODOO_PROD_PROMOTION_RUN_ACTION,
+                                    ],
+                                    "products": ["odoo-tenant-cm"],
+                                    "contexts": ["cm"],
+                                }
+                            ]
+                        }
+                    ),
+                    record_store_factory=lambda: store,
+                )
+                headers = {
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "workflow-promotion",
+                }
+                with patch(target) as execute:
+                    response = await request(app, "POST", route, headers=headers, payload=payload)
+
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(response.json()["error"]["code"], "lane_busy")
+                execute.assert_not_called()
+
     async def test_synchronous_rollback_refuses_while_a_queued_release_holds_the_lane(
         self,
     ) -> None:
@@ -841,6 +905,64 @@ class OdooProdPromotionOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 409, response.text)
             self.assertEqual(response.json()["error"]["code"], "lane_busy")
             execute.assert_not_called()
+
+
+@unittest.skipUnless(
+    os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "Real PostgreSQL test URL is required"
+)
+class OdooSynchronousLaneReservationPostgresTests(unittest.TestCase):
+    """A synchronous release route and the queued operations exclude each other."""
+
+    lane = {"product": "odoo-tenant-cm", "context": "cm", "instance": "prod"}
+
+    def test_a_synchronous_run_blocks_enqueues_and_is_released_after_success(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            with store.odoo_synchronous_lane_reservation(**self.lane) as owner:
+                self.assertIsNone(owner)
+                with self.assertRaises(OdooStableLaneOperationConflictError) as conflict:
+                    store.create_odoo_prod_promotion_operation_record_if_no_active_lane(
+                        _operation()
+                    )
+                self.assertEqual(conflict.exception.owner.operation_kind, "synchronous_release")
+                with self.assertRaises(OdooStableLaneOperationConflictError):
+                    store.create_odoo_prod_rollback_operation_record_if_no_active_lane(
+                        _rollback_operation()
+                    )
+                with store.odoo_synchronous_lane_reservation(**self.lane) as second:
+                    assert second is not None
+                    self.assertEqual(second.operation_kind, "synchronous_release")
+                # Another lane is unaffected.
+                with store.odoo_synchronous_lane_reservation(
+                    product="odoo-tenant-cm", context="cm", instance="testing"
+                ) as other_lane:
+                    self.assertIsNone(other_lane)
+
+            _created_operation, created = (
+                store.create_odoo_prod_promotion_operation_record_if_no_active_lane(_operation())
+            )
+            self.assertTrue(created)
+
+    def test_the_reservation_is_released_when_the_run_fails(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            with self.assertRaises(RuntimeError):
+                with store.odoo_synchronous_lane_reservation(**self.lane) as owner:
+                    self.assertIsNone(owner)
+                    raise RuntimeError("deploy failed")
+
+            _created_operation, created = (
+                store.create_odoo_prod_rollback_operation_record_if_no_active_lane(
+                    _rollback_operation()
+                )
+            )
+            self.assertTrue(created)
+
+    def test_a_queued_operation_refuses_a_synchronous_run(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            store.create_odoo_prod_promotion_operation_record_if_no_active_lane(_operation())
+
+            with store.odoo_synchronous_lane_reservation(**self.lane) as owner:
+                assert owner is not None
+                self.assertEqual(owner.operation_kind, "prod_promotion")
 
 
 if __name__ == "__main__":

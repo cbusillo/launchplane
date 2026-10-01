@@ -1773,7 +1773,16 @@ state/
   operation.
 - Bootstrap, target replacement, production backup restore, retained-volume
   backup import, and queued prod promotion and rollback creation and worker claim
-  also share one storage-level stable-lane reservation.
+  also share one storage-level stable-lane reservation. Synchronous Odoo prod
+  release routes join it without a record: they hold a PostgreSQL
+  transaction-scoped advisory lock for the lane (`synchronous_release`) on an
+  open session for their whole run, after checking under the lane lock that no
+  durable operation is active. Every create and claim tries the same lock inside
+  its lane-locked transaction and treats a held one as an active owner, so the
+  two sides exclude each other. The lock ends with the session, on success, on
+  failure, or when a crashed process's connection closes and PostgreSQL ends its
+  backend, so a crash cannot leave the lane reserved. SQLite rehearsal stores
+  only check for an active operation.
   Filesystem storage serializes the exact product/context/instance with one lock;
   PostgreSQL uses a transaction-scoped advisory lock and checks all six blocking
   operation tables before inserting or claiming. Claims choose one deterministic

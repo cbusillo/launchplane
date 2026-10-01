@@ -1681,7 +1681,9 @@ The Odoo release routes `POST /v1/drivers/odoo/prod-promotion-run` and
 enqueue and cancel routes, accept a signed-in session this way so the operator
 can release from the product's prod environment page. They keep accepting the
 bearer and OIDC callers the CM website's workflows use only until those
-workflows and their grant are deleted, and refuse terminal-agent tokens. A
+workflows and their grant are deleted, and refuse terminal-agent tokens. While
+they run, they hold the Odoo lane against queued operations and refuse with
+`lane_busy` when one already holds it (see [records](records.md)). A
 durable backup needs exactly one managed rule for the caller, or the caller is
 the signed-in policy administrator, which records a `policy_administrator`
 grant the worker re-checks against the active policy.

@@ -2739,8 +2739,13 @@ through these routes.
 The synchronous `POST /v1/drivers/odoo/prod-promotion-run` and
 `POST /v1/drivers/odoo/prod-rollback` routes, and the backup gate routes, keep
 accepting the CM website's workflow callers only until those workflows and their
-grant are deleted. The synchronous rollback refuses with `lane_busy` while any
-durable Odoo operation holds the lane. The panel calls neither synchronous route.
+grant are deleted. Other Odoo sites' workflows keep using them. Each
+synchronous Odoo prod route that changes the target (`prod-promotion`,
+`prod-promotion-run`, `prod-rollback`, and `post-deploy` on a prod lane) holds the
+lane for its whole run through the same reservation the queued operations use: it
+refuses with `lane_busy` while any durable Odoo operation holds the lane, and
+while it runs, a queued release, restore, or replacement on that lane is refused
+with `lane_busy` too. The panel calls neither synchronous route.
 
 The CM website's `odoo-prod-promotion.yml`, `odoo-prod-rollback.yml`, and
 `odoo-post-deploy.yml` stay in place until one real promote and one rollback

@@ -1185,6 +1185,26 @@ class _TrustedMaintenanceAuthoritySnapshot:
         return ()
 
 
+def _try_odoo_synchronous_lane_lock(
+    session: Any, *, product: str, context: str, instance: str
+) -> bool:
+    """Try the lane's synchronous-release advisory lock for this transaction.
+
+    A synchronous release route holds it for its whole run; durable enqueues and
+    claims take it briefly, so each side sees the other. SQLite has no such lock.
+    """
+
+    if session.get_bind().dialect.name != "postgresql":
+        return True
+    lane_key = "".join(f"{len(value)}:{value}" for value in (product, context, instance))
+    return bool(
+        session.scalar(
+            text("select pg_try_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+            {"lock_name": f"launchplane:odoo-lane-synchronous-release:{lane_key}"},
+        )
+    )
+
+
 def _utc_now_timestamp() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -8930,7 +8950,14 @@ class PostgresRecordStore(HumanSessionStore):
         product: str,
         context: str,
         instance: str,
+        include_synchronous: bool = True,
     ) -> OdooStableLaneOperationOwner | None:
+        if include_synchronous and not _try_odoo_synchronous_lane_lock(
+            session, product=product, context=context, instance=instance
+        ):
+            return OdooStableLaneOperationOwner(
+                operation_kind="synchronous_release", operation_id=""
+            )
         operation_tables: tuple[tuple[OdooStableLaneOperationKind, Any], ...] = (
             ("stable_bootstrap", LaunchplaneOdooStableBootstrapOperationRow),
             ("target_replacement", LaunchplaneOdooStableTargetReplacementOperationRow),
@@ -10656,15 +10683,48 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
         return tuple(affected_operation_ids)
 
-    def active_odoo_stable_lane_operation_owner(
+    @contextmanager
+    def odoo_synchronous_lane_reservation(
         self, *, product: str, context: str, instance: str
-    ) -> OdooStableLaneOperationOwner | None:
-        """The durable Odoo operation holding a lane, if any (read only)."""
+    ) -> Iterator[OdooStableLaneOperationOwner | None]:
+        """Hold an Odoo lane for a synchronous release route while the body runs.
 
-        with self._session_factory() as session:
-            return self._active_odoo_stable_lane_operation_owner(
-                session, product=product, context=context, instance=instance
+        Yields ``None`` when the lane is reserved, or the owner that holds it. The
+        reservation is a PostgreSQL transaction-scoped advisory lock kept by an
+        open session for the whole body. Durable enqueues and worker claims try the
+        same lock inside their lane-locked transaction, so neither can start while a
+        synchronous run holds the lane, and a synchronous run cannot start while one
+        of them is mid-commit. The lock ends with the session: on exit, on an
+        exception, or when a crashed process's connection closes and PostgreSQL
+        ends its backend, so a lane cannot stay reserved after its holder is gone.
+        SQLite rehearsal stores only check for an active operation.
+        """
+
+        with self._session_factory() as hold_session:
+            reserved = _try_odoo_synchronous_lane_lock(
+                hold_session, product=product, context=context, instance=instance
             )
+            owner: OdooStableLaneOperationOwner | None
+            if not reserved:
+                owner = OdooStableLaneOperationOwner(
+                    operation_kind="synchronous_release", operation_id=""
+                )
+            else:
+                # Durable operations committed before the reservation still own the
+                # lane; the brief lane lock waits out an enqueue that is mid-commit.
+                with self._session_factory() as check_session:
+                    self._lock_odoo_stable_lane(
+                        check_session, product=product, context=context, instance=instance
+                    )
+                    owner = self._active_odoo_stable_lane_operation_owner(
+                        check_session,
+                        product=product,
+                        context=context,
+                        instance=instance,
+                        include_synchronous=False,
+                    )
+                    check_session.rollback()
+            yield owner
 
     def write_odoo_prod_promotion_operation_record(
         self, record: OdooProdPromotionOperationRecord
