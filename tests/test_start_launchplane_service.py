@@ -13,14 +13,14 @@ def _compose_service_blocks(compose_text: str) -> dict[str, str]:
     services_section = re.split(r"(?m)^\S", services_section, maxsplit=1)[0]
     return dict(
         re.findall(
-            r"(?ms)^  ([A-Za-z0-9_-]+):\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            r"(?ms)^ {2}([A-Za-z0-9_-]+):\n(.*?)(?=^ {2}[A-Za-z0-9_-]+:\n|\Z)",
             services_section,
         )
     )
 
 
 def _compose_service_value(service_block: str, key: str) -> str:
-    match = re.search(rf"(?ms)^    {key}:(.*?)(?=^    \S|\Z)", service_block)
+    match = re.search(rf"(?ms)^ {{4}}{key}:(.*?)(?=^ {{4}}\S|\Z)", service_block)
     return match.group(1).strip() if match else ""
 
 
