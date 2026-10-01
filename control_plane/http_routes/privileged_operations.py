@@ -54,6 +54,8 @@ from control_plane.contracts.ordinary_agent_delivery_authorization_inputs import
     OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse,
 )
 from control_plane.authz_candidate_preparation import (
+    AGENT_OPERATE_PRODUCT_SETUP_CANDIDATE_ID,
+    AGENT_OPERATE_PRODUCT_SETUP_MAX_PRODUCTS,
     AuthorizationCandidateId,
     AuthorizationCandidatePreparationError,
     authorization_candidate_request_matches,
@@ -148,6 +150,9 @@ class PrivilegedOperationRouteDependencies:
     policy_reader: Callable[[], LaunchplaneAuthzPolicy]
     policy_record_reader: Callable[[], object] | None = None
     read_configured_terminal_identity: Callable[[], TerminalAgentIdentity | None] = lambda: None
+    read_configured_local_operator_identity: Callable[[], LocalOperatorIdentity | None] = lambda: (
+        None
+    )
 
 
 class PrivilegedOperationPlanEnvelope(BaseModel):
@@ -232,10 +237,22 @@ class AuthorizationCandidatePrepareEnvelope(BaseModel):
     candidate_id: AuthorizationCandidateId
     intent: Literal["add", "remove"]
     source_event_id: str = Field(min_length=1, max_length=128)
+    products: tuple[Annotated[str, Field(min_length=1, max_length=128)], ...] = Field(
+        default=(),
+        max_length=AGENT_OPERATE_PRODUCT_SETUP_MAX_PRODUCTS,
+        description=(
+            "Product identifiers selected for agent operate access. Accepted only when "
+            "adding agent-operate-product-setup; the server validates each one."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_envelope(self) -> "AuthorizationCandidatePrepareEnvelope":
         self.source_event_id = normalize_privileged_operation_source_event_id(self.source_event_id)
+        if self.products and (
+            self.candidate_id != AGENT_OPERATE_PRODUCT_SETUP_CANDIDATE_ID or self.intent != "add"
+        ):
+            raise ValueError("Products are accepted only when adding agent operate access.")
         return self
 
 
@@ -585,6 +602,9 @@ def register_privileged_operation_routes(
                 record=record,
                 events=events,
                 generated_at=generated_at,
+                configured_local_operator_identity=(
+                    dependencies.read_configured_local_operator_identity()
+                ),
             )
         except PrivilegedOperationSemanticReviewError as error:
             raise dependencies.common.http_error(
@@ -1582,6 +1602,10 @@ def register_privileged_operation_routes(
                         request=request,
                         github_id=identity.github_id,
                         intent=envelope.intent,
+                        products=envelope.products,
+                        configured_local_operator_identity=(
+                            dependencies.read_configured_local_operator_identity()
+                        ),
                     )
                 ):
                     raise PrivilegedOperationConflictError(
@@ -1599,6 +1623,10 @@ def register_privileged_operation_routes(
                 intent=envelope.intent,
                 record_store=record_store,
                 configured_terminal_identity=dependencies.read_configured_terminal_identity(),
+                configured_local_operator_identity=(
+                    dependencies.read_configured_local_operator_identity()
+                ),
+                products=envelope.products,
             )
             if state == "already_satisfied":
                 return AuthorizationCandidatePrepareResponse(
@@ -1638,6 +1666,23 @@ def register_privileged_operation_routes(
                 "activation_history_truncated": (
                     "authorization_candidate_activation_history_truncated",
                     "Agent delivery activation history exceeds the safe preparation window.",
+                ),
+                "candidate_principal_unavailable": (
+                    "authorization_candidate_principal_unavailable",
+                    "The service has no exact configured local operator identity for the "
+                    "operator's agent.",
+                ),
+                "candidate_products_required": (
+                    "authorization_candidate_products_required",
+                    "Choose at least one product.",
+                ),
+                "candidate_product_unavailable": (
+                    "authorization_candidate_product_unavailable",
+                    "A selected product is not a recorded product.",
+                ),
+                "candidate_product_live": (
+                    "authorization_candidate_product_live",
+                    "Live products cannot receive agent operate access.",
                 ),
             }
             code, message = preparation_errors.get(

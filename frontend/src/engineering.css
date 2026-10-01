@@ -1659,6 +1659,35 @@
   gap: 1rem;
 }
 
+.agent-operate-products {
+  display: grid;
+  gap: 0.5rem;
+  min-width: 0;
+  margin: 0 0 1rem;
+  padding: 0.95rem;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 0.75rem;
+}
+
+.agent-operate-products legend {
+  padding: 0 0.4rem;
+  color: var(--muted-strong);
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.agent-operate-products label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted-strong);
+  font-size: 0.86rem;
+}
+
 .ordinary-target-preparation-card {
   display: grid;
   gap: 1rem;

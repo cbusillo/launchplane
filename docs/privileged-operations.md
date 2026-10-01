@@ -10,13 +10,18 @@ credentials. The boundary is separate from Owner Acceptance, Agent Write
 Intents, workflow authorization, and ordinary operator mutations.
 
 The Access policy workbench includes closed candidate preparation for Agent
-delivery administration and administrator product-evidence reads. Its add and
-remove controls derive the signed-in administrator and policy inputs on the
-server and create a standard managed authorization plan for review. They do
-not approve or apply it. See
-[Preparing Agent Delivery Administration](authorization-authority.md#preparing-agent-delivery-administration)
-and [Preparing Administrator Product Evidence Access](authorization-authority.md#preparing-administrator-product-evidence-access)
+delivery administration, administrator product-evidence reads, and agent
+operate access. Its add and remove controls derive the signed-in administrator,
+principal, and policy inputs on the server and create a standard managed
+authorization plan for review. They do not approve or apply it. See
+[Preparing Agent Delivery Administration](authorization-authority.md#preparing-agent-delivery-administration),
+[Preparing Administrator Product Evidence Access](authorization-authority.md#preparing-administrator-product-evidence-access),
+and [Preparing Agent Operate Access](authorization-authority.md#preparing-agent-operate-access)
 for eligibility, collision, removal, and production-activation boundaries.
+The agent operate candidate is the only one whose browser input includes a
+selection: the administrator checks non-live products, and the server
+revalidates them and derives the operator's agent from the configured local
+operator identity.
 The product-evidence candidate proposes one read capability across all current
 and future projects for the requesting administrator. Its project-level rule
 uses the Launchplane context. Its environment-level all-instances rule has an
