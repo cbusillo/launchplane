@@ -7,6 +7,9 @@ import type {
 import { promotionOperationFailure } from "./promotion-operation";
 import type {
   EnqueueOdooProdPromotionData,
+  EnqueueOdooProdRollbackData,
+  OdooProdRollbackOperationResponse,
+  OdooProdRollbackOperationView,
   OdooProdPromotionOperationResponse,
   OdooProdPromotionOperationView,
   OdooProdPromotionRunResult,
@@ -84,7 +87,7 @@ export interface OdooReleaseDependencies {
 }
 
 const BACKUP_ACTIVE_STATUSES = new Set(["pending", "running"]);
-const PROMOTION_ACTIVE_STATUSES = new Set(["pending", "running"]);
+const RELEASE_ACTIVE_STATUSES = new Set(["pending", "running"]);
 const PROMOTION_PHASE_DETAILS: Record<string, string> = {
   created: "Queued; waiting for the Launchplane worker.",
   running: "The worker picked it up and is checking approval and the backup.",
@@ -267,7 +270,7 @@ export async function runOdooRelease({
     response: OdooProdPromotionOperationResponse,
   ): Promise<OdooReleaseOutcome> {
     let current = response;
-    while (PROMOTION_ACTIVE_STATUSES.has(current.operation.status)) {
+    while (RELEASE_ACTIVE_STATUSES.has(current.operation.status)) {
       onProgress({
         detail: PROMOTION_PHASE_DETAILS[current.operation.phase] ?? `Phase ${current.operation.phase}.`,
         state: "running",
@@ -289,39 +292,182 @@ export async function runOdooRelease({
       });
       return { operation, result: operation.result, status: "promoted" };
     }
-    return stop(promotionStopFailure(operation, current.trace_id), "definitive");
+    return stop(releaseStopFailure(operation, current.trace_id, "promotion"), "definitive");
   }
 }
 
-function promotionStopFailure(
-  operation: OdooProdPromotionOperationView,
+function releaseStopFailure(
+  operation: { error_code: string; error_message: string; operation_id: string; phase: string; result?: { error_message?: string } | null; status: string },
   traceId: string,
+  kind: "promotion" | "rollback",
 ): BrowserOperationFailure {
   if (operation.status === "reconciliation_required") {
     return {
       code: operation.error_code || "operation_reconciliation_required",
-      message: `The worker stopped mid-promotion (phase ${operation.phase}) and did not run it again. Check the latest prod deployment, then cancel operation ${operation.operation_id} with what you found to free the lane.`,
+      message: `The worker stopped mid-${kind} (phase ${operation.phase}) and did not run it again. Check the latest prod deployment, then cancel operation ${operation.operation_id} with what you found to free the lane.`,
       statusCode: 0,
       traceId,
     };
   }
   if (operation.status === "cancelled") {
     return {
-      code: "promotion_cancelled",
-      message: `Promotion ${operation.operation_id} was cancelled before it finished.`,
+      code: `${kind}_cancelled`,
+      message: `The ${kind} ${operation.operation_id} was cancelled before it finished.`,
       statusCode: 0,
       traceId,
     };
   }
   return {
-    code: operation.error_code || `promotion_${operation.status}`,
+    code: operation.error_code || `${kind}_${operation.status}`,
     message:
       operation.error_message ||
       operation.result?.error_message ||
-      `The promotion ended ${operation.status}.`,
+      `The ${kind} ended ${operation.status}.`,
     statusCode: 0,
     traceId,
   };
+}
+
+// One rollback click's identity: a retry reuses the key and reason, so the
+// server returns the operation (and the target it fixed) instead of a new one.
+export interface OdooRollbackAttempt {
+  idempotencyKey: string;
+  operationId?: string;
+  reason: string;
+}
+
+export type OdooRollbackOutcome =
+  | { operation: OdooProdRollbackOperationView; status: "rolled_back" }
+  | {
+      certainty: "definitive" | "uncertain";
+      failure: BrowserOperationFailure;
+      operation: OdooProdRollbackOperationView | null;
+      status: "stopped";
+    };
+
+export interface OdooRollbackDependencies {
+  enqueueRollback: (
+    payload: EnqueueOdooProdRollbackData["body"],
+    options: BrowserOperationOptions,
+  ) => Promise<OdooProdRollbackOperationResponse>;
+  readRollback: (
+    operationId: string,
+    scope: { context: string; product: string },
+    signal?: AbortSignal,
+  ) => Promise<OdooProdRollbackOperationResponse>;
+  wait: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+}
+
+const ROLLBACK_PHASE_DETAILS: Record<string, string> = {
+  created: "Queued; waiting for the Launchplane worker.",
+  running: "The worker picked it up.",
+  validated: "Target confirmed; starting the redeploy.",
+  rollback_started: "Redeploying the earlier artifact and running post-deploy.",
+};
+
+export function createOdooRollbackAttempt(reason: string): OdooRollbackAttempt {
+  return { idempotencyKey: `ui-odoo-rollback-${globalThis.crypto.randomUUID()}`, reason };
+}
+
+export function rollbackPhaseDetail(phase: string): string {
+  return ROLLBACK_PHASE_DETAILS[phase] ?? `Phase ${phase}.`;
+}
+
+export async function runOdooRollback({
+  attempt,
+  dependencies,
+  onOperation,
+  onQueued,
+  pollIntervalMilliseconds = 5000,
+  scope,
+  signal,
+}: {
+  attempt: OdooRollbackAttempt;
+  dependencies: OdooRollbackDependencies;
+  onOperation: (operation: OdooProdRollbackOperationView) => void;
+  onQueued?: (operationId: string) => void;
+  pollIntervalMilliseconds?: number;
+  scope: OdooReleaseScope;
+  signal?: AbortSignal;
+}): Promise<OdooRollbackOutcome> {
+  const rollbackScope = { context: scope.context, product: scope.product };
+  let operation: OdooProdRollbackOperationView | null = null;
+  try {
+    let current = attempt.operationId
+      ? await dependencies.readRollback(attempt.operationId, rollbackScope, signal)
+      : await dependencies.enqueueRollback(
+          {
+            product: scope.product,
+            rollback: {
+              context: scope.context,
+              instance: scope.environment,
+              reason: attempt.reason,
+              schema_version: 1,
+            },
+            schema_version: 1,
+          },
+          { idempotencyKey: attempt.idempotencyKey, signal },
+        );
+    operation = current.operation;
+    if (!attempt.operationId) {
+      onQueued?.(operation.operation_id);
+    }
+    onOperation(operation);
+    while (RELEASE_ACTIVE_STATUSES.has(current.operation.status)) {
+      await dependencies.wait(pollIntervalMilliseconds, signal);
+      current = await dependencies.readRollback(operation.operation_id, rollbackScope, signal);
+      operation = current.operation;
+      onOperation(operation);
+    }
+    if (operation.status === "pass") {
+      return { operation, status: "rolled_back" };
+    }
+    return {
+      certainty: "definitive",
+      failure: releaseStopFailure(operation, current.trace_id, "rollback"),
+      operation,
+      status: "stopped",
+    };
+  } catch (error) {
+    return {
+      certainty: odooReleaseFailureCertainty(error),
+      failure: odooReleaseFailure(error),
+      operation,
+      status: "stopped",
+    };
+  }
+}
+
+export function readOdooRollbackAttempt(
+  scope: OdooReleaseScope,
+  storage: BrowserOperationStorage | null = sessionStorageOrNull(),
+): OdooRollbackAttempt | null {
+  const candidate = readStoredJson(rollbackStorageKey(scope), storage) as
+    | Partial<OdooRollbackAttempt>
+    | null;
+  if (
+    !candidate ||
+    typeof candidate.idempotencyKey !== "string" ||
+    !candidate.idempotencyKey ||
+    typeof candidate.reason !== "string"
+  ) {
+    return null;
+  }
+  return {
+    idempotencyKey: candidate.idempotencyKey,
+    reason: candidate.reason,
+    ...(typeof candidate.operationId === "string" && candidate.operationId
+      ? { operationId: candidate.operationId }
+      : {}),
+  };
+}
+
+export function writeOdooRollbackAttempt(
+  scope: OdooReleaseScope,
+  attempt: OdooRollbackAttempt | null,
+  storage: BrowserOperationStorage | null = sessionStorageOrNull(),
+): void {
+  writeStoredJson(rollbackStorageKey(scope), attempt, storage);
 }
 
 export function waitFor(milliseconds: number, signal?: AbortSignal): Promise<void> {
@@ -346,30 +492,25 @@ export function readOdooReleaseAttempt(
   scope: OdooReleaseScope,
   storage: BrowserOperationStorage | null = sessionStorageOrNull(),
 ): OdooReleaseAttempt | null {
-  try {
-    const value = storage?.getItem(attemptStorageKey(scope));
-    if (!value) {
-      return null;
-    }
-    const candidate = JSON.parse(value) as Partial<OdooReleaseAttempt>;
-    if (
-      typeof candidate.idempotencyKey !== "string" ||
-      !candidate.idempotencyKey ||
-      typeof candidate.requestId !== "string" ||
-      !candidate.requestId
-    ) {
-      return null;
-    }
-    return {
-      idempotencyKey: candidate.idempotencyKey,
-      requestId: candidate.requestId,
-      ...(typeof candidate.promotionOperationId === "string" && candidate.promotionOperationId
-        ? { promotionOperationId: candidate.promotionOperationId }
-        : {}),
-    };
-  } catch {
+  const candidate = readStoredJson(attemptStorageKey(scope), storage) as
+    | Partial<OdooReleaseAttempt>
+    | null;
+  if (
+    !candidate ||
+    typeof candidate.idempotencyKey !== "string" ||
+    !candidate.idempotencyKey ||
+    typeof candidate.requestId !== "string" ||
+    !candidate.requestId
+  ) {
     return null;
   }
+  return {
+    idempotencyKey: candidate.idempotencyKey,
+    requestId: candidate.requestId,
+    ...(typeof candidate.promotionOperationId === "string" && candidate.promotionOperationId
+      ? { promotionOperationId: candidate.promotionOperationId }
+      : {}),
+  };
 }
 
 export function writeOdooReleaseAttempt(
@@ -377,11 +518,28 @@ export function writeOdooReleaseAttempt(
   attempt: OdooReleaseAttempt | null,
   storage: BrowserOperationStorage | null = sessionStorageOrNull(),
 ): void {
+  writeStoredJson(attemptStorageKey(scope), attempt, storage);
+}
+
+function readStoredJson(key: string, storage: BrowserOperationStorage | null): unknown {
   try {
-    if (attempt) {
-      storage?.setItem(attemptStorageKey(scope), JSON.stringify(attempt));
+    const value = storage?.getItem(key);
+    return value ? (JSON.parse(value) as unknown) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredJson(
+  key: string,
+  value: object | null,
+  storage: BrowserOperationStorage | null,
+): void {
+  try {
+    if (value) {
+      storage?.setItem(key, JSON.stringify(value));
     } else {
-      storage?.removeItem(attemptStorageKey(scope));
+      storage?.removeItem(key);
     }
   } catch {
     return;
@@ -390,6 +548,10 @@ export function writeOdooReleaseAttempt(
 
 function attemptStorageKey(scope: OdooReleaseScope): string {
   return `launchplane.odoo-release.${scope.product.trim()}.${scope.environment.trim()}`;
+}
+
+function rollbackStorageKey(scope: OdooReleaseScope): string {
+  return `launchplane.odoo-rollback.${scope.product.trim()}.${scope.environment.trim()}`;
 }
 
 function sessionStorageOrNull(): BrowserOperationStorage | null {

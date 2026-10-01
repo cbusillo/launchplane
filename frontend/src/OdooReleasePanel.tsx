@@ -17,14 +17,19 @@ import {
   enqueueProductionBackupGate,
   readOdooProdPromotionOperation,
   readProductionBackupGateOperation,
+  enqueueOdooProdRollback,
+  readOdooProdRollbackOperation,
   readReleaseReview,
-  rollBackOdooProd,
 } from "./api";
-import type { BrowserOperationState } from "./browser-operation";
 import {
   createOdooReleaseAttempt,
-  odooReleaseFailure,
+  createOdooRollbackAttempt,
   readOdooReleaseAttempt,
+  readOdooRollbackAttempt,
+  rollbackPhaseDetail,
+  runOdooRollback,
+  writeOdooRollbackAttempt,
+  type OdooRollbackOutcome,
   releaseReviewAllowsPromotion,
   runOdooRelease,
   waitFor,
@@ -34,15 +39,13 @@ import {
   type OdooReleaseScope,
   type OdooReleaseStep,
 } from "./odoo-release-operation";
-import { promotionFailureCertainty, promotionOperationFailure } from "./promotion-operation";
+import { promotionOperationFailure } from "./promotion-operation";
 import { emptyResource, type ResourceState } from "./resource";
-import { useBrowserOperationController } from "./use-browser-operation";
 
 import type {
   ProductEnvironmentDetail,
   ReleaseReviewResponse,
-  WriteOdooProdRollbackData,
-  WriteOdooProdRollbackResponse,
+  OdooProdRollbackOperationView,
 } from "./generated/openapi.ts";
 
 const STEP_LABELS: Record<OdooReleaseStep, string> = {
@@ -53,7 +56,6 @@ const STEP_LABELS: Record<OdooReleaseStep, string> = {
 const STEPS: OdooReleaseStep[] = ["review", "backup", "promote"];
 
 type StepProgress = Partial<Record<OdooReleaseStep, OdooReleaseProgress>>;
-type RollbackPayload = WriteOdooProdRollbackData["body"];
 
 export function OdooReleasePanel({
   detail,
@@ -315,43 +317,86 @@ function RollbackSection({
 }) {
   const [reason, setReason] = useState("");
   const [confirmed, setConfirmed] = useState(false);
-  const [pendingPayload, setPendingPayload] = useState<RollbackPayload | null>(null);
-  const [response, setResponse] = useState<WriteOdooProdRollbackResponse | null>(null);
-  const rollback = useBrowserOperationController<RollbackPayload, WriteOdooProdRollbackResponse>({
-    execute: rollBackOdooProd,
-    failureCertainty: promotionFailureCertainty,
-    failureFor: odooReleaseFailure,
-    scope: `${scope.product}:${scope.environment}:odoo-rollback`,
-  });
+  const [pendingAttempt, setPendingAttempt] = useState(() => readOdooRollbackAttempt(scope));
+  const [operation, setOperation] = useState<OdooProdRollbackOperationView | null>(null);
+  const [outcome, setOutcome] = useState<OdooRollbackOutcome | null>(null);
+  const [running, setRunning] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const runNumberRef = useRef(0);
   const rollbackArtifact = detail.driver_extensions.odoo?.rollback_artifact_id ?? "";
-  const busy = rollback.state.phase === "queued" || rollback.state.phase === "submitting";
-  const continuityRetry = rollback.state.requiresIdempotencyContinuity ? pendingPayload : null;
   const canSubmit =
-    !busy && (continuityRetry !== null || (!!rollbackArtifact && confirmed && !!reason.trim()));
+    !running && (pendingAttempt !== null || (!!rollbackArtifact && confirmed && !!reason.trim()));
+
+  useEffect(() => {
+    // A rollback queued before a reload keeps running on the server; resume watching it.
+    if (readOdooRollbackAttempt(scope)?.operationId) {
+      void submit();
+    }
+    return () => {
+      abortRef.current?.abort();
+      abortRef.current = null;
+    };
+  }, [scope.product]);
 
   async function submit() {
-    const payload: RollbackPayload = continuityRetry ?? {
-      product: scope.product,
-      rollback: {
-        context: scope.context,
-        instance: scope.environment,
-        reason: reason.trim(),
-        schema_version: 1,
+    const storedAttempt = readOdooRollbackAttempt(scope);
+    if (abortRef.current || (!storedAttempt && !(confirmed && reason.trim()))) {
+      return;
+    }
+    let attempt = storedAttempt ?? createOdooRollbackAttempt(reason.trim());
+    writeOdooRollbackAttempt(scope, attempt);
+    setPendingAttempt(attempt);
+    setOutcome(null);
+    setRunning(true);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const runNumber = ++runNumberRef.current;
+    const result = await runOdooRollback({
+      attempt,
+      dependencies: {
+        enqueueRollback: enqueueOdooProdRollback,
+        readRollback: readOdooProdRollbackOperation,
+        wait: waitFor,
       },
-      schema_version: 1,
-    };
-    setPendingPayload(payload);
-    setResponse(null);
-    const result = await rollback.run(payload);
-    if (result) {
-      setResponse(result);
-      setPendingPayload(null);
-      setConfirmed(false);
+      onOperation: (current) => {
+        if (runNumber === runNumberRef.current) {
+          setOperation(current);
+        }
+      },
+      onQueued: (operationId) => {
+        attempt = { ...attempt, operationId };
+        writeOdooRollbackAttempt(scope, attempt);
+        if (runNumber === runNumberRef.current) {
+          setPendingAttempt(attempt);
+        }
+      },
+      scope,
+      signal: controller.signal,
+    });
+    if (abortRef.current === controller) {
+      abortRef.current = null;
+    }
+    if (runNumber !== runNumberRef.current) {
+      return;
+    }
+    setRunning(false);
+    setOutcome(result);
+    if (result.status === "stopped" && result.certainty === "uncertain") {
+      return;
+    }
+    writeOdooRollbackAttempt(scope, null);
+    setPendingAttempt(null);
+    setConfirmed(false);
+    if (result.status === "rolled_back") {
       onRefresh();
     }
   }
 
-  const result = response?.result ?? null;
+  const target = operation?.target_artifact_id || rollbackArtifact;
+  const targetDeployment =
+    operation?.target_deployment_record_id ||
+    (operation ? "" : detail.driver_extensions.odoo?.rollback_deployment_record_id ?? "");
+  const result = operation?.result ?? null;
   return (
     <section className="promotion-step" data-step="2" id="odoo-release-rollback">
       <div className="promotion-step-heading">
@@ -366,16 +411,22 @@ function RollbackSection({
       </div>
       <dl className="odoo-release-facts">
         <div>
-          <dt>Rolls back to</dt>
+          <dt>{operation ? "Rolling back to" : "Rolls back to"}</dt>
           <dd className="promotion-code-value">
-            {rollbackArtifact || "No earlier passing production deployment"}
+            {target || "No earlier passing production deployment"}
           </dd>
         </div>
-        {detail.driver_extensions.odoo?.rollback_deployment_record_id ? (
+        {targetDeployment ? (
           <div>
             <dt>From deployment</dt>
-            <dd className="promotion-code-value">
-              {detail.driver_extensions.odoo.rollback_deployment_record_id}
+            <dd className="promotion-code-value">{targetDeployment}</dd>
+          </div>
+        ) : null}
+        {operation ? (
+          <div>
+            <dt>Status</dt>
+            <dd>
+              {operation.status} · {rollbackPhaseDetail(operation.phase)}
             </dd>
           </div>
         ) : null}
@@ -383,23 +434,43 @@ function RollbackSection({
       <label className="promotion-field promotion-field-wide">
         <span>Reason</span>
         <textarea
-          disabled={busy || continuityRetry !== null || !rollbackArtifact}
+          disabled={running || pendingAttempt !== null || !rollbackArtifact}
           onChange={(event) => setReason(event.target.value)}
           placeholder="Why is production rolling back?"
           rows={2}
-          value={reason}
+          value={pendingAttempt ? pendingAttempt.reason : reason}
         />
       </label>
-      {continuityRetry ? null : (
+      {pendingAttempt ? null : (
         <ConfirmationBox
           checked={confirmed}
-          disabled={busy || !rollbackArtifact}
+          disabled={running || !rollbackArtifact}
           label="I confirm rolling production back"
           detail={`Product ${scope.product} · ${scope.context}/${scope.environment} → ${rollbackArtifact || "no target"}.`}
           onChange={setConfirmed}
         />
       )}
-      <OperationNotice label="Rollback" state={rollback.state} />
+      {outcome?.status === "stopped" ? (
+        <div
+          className="operation-notice"
+          data-phase={outcome.certainty === "uncertain" ? "uncertain" : "failed"}
+          role="alert"
+        >
+          <AlertTriangle aria-hidden="true" />
+          <div>
+            <strong>Rollback stopped</strong>
+            <p>{outcome.failure.message}</p>
+            {outcome.certainty === "uncertain" ? (
+              <p>
+                The rollback runs on the server whether or not this page is open. Resuming
+                only watches it; the same request never starts a second rollback.
+              </p>
+            ) : null}
+            {outcome.failure.code ? <code>{outcome.failure.code}</code> : null}
+            {outcome.failure.traceId ? <small>Trace {outcome.failure.traceId}</small> : null}
+          </div>
+        </div>
+      ) : null}
       {result ? (
         <div className="promotion-result" data-status={result.rollback_status === "pass" ? "accepted" : "stale"}>
           <div className="promotion-result-title">
@@ -418,15 +489,21 @@ function RollbackSection({
       ) : null}
       <div className="promotion-button-row">
         <button className="danger-button" disabled={!canSubmit} onClick={() => void submit()} type="button">
-          {busy ? (
+          {running ? (
             <LoaderCircle className="spin" size={16} aria-hidden="true" />
           ) : (
             <RotateCcw size={16} aria-hidden="true" />
           )}
-          {continuityRetry ? "Retry the same rollback" : "Roll back production"}
+          {running
+            ? "Rolling back…"
+            : pendingAttempt?.operationId
+              ? "Resume watching the rollback"
+              : pendingAttempt
+                ? "Retry the same rollback"
+                : "Roll back production"}
         </button>
-        {busy ? (
-          <button className="secondary-button" onClick={rollback.cancel} type="button">
+        {running ? (
+          <button className="secondary-button" onClick={() => abortRef.current?.abort()} type="button">
             <XCircle size={15} aria-hidden="true" />
             Stop waiting
           </button>
@@ -485,23 +562,6 @@ function ReleaseOutcomeNotice({
         ) : null}
         {outcome.failure.code ? <code>{outcome.failure.code}</code> : null}
         {outcome.failure.traceId ? <small>Trace {outcome.failure.traceId}</small> : null}
-      </div>
-    </div>
-  );
-}
-
-function OperationNotice({ label, state }: { label: string; state: BrowserOperationState }) {
-  if (!state.failure) {
-    return null;
-  }
-  return (
-    <div className="operation-notice" data-phase={state.phase} role="alert">
-      <AlertTriangle aria-hidden="true" />
-      <div>
-        <strong>{label} {state.phase}</strong>
-        <p>{state.failure.message}</p>
-        {state.failure.code ? <code>{state.failure.code}</code> : null}
-        {state.failure.traceId ? <small>Trace {state.failure.traceId}</small> : null}
       </div>
     </div>
   );

@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -28,6 +29,15 @@ from control_plane.contracts.odoo_prod_promotion_operation import (
     build_odoo_prod_promotion_operation_id,
     odoo_prod_promotion_request_fingerprint,
 )
+from control_plane.contracts.odoo_prod_rollback_operation import (
+    ODOO_PROD_ROLLBACK_ACTION,
+    OdooProdRollbackOperationRecord,
+    OdooProdRollbackRequest,
+    OdooProdRollbackResult,
+    OdooProdRollbackTarget,
+    build_odoo_prod_rollback_operation_id,
+    odoo_prod_rollback_request_fingerprint,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.durable_operation_authorization import capture_durable_operation_authorization
 from control_plane.http_app import create_launchplane_fastapi_app
@@ -39,6 +49,7 @@ from control_plane.service_human_auth import (
     LaunchplaneHumanSession,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupGateResult
 from control_plane.workflows.odoo_prod_promotion_inputs import OdooProdPromotionInputsResult
 from control_plane.workflows.odoo_prod_promotion_run import OdooProdPromotionRunAdmission
 from control_plane.workflows.odoo_stable_operation_worker import (
@@ -149,6 +160,39 @@ def _operation(key: str = "release-1") -> OdooProdPromotionOperationRecord:
     )
 
 
+def _rollback_operation(key: str = "rollback-1") -> OdooProdRollbackOperationRecord:
+    rollback_request = OdooProdRollbackRequest(context="cm", reason="Drill")
+    scope = "github-human|example-operator|123"
+    return OdooProdRollbackOperationRecord(
+        operation_id=build_odoo_prod_rollback_operation_id(
+            product="odoo-tenant-cm", context="cm", idempotency_key=key, idempotency_scope=scope
+        ),
+        product="odoo-tenant-cm",
+        context="cm",
+        instance="prod",
+        idempotency_key=key,
+        idempotency_scope=scope,
+        request_fingerprint=odoo_prod_rollback_request_fingerprint(
+            product="odoo-tenant-cm", request=rollback_request
+        ),
+        request=rollback_request,
+        target=OdooProdRollbackTarget(
+            artifact_id="artifact-cm-previous", deployment_record_id="deployment-cm-prod-previous"
+        ),
+        authorization=capture_durable_operation_authorization(
+            identity=_github_human_identity(),
+            action=ODOO_PROD_ROLLBACK_ACTION,
+            product="odoo-tenant-cm",
+            context="cm",
+            instances=("prod",),
+            policy_record=_policy_record(_ADMINISTRATOR_POLICY),
+            authorized_at="2026-09-30T00:00:00Z",
+        ),
+        created_at="2026-09-30T00:00:00Z",
+        updated_at="2026-09-30T00:00:00Z",
+    )
+
+
 def _passing_result(request_id: str = "release-1") -> OdooProdPromotionRunResult:
     return OdooProdPromotionRunResult(
         context="cm",
@@ -194,6 +238,31 @@ class OdooProdPromotionOperationStorageTests(unittest.TestCase):
                     _restore_operation()
                 )
             self.assertEqual(conflict.exception.owner.operation_kind, "prod_promotion")
+            with self.assertRaises(OdooStableLaneOperationConflictError) as rollback_conflict:
+                store.create_odoo_prod_rollback_operation_record_if_no_active_lane(
+                    _rollback_operation()
+                )
+            self.assertEqual(rollback_conflict.exception.owner.operation_kind, "prod_promotion")
+
+    def test_only_an_administrator_grant_can_back_a_queued_release(self) -> None:
+        managed_rule_grant = _operation().authorization.model_copy(
+            update={
+                "grant": "policy_rule",
+                "managed_set_id": "operator.releases",
+                "managed_rule_id": "cm-prod-release",
+            }
+        )
+        for operation in (_operation(), _rollback_operation()):
+            with self.subTest(type(operation).__name__), self.assertRaises(ValueError):
+                type(operation).model_validate(
+                    {
+                        **operation.model_dump(mode="json"),
+                        "authorization": {
+                            **managed_rule_grant.model_dump(mode="json"),
+                            "action": operation.authorization.action,
+                        },
+                    }
+                )
 
     def test_expired_lease_reruns_only_before_any_provider_effect(self) -> None:
         with TemporaryDirectory() as directory:
@@ -361,6 +430,134 @@ class OdooProdPromotionWorkerTests(unittest.TestCase):
             self.assertEqual(effects, [])
 
 
+class OdooProdReleaseBoundaryTests(unittest.TestCase):
+    def test_administrator_removed_during_the_logical_backup_stops_the_deploy(self) -> None:
+        narrowed = _policy_record(
+            LaunchplaneAuthzPolicy.model_validate(
+                {
+                    **_ADMINISTRATOR_POLICY.model_dump(mode="json", exclude_none=True),
+                    "github_humans": [],
+                }
+            ),
+            revision=2,
+        )
+        current_policy = [_policy_record(_ADMINISTRATOR_POLICY)]
+        deploys: list[str] = []
+
+        def take_logical_backup(**_kwargs: object) -> OdooProdBackupGateResult:
+            current_policy[0] = narrowed
+            return OdooProdBackupGateResult(
+                context="cm", instance="prod", backup_record_id="backup-1", backup_status="pass"
+            )
+
+        def deploy(**_kwargs: object) -> object:
+            deploys.append("deploy")
+            raise AssertionError("The deploy must not start after the administrator is removed.")
+
+        with TemporaryDirectory() as directory:
+            store = _store(directory)
+            operation = _operation()
+            store.create_odoo_prod_promotion_operation_record_if_no_active_lane(operation)
+            run_module = "control_plane.workflows.odoo_prod_promotion_run."
+            with (
+                patch(
+                    run_module + "admit_odoo_prod_promotion_run",
+                    return_value=OdooProdPromotionOperationHttpTests._admission(),
+                ),
+                patch(
+                    run_module + "execute_odoo_prod_backup_gate", side_effect=take_logical_backup
+                ),
+                patch(run_module + "execute_odoo_prod_promotion", side_effect=deploy),
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker."
+                    "read_active_authz_policy_record",
+                    side_effect=lambda _store: current_policy[0],
+                ),
+            ):
+                run_odoo_stable_operation_worker_once(
+                    record_store=cast(object, store),  # type: ignore[arg-type]
+                    control_plane_root_path=Path("."),
+                    lease_owner="worker-a",
+                )
+
+            finished = store.read_odoo_prod_promotion_operation_record(operation.operation_id)
+            self.assertEqual(deploys, [])
+            self.assertEqual(finished.status, "fail")
+            self.assertEqual(finished.error_code, "operation_authorization_administrator_revoked")
+            self.assertEqual(
+                tuple(checkpoint.phase for checkpoint in finished.checkpoints),
+                ("validated", "logical_backup_started", "logical_backup_completed"),
+            )
+
+    def test_worker_rolls_back_to_the_target_fixed_at_enqueue(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(directory)
+            operation = _rollback_operation()
+            store.create_odoo_prod_rollback_operation_record_if_no_active_lane(operation)
+
+            def rollback(**kwargs: object) -> OdooProdRollbackResult:
+                self.assertEqual(kwargs["target"], operation.target)
+                checkpoint = cast(Callable[[str], None], kwargs["provider_effect_checkpoint"])
+                checkpoint("target_replacement_raw_source")
+                checkpoint("target_replacement_deploy")
+                return OdooProdRollbackResult(
+                    context="cm",
+                    instance="prod",
+                    source_channel="previous-deployment",
+                    artifact_id="artifact-cm-previous",
+                    promotion_record_id="promotion-cm-testing-to-prod",
+                    deployment_record_id="deployment-cm-prod-rollback",
+                    rollback_status="pass",
+                    post_deploy_status="pass",
+                )
+
+            with patch(
+                "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_prod_rollback",
+                side_effect=rollback,
+            ):
+                result = run_odoo_stable_operation_worker_once(
+                    record_store=cast(object, store),  # type: ignore[arg-type]
+                    control_plane_root_path=Path("."),
+                    lease_owner="worker-a",
+                )
+
+            self.assertEqual(result.operation_kind, "odoo_prod_rollback")
+            finished = store.read_odoo_prod_rollback_operation_record(operation.operation_id)
+            self.assertEqual((finished.status, finished.phase), ("pass", "completed"))
+            self.assertEqual(
+                tuple(checkpoint.phase for checkpoint in finished.checkpoints),
+                ("validated", "rollback_started"),
+            )
+
+    def test_rollback_lease_expiry_after_the_redeploy_started_is_never_rerun(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(directory)
+            operation = _rollback_operation()
+            store.create_odoo_prod_rollback_operation_record_if_no_active_lane(operation)
+            store.claim_next_odoo_prod_rollback_operation_record(
+                lease_owner="worker-a",
+                lease_expires_at="2026-09-30T00:05:00Z",
+                claimed_at="2026-09-30T00:00:00Z",
+            )
+            for phase in ("validated", "rollback_started"):
+                store.checkpoint_odoo_prod_rollback_operation_record(
+                    operation_id=operation.operation_id,
+                    lease_owner="worker-a",
+                    phase=phase,
+                    checkpointed_at="2026-09-30T00:01:00Z",
+                    evidence={},
+                )
+            store.recover_expired_odoo_prod_rollback_operation_records(
+                now="2026-09-30T00:10:00Z",
+                safe_phases=("created", "running", "validated"),
+                max_attempts=3,
+            )
+
+            held = store.read_odoo_prod_rollback_operation_record(operation.operation_id)
+            self.assertEqual(held.status, "reconciliation_required")
+            self.assertEqual(held.target, operation.target)
+
+
 class OdooProdPromotionOperationHttpTests(unittest.IsolatedAsyncioTestCase):
     def _app(
         self, store: PostgresRecordStore
@@ -401,6 +598,8 @@ class OdooProdPromotionOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 to_instance="prod",
                 request_id="release-1",
                 input_status="ready",
+                artifact_id="artifact-cm-new",
+                backup_record_id="backup-gate-cm-prod-release-1",
             ),
             blocked_reason=blocked_reason,
         )
@@ -421,7 +620,7 @@ class OdooProdPromotionOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 return response.status_code, response.json()
 
             with patch(
-                "control_plane.http_routes.odoo_prod_promotion_operation."
+                "control_plane.http_routes.odoo_prod_release_operation."
                 "admit_odoo_prod_promotion_run",
                 return_value=self._admission(),
             ) as admit:
@@ -470,7 +669,7 @@ class OdooProdPromotionOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             headers = _browser_mutation_headers(session_manager, human_session)
             headers["Idempotency-Key"] = "ui-release-1"
             with patch(
-                "control_plane.http_routes.odoo_prod_promotion_operation."
+                "control_plane.http_routes.odoo_prod_release_operation."
                 "admit_odoo_prod_promotion_run",
                 return_value=self._admission("Release is not approved by the site owner."),
             ):
@@ -505,6 +704,143 @@ class OdooProdPromotionOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 403, response.text)
             self.assertEqual(response.json()["error"]["code"], "authorization_denied")
             self.assertEqual(store.list_odoo_prod_promotion_operation_records(), ())
+
+    async def test_a_session_with_only_a_product_rule_cannot_queue_a_release(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(directory)
+            app, session_manager, _admin_session = self._app(store)
+            operator_session = session_manager.issue(
+                replace(_github_human_identity(), github_id=456, login="site-operator")
+            )
+            for route, payload in (
+                ("/v1/odoo-prod-promotions", self._payload()),
+                ("/v1/odoo-prod-rollbacks", self._rollback_payload()),
+            ):
+                headers = _browser_mutation_headers(session_manager, operator_session)
+                headers["Idempotency-Key"] = "operator-release"
+                response = await request(app, "POST", route, headers=headers, payload=payload)
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+            self.assertEqual(store.list_odoo_prod_promotion_operation_records(), ())
+            self.assertEqual(store.list_odoo_prod_rollback_operation_records(), ())
+
+    @staticmethod
+    def _rollback_payload(reason: str = "Drill") -> dict[str, object]:
+        return {"product": "odoo-tenant-cm", "rollback": {"context": "cm", "reason": reason}}
+
+    async def test_rollback_fixes_its_target_once_and_replays_it(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(directory)
+            app, session_manager, human_session = self._app(store)
+
+            async def enqueue(
+                key: str, payload: dict[str, object]
+            ) -> tuple[int, dict[str, object]]:
+                headers = _browser_mutation_headers(session_manager, human_session)
+                headers["Idempotency-Key"] = key
+                response = await request(
+                    app, "POST", "/v1/odoo-prod-rollbacks", headers=headers, payload=payload
+                )
+                return response.status_code, response.json()
+
+            with patch(
+                "control_plane.http_routes.odoo_prod_release_operation."
+                "resolve_odoo_prod_rollback_target",
+                return_value=OdooProdRollbackTarget(
+                    artifact_id="artifact-cm-previous",
+                    deployment_record_id="deployment-cm-prod-previous",
+                ),
+            ) as resolve:
+                status, accepted = await enqueue("ui-rollback-1", self._rollback_payload())
+                replay_status, replay = await enqueue("ui-rollback-1", self._rollback_payload())
+                other_status, other = await enqueue("ui-rollback-2", self._rollback_payload("x"))
+                with patch(
+                    "control_plane.http_routes.odoo_prod_release_operation."
+                    "admit_odoo_prod_promotion_run",
+                    return_value=self._admission(),
+                ):
+                    headers = _browser_mutation_headers(session_manager, human_session)
+                    headers["Idempotency-Key"] = "ui-release-1"
+                    promotion = await request(
+                        app,
+                        "POST",
+                        "/v1/odoo-prod-promotions",
+                        headers=headers,
+                        payload=self._payload(),
+                    )
+
+            self.assertEqual(status, 200, accepted)
+            operation = cast(dict[str, object], accepted["operation"])
+            self.assertEqual(operation["target_artifact_id"], "artifact-cm-previous")
+            self.assertEqual(
+                operation["target_deployment_record_id"], "deployment-cm-prod-previous"
+            )
+            self.assertEqual(replay_status, 200, replay)
+            self.assertEqual(
+                cast(dict[str, object], replay["operation"])["operation_id"],
+                operation["operation_id"],
+            )
+            resolve.assert_called_once()
+            self.assertEqual(other_status, 409, other)
+            self.assertEqual(
+                cast(dict[str, dict[str, str]], other)["error"]["code"],
+                "rollback_already_active",
+            )
+            self.assertEqual(promotion.status_code, 409, promotion.text)
+            self.assertEqual(promotion.json()["error"]["code"], "lane_busy")
+            stored = store.read_odoo_prod_rollback_operation_record(str(operation["operation_id"]))
+            self.assertEqual(stored.authorization.grant, "policy_administrator")
+
+            query = urlencode({"product": "odoo-tenant-cm", "context": "cm"})
+            read = await get(
+                app,
+                f"/v1/odoo-prod-rollbacks/operations/{operation['operation_id']}?{query}",
+                headers={"Cookie": session_manager.session_cookie_header(human_session)},
+            )
+            self.assertEqual(read.status_code, 200, read.text)
+            self.assertEqual(read.json()["operation"]["reason"], "Drill")
+
+    async def test_rollback_with_no_earlier_deployment_is_refused_before_queueing(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(directory)
+            app, session_manager, human_session = self._app(store)
+            headers = _browser_mutation_headers(session_manager, human_session)
+            headers["Idempotency-Key"] = "ui-rollback-1"
+            response = await request(
+                app,
+                "POST",
+                "/v1/odoo-prod-rollbacks",
+                headers=headers,
+                payload=self._rollback_payload(),
+            )
+
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(response.json()["error"]["code"], "rollback_target_missing")
+            self.assertEqual(store.list_odoo_prod_rollback_operation_records(), ())
+
+    async def test_synchronous_rollback_refuses_while_a_queued_release_holds_the_lane(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(directory)
+            store.create_odoo_prod_promotion_operation_record_if_no_active_lane(_operation())
+            app, session_manager, human_session = self._app(store)
+            headers = _browser_mutation_headers(session_manager, human_session)
+            headers["Idempotency-Key"] = "workflow-rollback"
+            with patch(
+                "control_plane.odoo_prod_rollback_http.execute_odoo_prod_rollback"
+            ) as execute:
+                response = await request(
+                    app,
+                    "POST",
+                    "/v1/drivers/odoo/prod-rollback",
+                    headers=headers,
+                    payload=self._rollback_payload(),
+                )
+
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(response.json()["error"]["code"], "lane_busy")
+            execute.assert_not_called()
 
 
 if __name__ == "__main__":

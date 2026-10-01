@@ -886,6 +886,137 @@
         "summary": "Read Promotion Operation"
       }
     },
+    "/v1/odoo-prod-rollbacks/operations/{operation_id}": {
+      "get": {
+        "operationId": "read_odoo_prod_rollback_operation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "context",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Context",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OdooProdRollbackOperationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read Rollback Operation"
+      }
+    },
     "/v1/ordinary-agent-jobs/{principal_id}/{request_id}": {
       "get": {
         "operationId": "read_human_ordinary_agent_job",
@@ -4328,147 +4459,6 @@
         "summary": "Read exact pull-request tenant admission and technical readiness"
       }
     },
-    "/v1/drivers/odoo/prod-rollback": {
-      "post": {
-        "operationId": "write_odoo_prod_rollback",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "Idempotency-Key",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Idempotency-Key",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Cookie",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Cookie",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "additionalProperties": false,
-                "properties": {
-                  "product": {
-                    "title": "Product",
-                    "type": "string"
-                  },
-                  "rollback": {
-                    "$ref": "#/components/schemas/OdooProdRollbackRequest"
-                  },
-                  "schema_version": {
-                    "default": 1,
-                    "minimum": 1,
-                    "title": "Schema Version",
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "product",
-                  "rollback"
-                ],
-                "title": "OdooProdRollbackEnvelope",
-                "type": "object"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Bad Request"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Not Found"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Conflict"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
-          }
-        },
-        "summary": "Execute Odoo prod rollback"
-      }
-    },
     "/v1/odoo-prod-promotions": {
       "post": {
         "operationId": "enqueue_odoo_prod_promotion",
@@ -4588,6 +4578,127 @@
           }
         },
         "summary": "Enqueue Promotion"
+      }
+    },
+    "/v1/odoo-prod-rollbacks": {
+      "post": {
+        "operationId": "enqueue_odoo_prod_rollback",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 256,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OdooProdRollbackEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OdooProdRollbackOperationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Enqueue Rollback"
       }
     },
     "/v1/ordinary-agent-connections/{principal_id}/disconnect": {
@@ -15848,6 +15959,172 @@
         "title": "OdooProdPromotionRunResult",
         "type": "object"
       },
+      "OdooProdRollbackEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "rollback": {
+            "$ref": "#/components/schemas/OdooProdRollbackRequest"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "product",
+          "rollback"
+        ],
+        "title": "OdooProdRollbackEnvelope",
+        "type": "object"
+      },
+      "OdooProdRollbackOperationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "operation": {
+            "$ref": "#/components/schemas/OdooProdRollbackOperationView"
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "status",
+          "trace_id"
+        ],
+        "title": "OdooProdRollbackOperationResponse",
+        "type": "object"
+      },
+      "OdooProdRollbackOperationView": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "error_code": {
+            "title": "Error Code",
+            "type": "string"
+          },
+          "error_message": {
+            "title": "Error Message",
+            "type": "string"
+          },
+          "finished_at": {
+            "title": "Finished At",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "phase": {
+            "enum": [
+              "created",
+              "running",
+              "validated",
+              "rollback_started",
+              "completed",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooProdRollbackResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "running",
+              "reconciliation_required",
+              "pass",
+              "fail",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "target_artifact_id": {
+            "title": "Target Artifact Id",
+            "type": "string"
+          },
+          "target_deployment_record_id": {
+            "title": "Target Deployment Record Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "attempt",
+          "context",
+          "created_at",
+          "error_code",
+          "error_message",
+          "finished_at",
+          "instance",
+          "operation_id",
+          "phase",
+          "product",
+          "reason",
+          "result",
+          "started_at",
+          "status",
+          "target_artifact_id",
+          "target_deployment_record_id",
+          "updated_at"
+        ],
+        "title": "OdooProdRollbackOperationView",
+        "type": "object"
+      },
       "OdooProdRollbackRequest": {
         "additionalProperties": false,
         "properties": {
@@ -15931,6 +16208,101 @@
           "context"
         ],
         "title": "OdooProdRollbackRequest",
+        "type": "object"
+      },
+      "OdooProdRollbackResult": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "deployment_record_id": {
+            "default": "",
+            "title": "Deployment Record Id",
+            "type": "string"
+          },
+          "error_message": {
+            "default": "",
+            "title": "Error Message",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "post_deploy_status": {
+            "default": "skipped",
+            "enum": [
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Post Deploy Status",
+            "type": "string"
+          },
+          "promotion_record_id": {
+            "title": "Promotion Record Id",
+            "type": "string"
+          },
+          "release_tuple_id": {
+            "default": "",
+            "title": "Release Tuple Id",
+            "type": "string"
+          },
+          "rollback_finished_at": {
+            "default": "",
+            "title": "Rollback Finished At",
+            "type": "string"
+          },
+          "rollback_health_status": {
+            "default": "skipped",
+            "enum": [
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Rollback Health Status",
+            "type": "string"
+          },
+          "rollback_started_at": {
+            "default": "",
+            "title": "Rollback Started At",
+            "type": "string"
+          },
+          "rollback_status": {
+            "enum": [
+              "pass",
+              "fail"
+            ],
+            "title": "Rollback Status",
+            "type": "string"
+          },
+          "source_channel": {
+            "title": "Source Channel",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "context",
+          "deployment_record_id",
+          "error_message",
+          "instance",
+          "post_deploy_status",
+          "promotion_record_id",
+          "release_tuple_id",
+          "rollback_finished_at",
+          "rollback_health_status",
+          "rollback_started_at",
+          "rollback_status",
+          "source_channel"
+        ],
+        "title": "OdooProdRollbackResult",
         "type": "object"
       },
       "OdooWebsiteBootstrapPayload": {

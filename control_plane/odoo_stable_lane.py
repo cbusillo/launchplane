@@ -25,6 +25,7 @@ OdooStableLaneOperationKind = Literal[
     "prod_backup_restore",
     "retained_volume_backup_import",
     "prod_promotion",
+    "prod_rollback",
 ]
 ODOO_STABLE_LANE_BLOCKING_STATUSES: tuple[str, ...] = (
     "pending",
@@ -104,6 +105,7 @@ def odoo_stable_lane_operation_priority(
         "prod_backup_restore": 2,
         "retained_volume_backup_import": 3,
         "prod_promotion": 4,
+        "prod_rollback": 5,
     }
     return (
         status_priority[status],

@@ -38,7 +38,7 @@ test("browser write routes are the generated UI write allowlist", () => {
     "/v1/work-graph/rank",
     "/v1/production-backup-gates",
     "/v1/odoo-prod-promotions",
-    "/v1/drivers/odoo/prod-rollback",
+    "/v1/odoo-prod-rollbacks",
     "/v1/product-review/decisions",
     "/v1/product-review/feedback/retry",
     "/v1/owner-secret-inputs/submit",

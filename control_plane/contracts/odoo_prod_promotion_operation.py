@@ -209,44 +209,56 @@ class OdooProdPromotionOperationRecord(BaseModel):
             or self.authorization.instances != (self.instance,)
         ):
             raise ValueError("Odoo prod promotion authorization target must match operation.")
-        if (
-            self.checkpoints
-            and self.phase not in {"completed", "failed", "cancelled"}
-            and self.checkpoints[-1].phase != self.phase
-        ):
-            raise ValueError(
-                "Odoo prod promotion operation phase must match its latest checkpoint."
-            )
-        if self.status in ODOO_PROD_PROMOTION_TERMINAL_OPERATION_STATUSES:
-            if not self.finished_at:
-                raise ValueError("Terminal Odoo prod promotion operations require finished_at.")
-            if self.status == "pass" and (self.error_code or self.error_message):
-                raise ValueError("Passing Odoo prod promotion operations cannot include errors.")
-            if self.status == "fail" and not self.error_message:
-                raise ValueError("Failed Odoo prod promotion operations require error_message.")
-            if self.status == "cancelled":
-                if self.cancellation is None:
-                    raise ValueError("Cancelled Odoo prod promotion operations require evidence.")
-                if self.result is not None or self.error_code or self.error_message:
-                    raise ValueError(
-                        "Cancelled Odoo prod promotion operations cannot include result or error."
-                    )
-        elif self.status == "reconciliation_required":
-            if self.finished_at or self.lease_owner or self.lease_expires_at or self.heartbeat_at:
-                raise ValueError(
-                    "Reconciliation-required Odoo prod promotion operations cannot retain "
-                    "terminal or lease state."
-                )
-            if self.result is not None or not self.error_code or not self.error_message:
-                raise ValueError(
-                    "Reconciliation-required Odoo prod promotion operations require an error "
-                    "and cannot include a result."
-                )
-        elif self.cancellation is not None:
-            raise ValueError(
-                "Only cancelled Odoo prod promotion operations can include cancellation."
-            )
+        if self.authorization.grant != "policy_administrator":
+            raise ValueError("Only the policy administrator may queue an Odoo prod promotion.")
+        validate_release_operation_state(self, label="Odoo prod promotion")
         return self
+
+
+def validate_release_operation_state(record: object, *, label: str) -> None:
+    """Shared lifecycle rules for queued Odoo release operations."""
+
+    status = str(getattr(record, "status"))
+    phase = str(getattr(record, "phase"))
+    checkpoints = tuple(getattr(record, "checkpoints"))
+    finished_at = str(getattr(record, "finished_at")).strip()
+    holds_lease = any(
+        str(getattr(record, name)).strip()
+        for name in ("lease_owner", "lease_expires_at", "heartbeat_at")
+    )
+    result = getattr(record, "result")
+    cancellation = getattr(record, "cancellation")
+    error_code = str(getattr(record, "error_code")).strip()
+    error_message = str(getattr(record, "error_message")).strip()
+    if (
+        checkpoints
+        and phase not in {"completed", "failed", "cancelled"}
+        and getattr(checkpoints[-1], "phase") != phase
+    ):
+        raise ValueError(f"{label} operation phase must match its latest checkpoint.")
+    if status in {"pass", "fail", "cancelled"}:
+        if not finished_at:
+            raise ValueError(f"Terminal {label} operations require finished_at.")
+        if status == "pass" and (error_code or error_message):
+            raise ValueError(f"Passing {label} operations cannot include errors.")
+        if status == "fail" and not error_message:
+            raise ValueError(f"Failed {label} operations require error_message.")
+        if status == "cancelled":
+            if cancellation is None:
+                raise ValueError(f"Cancelled {label} operations require evidence.")
+            if result is not None or error_code or error_message:
+                raise ValueError(f"Cancelled {label} operations cannot include result or error.")
+    elif status == "reconciliation_required":
+        if finished_at or holds_lease:
+            raise ValueError(
+                f"Reconciliation-required {label} operations cannot retain terminal or lease state."
+            )
+        if result is not None or not error_code or not error_message:
+            raise ValueError(
+                f"Reconciliation-required {label} operations require an error and no result."
+            )
+    elif cancellation is not None:
+        raise ValueError(f"Only cancelled {label} operations can include cancellation.")
 
 
 def odoo_prod_promotion_request_fingerprint(request: OdooProdPromotionRunRequest) -> str:

@@ -76,6 +76,22 @@ class DurableOperationAuthorizationGuard:
             raise
         self.provider_effect_authorized = True
 
+    def recheck_provider_effect(self, _phase: str) -> None:
+        """Re-read authority at a phase boundary even after an earlier effect.
+
+        ``checkpoint_provider_effect`` checks once and then stays authorized so a
+        revocation cannot stop half-applied provider work. A worker calls this at
+        a boundary that starts a new effect worth refusing, such as the deploy
+        after a backup.
+        """
+
+        try:
+            self._authorize()
+        except DurableOperationAuthorizationDeniedError as error:
+            self.denial_error = error
+            raise
+        self.provider_effect_authorized = True
+
     def _authorize(self) -> None:
         if self.authorization is None:
             raise DurableOperationAuthorizationDeniedError(

@@ -1676,16 +1676,20 @@ single-use CSRF token); `tests/test_http_app_browser_mutation.py` pins that
 route inventory. Every other POST route stays bearer-only: GitHub Actions OIDC
 or the local operator/admin tokens.
 
-The Odoo release routes `POST /v1/drivers/odoo/prod-promotion-run`,
-`POST /v1/odoo-prod-promotions` (and its cancel route), and
+The Odoo release routes `POST /v1/drivers/odoo/prod-promotion-run` and
 `POST /v1/drivers/odoo/prod-rollback`, and the `POST /v1/production-backup-gates`
 enqueue and cancel routes, accept a signed-in session this way so the operator
 can release from the product's prod environment page. They keep accepting the
-bearer and OIDC callers the site workflows use, and refuse terminal-agent
-tokens. The same actions are checked against the caller's identity. A durable
-operation (backup or queued promotion) needs exactly one managed rule for the
-caller, or the caller is the signed-in policy administrator: that records a
-`policy_administrator` grant the worker re-checks against the active policy.
+bearer and OIDC callers the CM website's workflows use only until those
+workflows and their grant are deleted, and refuse terminal-agent tokens. A
+durable backup needs exactly one managed rule for the caller, or the caller is
+the signed-in policy administrator, which records a `policy_administrator`
+grant the worker re-checks against the active policy.
+
+The queued release routes `POST /v1/odoo-prod-promotions` and
+`POST /v1/odoo-prod-rollbacks`, and their cancel routes, accept only a signed-in
+GitHub human whom the active policy names as administrator; every other caller
+gets `authorization_denied`, whatever rules it holds.
 
 Agent consumers use the same allow-list policy but are classified into a compact
 subject model before diagnostics or downstream intent contracts consume them:
@@ -3346,21 +3350,26 @@ The route is owned by native FastAPI; its descriptor remains discoverable, the
 native route owns execution.
 
 `POST /v1/odoo-prod-promotions` queues the same promotion run as a durable
-operation for the operator's release panel. It requires
-`odoo_prod_promotion_run.execute` on the testing and prod instances and an
-`Idempotency-Key`, refuses with `promotion_not_ready` when inputs, release
-approval, or the verified infrastructure backup are missing, and otherwise
-captures durable authorization on the prod instance and returns the queued
-operation. The same caller and key return the same operation (a changed request
-is `idempotency_key_reused`); one promotion may be active per lane
-(`promotion_already_active`), and other Odoo lane operations block it
-(`lane_busy`). `GET /v1/odoo-prod-promotions/operations/{operation_id}` with
-`product` and `context` query parameters returns status, phase, and the run
-result without authorization provenance. The Odoo stable-lane worker executes
-it; see [records](records.md) for lease recovery.
+operation for the operator's release panel. It requires the signed-in policy
+administrator and an `Idempotency-Key`, refuses with `promotion_not_ready` when
+inputs, release approval, or the verified infrastructure backup are missing, and
+otherwise captures a `policy_administrator` authorization on the prod instance
+and returns the queued operation. `POST /v1/odoo-prod-rollbacks` does the same
+for `odoo_prod_rollback.execute`: it resolves and stores the rollback target
+before any effect, or refuses with `rollback_target_missing` or
+`rollback_not_ready`. For both, the same caller and key return the same operation
+(a changed request is `idempotency_key_reused`); one operation of a kind may be
+active per lane (`promotion_already_active`, `rollback_already_active`), and any
+other Odoo lane operation blocks it (`lane_busy`).
+`GET /v1/odoo-prod-promotions/operations/{operation_id}` and
+`GET /v1/odoo-prod-rollbacks/operations/{operation_id}`, with `product` and
+`context` query parameters, require the operation's action and return status,
+phase, the rollback target, and the result without authorization provenance. The
+Odoo stable-lane worker executes both; see [records](records.md) for lease
+recovery.
 
 `POST /v1/drivers/odoo/prod-promotion-run` is the synchronous mutation route for
-Odoo prod promotion that the site workflows call. The tenant workflow supplies product,
+Odoo prod promotion that the site workflows call until they are deleted. The tenant workflow supplies product,
 context, and a stable request ID to the shared Launchplane workflow. That workflow
 captures the typed infrastructure backup and supplies
 `run.infrastructure_backup_record_id`. Launchplane requires its current passing

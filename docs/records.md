@@ -1747,28 +1747,35 @@ state/
   `provider_control` stage with distinct target, schedule, trigger, wait, and
   identity codes; result-read and result-parse failures use bounded `result`
   codes.
-- Odoo prod promotions queued from the operator's release panel write
-  `OdooProdPromotionOperationRecord` entries to
-  `launchplane_odoo_prod_promotion_operations` (DB-backed only; there is no
-  file-backed form). The record stores the promotion run request, the caller's
-  idempotency scope and key, request fingerprint, authorization provenance for
-  `odoo_prod_promotion_run.execute` on the prod instance, lease ownership,
-  monotonic phase checkpoints (`validated`, `logical_backup_started`,
-  `logical_backup_completed`, `promotion_started`), the final run result
-  (run status, artifact, deployment and promotion record ids, error), and a
-  bounded error. The operation id is derived from the caller scope, key,
-  product, and context, so a repeated enqueue finds the same record. A partial
-  unique index allows one pending, running, or reconciliation-required promotion
-  per lane. An expired lease in `created`, `running`, or `validated` (before the
-  logical backup) requeues the promotion; an expired lease in any later phase
-  moves it to `reconciliation_required`, because it may have taken a backup or
-  deployed, and the lane stays blocked until an operator cancels it with provider
-  inspection evidence. The worker never re-runs such a promotion.
+- Odoo prod promotions and rollbacks queued from the operator's release panel
+  write `OdooProdPromotionOperationRecord` entries to
+  `launchplane_odoo_prod_promotion_operations` and
+  `OdooProdRollbackOperationRecord` entries to
+  `launchplane_odoo_prod_rollback_operations` (DB-backed only; there is no
+  file-backed form). Each stores its request, the caller's idempotency scope and
+  key, request fingerprint, a `policy_administrator` authorization for
+  `odoo_prod_promotion_run.execute` or `odoo_prod_rollback.execute` on the prod
+  instance (the record refuses any other grant), lease ownership, monotonic phase
+  checkpoints, the final result, and a bounded error. A promotion records
+  `validated`, `logical_backup_started`, `logical_backup_completed`, and
+  `promotion_started`; its result carries run status, artifact, and deployment
+  and promotion record ids. A rollback stores its `target` (artifact id, and the
+  previous passing deployment it came from when not chosen explicitly), resolved
+  at enqueue before any effect, and records `validated` and `rollback_started`.
+  The operation id is derived from the caller scope, key, product, and context,
+  so a repeated enqueue finds the same record. A partial unique index allows one
+  pending, running, or reconciliation-required operation of each kind per lane,
+  and the shared lane reservation below allows only one across kinds. An expired
+  lease before the first provider effect (`created`, `running`, `validated`)
+  requeues the operation; later it becomes `reconciliation_required`, because it
+  may have changed prod, and the lane stays blocked until the administrator
+  cancels it with provider inspection evidence. The worker never re-runs such an
+  operation.
 - Bootstrap, target replacement, production backup restore, retained-volume
-  backup import, and queued prod promotion creation and worker claim also share
-  one storage-level stable-lane reservation.
+  backup import, and queued prod promotion and rollback creation and worker claim
+  also share one storage-level stable-lane reservation.
   Filesystem storage serializes the exact product/context/instance with one lock;
-  PostgreSQL uses a transaction-scoped advisory lock and checks all five blocking
+  PostgreSQL uses a transaction-scoped advisory lock and checks all six blocking
   operation tables before inserting or claiming. Claims choose one deterministic
   owner across legacy cross-kind queue entries, prioritizing reconciliation and
   running work before the oldest pending record. Per-table partial indexes remain
@@ -1803,7 +1810,11 @@ state/
   `operation_authorization_administrator_revoked` when that policy no longer
   names the recorded caller's GitHub id as administrator. It creates no grant or
   credential, and no automated identity can hold it; managed-rule checks never
-  accept it. Every other caller still needs exactly one managed rule.
+  accept it. Every other caller still needs exactly one managed rule, except
+  that queued Odoo prod promotions and rollbacks accept only this grant. A guard
+  normally checks once before the first provider effect; a queued promotion
+  re-reads it again before its deploy starts, so a revocation during the logical
+  backup stops the deploy.
   A reconcile grant has caller identity type `launchplane_reconcile` with the
   fixed subject `launchplane-reconciler` and carries no managed rule or policy
   fields; neither form accepts the other's identity. Only the reconciler builds

@@ -398,6 +398,16 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         ("integer", "int4"),
     ),
     CriticalColumnType(
+        "launchplane_odoo_prod_rollback_operations",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_odoo_prod_rollback_operations",
+        "attempt",
+        ("integer", "int4"),
+    ),
+    CriticalColumnType(
         "launchplane_odoo_prod_retained_volume_backup_import_operations",
         "attempt",
         ("integer", "int4"),
@@ -1353,6 +1363,18 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
     CriticalIndex(
         "launchplane_odoo_prod_promotion_operations",
         "launchplane_odoo_promotion_worker_claim_idx",
+        ("status", "lease_expires_at", "updated_at"),
+    ),
+    CriticalIndex(
+        "launchplane_odoo_prod_rollback_operations",
+        "launchplane_odoo_rollback_active_lane_uidx",
+        ("product", "context", "instance"),
+        unique=True,
+        predicate_tokens=_ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS,
+    ),
+    CriticalIndex(
+        "launchplane_odoo_prod_rollback_operations",
+        "launchplane_odoo_rollback_worker_claim_idx",
         ("status", "lease_expires_at", "updated_at"),
     ),
     CriticalIndex(

@@ -48,6 +48,12 @@ class OdooProdPromotionRunStore(
     pass
 
 
+# The two effects a queued promotion's authority is re-read before, even after
+# an earlier effect: the logical backup, then the deploy.
+ODOO_LOGICAL_BACKUP_EFFECT = "odoo_logical_backup"
+ODOO_PROD_DEPLOY_EFFECT = "odoo_prod_deploy"
+
+
 @dataclass(frozen=True, slots=True)
 class OdooProdPromotionRunAdmission:
     """What a promotion run checks before any provider effect."""
@@ -115,9 +121,9 @@ def execute_odoo_prod_promotion_run(
 ) -> OdooProdPromotionRunResult:
     """Run one promotion; the durable worker passes checkpoints, the sync route does not.
 
-    ``provider_effect_checkpoint`` runs before the first provider effect (the logical
-    backup) and again before the deploy's effects; ``phase_checkpoint`` records progress
-    after each check passes and before the effect it names starts.
+    ``provider_effect_checkpoint`` runs before the logical backup, before the deploy
+    starts, and again before the deploy's own effects; ``phase_checkpoint`` records
+    progress after each check passes and before the effect it names starts.
     """
 
     def record_phase(phase: OdooProdPromotionOperationPhase) -> None:
@@ -139,7 +145,7 @@ def execute_odoo_prod_promotion_run(
         )
     record_phase("validated")
     if provider_effect_checkpoint is not None:
-        provider_effect_checkpoint("odoo_logical_backup")
+        provider_effect_checkpoint(ODOO_LOGICAL_BACKUP_EFFECT)
     record_phase("logical_backup_started")
     backup_result = execute_odoo_prod_backup_gate(
         control_plane_root=control_plane_root,
@@ -161,6 +167,8 @@ def execute_odoo_prod_promotion_run(
         )
 
     record_phase("logical_backup_completed")
+    if provider_effect_checkpoint is not None:
+        provider_effect_checkpoint(ODOO_PROD_DEPLOY_EFFECT)
     record_phase("promotion_started")
     promotion_result = execute_odoo_prod_promotion(
         control_plane_root=control_plane_root,

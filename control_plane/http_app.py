@@ -215,9 +215,9 @@ from control_plane.http_routes import (
     request_fingerprint as build_request_fingerprint,
     require_product_profile_read_store,
 )
-from control_plane.http_routes.odoo_prod_promotion_operation import (
-    OdooProdPromotionOperationRouteDependencies,
-    register_odoo_prod_promotion_operation_routes,
+from control_plane.http_routes.odoo_prod_release_operation import (
+    OdooProdReleaseOperationRouteDependencies,
+    register_odoo_prod_release_operation_routes,
 )
 from control_plane.http_routes.production_backup_gate import (
     ProductionBackupGateRouteDependencies,
@@ -9556,6 +9556,31 @@ def create_launchplane_fastapi_app(
         )
         if replay_response is not None:
             return replay_response
+
+        # A queued release (or any other durable Odoo operation) on this lane must
+        # not race a synchronous rollback from a site workflow.
+        read_active_lane_owner = optional_callable_attribute(
+            record_store, "active_odoo_stable_lane_operation_owner"
+        )
+        active_lane_owner = (
+            read_active_lane_owner(
+                product=authorization_product,
+                context=rollback_request.rollback.context,
+                instance=rollback_request.rollback.instance,
+            )
+            if read_active_lane_owner is not None
+            else None
+        )
+        if active_lane_owner is not None:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="lane_busy",
+                message=(
+                    "Another Odoo operation is active on this prod lane "
+                    f"({active_lane_owner.operation_kind} {active_lane_owner.operation_id})."
+                ),
+            )
 
         try:
             records, driver_result = execute_odoo_prod_rollback_result(
@@ -25278,9 +25303,9 @@ def create_launchplane_fastapi_app(
             cancel_pending_operation=cancel_pending_durable_operation,
         ),
     )
-    register_odoo_prod_promotion_operation_routes(
+    register_odoo_prod_release_operation_routes(
         app,
-        dependencies=OdooProdPromotionOperationRouteDependencies(
+        dependencies=OdooProdReleaseOperationRouteDependencies(
             common=read_route_dependencies,
             read_mutation_identity=read_operator_mutation_identity,
             cancel_pending_operation=cancel_pending_durable_operation,

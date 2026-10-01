@@ -13,8 +13,8 @@ from control_plane.odoo_product_driver_http import (
     OdooRouteDependencyError,
     resolve_odoo_product_route,
 )
+from control_plane.contracts.odoo_prod_rollback_operation import OdooProdRollbackRequest
 from control_plane.workflows.odoo_prod_rollback import (
-    OdooProdRollbackRequest,
     OdooProdRollbackStore,
     execute_odoo_prod_rollback,
 )

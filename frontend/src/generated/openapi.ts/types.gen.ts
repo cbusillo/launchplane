@@ -1549,6 +1549,38 @@ export type OdooProdPromotionRunResult = {
     to_instance: string;
 };
 
+export type OdooProdRollbackEnvelope = {
+    product: string;
+    rollback: OdooProdRollbackRequest;
+    schema_version?: number;
+};
+
+export type OdooProdRollbackOperationResponse = {
+    operation: OdooProdRollbackOperationView;
+    status: 'accepted';
+    trace_id: string;
+};
+
+export type OdooProdRollbackOperationView = {
+    attempt: number;
+    context: string;
+    created_at: string;
+    error_code: string;
+    error_message: string;
+    finished_at: string;
+    instance: string;
+    operation_id: string;
+    phase: 'created' | 'running' | 'validated' | 'rollback_started' | 'completed' | 'failed' | 'cancelled';
+    product: string;
+    reason: string;
+    result: OdooProdRollbackResult | null;
+    started_at: string;
+    status: 'pending' | 'running' | 'reconciliation_required' | 'pass' | 'fail' | 'cancelled';
+    target_artifact_id: string;
+    target_deployment_record_id: string;
+    updated_at: string;
+};
+
 export type OdooProdRollbackRequest = {
     artifact_id?: string;
     context: string;
@@ -1562,6 +1594,22 @@ export type OdooProdRollbackRequest = {
     timeout_seconds?: number | null;
     verify_health?: boolean;
     wait?: boolean;
+};
+
+export type OdooProdRollbackResult = {
+    artifact_id: string;
+    context: string;
+    deployment_record_id: string;
+    error_message: string;
+    instance: string;
+    post_deploy_status: 'pass' | 'fail' | 'skipped';
+    promotion_record_id: string;
+    release_tuple_id: string;
+    rollback_finished_at: string;
+    rollback_health_status: 'pass' | 'fail' | 'skipped';
+    rollback_started_at: string;
+    rollback_status: 'pass' | 'fail';
+    source_channel: string;
 };
 
 export type OdooWebsiteBootstrapPayload = {
@@ -4403,6 +4451,39 @@ export type ReadOdooProdPromotionOperationResponses = {
 
 export type ReadOdooProdPromotionOperationResponse = ReadOdooProdPromotionOperationResponses[keyof ReadOdooProdPromotionOperationResponses];
 
+export type ReadOdooProdRollbackOperationData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        operation_id: string;
+    };
+    query: {
+        product: string;
+        context: string;
+    };
+    url: '/v1/odoo-prod-rollbacks/operations/{operation_id}';
+};
+
+export type ReadOdooProdRollbackOperationErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadOdooProdRollbackOperationError = ReadOdooProdRollbackOperationErrors[keyof ReadOdooProdRollbackOperationErrors];
+
+export type ReadOdooProdRollbackOperationResponses = {
+    200: OdooProdRollbackOperationResponse;
+};
+
+export type ReadOdooProdRollbackOperationResponse = ReadOdooProdRollbackOperationResponses[keyof ReadOdooProdRollbackOperationResponses];
+
 export type ReadHumanOrdinaryAgentJobData = {
     body?: never;
     path: {
@@ -5338,39 +5419,6 @@ export type ReadTenantAdmissionEvaluationResponses = {
 
 export type ReadTenantAdmissionEvaluationResponse = ReadTenantAdmissionEvaluationResponses[keyof ReadTenantAdmissionEvaluationResponses];
 
-export type WriteOdooProdRollbackData = {
-    body: {
-        product: string;
-        rollback: OdooProdRollbackRequest;
-        schema_version?: number;
-    };
-    headers?: {
-        'Idempotency-Key'?: string;
-        Authorization?: string;
-        Cookie?: string;
-    };
-    path?: never;
-    query?: never;
-    url: '/v1/drivers/odoo/prod-rollback';
-};
-
-export type WriteOdooProdRollbackErrors = {
-    400: LaunchplaneErrorResponse;
-    401: LaunchplaneErrorResponse;
-    403: LaunchplaneErrorResponse;
-    404: LaunchplaneErrorResponse;
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type WriteOdooProdRollbackError = WriteOdooProdRollbackErrors[keyof WriteOdooProdRollbackErrors];
-
-export type WriteOdooProdRollbackResponses = {
-    202: AcceptedEvidenceResponse;
-};
-
-export type WriteOdooProdRollbackResponse = WriteOdooProdRollbackResponses[keyof WriteOdooProdRollbackResponses];
-
 export type EnqueueOdooProdPromotionData = {
     body: OdooProdPromotionRunEnvelope;
     headers?: {
@@ -5399,6 +5447,35 @@ export type EnqueueOdooProdPromotionResponses = {
 };
 
 export type EnqueueOdooProdPromotionResponse = EnqueueOdooProdPromotionResponses[keyof EnqueueOdooProdPromotionResponses];
+
+export type EnqueueOdooProdRollbackData = {
+    body: OdooProdRollbackEnvelope;
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/odoo-prod-rollbacks';
+};
+
+export type EnqueueOdooProdRollbackErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type EnqueueOdooProdRollbackError = EnqueueOdooProdRollbackErrors[keyof EnqueueOdooProdRollbackErrors];
+
+export type EnqueueOdooProdRollbackResponses = {
+    200: OdooProdRollbackOperationResponse;
+};
+
+export type EnqueueOdooProdRollbackResponse = EnqueueOdooProdRollbackResponses[keyof EnqueueOdooProdRollbackResponses];
 
 export type DisconnectOrdinaryAgentPrincipalData = {
     body: OrdinaryAgentDisconnectRequest;

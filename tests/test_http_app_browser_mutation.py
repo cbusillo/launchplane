@@ -52,6 +52,8 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "/v1/production-backup-gates/operations/{operation_id}/cancel",
             "/v1/odoo-prod-promotions",
             "/v1/odoo-prod-promotions/operations/{operation_id}/cancel",
+            "/v1/odoo-prod-rollbacks",
+            "/v1/odoo-prod-rollbacks/operations/{operation_id}/cancel",
             "/v1/product-profiles/{product}/owner",
             "/v1/product-review/decisions",
             "/v1/product-review/feedback/retry",
