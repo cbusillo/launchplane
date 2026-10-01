@@ -325,7 +325,8 @@ APPROVED_CONTAINER_IMAGES: Mapping[str, ActionClassification] = {
 
 
 UNTRUSTED_RUN_EXPRESSION_PATTERN = re.compile(
-    r"\$\{\{[^}]*\b(?:inputs\.|github\.event\.|github\.head_ref\b)"
+    r"\$\{\{[^}]*\b(?:inputs\s*[.\[]|github\s*(?:\.\s*event\b|\[\s*'event'|\.\s*head_ref\b"
+    r"|\[\s*'head_ref'))"
 )
 
 
@@ -346,7 +347,10 @@ def _strip_enclosing_parentheses(expression: str) -> str:
 
 def _requires_conjunct(expression: str, required: str) -> bool:
     """Whether `required` must hold for the whole expression to be true."""
-    expression = _strip_enclosing_parentheses(_normalized_expression(expression))
+    expression = _normalized_expression(expression)
+    if expression.startswith("${{") and expression.endswith("}}"):
+        expression = expression[3:-2].strip()
+    expression = _strip_enclosing_parentheses(expression)
     required = _strip_enclosing_parentheses(_normalized_expression(required))
     if expression == required:
         return True
@@ -365,7 +369,9 @@ def _requires_conjunct(expression: str, required: str) -> bool:
             index += 1
         index += 1
     conjuncts.append(expression[start:].strip())
-    return any(_strip_enclosing_parentheses(conjunct) == required for conjunct in conjuncts)
+    return any(
+        conjunct != expression and _requires_conjunct(conjunct, required) for conjunct in conjuncts
+    )
 
 
 def _run_scripts() -> Iterator[tuple[Path, str, str]]:
@@ -391,7 +397,8 @@ def _run_scripts() -> Iterator[tuple[Path, str, str]]:
 
 
 def _action_reference_files() -> tuple[Path, ...]:
-    workflow_files = sorted(Path(".github/workflows").glob("*.yml"))
+    workflow_root = Path(".github/workflows")
+    workflow_files = sorted((*workflow_root.glob("*.yml"), *workflow_root.glob("*.yaml")))
     composite_action_files = sorted(Path(".github/actions").rglob("action.y*ml"))
     return tuple(workflow_files + composite_action_files)
 
@@ -516,18 +523,36 @@ class GitHubActionsSecurityTests(TestCase):
             (f"{guard} || needs.a.outputs.verified != 'true'", False),
             (f"(needs.a.outputs.verified != 'true' || {guard}) && always()", False),
             ("needs.a.outputs.verified != 'true'", False),
+            (f"${{{{ needs.a.outputs.verified != 'true' && {guard} }}}}", True),
+            (f"(always() && {guard}) && needs.a.result == 'success'", True),
+            (f"(always() || {guard}) && needs.a.result == 'success'", False),
         ):
             with self.subTest(expression=expression):
                 self.assertEqual(_requires_conjunct(expression, guard), required)
+
+    def test_untrusted_expression_pattern_covers_index_and_multiline_forms(self) -> None:
+        for script, matches in (
+            ('echo "${{ inputs.command }}"', True),
+            ("echo \"${{ inputs['command'] }}\"", True),
+            ("echo \"${{ github['event']['pull_request']['title'] }}\"", True),
+            ('echo "${{\n  inputs.command }}"', True),
+            ('echo "${{ github.head_ref }}"', True),
+            ('echo "${{ github.event_name }}"', False),
+            ('echo "${{ steps.request.outputs.url }}"', False),
+            ('echo "$INPUT_COMMAND"', False),
+        ):
+            with self.subTest(script=script):
+                self.assertEqual(
+                    UNTRUSTED_RUN_EXPRESSION_PATTERN.search(script) is not None, matches
+                )
 
     def test_run_scripts_read_untrusted_values_through_the_environment(self) -> None:
         # An expression in a run script is pasted into the shell before it runs,
         # so a crafted input or event field becomes code. Pass it through env.
         violations = [
-            f"{path}:{step}: {line.strip()}"
+            f"{path}:{step}: {match.group(0)}"
             for path, step, script in _run_scripts()
-            for line in script.splitlines()
-            if UNTRUSTED_RUN_EXPRESSION_PATTERN.search(line)
+            for match in UNTRUSTED_RUN_EXPRESSION_PATTERN.finditer(script)
         ]
 
         self.assertEqual([], violations)
