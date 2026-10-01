@@ -13,7 +13,10 @@ from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
-from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.deployment_record import (
+    DeploymentRecord,
+    previous_passing_deployment,
+)
 from control_plane.contracts.driver_descriptor import DriverActionDescriptor, DriverDescriptor
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
@@ -391,6 +394,9 @@ class ProductOdooEnvironmentExtension(BaseModel):
     requires_backup_before_destroy: bool = True
     requires_restore_proof: bool = True
     requires_runtime_identity: bool = True
+    # Prod only: what a rollback with no artifact chosen would deploy.
+    rollback_artifact_id: str = ""
+    rollback_deployment_record_id: str = ""
 
 
 class ProductEnvironmentDriverExtensions(BaseModel):
@@ -697,6 +703,7 @@ def build_product_environment_detail(
             profile=profile,
             descriptor=descriptor,
             lane=lane,
+            record_store=record_store,
         ),
         target=_target_summary(lane_summary, topology=topology),
         topology=topology,
@@ -2646,12 +2653,25 @@ def _environment_driver_extensions(
     profile: LaunchplaneProductProfileRecord,
     descriptor: DriverDescriptor | None,
     lane: ProductLaneProfile,
+    record_store: object | None = None,
 ) -> ProductEnvironmentDriverExtensions:
     driver_ids = {profile.driver_id}
     if descriptor is not None and descriptor.base_driver_id:
         driver_ids.add(descriptor.base_driver_id)
     if "odoo" not in driver_ids:
         return ProductEnvironmentDriverExtensions()
+    rollback_deployment = None
+    if record_store is not None and lane.instance == "prod":
+        rollback_deployment = previous_passing_deployment(
+            record
+            for record in _optional_records(
+                record_store,
+                "list_deployment_records",
+                context_name=lane.context,
+                instance_name=lane.instance,
+            )
+            if isinstance(record, DeploymentRecord)
+        )
     return ProductEnvironmentDriverExtensions(
         odoo=ProductOdooEnvironmentExtension(
             prelaunch_rebuild_allowed=lane.odoo_prelaunch_rebuild.enabled,
@@ -2667,6 +2687,14 @@ def _environment_driver_extensions(
             requires_backup_before_destroy=lane.odoo_data_policy.requires_backup_before_destroy,
             requires_restore_proof=lane.odoo_data_policy.requires_restore_proof,
             requires_runtime_identity=lane.odoo_data_policy.requires_runtime_identity,
+            rollback_artifact_id=(
+                rollback_deployment.artifact_identity.artifact_id
+                if rollback_deployment is not None and rollback_deployment.artifact_identity
+                else ""
+            ),
+            rollback_deployment_record_id=(
+                rollback_deployment.record_id if rollback_deployment is not None else ""
+            ),
         )
     )
 

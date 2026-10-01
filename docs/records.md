@@ -1780,11 +1780,44 @@ state/
   `provider_control` stage with distinct target, schedule, trigger, wait, and
   identity codes; result-read and result-parse failures use bounded `result`
   codes.
-- Bootstrap, target replacement, production backup restore, and retained-volume
-  backup import creation and worker claim also share one storage-level
-  stable-lane reservation.
+- Odoo prod promotions and rollbacks queued from the operator's release panel
+  write `OdooProdPromotionOperationRecord` entries to
+  `launchplane_odoo_prod_promotion_operations` and
+  `OdooProdRollbackOperationRecord` entries to
+  `launchplane_odoo_prod_rollback_operations` (DB-backed only; there is no
+  file-backed form). Each stores its request, the caller's idempotency scope and
+  key, request fingerprint, a `policy_administrator` authorization for
+  `odoo_prod_promotion_run.execute` or `odoo_prod_rollback.execute` on the prod
+  instance (the record refuses any other grant), lease ownership, monotonic phase
+  checkpoints, the final result, and a bounded error. A promotion records
+  `validated`, `logical_backup_started`, `logical_backup_completed`, and
+  `promotion_started`; its result carries run status, artifact, and deployment
+  and promotion record ids. A rollback stores its `target` (artifact id, and the
+  previous passing deployment it came from when not chosen explicitly), resolved
+  at enqueue before any effect, and records `validated` and `rollback_started`.
+  The operation id is derived from the caller scope, key, product, and context,
+  so a repeated enqueue finds the same record. A partial unique index allows one
+  pending, running, or reconciliation-required operation of each kind per lane,
+  and the shared lane reservation below allows only one across kinds. An expired
+  lease before the first provider effect (`created`, `running`, `validated`)
+  requeues the operation; later it becomes `reconciliation_required`, because it
+  may have changed prod, and the lane stays blocked until the administrator
+  cancels it with provider inspection evidence. The worker never re-runs such an
+  operation.
+- Bootstrap, target replacement, production backup restore, retained-volume
+  backup import, and queued prod promotion and rollback creation and worker claim
+  also share one storage-level stable-lane reservation. Synchronous Odoo prod
+  release routes join it without a record: they hold a PostgreSQL
+  transaction-scoped advisory lock for the lane (`synchronous_release`) on an
+  open session for their whole run, after checking under the lane lock that no
+  durable operation is active. Every create and claim tries the same lock inside
+  its lane-locked transaction and treats a held one as an active owner, so the
+  two sides exclude each other. The lock ends with the session, on success, on
+  failure, or when a crashed process's connection closes and PostgreSQL ends its
+  backend, so a crash cannot leave the lane reserved. SQLite rehearsal stores
+  only check for an active operation.
   Filesystem storage serializes the exact product/context/instance with one lock;
-  PostgreSQL uses a transaction-scoped advisory lock and checks all four blocking
+  PostgreSQL uses a transaction-scoped advisory lock and checks all six blocking
   operation tables before inserting or claiming. Claims choose one deterministic
   owner across legacy cross-kind queue entries, prioritizing reconciliation and
   running work before the oldest pending record. Per-table partial indexes remain
@@ -1798,7 +1831,7 @@ state/
   and block on any difference before an apply operation can be created. Volume
   changes remain explicit rebuild/restore decisions rather than implicit
   `data_source_mode=existing` behavior.
-- New records for all five durable driver queues use schema version 2 and
+- New records for the five original durable driver queues use schema version 2 and
   persist authorization provenance in the canonical operation payload: action,
   product, context, exact instances, managed set/rule ids, policy record id,
   revision, schema version, digest, source, authorization time, and normalized
@@ -1807,7 +1840,23 @@ state/
   The payload remains the storage authority, so this contract does not require
   promoted SQL columns or an Alembic migration.
 - Durable Operation Authorization has a `grant`: `policy_rule` (the default,
-  serialized without the field, exactly as before) or `launchplane_reconcile`.
+  serialized without the field, exactly as before), `policy_administrator`, or
+  `launchplane_reconcile`.
+  A `policy_administrator` grant is captured, for any product and action, when
+  the caller is a signed-in GitHub human with role `admin` whom the active
+  policy names as its administrator by immutable GitHub id (the strict
+  `authz_policy_grant.write` rule on `launchplane`/`launchplane`). It records the
+  policy record id, revision, schema version, digest, and source for audit, and
+  no managed set or rule id. The worker re-reads the active policy before
+  executing and before the first provider effect, and fails the operation with
+  `operation_authorization_administrator_revoked` when that policy no longer
+  names the recorded caller's GitHub id as administrator. It creates no grant or
+  credential, and no automated identity can hold it; managed-rule checks never
+  accept it. Every other caller still needs exactly one managed rule, except
+  that queued Odoo prod promotions and rollbacks accept only this grant. A guard
+  normally checks once before the first provider effect; a queued promotion
+  re-reads it again before its deploy starts, so a revocation during the logical
+  backup stops the deploy.
   A reconcile grant has caller identity type `launchplane_reconcile` with the
   fixed subject `launchplane-reconciler` and carries no managed rule or policy
   fields; neither form accepts the other's identity. Only the reconciler builds
@@ -1944,9 +1993,10 @@ run` is the foreground loop intended for an external process supervisor, and
   which writes the deployment record and prod release tuple. Rollback then
   refreshes prod inventory with rollback provenance and annotates the current
   prod promotion record's `rollback` and `rollback_health` fields. The selected
-  rollback source is the DB-backed `testing` release tuple unless the operator
-  supplies an explicit DB-backed artifact ID; operators must not supply
-  unrecorded image refs or source SHAs.
+  rollback source is the artifact of the previous passing prod deployment record
+  (the newest passing one whose artifact differs from the lane's latest
+  deployment) unless the operator supplies an explicit DB-backed artifact ID;
+  operators must not supply unrecorded image refs or source SHAs.
 - Generic-web rollback planning writes `GenericWebRollbackPlanRecord` entries
   under `generic_web_rollback_plans` in file-backed state and
   `launchplane_generic_web_rollback_plans` in DB-backed state. These records are

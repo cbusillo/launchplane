@@ -15,6 +15,12 @@ import type {
   DispatchProductPromotionWorkflowResponse,
   DryRunProductPromotionData,
   DryRunProductPromotionResponse,
+  EnqueueOdooProdPromotionData,
+  EnqueueOdooProdPromotionResponse,
+  EnqueueOdooProdRollbackData,
+  EnqueueOdooProdRollbackResponse,
+  EnqueueProductionBackupGateData,
+  EnqueueProductionBackupGateResponse,
   EveryCodeSummaryResponse,
   GovernanceProjectionResponse,
   InspectionSetupMetadata,
@@ -75,6 +81,12 @@ import type {
   RetryProductReviewFeedbackData,
   ReleaseReviewResponse,
   ReleaseReviewDecisionEnvelope,
+  ReadProductionBackupGateOperationData,
+  ReadProductionBackupGateOperationResponse,
+  ReadOdooProdPromotionOperationData,
+  ReadOdooProdPromotionOperationResponse,
+  ReadOdooProdRollbackOperationData,
+  ReadOdooProdRollbackOperationResponse,
 } from "./generated/openapi.ts";
 import type {
   OrdinaryAgentOperationClientResponse,
@@ -640,6 +652,90 @@ export function dispatchProductPromotionWorkflow(
     options.signal,
     generatedIdempotencyKey(request.headers),
     options.onDispatch,
+  );
+}
+
+export function enqueueProductionBackupGate(
+  payload: EnqueueProductionBackupGateData["body"],
+  options: BrowserOperationOptions,
+): Promise<EnqueueProductionBackupGateResponse> {
+  return requestGeneratedPost<EnqueueProductionBackupGateResponse>(
+    {
+      url: BROWSER_WRITE_ROUTES.productionBackupGateEnqueue,
+      body: payload,
+      headers: { "Idempotency-Key": options.idempotencyKey },
+    },
+    options.signal,
+    options.onDispatch,
+  );
+}
+
+export function readProductionBackupGateOperation(
+  operationId: string,
+  scope: ReadProductionBackupGateOperationData["query"],
+  signal?: AbortSignal,
+): Promise<ReadProductionBackupGateOperationResponse> {
+  return requestJson<ReadProductionBackupGateOperationResponse>(
+    `/v1/production-backup-gates/operations/${encodeURIComponent(operationId)}?${new URLSearchParams(scope)}`,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function enqueueOdooProdPromotion(
+  payload: EnqueueOdooProdPromotionData["body"],
+  options: BrowserOperationOptions,
+): Promise<EnqueueOdooProdPromotionResponse> {
+  return requestGeneratedPost<EnqueueOdooProdPromotionResponse>(
+    {
+      url: BROWSER_WRITE_ROUTES.odooProdPromotionEnqueue,
+      body: payload,
+      headers: { "Idempotency-Key": options.idempotencyKey },
+    },
+    options.signal,
+    options.onDispatch,
+  );
+}
+
+export function readOdooProdPromotionOperation(
+  operationId: string,
+  scope: ReadOdooProdPromotionOperationData["query"],
+  signal?: AbortSignal,
+): Promise<ReadOdooProdPromotionOperationResponse> {
+  return requestJson<ReadOdooProdPromotionOperationResponse>(
+    `/v1/odoo-prod-promotions/operations/${encodeURIComponent(operationId)}?${new URLSearchParams(scope)}`,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function enqueueOdooProdRollback(
+  payload: EnqueueOdooProdRollbackData["body"],
+  options: BrowserOperationOptions,
+): Promise<EnqueueOdooProdRollbackResponse> {
+  return requestGeneratedPost<EnqueueOdooProdRollbackResponse>(
+    {
+      url: BROWSER_WRITE_ROUTES.odooProdRollbackEnqueue,
+      body: payload,
+      headers: { "Idempotency-Key": options.idempotencyKey },
+    },
+    options.signal,
+    options.onDispatch,
+  );
+}
+
+export function readOdooProdRollbackOperation(
+  operationId: string,
+  scope: ReadOdooProdRollbackOperationData["query"],
+  signal?: AbortSignal,
+): Promise<ReadOdooProdRollbackOperationResponse> {
+  return requestJson<ReadOdooProdRollbackOperationResponse>(
+    `/v1/odoo-prod-rollbacks/operations/${encodeURIComponent(operationId)}?${new URLSearchParams(scope)}`,
+    "GET",
+    undefined,
+    signal,
   );
 }
 

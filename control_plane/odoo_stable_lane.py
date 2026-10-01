@@ -24,6 +24,10 @@ OdooStableLaneOperationKind = Literal[
     "target_replacement",
     "prod_backup_restore",
     "retained_volume_backup_import",
+    "prod_promotion",
+    "prod_rollback",
+    # A synchronous Odoo release route holding the lane (no operation record).
+    "synchronous_release",
 ]
 ODOO_STABLE_LANE_BLOCKING_STATUSES: tuple[str, ...] = (
     "pending",
@@ -102,6 +106,9 @@ def odoo_stable_lane_operation_priority(
         "target_replacement": 1,
         "prod_backup_restore": 2,
         "retained_volume_backup_import": 3,
+        "prod_promotion": 4,
+        "prod_rollback": 5,
+        "synchronous_release": 6,
     }
     return (
         status_priority[status],

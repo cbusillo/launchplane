@@ -25,9 +25,11 @@ from control_plane.workflows.odoo_prod_promotion import (
     OdooProdPromotionStore,
     execute_odoo_prod_promotion,
 )
-from control_plane.workflows.odoo_prod_promotion_run import (
+from control_plane.contracts.odoo_prod_promotion_operation import (
     OdooProdPromotionRunRequest,
     OdooProdPromotionRunResult,
+)
+from control_plane.workflows.odoo_prod_promotion_run import (
     OdooProdPromotionRunStore,
     execute_odoo_prod_promotion_run,
 )

@@ -1,5 +1,6 @@
 import json
 import unittest
+from dataclasses import replace
 
 from pydantic import ValidationError
 
@@ -13,6 +14,7 @@ from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationGuard,
     capture_explicit_action_durable_operation_authorization,
     capture_durable_operation_authorization,
+    durable_operation_administrator_grant_allows,
     durable_operation_authorization_allows,
     explicit_action_durable_operation_authorization_allows,
     managed_github_id_action_allows,
@@ -27,6 +29,7 @@ from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
+    TerminalAgentIdentity,
 )
 from tests.support.auth import _identity
 
@@ -586,6 +589,191 @@ class LaunchplaneReconcileGrantContractTests(unittest.TestCase):
         with self.assertRaises(DurableOperationAuthorizationDeniedError) as denied:
             guard.authorize_execution()
         self.assertEqual(denied.exception.code, "operation_authorization_reconcile_refused")
+
+
+_ADMINISTRATOR_RULE: dict[str, object] = {
+    "github_ids": [123],
+    "roles": ["admin"],
+    "actions": ["authz_policy_grant.write"],
+    "products": ["launchplane"],
+    "contexts": ["launchplane"],
+}
+
+
+class PolicyAdministratorGrantTests(unittest.TestCase):
+    def _human(self, *, github_id: int = 123) -> GitHubHumanIdentity:
+        return GitHubHumanIdentity(
+            login="example-operator",
+            github_id=github_id,
+            name="",
+            email="",
+            organizations=frozenset(),
+            teams=frozenset(),
+            role="admin",
+        )
+
+    def _policy_record(
+        self, *, administrator_rule: dict[str, object] | None, revision: int = 7
+    ) -> LaunchplaneAuthzPolicyRecord:
+        managed_backup_rule: dict[str, object] = {
+            "managed_set_id": "operator.production-backups",
+            "managed_rule_id": "cm-prod-backup",
+            "github_ids": [456],
+            "roles": ["admin"],
+            "actions": ["production_backup_gate.execute"],
+            "products": ["odoo-tenant-cm"],
+            "contexts": ["cm"],
+            "instances": ["prod"],
+        }
+        rules = [managed_backup_rule]
+        if administrator_rule is not None:
+            rules.append(administrator_rule)
+        return LaunchplaneAuthzPolicyRecord(
+            record_id=f"launchplane-authz-policy-r{revision}",
+            revision=revision,
+            status="active",
+            source="service:test",
+            updated_at="2026-09-30T00:00:00Z",
+            policy=LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 3,
+                    "github_humans": rules,
+                    "terminal_agents": [
+                        {
+                            "subjects": ["terminal-agent"],
+                            "token_labels": ["terminal-agent-read"],
+                            "actions": ["production_backup_gate.execute"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "instances": ["prod"],
+                        }
+                    ],
+                }
+            ),
+        )
+
+    def _capture(
+        self, identity: object, policy_record: LaunchplaneAuthzPolicyRecord
+    ) -> DurableOperationAuthorization:
+        return capture_durable_operation_authorization(
+            identity=identity,  # type: ignore[arg-type]
+            action="production_backup_gate.execute",
+            product="odoo-tenant-cm",
+            context="cm",
+            instances=("prod",),
+            policy_record=policy_record,
+            authorized_at="2026-09-30T00:01:00Z",
+        )
+
+    def test_capture_gives_only_the_named_administrator_the_administrator_grant(self) -> None:
+        policy_record = self._policy_record(administrator_rule=_ADMINISTRATOR_RULE)
+
+        for capture in (
+            capture_durable_operation_authorization,
+            capture_explicit_action_durable_operation_authorization,
+        ):
+            with self.subTest(capture=capture.__name__):
+                grant = capture(
+                    identity=self._human(),
+                    action="production_backup_gate.execute",
+                    product="odoo-tenant-cm",
+                    context="cm",
+                    instances=("prod",),
+                    policy_record=policy_record,
+                    authorized_at="2026-09-30T00:01:00Z",
+                )
+                self.assertEqual(grant.grant, "policy_administrator")
+                self.assertEqual((grant.managed_set_id, grant.managed_rule_id), ("", ""))
+                self.assertEqual(grant.policy_record_id, policy_record.record_id)
+                self.assertEqual(grant.policy_revision, 7)
+                self.assertEqual(grant.policy_sha256, policy_record.policy_sha256)
+                self.assertEqual(grant.caller.github_id, 123)
+
+        managed = self._capture(self._human(github_id=456), policy_record)
+        self.assertEqual(managed.grant, "policy_rule")
+        self.assertEqual(managed.managed_rule_id, "cm-prod-backup")
+
+        with self.assertRaises(DurableOperationAuthorizationCaptureError):
+            self._capture(self._human(github_id=789), policy_record)
+        with self.assertRaises(DurableOperationAuthorizationCaptureError):
+            self._capture(
+                TerminalAgentIdentity(subject="terminal-agent", token_label="terminal-agent-read"),
+                policy_record,
+            )
+        read_only = replace(self._human(), role="read_only")
+        with self.assertRaises(DurableOperationAuthorizationCaptureError):
+            self._capture(read_only, policy_record)
+
+    def test_worker_recheck_denies_once_the_policy_stops_naming_the_administrator(self) -> None:
+        grant = self._capture(
+            self._human(), self._policy_record(administrator_rule=_ADMINISTRATOR_RULE)
+        )
+        narrowed_rules = {
+            "removed": None,
+            "another person": {**_ADMINISTRATOR_RULE, "github_ids": [456]},
+            "login selector": {**_ADMINISTRATOR_RULE, "logins": ["example-operator"]},
+            "one product": {**_ADMINISTRATOR_RULE, "products": ["odoo-tenant-cm"]},
+            "read role": {**_ADMINISTRATOR_RULE, "roles": ["read_only"]},
+        }
+        still_named = self._policy_record(administrator_rule=_ADMINISTRATOR_RULE, revision=8)
+        DurableOperationAuthorizationGuard(
+            authorization=grant, policy_record_reader=lambda: still_named
+        ).checkpoint_provider_effect("backup_preflight")
+        for name, rule in narrowed_rules.items():
+            with self.subTest(name):
+                current = self._policy_record(administrator_rule=rule, revision=9)
+                self.assertFalse(
+                    durable_operation_administrator_grant_allows(
+                        authorization=grant, policy_record=current
+                    )
+                )
+                guard = DurableOperationAuthorizationGuard(
+                    authorization=grant, policy_record_reader=lambda: current
+                )
+                with self.assertRaises(DurableOperationAuthorizationDeniedError) as denied:
+                    guard.checkpoint_provider_effect("backup_preflight")
+                self.assertEqual(
+                    denied.exception.code, "operation_authorization_administrator_revoked"
+                )
+
+        # The administrator grant is never read as a managed policy rule.
+        self.assertFalse(
+            durable_operation_authorization_allows(authorization=grant, policy_record=still_named)
+        )
+        self.assertFalse(
+            explicit_action_durable_operation_authorization_allows(
+                authorization=grant, policy_record=still_named
+            )
+        )
+
+    def test_administrator_grant_serializes_deterministically_without_a_managed_rule(
+        self,
+    ) -> None:
+        grant = self._capture(
+            self._human(), self._policy_record(administrator_rule=_ADMINISTRATOR_RULE)
+        )
+
+        payload = grant.model_dump(mode="json")
+
+        self.assertEqual(payload["grant"], "policy_administrator")
+        self.assertFalse({"managed_set_id", "managed_rule_id"} & set(payload))
+        self.assertEqual(payload["policy_revision"], 7)
+        round_tripped = DurableOperationAuthorization.model_validate_json(grant.model_dump_json())
+        self.assertEqual(round_tripped, grant)
+        self.assertEqual(round_tripped.model_dump_json(), grant.model_dump_json())
+
+        invalid = {
+            "with a managed rule": {**payload, "managed_rule_id": "cm-prod-backup"},
+            "workflow caller": {
+                **payload,
+                "caller": json.loads(_LEGACY_V2_POLICY_AUTHORIZATION_JSON)["caller"],
+            },
+            "read-only person": {**payload, "caller": {**payload["caller"], "role": "read_only"}},
+            "without policy provenance": {**payload, "policy_sha256": ""},
+        }
+        for name, invalid_payload in invalid.items():
+            with self.subTest(name), self.assertRaises(ValidationError):
+                DurableOperationAuthorization.model_validate(invalid_payload)
 
 
 if __name__ == "__main__":

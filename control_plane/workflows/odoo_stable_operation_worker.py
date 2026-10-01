@@ -6,7 +6,9 @@ import logging
 from pathlib import Path
 from threading import Event, Thread
 import time
-from typing import Callable, Protocol, cast
+from typing import Any, Callable, Protocol, cast
+
+from pydantic import BaseModel
 
 from control_plane.contracts.odoo_stable_bootstrap import OdooStableBootstrapResult
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -16,6 +18,19 @@ from control_plane.contracts.odoo_prod_backup_restore_operation import (
     OdooProdBackupRestoreOperationPhase,
     OdooProdBackupRestoreOperationRecord,
     odoo_prod_backup_restore_operation_is_verification_replay_claim,
+)
+from control_plane.contracts.odoo_prod_promotion_operation import (
+    ODOO_PROD_PROMOTION_SAFE_RETRY_PHASES,
+    OdooProdPromotionOperationPhase,
+    OdooProdPromotionOperationRecord,
+    OdooProdPromotionRunResult,
+)
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.odoo_prod_rollback_operation import (
+    ODOO_PROD_ROLLBACK_SAFE_RETRY_PHASES,
+    OdooProdRollbackOperationPhase,
+    OdooProdRollbackOperationRecord,
+    OdooProdRollbackResult,
 )
 from control_plane.contracts.odoo_prod_retained_volume_backup_import import (
     OdooProdRetainedVolumeBackupImportApplyRequest,
@@ -58,6 +73,13 @@ from control_plane.workflows.odoo_prod_backup_restore import (
     execute_odoo_prod_backup_restore_apply,
     execute_odoo_prod_backup_restore_verification_replay,
 )
+from control_plane.workflows.odoo_prod_promotion_run import (
+    ODOO_LOGICAL_BACKUP_EFFECT,
+    ODOO_PROD_DEPLOY_EFFECT,
+    OdooProdPromotionRunStore,
+    execute_odoo_prod_promotion_run,
+)
+from control_plane.workflows.odoo_prod_rollback import execute_odoo_prod_rollback
 from control_plane.workflows.odoo_prod_retained_volume_backup_import import (
     OdooProdRetainedVolumeBackupImportStore,
     build_odoo_prod_retained_volume_backup_import_plan,
@@ -305,6 +327,138 @@ class OdooStableOperationWorkerStore(Protocol):
     ) -> DokployTargetRecord: ...
 
 
+class OdooProdPromotionOperationWorkerStore(Protocol):
+    """Database-backed stores also run queued Odoo prod promotions."""
+
+    def list_odoo_prod_promotion_operation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        statuses: tuple[str, ...] = (),
+        limit: int | None = None,
+    ) -> tuple[OdooProdPromotionOperationRecord, ...]: ...
+
+    def read_odoo_prod_promotion_operation_record(
+        self, operation_id: str
+    ) -> OdooProdPromotionOperationRecord: ...
+
+    def claim_next_odoo_prod_promotion_operation_record(
+        self,
+        *,
+        lease_owner: str,
+        lease_expires_at: str,
+        claimed_at: str,
+    ) -> OdooProdPromotionOperationRecord | None: ...
+
+    def heartbeat_odoo_prod_promotion_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool: ...
+
+    def checkpoint_odoo_prod_promotion_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        phase: OdooProdPromotionOperationPhase,
+        checkpointed_at: str,
+        evidence: dict[str, str],
+    ) -> OdooProdPromotionOperationRecord | None: ...
+
+    def complete_odoo_prod_promotion_operation_record(
+        self,
+        *,
+        record: OdooProdPromotionOperationRecord,
+        lease_owner: str,
+    ) -> bool: ...
+
+    def recover_expired_odoo_prod_promotion_operation_records(
+        self,
+        *,
+        now: str,
+        safe_phases: tuple[str, ...],
+        max_attempts: int,
+    ) -> tuple[str, ...]: ...
+
+
+def _promotion_store(record_store: object) -> OdooProdPromotionOperationWorkerStore | None:
+    if callable(getattr(record_store, "claim_next_odoo_prod_promotion_operation_record", None)):
+        return cast(OdooProdPromotionOperationWorkerStore, record_store)
+    return None
+
+
+class OdooProdRollbackOperationWorkerStore(Protocol):
+    """Database-backed stores also run queued Odoo prod rollbacks."""
+
+    def list_odoo_prod_rollback_operation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        statuses: tuple[str, ...] = (),
+        limit: int | None = None,
+    ) -> tuple[OdooProdRollbackOperationRecord, ...]: ...
+
+    def read_odoo_prod_rollback_operation_record(
+        self, operation_id: str
+    ) -> OdooProdRollbackOperationRecord: ...
+
+    def claim_next_odoo_prod_rollback_operation_record(
+        self,
+        *,
+        lease_owner: str,
+        lease_expires_at: str,
+        claimed_at: str,
+    ) -> OdooProdRollbackOperationRecord | None: ...
+
+    def heartbeat_odoo_prod_rollback_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool: ...
+
+    def checkpoint_odoo_prod_rollback_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        phase: OdooProdRollbackOperationPhase,
+        checkpointed_at: str,
+        evidence: dict[str, str],
+    ) -> OdooProdRollbackOperationRecord | None: ...
+
+    def complete_odoo_prod_rollback_operation_record(
+        self,
+        *,
+        record: OdooProdRollbackOperationRecord,
+        lease_owner: str,
+    ) -> bool: ...
+
+    def recover_expired_odoo_prod_rollback_operation_records(
+        self,
+        *,
+        now: str,
+        safe_phases: tuple[str, ...],
+        max_attempts: int,
+    ) -> tuple[str, ...]: ...
+
+
+def _rollback_store(record_store: object) -> OdooProdRollbackOperationWorkerStore | None:
+    if callable(getattr(record_store, "claim_next_odoo_prod_rollback_operation_record", None)):
+        return cast(OdooProdRollbackOperationWorkerStore, record_store)
+    return None
+
+
 @dataclass(frozen=True)
 class OdooStableOperationWorkerResult:
     status: str
@@ -358,6 +512,8 @@ class OdooStableOperationReconcileResult:
     reconciled_replacement_ids: tuple[str, ...]
     reconciled_restore_ids: tuple[str, ...]
     reconciled_retained_import_ids: tuple[str, ...]
+    reconciled_promotion_ids: tuple[str, ...] = ()
+    reconciled_rollback_ids: tuple[str, ...] = ()
 
 
 def run_odoo_stable_operation_worker_once(
@@ -407,11 +563,33 @@ def run_odoo_stable_operation_worker_once(
             max_attempts=max_attempts,
         )
     )
+    promotion_store = _promotion_store(record_store)
+    recovered_promotion_ids = (
+        promotion_store.recover_expired_odoo_prod_promotion_operation_records(
+            now=now,
+            safe_phases=ODOO_PROD_PROMOTION_SAFE_RETRY_PHASES,
+            max_attempts=max_attempts,
+        )
+        if promotion_store is not None
+        else ()
+    )
+    rollback_store = _rollback_store(record_store)
+    recovered_rollback_ids = (
+        rollback_store.recover_expired_odoo_prod_rollback_operation_records(
+            now=now,
+            safe_phases=ODOO_PROD_ROLLBACK_SAFE_RETRY_PHASES,
+            max_attempts=max_attempts,
+        )
+        if rollback_store is not None
+        else ()
+    )
     recovered_operation_ids = (
         recovered_bootstrap_ids
         + recovered_restore_ids
         + recovered_retained_import_ids
         + recovered_replacement_ids
+        + recovered_promotion_ids
+        + recovered_rollback_ids
     )
     claim_started_at = _utc_now_timestamp()
     claim_expires_at = _timestamp_after(claim_started_at, seconds=lease_seconds)
@@ -480,6 +658,56 @@ def run_odoo_stable_operation_worker_once(
                 f"{retained_import_operation.operation_kind}"
             ),
             operation_id=retained_import_operation.operation_id,
+            recovered_operation_ids=recovered_operation_ids,
+            terminal_write_committed=terminal_write_committed,
+        )
+    promotion_operation = (
+        promotion_store.claim_next_odoo_prod_promotion_operation_record(
+            lease_owner=normalized_lease_owner,
+            lease_expires_at=claim_expires_at,
+            claimed_at=claim_started_at,
+        )
+        if promotion_store is not None
+        else None
+    )
+    if promotion_store is not None and promotion_operation is not None:
+        terminal_write_committed = _execute_prod_promotion_operation(
+            record_store=promotion_store,
+            control_plane_root_path=control_plane_root_path,
+            operation=promotion_operation,
+            lease_owner=normalized_lease_owner,
+            lease_seconds=lease_seconds,
+            heartbeat_seconds=heartbeat_seconds,
+        )
+        return OdooStableOperationWorkerResult(
+            status="worked",
+            operation_kind="odoo_prod_promotion",
+            operation_id=promotion_operation.operation_id,
+            recovered_operation_ids=recovered_operation_ids,
+            terminal_write_committed=terminal_write_committed,
+        )
+    rollback_operation = (
+        rollback_store.claim_next_odoo_prod_rollback_operation_record(
+            lease_owner=normalized_lease_owner,
+            lease_expires_at=claim_expires_at,
+            claimed_at=claim_started_at,
+        )
+        if rollback_store is not None
+        else None
+    )
+    if rollback_store is not None and rollback_operation is not None:
+        terminal_write_committed = _execute_prod_rollback_operation(
+            record_store=rollback_store,
+            control_plane_root_path=control_plane_root_path,
+            operation=rollback_operation,
+            lease_owner=normalized_lease_owner,
+            lease_seconds=lease_seconds,
+            heartbeat_seconds=heartbeat_seconds,
+        )
+        return OdooStableOperationWorkerResult(
+            status="worked",
+            operation_kind="odoo_prod_rollback",
+            operation_id=rollback_operation.operation_id,
             recovered_operation_ids=recovered_operation_ids,
             terminal_write_committed=terminal_write_committed,
         )
@@ -562,7 +790,29 @@ def reconcile_stale_odoo_stable_operation_records(
             max_attempts=max_attempts,
         )
     )
+    promotion_store = _promotion_store(record_store)
+    reconciled_promotion_ids = (
+        promotion_store.recover_expired_odoo_prod_promotion_operation_records(
+            now=reconciled_at,
+            safe_phases=ODOO_PROD_PROMOTION_SAFE_RETRY_PHASES,
+            max_attempts=max_attempts,
+        )
+        if promotion_store is not None
+        else ()
+    )
+    rollback_store = _rollback_store(record_store)
+    reconciled_rollback_ids = (
+        rollback_store.recover_expired_odoo_prod_rollback_operation_records(
+            now=reconciled_at,
+            safe_phases=ODOO_PROD_ROLLBACK_SAFE_RETRY_PHASES,
+            max_attempts=max_attempts,
+        )
+        if rollback_store is not None
+        else ()
+    )
     return OdooStableOperationReconcileResult(
+        reconciled_promotion_ids=reconciled_promotion_ids,
+        reconciled_rollback_ids=reconciled_rollback_ids,
         reconciled_bootstrap_ids=reconciled_bootstrap_ids,
         reconciled_replacement_ids=reconciled_replacement_ids,
         reconciled_restore_ids=reconciled_restore_ids,
@@ -728,6 +978,36 @@ def build_odoo_stable_operation_worker_status(
             for record in active_replacement_records
         )
     )
+    promotion_store = _promotion_store(record_store)
+    active_promotion_records: tuple[OdooProdPromotionOperationRecord, ...] = ()
+    terminal_promotion_records: tuple[OdooProdPromotionOperationRecord, ...] = ()
+    if promotion_store is not None:
+        active_promotion_records = promotion_store.list_odoo_prod_promotion_operation_records(
+            statuses=("pending", "running", "reconciliation_required")
+        )
+        terminal_promotion_records = promotion_store.list_odoo_prod_promotion_operation_records(
+            statuses=("pass", "fail"),
+            limit=recent_terminal_limit,
+        )
+    summaries += tuple(
+        _lease_summary(operation_kind="odoo_prod_promotion", record=record, recorded_at=recorded_at)
+        for record in active_promotion_records
+    )
+    rollback_store = _rollback_store(record_store)
+    active_rollback_records: tuple[OdooProdRollbackOperationRecord, ...] = ()
+    terminal_rollback_records: tuple[OdooProdRollbackOperationRecord, ...] = ()
+    if rollback_store is not None:
+        active_rollback_records = rollback_store.list_odoo_prod_rollback_operation_records(
+            statuses=("pending", "running", "reconciliation_required")
+        )
+        terminal_rollback_records = rollback_store.list_odoo_prod_rollback_operation_records(
+            statuses=("pass", "fail"),
+            limit=recent_terminal_limit,
+        )
+    summaries += tuple(
+        _lease_summary(operation_kind="odoo_prod_rollback", record=record, recorded_at=recorded_at)
+        for record in active_rollback_records
+    )
     reconcile_requests = _product_reconcile_requests(record_store)
     summaries += tuple(
         _reconcile_lease_summary(request, recorded_at=recorded_at)
@@ -749,6 +1029,8 @@ def build_odoo_stable_operation_worker_status(
             "odoo_stable_target_replacement",
             active_replacement_records + terminal_replacement_records,
         ),
+        ("odoo_prod_promotion", active_promotion_records + terminal_promotion_records),
+        ("odoo_prod_rollback", active_rollback_records + terminal_rollback_records),
     ):
         for record in records:
             key = f"{kind}:{record.status}"
@@ -765,6 +1047,8 @@ def build_odoo_stable_operation_worker_status(
         + len(terminal_restore_records)
         + len(terminal_retained_import_records)
         + len(terminal_replacement_records)
+        + len(terminal_promotion_records)
+        + len(terminal_rollback_records)
     )
     return OdooStableOperationWorkerStatus(
         status="stalled" if stalled_count else "ok",
@@ -875,6 +1159,8 @@ def _lease_summary(
         | OdooProdBackupRestoreOperationRecord
         | OdooProdRetainedVolumeBackupImportOperationRecord
         | OdooStableTargetReplacementOperationRecord
+        | OdooProdPromotionOperationRecord
+        | OdooProdRollbackOperationRecord
     ),
     recorded_at: str,
 ) -> OdooStableOperationLeaseSummary:
@@ -1080,6 +1366,283 @@ def _execute_prod_backup_restore_operation(
         record=terminal_operation,
         lease_owner=lease_owner,
     )
+
+
+def _run_release_operation(
+    *,
+    label: str,
+    operation: Any,
+    lease_owner: str,
+    heartbeat_seconds: int,
+    renew_lease: Callable[[str], bool],
+    record_phase: Callable[[str], Any],
+    read_current: Callable[[], Any],
+    complete: Callable[[Any], bool],
+    policy_record_reader: Callable[[], LaunchplaneAuthzPolicyRecord],
+    boundary_effects: frozenset[str],
+    run: Callable[[Callable[[str], None], Callable[[str], None]], Any],
+    terminal: Callable[[Any, Any], Any],
+) -> bool:
+    """Lease, heartbeat, authority checks, and the terminal write for a queued release.
+
+    Authority is checked when the worker starts, before the first provider effect,
+    and again before each ``boundary_effects`` effect even after an earlier one, so a
+    revocation during the backup stops the deploy. Once the deploy began it finishes.
+    """
+
+    stop_event = Event()
+    heartbeat_lost_event = Event()
+    heartbeat_thread = Thread(
+        target=_lease_heartbeat_loop,
+        kwargs={
+            "renew_lease": renew_lease,
+            "heartbeat_seconds": heartbeat_seconds,
+            "stop_event": stop_event,
+            "heartbeat_lost_event": heartbeat_lost_event,
+        },
+        name=f"odoo-release-heartbeat-{operation.operation_id}",
+        daemon=True,
+    )
+    heartbeat_thread.start()
+    authorization_guard = DurableOperationAuthorizationGuard(
+        authorization=operation.authorization,
+        policy_record_reader=policy_record_reader,
+    )
+
+    def checkpoint_phase(phase: str) -> None:
+        if heartbeat_lost_event.is_set():
+            raise RuntimeError(f"{label} lost its lease before a checkpoint.")
+        if record_phase(phase) is None:
+            heartbeat_lost_event.set()
+            raise RuntimeError(f"{label} could not persist its durable checkpoint.")
+
+    def checkpoint_provider_effect(effect_name: str) -> None:
+        if heartbeat_lost_event.is_set():
+            raise RuntimeError(f"{label} lost its lease before a provider effect.")
+        if effect_name in boundary_effects:
+            authorization_guard.recheck_provider_effect(effect_name)
+        else:
+            authorization_guard.checkpoint_provider_effect(effect_name)
+
+    def failed(error_message: str, error_code: str = "") -> Any:
+        finished_at = _utc_now_timestamp()
+        return read_current().model_copy(
+            update={
+                "status": "fail",
+                "phase": "failed",
+                "updated_at": finished_at,
+                "finished_at": finished_at,
+                "lease_owner": lease_owner,
+                "error_code": error_code,
+                "error_message": error_message or f"{label} failed.",
+            }
+        )
+
+    try:
+        authorization_guard.authorize_execution()
+        result = run(checkpoint_phase, checkpoint_provider_effect)
+        if authorization_guard.denial_error is not None:
+            raise authorization_guard.denial_error
+    except DurableOperationAuthorizationDeniedError as error:
+        logging.warning("%s operation %s was denied: %s", label, operation.operation_id, error)
+        terminal_operation = failed(str(error), error.code)
+    except Exception as error:
+        logging.exception(
+            "%s operation %s failed before producing a result.", label, operation.operation_id
+        )
+        terminal_operation = failed(str(error))
+    else:
+        terminal_operation = terminal(read_current(), result)
+    finally:
+        stop_event.set()
+        heartbeat_thread.join(timeout=max(float(heartbeat_seconds), 1.0))
+    if heartbeat_lost_event.is_set():
+        logging.error(
+            "%s operation %s lost its lease before terminal write.", label, operation.operation_id
+        )
+    return complete(terminal_operation)
+
+
+def _execute_prod_promotion_operation(
+    *,
+    record_store: OdooProdPromotionOperationWorkerStore,
+    control_plane_root_path: Path,
+    operation: OdooProdPromotionOperationRecord,
+    lease_owner: str,
+    lease_seconds: int,
+    heartbeat_seconds: int,
+) -> bool:
+    def run(
+        checkpoint_phase: Callable[[str], None],
+        checkpoint_provider_effect: Callable[[str], None],
+    ) -> OdooProdPromotionRunResult:
+        return execute_odoo_prod_promotion_run(
+            control_plane_root=control_plane_root_path,
+            state_dir=control_plane_root_path / "state",
+            database_url=getattr(record_store, "database_url", None),
+            record_store=cast(OdooProdPromotionRunStore, record_store),
+            request=operation.request,
+            phase_checkpoint=checkpoint_phase,
+            provider_effect_checkpoint=checkpoint_provider_effect,
+        )
+
+    def terminal(
+        current: OdooProdPromotionOperationRecord, result: OdooProdPromotionRunResult
+    ) -> OdooProdPromotionOperationRecord:
+        passed = result.run_status == "pass"
+        return _release_terminal(
+            current,
+            result=result,
+            lease_owner=lease_owner,
+            passed=passed,
+            error_code="" if passed else f"promotion_{result.run_status}",
+            error_message=result.error_message or "Odoo prod promotion failed.",
+        )
+
+    return _run_release_operation(
+        label="Odoo prod promotion",
+        operation=operation,
+        lease_owner=lease_owner,
+        heartbeat_seconds=heartbeat_seconds,
+        renew_lease=lambda heartbeat_at: (
+            record_store.heartbeat_odoo_prod_promotion_operation_record(
+                operation_id=operation.operation_id,
+                lease_owner=lease_owner,
+                heartbeat_at=heartbeat_at,
+                lease_expires_at=_timestamp_after(heartbeat_at, seconds=lease_seconds),
+            )
+        ),
+        record_phase=lambda phase: record_store.checkpoint_odoo_prod_promotion_operation_record(
+            operation_id=operation.operation_id,
+            lease_owner=lease_owner,
+            phase=cast(OdooProdPromotionOperationPhase, phase),
+            checkpointed_at=_utc_now_timestamp(),
+            evidence={},
+        ),
+        read_current=lambda: record_store.read_odoo_prod_promotion_operation_record(
+            operation.operation_id
+        ),
+        complete=lambda record: record_store.complete_odoo_prod_promotion_operation_record(
+            record=record, lease_owner=lease_owner
+        ),
+        policy_record_reader=lambda: read_active_authz_policy_record(record_store),
+        boundary_effects=frozenset({ODOO_LOGICAL_BACKUP_EFFECT, ODOO_PROD_DEPLOY_EFFECT}),
+        run=run,
+        terminal=terminal,
+    )
+
+
+def _execute_prod_rollback_operation(
+    *,
+    record_store: OdooProdRollbackOperationWorkerStore,
+    control_plane_root_path: Path,
+    operation: OdooProdRollbackOperationRecord,
+    lease_owner: str,
+    lease_seconds: int,
+    heartbeat_seconds: int,
+) -> bool:
+    def run(
+        checkpoint_phase: Callable[[str], None],
+        checkpoint_provider_effect: Callable[[str], None],
+    ) -> OdooProdRollbackResult:
+        checkpoint_phase("validated")
+        started = False
+
+        def before_effect(effect_name: str) -> None:
+            nonlocal started
+            checkpoint_provider_effect(effect_name)
+            if not started:
+                checkpoint_phase("rollback_started")
+                started = True
+
+        return execute_odoo_prod_rollback(
+            control_plane_root=control_plane_root_path,
+            record_store=record_store,
+            product=operation.product,
+            request=operation.request,
+            target=operation.target,
+            provider_effect_checkpoint=before_effect,
+        )
+
+    def terminal(
+        current: OdooProdRollbackOperationRecord, result: OdooProdRollbackResult
+    ) -> OdooProdRollbackOperationRecord:
+        passed = result.rollback_status == "pass"
+        return _release_terminal(
+            current,
+            result=result,
+            lease_owner=lease_owner,
+            passed=passed,
+            error_code="" if passed else "rollback_fail",
+            error_message=result.error_message or "Odoo prod rollback failed.",
+        )
+
+    return _run_release_operation(
+        label="Odoo prod rollback",
+        operation=operation,
+        lease_owner=lease_owner,
+        heartbeat_seconds=heartbeat_seconds,
+        renew_lease=lambda heartbeat_at: record_store.heartbeat_odoo_prod_rollback_operation_record(
+            operation_id=operation.operation_id,
+            lease_owner=lease_owner,
+            heartbeat_at=heartbeat_at,
+            lease_expires_at=_timestamp_after(heartbeat_at, seconds=lease_seconds),
+        ),
+        record_phase=lambda phase: record_store.checkpoint_odoo_prod_rollback_operation_record(
+            operation_id=operation.operation_id,
+            lease_owner=lease_owner,
+            phase=cast(OdooProdRollbackOperationPhase, phase),
+            checkpointed_at=_utc_now_timestamp(),
+            evidence={},
+        ),
+        read_current=lambda: record_store.read_odoo_prod_rollback_operation_record(
+            operation.operation_id
+        ),
+        complete=lambda record: record_store.complete_odoo_prod_rollback_operation_record(
+            record=record, lease_owner=lease_owner
+        ),
+        policy_record_reader=lambda: read_active_authz_policy_record(record_store),
+        boundary_effects=frozenset(),
+        run=run,
+        terminal=terminal,
+    )
+
+
+def _release_terminal[ReleaseRecord: BaseModel](
+    current: ReleaseRecord,
+    *,
+    result: object,
+    lease_owner: str,
+    passed: bool,
+    error_code: str,
+    error_message: str,
+) -> ReleaseRecord:
+    finished_at = _utc_now_timestamp()
+    return current.model_copy(
+        update={
+            "status": "pass" if passed else "fail",
+            "phase": "completed" if passed else "failed",
+            "updated_at": finished_at,
+            "finished_at": finished_at,
+            "lease_owner": lease_owner,
+            "result": result,
+            "error_code": error_code,
+            "error_message": "" if passed else error_message,
+        }
+    )
+
+
+def _lease_heartbeat_loop(
+    *,
+    renew_lease: Callable[[str], bool],
+    heartbeat_seconds: int,
+    stop_event: Event,
+    heartbeat_lost_event: Event,
+) -> None:
+    while not stop_event.wait(timeout=float(heartbeat_seconds)):
+        if not renew_lease(_utc_now_timestamp()):
+            heartbeat_lost_event.set()
+            return
 
 
 def _execute_retained_volume_backup_import_operation(

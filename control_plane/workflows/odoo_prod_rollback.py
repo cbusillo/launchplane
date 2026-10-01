@@ -1,22 +1,29 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
 import click
-from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
-from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.deployment_record import (
+    DeploymentRecord,
+    previous_passing_deployment,
+)
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.odoo_prod_rollback_operation import (
+    OdooProdRollbackRequest as OdooProdRollbackRequest,
+    OdooProdRollbackResult as OdooProdRollbackResult,
+    OdooProdRollbackTarget,
+)
 from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
     PromotionRecord,
     ReleaseStatus,
     RollbackExecutionEvidence,
 )
-from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
 )
@@ -39,9 +46,13 @@ class _RollbackSource:
 
 
 class OdooProdRollbackStore(OdooStableTargetReplacementStore, Protocol):
-    def read_release_tuple_record(
-        self, *, context_name: str, channel_name: str
-    ) -> ReleaseTupleRecord: ...
+    def list_deployment_records(
+        self,
+        *,
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[DeploymentRecord, ...]: ...
 
     def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest: ...
 
@@ -55,16 +66,14 @@ class OdooProdRollbackStore(OdooStableTargetReplacementStore, Protocol):
 
     def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
 
-    def write_environment_inventory(self, inventory: EnvironmentInventory) -> None: ...
-
-    def write_release_tuple_record(self, record: ReleaseTupleRecord) -> None: ...
+    def write_environment_inventory(self, record: EnvironmentInventory) -> object: ...
 
     def write_promotion_record(self, record: PromotionRecord) -> None: ...
 
 
 def _require_record_store(record_store: object) -> OdooProdRollbackStore:
     required_methods = (
-        "read_release_tuple_record",
+        "list_deployment_records",
         "read_artifact_manifest",
         "read_environment_inventory",
         "read_promotion_record",
@@ -74,7 +83,6 @@ def _require_record_store(record_store: object) -> OdooProdRollbackStore:
         "write_deployment_record",
         "read_deployment_record",
         "write_environment_inventory",
-        "write_release_tuple_record",
         "write_promotion_record",
     )
     missing_methods = tuple(
@@ -90,70 +98,27 @@ def _require_record_store(record_store: object) -> OdooProdRollbackStore:
     return cast(OdooProdRollbackStore, record_store)
 
 
-class OdooProdRollbackRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    context: str
-    instance: str = "prod"
-    source_channel: Literal["testing"] = "testing"
-    promotion_record_id: str = ""
-    artifact_id: str = ""
-    reason: str = ""
-    wait: bool = True
-    timeout_seconds: int | None = Field(default=None, ge=1)
-    verify_health: bool = True
-    health_timeout_seconds: int | None = Field(default=None, ge=1)
-    no_cache: bool = False
-
-    @model_validator(mode="after")
-    def _validate_request(self) -> "OdooProdRollbackRequest":
-        self.context = self.context.strip().lower()
-        self.instance = self.instance.strip().lower()
-        self.promotion_record_id = self.promotion_record_id.strip()
-        self.artifact_id = self.artifact_id.strip()
-        self.reason = self.reason.strip()
-        if not self.context:
-            raise ValueError("Odoo prod rollback requires context.")
-        if self.instance != "prod":
-            raise ValueError("Odoo prod rollback requires instance 'prod'.")
-        if self.verify_health and not self.wait:
-            raise ValueError("Odoo prod rollback health verification requires wait=true.")
-        return self
+class OdooProdRollbackTargetMissingError(click.ClickException):
+    """No earlier passing deployment exists to roll back to."""
 
 
-class OdooProdRollbackResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    context: str
-    instance: str
-    source_channel: str
-    artifact_id: str
-    promotion_record_id: str
-    deployment_record_id: str = ""
-    release_tuple_id: str = ""
-    rollback_status: Literal["pass", "fail"]
-    rollback_health_status: Literal["pass", "fail", "skipped"] = "skipped"
-    rollback_started_at: str = ""
-    rollback_finished_at: str = ""
-    post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped"
-    error_message: str = ""
-
-
-def _read_source_release_tuple(
+def _read_previous_prod_deployment(
     *,
     record_store: OdooProdRollbackStore,
     request: OdooProdRollbackRequest,
-) -> ReleaseTupleRecord:
-    try:
-        return record_store.read_release_tuple_record(
+) -> tuple[DeploymentRecord, str]:
+    previous_deployment = previous_passing_deployment(
+        record_store.list_deployment_records(
             context_name=request.context,
-            channel_name=request.source_channel,
+            instance_name=request.instance,
         )
-    except FileNotFoundError as exc:
-        raise click.ClickException(
-            f"Odoo prod rollback requires a DB-backed {request.context}/{request.source_channel} release tuple."
-        ) from exc
+    )
+    if previous_deployment is None or previous_deployment.artifact_identity is None:
+        raise OdooProdRollbackTargetMissingError(
+            f"Odoo prod rollback found no earlier passing {request.context}/{request.instance} "
+            "deployment of a different artifact. Pass artifact_id to choose one."
+        )
+    return previous_deployment, previous_deployment.artifact_identity.artifact_id
 
 
 def _read_artifact_manifest(
@@ -173,21 +138,19 @@ def _resolve_rollback_source(
     *,
     request: OdooProdRollbackRequest,
     artifact_manifest: ArtifactIdentityManifest,
-    source_tuple: ReleaseTupleRecord | None,
+    previous_deployment: DeploymentRecord | None,
 ) -> _RollbackSource:
-    if source_tuple is not None:
-        source_git_ref = source_tuple.repo_shas.get(
-            f"tenant-{request.context}", artifact_manifest.source_commit
-        )
+    if previous_deployment is not None:
         return _RollbackSource(
-            artifact_id=source_tuple.artifact_id,
-            source_git_ref=source_git_ref,
-            result_source_channel=request.source_channel,
-            promoted_from_instance=request.source_channel,
-            snapshot_name=f"release-tuple:{source_tuple.tuple_id}",
+            artifact_id=artifact_manifest.artifact_id,
+            source_git_ref=previous_deployment.source_git_ref,
+            result_source_channel="previous-deployment",
+            promoted_from_instance="previous-deployment",
+            snapshot_name=f"deployment:{previous_deployment.record_id}",
             detail=(
-                f"Rolled {request.context}/{request.instance} back to "
-                f"{request.source_channel} release tuple {source_tuple.tuple_id}."
+                f"Rolled {request.context}/{request.instance} back to artifact "
+                f"{artifact_manifest.artifact_id} from passing deployment "
+                f"{previous_deployment.record_id}."
             ),
         )
     return _RollbackSource(
@@ -294,33 +257,90 @@ def _write_rollback_state(
     return updated_record
 
 
+def resolve_odoo_prod_rollback_target(
+    *,
+    record_store: object,
+    request: OdooProdRollbackRequest,
+) -> OdooProdRollbackTarget:
+    """Resolve the artifact a rollback will redeploy, without any effect.
+
+    The explicit ``artifact_id`` wins; otherwise it is the previous passing prod
+    deployment's artifact. The artifact manifest and the current promotion record
+    must exist.
+    """
+
+    typed_record_store = _require_record_store(record_store)
+    if request.artifact_id:
+        target = OdooProdRollbackTarget(artifact_id=request.artifact_id)
+    else:
+        previous_deployment, artifact_id = _read_previous_prod_deployment(
+            record_store=typed_record_store, request=request
+        )
+        target = OdooProdRollbackTarget(
+            artifact_id=artifact_id, deployment_record_id=previous_deployment.record_id
+        )
+    _read_artifact_manifest(record_store=typed_record_store, artifact_id=target.artifact_id)
+    _resolve_promotion_record(record_store=typed_record_store, request=request)
+    return target
+
+
+def _read_pinned_previous_deployment(
+    *,
+    record_store: OdooProdRollbackStore,
+    target: OdooProdRollbackTarget,
+) -> DeploymentRecord | None:
+    if not target.deployment_record_id:
+        return None
+    try:
+        deployment = record_store.read_deployment_record(target.deployment_record_id)
+    except FileNotFoundError as exc:
+        raise click.ClickException(
+            f"Odoo prod rollback target deployment {target.deployment_record_id!r} is missing."
+        ) from exc
+    if (
+        deployment.artifact_identity is None
+        or deployment.artifact_identity.artifact_id != target.artifact_id
+    ):
+        raise click.ClickException(
+            "Odoo prod rollback target deployment no longer names the recorded artifact."
+        )
+    return deployment
+
+
 def execute_odoo_prod_rollback(
     *,
     control_plane_root: Path,
     record_store: object,
     product: str,
     request: OdooProdRollbackRequest,
+    target: OdooProdRollbackTarget | None = None,
+    provider_effect_checkpoint: Callable[[str], None] | None = None,
 ) -> OdooProdRollbackResult:
+    """Roll prod back; a queued rollback passes the ``target`` it fixed at enqueue."""
+
     normalized_product = product.strip()
     if not normalized_product or normalized_product == "odoo":
         raise click.ClickException("Odoo prod rollback requires a DB-backed product profile key.")
     typed_record_store = _require_record_store(record_store)
-    source_tuple: ReleaseTupleRecord | None = None
-    if request.artifact_id:
-        artifact_manifest = _read_artifact_manifest(
-            record_store=typed_record_store,
-            artifact_id=request.artifact_id,
+    previous_deployment: DeploymentRecord | None = None
+    artifact_id = request.artifact_id
+    if target is not None:
+        artifact_id = target.artifact_id
+        previous_deployment = _read_pinned_previous_deployment(
+            record_store=typed_record_store, target=target
         )
-    else:
-        source_tuple = _read_source_release_tuple(record_store=typed_record_store, request=request)
-        artifact_manifest = _read_artifact_manifest(
-            record_store=typed_record_store,
-            artifact_id=source_tuple.artifact_id,
+    elif not artifact_id:
+        previous_deployment, artifact_id = _read_previous_prod_deployment(
+            record_store=typed_record_store, request=request
         )
+    artifact_manifest = _read_artifact_manifest(
+        record_store=typed_record_store,
+        artifact_id=artifact_id,
+    )
     rollback_source = _resolve_rollback_source(
         request=request,
         artifact_manifest=artifact_manifest,
-        source_tuple=source_tuple,
+        previous_deployment=previous_deployment,
     )
     promotion_record = _resolve_promotion_record(record_store=typed_record_store, request=request)
     started_at = utc_now_timestamp()
@@ -357,6 +377,7 @@ def execute_odoo_prod_rollback(
                 health_timeout_seconds=request.health_timeout_seconds,
                 no_cache=request.no_cache,
             ),
+            provider_effect_checkpoint=provider_effect_checkpoint,
         )
         deployment_record = typed_record_store.read_deployment_record(
             replacement_result.deployment_record_id

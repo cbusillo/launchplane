@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -92,3 +93,34 @@ class DeploymentRecord(BaseModel):
             if not self.deployed_target.provider_target_type and self.deploy.provider_target_type:
                 self.deployed_target.provider_target_type = self.deploy.provider_target_type
         return self
+
+
+def deployment_record_passed(record: DeploymentRecord) -> bool:
+    return (
+        record.deploy.status == "pass"
+        and record.post_deploy_update.status in {"pass", "skipped"}
+        and record.destination_health.status in {"pass", "skipped"}
+    )
+
+
+def previous_passing_deployment(
+    records_newest_first: Iterable[DeploymentRecord],
+) -> DeploymentRecord | None:
+    """Return the newest passing deployment of an artifact other than the lane's latest one.
+
+    The latest deployment counts as current whether or not it passed, so a failed
+    release rolls back to the last good artifact and a good one rolls back to the
+    artifact it replaced.
+    """
+
+    current_artifact_id = ""
+    for record in records_newest_first:
+        if record.artifact_identity is None:
+            continue
+        artifact_id = record.artifact_identity.artifact_id
+        if not current_artifact_id:
+            current_artifact_id = artifact_id
+            continue
+        if artifact_id != current_artifact_id and deployment_record_passed(record):
+            return record
+    return None

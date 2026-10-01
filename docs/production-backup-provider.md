@@ -19,6 +19,13 @@ authority changes; changed requests conflict. New captures resolve current
 authority. Backup record IDs cannot be reused for another capture, including
 after an operation finishes.
 
+The enqueue and cancel routes accept a bearer or OIDC caller, or a signed-in
+browser session through the CSRF-checked browser-mutation dependency; terminal
+agent tokens are refused. A caller needs exactly one matching managed rule,
+except a signed-in policy administrator, whose backup records a
+`policy_administrator` grant that the worker re-checks against the active policy
+before the capture's first effect.
+
 `GET /v1/production-backup-gates/operations/{operation_id}` takes the same
 product/context/instance as query parameters and requires
 `production_backup_authority.read`. It returns status and bounded evidence,
