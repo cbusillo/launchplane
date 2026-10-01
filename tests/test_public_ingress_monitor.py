@@ -2428,6 +2428,51 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(dead.open_incident_count, 1)
         self.assertEqual(dead.incidents[0].failure_code, "deploy_fence_held")
 
+    def test_a_refused_deploy_does_not_restart_a_stuck_fence_grace(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(
+                _profile(lane=ProductLaneProfile(instance="prod", context="example-site"))
+            )
+            running = _hold_deploy_fence(
+                store,
+                idempotency_key="generic-web-stable-deploy:run-9:1",
+                reconcile_required=False,
+            )
+            expired_hour_later = _minutes_after(running.lease_expires_at, 60)
+            stuck = run_public_ingress_monitor_once(
+                record_store=store, checked_at=expired_hour_later
+            )
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: expired_hour_later,
+            ):
+                refused = store.reserve_mutation(
+                    scope=running.scope,
+                    route_path=running.route_path,
+                    idempotency_key="generic-web-stable-deploy:run-10:1",
+                    request_fingerprint="fingerprint-later",
+                    lease_owner="trace-later",
+                    reconciliation_key=running.reconciliation_key,
+                    provider_target_key=running.provider_target_key,
+                )
+            still_stuck = run_public_ingress_monitor_once(
+                record_store=store, checked_at=_minutes_after(expired_hour_later, 5)
+            )
+            store.close()
+
+        self.assertEqual(stuck.open_incident_count, 1)
+        self.assertEqual(refused.status, "target_busy")
+        self.assertEqual(refused.record.state, "reconcile_required")
+        self.assertEqual(still_stuck.fail_count, 1)
+        self.assertEqual(still_stuck.resolved_incident_count, 0)
+
     def test_postgres_monitor_writes_github_notifications_to_outbox(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(

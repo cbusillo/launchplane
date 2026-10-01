@@ -2471,6 +2471,15 @@ def _deploy_fence_is_stuck(fence: LaunchplaneIdempotencyRecord, *, checked_at: s
     if not fence.updated_at:
         return True
     held_since = parse_launchplane_mutation_timestamp(fence.updated_at, field_name="updated_at")
+    if fence.lease_expires_at:
+        # A later refused deploy re-marks an expired fence and moves updated_at;
+        # the lease expiry it kept is when the fence really stopped.
+        held_since = min(
+            held_since,
+            parse_launchplane_mutation_timestamp(
+                fence.lease_expires_at, field_name="lease_expires_at"
+            ),
+        )
     return held_since + DEPLOY_FENCE_RECONCILE_GRACE <= observed_at
 
 
