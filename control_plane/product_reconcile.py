@@ -548,6 +548,13 @@ TESTING_FAILURE_DESCRIPTIONS: dict[str, str] = {
     "logo_check_failed": "The website logo check did not pass.",
     "driver_result_failed": "The driver reported a failure outside its recorded steps.",
     "operation_failed": "The deploy stopped with an error before the driver returned a result.",
+    "post_deploy_setup_failed": (
+        "The deploy finished, but the post-deploy update could not start: its target or "
+        "setting overrides could not be read."
+    ),
+    "release_tuple_mint_failed": (
+        "The deploy passed, but recording its release tuple from the artifact manifest failed."
+    ),
     "operation_cancelled": "The deploy was cancelled.",
     "operation_authorization_reconcile_refused": (
         "Launchplane's reconcile grant did not cover this deploy when it ran."

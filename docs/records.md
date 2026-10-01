@@ -1421,7 +1421,11 @@ records what it decided and did as `last_plan`:
   product read shows. The code is the operation's `error_code` (an
   authorization denial: `operation_authorization_reconcile_refused`,
   `operation_authorization_revoked`, `operation_authorization_policy_unavailable`,
-  `operation_authorization_provenance_missing`; for an error the worker did not
+  `operation_authorization_provenance_missing`; a step after the provider
+  deploy that raised instead of returning a result:
+  `post_deploy_setup_failed` when post-deploy could not start, or
+  `release_tuple_mint_failed` when a passed deploy's release tuple could not
+  be recorded; for an error the worker did not
   expect, that error's own code when it has a code-shaped one, otherwise
   `unexpected.<error class in snake case>`, never its message), or, when it has
   none, the first
