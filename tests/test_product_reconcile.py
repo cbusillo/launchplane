@@ -1118,7 +1118,12 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
             (feedback["status"], feedback["delivery_status"], feedback["delivery_action"]),
             ("destroyed", "delivered", "updated_comment"),
         )
-        (record,) = self.store.list_preview_pr_feedback_records(context_name="cm")
+        # Feedback record ids carry the request second, so a run that crosses a second
+        # boundary keeps one record per second; the newest is the retirement.
+        record = max(
+            self.store.list_preview_pr_feedback_records(context_name="cm"),
+            key=lambda item: item.requested_at,
+        )
         self.assertEqual((record.status, record.delivery_status), ("destroyed", "delivered"))
 
     def test_failed_preview_says_why_on_the_pr(self) -> None:
