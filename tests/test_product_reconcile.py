@@ -8,6 +8,8 @@ from tempfile import TemporaryDirectory
 from typing import cast
 from unittest.mock import patch
 
+import click
+
 from control_plane.build_provenance import BUILD_WORKFLOW_PATH
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetPolicies,
@@ -54,6 +56,7 @@ from control_plane.product_reconcile import (
     ProductReconcileError,
     request_product_reconcile_sweep,
     resolve_build_provenance_transport,
+    resolve_pull_request_feedback_token,
     run_product_reconcile_once,
 )
 from control_plane.storage.postgres import PostgresRecordStore
@@ -205,6 +208,64 @@ def _inventory(
     )
 
 
+class FakeGitHubComments:
+    """example/site's PR comments and merged PRs, as the feedback token sees them."""
+
+    def __init__(self) -> None:
+        self.comments: dict[int, list[dict[str, object]]] = {}
+        self.writes: list[tuple[str, int]] = []
+        self.merged: dict[str, int] = {}
+        self.tokens: list[str] = []
+        self.fail_writes = False
+        self._next_id = 900
+
+    def on(self, number: int) -> list[dict[str, object]]:
+        return self.comments.get(number, [])
+
+    def request(
+        self,
+        *,
+        path: str,
+        token: str,
+        method: str = "GET",
+        body: dict[str, object] | None = None,
+        **_kwargs: object,
+    ) -> object:
+        self.tokens.append(token)
+        prefix = f"/repos/{REPOSITORY}"
+        if method == "GET" and path.startswith(f"{prefix}/commits/") and path.endswith("/pulls"):
+            commit = path.split("/commits/")[1].split("/")[0]
+            number = self.merged.get(commit)
+            if number is None:
+                return []
+            return [
+                {"number": number, "merged_at": "2026-09-30T10:00:00Z", "merge_commit_sha": commit}
+            ]
+        if method != "GET" and self.fail_writes:
+            raise click.ClickException(f"GitHub API request failed for {path}: HTTP Error 502")
+        if path.startswith(f"{prefix}/issues/comments/") and method == "PATCH":
+            comment_id = int(path.rsplit("/", 1)[1])
+            for number, comments in self.comments.items():
+                for comment in comments:
+                    if comment["id"] == comment_id:
+                        assert body is not None
+                        comment["body"] = body["body"]
+                        self.writes.append(("PATCH", number))
+                        return dict(comment)
+        if path.startswith(f"{prefix}/issues/") and path.endswith("/comments"):
+            number = int(path.split("/issues/")[1].split("/")[0])
+            if method == "GET":
+                return [dict(comment) for comment in self.on(number)]
+            if method == "POST":
+                assert body is not None
+                self._next_id += 1
+                comment = {"id": self._next_id, "body": body["body"]}
+                self.comments.setdefault(number, []).append(comment)
+                self.writes.append(("POST", number))
+                return dict(comment)
+        raise AssertionError(f"unexpected GitHub {method} {path}")
+
+
 class FakePreviewProvider:
     """Plans and 'runs' preview provider changes; Launchplane's lifecycle records are real."""
 
@@ -300,6 +361,14 @@ class ProductReconcileTestCase(unittest.TestCase):
         self.github = FakeGitHub()
         self.provider = FakePreviewProvider()
         self.root = Path(temporary_directory.name)
+        self.comments = FakeGitHubComments()
+        for module in (
+            "control_plane.workflows.launchplane",
+            "control_plane.product_reconcile_feedback",
+        ):
+            github_api = patch(f"{module}.github_api_request", side_effect=self.comments.request)
+            github_api.start()
+            self.addCleanup(github_api.stop)
 
     def request(self, target_kind: str = "testing", number: int | None = None) -> str:
         target = ProductReconcileTarget.model_validate(
@@ -314,6 +383,7 @@ class ProductReconcileTestCase(unittest.TestCase):
             transport_factory=lambda _store, _profile: self.github,
             control_plane_root=self.root,
             preview_hooks=self.provider.hooks(),
+            feedback_token=lambda _store, _profile: "feedback-token",
         )
         assert completed is not None
         return completed
@@ -905,6 +975,141 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(self.store.list_preview_records(), ())
 
 
+class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        clock = patch("control_plane.odoo_preview_apply_http.datetime", _MinuteClock)
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    def reconcile_preview(self) -> dict[str, object]:
+        self.request("preview", 5)
+        return self.reconcile()
+
+    def comment_body(self) -> str:
+        (comment,) = self.comments.on(5)
+        return cast(str, comment["body"])
+
+    def test_preview_result_is_one_comment_edited_in_place(self) -> None:
+        self.assertEqual(self.reconcile_preview()["action"], "wait")
+        self.assertIn("Waiting for: a verified build of this commit", self.comment_body())
+        self.reconcile_preview()
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.assertEqual(self.reconcile_preview()["action"], "apply")
+        self.assertIn("preview is ready for PR #5", self.comment_body())
+        self.assertIn("https://pr-5.example.test", self.comment_body())
+        self.assertIn(f"`{LABEL}` label", self.comment_body())
+        self.assertEqual(self.reconcile_preview()["reason"], "already_serving")
+
+        self.github.pull_request["labels"] = []
+        destroyed = self.reconcile_preview()
+
+        self.assertIn("retired the preview for PR #5", self.comment_body())
+        # Saying the same thing again (a second wait, a kept preview) writes nothing.
+        self.assertEqual(self.comments.writes, [("POST", 5), ("PATCH", 5), ("PATCH", 5)])
+        self.assertEqual(set(self.comments.tokens), {"feedback-token"})
+        feedback = cast(dict[str, object], destroyed["pr_feedback"])
+        self.assertEqual(
+            (feedback["status"], feedback["delivery_status"], feedback["delivery_action"]),
+            ("destroyed", "delivered", "updated_comment"),
+        )
+        (record,) = self.store.list_preview_pr_feedback_records(context_name="cm")
+        self.assertEqual((record.status, record.delivery_status), ("destroyed", "delivered"))
+
+    def test_failed_preview_says_why_on_the_pr(self) -> None:
+        def failed_apply(**_kwargs: object) -> dict[str, object]:
+            return {
+                "status": "fail",
+                "error_message": "Dokploy compose deploy failed: image pull denied.",
+                "provider_effect_attempted": True,
+            }
+
+        self.provider.execute_apply = failed_apply  # type: ignore[method-assign]
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+
+        self.assertEqual(self.run_once().state, "failed")
+
+        self.assertIn("preview refresh failed for PR #5", self.comment_body())
+        self.assertIn("image pull denied", self.comment_body())
+
+    def test_feedback_that_cannot_be_posted_never_fails_the_preview(self) -> None:
+        self.comments.fail_writes = True
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+
+        applied = self.reconcile_preview()
+
+        self.assertEqual(applied["preview_result_status"], "pass")
+        self.assertEqual(self.store.list_preview_records()[0].state, "active")
+        feedback = cast(dict[str, object], applied["pr_feedback"])
+        self.assertEqual((feedback["status"], feedback["delivery_status"]), ("ready", "failed"))
+        self.assertIn("HTTP Error 502", cast(str, feedback["error"]))
+        (record,) = self.store.list_preview_pr_feedback_records(context_name="cm")
+        self.assertEqual(record.delivery_status, "failed")
+
+    def test_without_the_merge_train_app_nothing_is_posted(self) -> None:
+        def no_app(_store: object, _profile: object) -> str:
+            raise ProductReconcileError(
+                "No pull request feedback token: the merge train policy for example/site "
+                "has no GitHub App."
+            )
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+
+        completed = run_product_reconcile_once(
+            record_store=self.store,
+            lease_owner="worker-a",
+            transport_factory=lambda _store, _profile: self.github,
+            control_plane_root=self.root,
+            preview_hooks=self.provider.hooks(),
+            feedback_token=no_app,
+        )
+
+        assert completed is not None
+        self.assertEqual(completed.state, "done")
+        self.assertEqual(self.provider.applied, [("refresh", 5)])
+        self.assertEqual(self.comments.tokens, [])
+        feedback = cast(dict[str, object], completed.last_plan["pr_feedback"])
+        self.assertEqual(feedback["delivery_status"], "failed")
+        self.assertIn("has no GitHub App", cast(str, feedback["error"]))
+
+
+class ProductReconcileTestingFeedbackTests(ProductReconcileTestCase):
+    def test_merge_while_testing_is_held_says_it_waits_on_the_merged_pr(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.comments.merged[DEPLOYABLE] = 12
+        self.hold_testing()
+        self.request()
+
+        self.assertEqual(self.reconcile()["reason"], "staff_testing")
+
+        (comment,) = self.comments.on(12)
+        self.assertIn(
+            "Waiting: the testing lane is held for staff testing.", cast(str, comment["body"])
+        )
+        self.assertIn("Staff are testing checkout.", cast(str, comment["body"]))
+
+        self.lift_testing_hold()
+        queued = self.reconcile()
+
+        (comment,) = self.comments.on(12)
+        self.assertIn("queued the testing deploy", cast(str, comment["body"]))
+        self.assertEqual(self.comments.writes, [("POST", 12), ("PATCH", 12)])
+        feedback = cast(dict[str, object], queued["pr_feedback"])
+        self.assertEqual((feedback["pull_request_number"], feedback["status"]), (12, "queued"))
+
+    def test_a_direct_push_is_not_announced_anywhere(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+
+        feedback = cast(dict[str, object], self.reconcile()["pr_feedback"])
+
+        self.assertEqual(feedback["delivery_action"], "no_merged_pull_request")
+        self.assertEqual(self.comments.writes, [])
+
+
 class ProductReconcilePreviewRaceTests(ProductReconcileTestCase):
     def test_a_pr_closed_while_the_plan_is_prepared_never_reaches_the_provider(self) -> None:
         self.github.add_run(50, PR_HEAD, event="pull_request")
@@ -1167,6 +1372,44 @@ class ProductReconcileFailureTests(ProductReconcileTestCase):
 
         self.assertEqual(mint.call_args.kwargs["repository_id"], REPOSITORY_ID)
         self.assertEqual(mint.call_args.kwargs["repository"], REPOSITORY)
+
+    def test_feedback_token_is_refused_without_the_merge_train_app(self) -> None:
+        # The policy's other token sources are never a fallback for the reconciler's comments.
+        self.store.write_merge_train_policy_record(
+            build_test_merge_train_policy_record(repository=REPOSITORY)
+        )
+        with self.assertRaisesRegex(ProductReconcileError, "has no GitHub App"):
+            resolve_pull_request_feedback_token(
+                self.store, self.store.read_product_profile_record("site")
+            )
+
+    def test_feedback_token_is_minted_from_the_merge_train_app(self) -> None:
+        profile = self.store.read_product_profile_record("site")
+        self.write_merge_train_app(app_repository_id=int(REPOSITORY_ID))
+        token = GitHubAppInstallationToken(
+            token="comment-only",
+            app_id=77,
+            installation_id=5,
+            repository_id=int(REPOSITORY_ID),
+            repository=REPOSITORY,
+            expires_at="2026-09-30T13:00:00Z",
+        )
+        with (
+            patch(
+                "control_plane.product_reconcile.secrets.resolve_context_secret_value",
+                return_value="private-key",
+            ),
+            patch(
+                "control_plane.product_reconcile.mint_pull_request_feedback_installation_token",
+                return_value=token,
+            ) as mint,
+        ):
+            self.assertEqual(
+                resolve_pull_request_feedback_token(self.store, profile), "comment-only"
+            )
+
+        self.assertEqual(mint.call_args.kwargs["identity"].app_id, 77)
+        self.assertEqual(mint.call_args.kwargs["repository_id"], REPOSITORY_ID)
 
     def test_build_provenance_token_is_refused_for_another_repository_id(self) -> None:
         self.write_merge_train_app(app_repository_id=int(REPOSITORY_ID) + 1)

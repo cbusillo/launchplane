@@ -61,6 +61,7 @@ from control_plane.github_app_identity import (
     GitHubAppIdentity,
     GitHubAppIdentityError,
     mint_build_provenance_installation_token,
+    mint_pull_request_feedback_installation_token,
 )
 from control_plane.launchplane_reconcile_authorization import (
     TESTING_INSTANCE,
@@ -101,6 +102,11 @@ from control_plane.odoo_target_replacement_apply_http import (
     find_odoo_target_replacement_apply_operation_by_idempotency_key,
     odoo_target_replacement_apply_operation_store,
     resolve_odoo_target_replacement_apply_lane,
+)
+from control_plane.product_reconcile_feedback import (
+    PR_FEEDBACK_PLAN_KEY,
+    FeedbackTokenFactory,
+    post_reconcile_feedback,
 )
 from control_plane.product_repository_identity import (
     ProductRepositoryIdentity,
@@ -227,26 +233,62 @@ def resolve_build_provenance_transport(
     record_store: object, profile: LaunchplaneProductProfileRecord
 ) -> BuildProvenanceTransport:
     """Mint the product's read-only build-provenance token from its merge-train App."""
+    identity, repository_id = _merge_train_app_identity(
+        record_store, profile, purpose="build-provenance"
+    )
+    try:
+        token = mint_build_provenance_installation_token(
+            identity=identity, repository=profile.repository, repository_id=repository_id
+        )
+    except (GitHubAppIdentityError, click.ClickException, OSError, ValueError) as error:
+        raise ProductReconcileError(
+            f"No build-provenance token: minting failed ({type(error).__name__}: {error})."
+        ) from error
+    return GitHubBuildProvenanceTransport(token=token.token)
+
+
+def resolve_pull_request_feedback_token(
+    record_store: object, profile: LaunchplaneProductProfileRecord
+) -> str:
+    """Mint the token the reconciler comments with: the merge-train App, and no other."""
+    identity, repository_id = _merge_train_app_identity(
+        record_store, profile, purpose="pull request feedback"
+    )
+    try:
+        token = mint_pull_request_feedback_installation_token(
+            identity=identity, repository=profile.repository, repository_id=repository_id
+        )
+    except (GitHubAppIdentityError, click.ClickException, OSError, ValueError) as error:
+        raise ProductReconcileError(
+            f"No pull request feedback token: minting failed ({type(error).__name__}: {error})."
+        ) from error
+    return token.token
+
+
+def _merge_train_app_identity(
+    record_store: object, profile: LaunchplaneProductProfileRecord, *, purpose: str
+) -> tuple[GitHubAppIdentity, str]:
+    """The product repository's merge-train App and its inventory repository id."""
     try:
         policy_record = resolve_merge_train_policy_record(record_store)
     except MergeTrainPolicyStoreMissingError as error:
-        raise ProductReconcileError(f"No build-provenance token: {error}.") from error
+        raise ProductReconcileError(f"No {purpose} token: {error}.") from error
     try:
         repository_policy = policy_record.policy.find_repository_policy(
             repository=profile.repository, base_branch=profile.default_branch
         )
     except ValueError as error:
-        raise ProductReconcileError(f"No build-provenance token: {error}.") from error
+        raise ProductReconcileError(f"No {purpose} token: {error}.") from error
     app = repository_policy.github_token.github_app
     if app is None:
         raise ProductReconcileError(
-            f"No build-provenance token: the merge train policy for {profile.repository} "
+            f"No {purpose} token: the merge train policy for {profile.repository} "
             "has no GitHub App."
         )
     identity = product_repository_identity(record_store, profile)
     if str(app.repository_id) != identity.repository_id:
         raise ProductReconcileError(
-            "No build-provenance token: the merge train App's repository id is not the "
+            f"No {purpose} token: the merge train App's repository id is not the "
             "product's repository id in Launchplane's repository inventory."
         )
     try:
@@ -257,24 +299,15 @@ def resolve_build_provenance_transport(
         )
     except (click.ClickException, SQLAlchemyError, OSError, TypeError, ValueError) as error:
         raise ProductReconcileError(
-            f"No build-provenance token: the merge train App key could not be read "
+            f"No {purpose} token: the merge train App key could not be read "
             f"({type(error).__name__})."
         ) from error
     if not private_key:
-        raise ProductReconcileError(
-            "No build-provenance token: the merge train App key is not recorded."
-        )
-    try:
-        token = mint_build_provenance_installation_token(
-            identity=GitHubAppIdentity(app_id=app.app_id, private_key=private_key),
-            repository=profile.repository,
-            repository_id=identity.repository_id,
-        )
-    except (GitHubAppIdentityError, click.ClickException, OSError, ValueError) as error:
-        raise ProductReconcileError(
-            f"No build-provenance token: minting failed ({type(error).__name__}: {error})."
-        ) from error
-    return GitHubBuildProvenanceTransport(token=token.token)
+        raise ProductReconcileError(f"No {purpose} token: the merge train App key is not recorded.")
+    return (
+        GitHubAppIdentity(app_id=app.app_id, private_key=private_key),
+        identity.repository_id,
+    )
 
 
 def product_repository_identity(
@@ -783,7 +816,7 @@ def _run_preview_operation(
     except (OdooPreviewPlanProvenanceError, OdooPreviewApplyConfigError) as error:
         return ReconcileOutcome(plan, error=f"The preview {operation} was refused: {error}")
     except (FileNotFoundError, ValueError, click.ClickException) as error:
-        raise ProductReconcileError(f"The preview {operation} failed: {error}") from error
+        return ReconcileOutcome(plan, error=f"The preview {operation} failed: {error}")
     return ReconcileOutcome(plan)
 
 
@@ -832,6 +865,7 @@ def run_product_reconcile_once(
     transport_factory: TransportFactory = resolve_build_provenance_transport,
     control_plane_root: Path | None = None,
     preview_hooks: PreviewProviderHooks = PreviewProviderHooks(),
+    feedback_token: FeedbackTokenFactory = resolve_pull_request_feedback_token,
 ) -> ProductReconcileRequestRecord | None:
     """Claim one request, reconcile it, and record the plan; one bad target never stops the worker."""
     request = record_store.claim_next_product_reconcile_request(lease_owner, lease_seconds)
@@ -847,13 +881,22 @@ def run_product_reconcile_once(
         )
     except Exception as error:
         _LOGGER.warning("Product reconcile of %s failed: %s", request.target_key, error)
-        return record_store.complete_product_reconcile_request(
-            request.target_key,
-            lease_owner,
-            "failed",
-            {"target": request.target_kind},
-            _error_text(error),
-        )
+        outcome = ReconcileOutcome({"target": request.target_kind}, error=_error_text(error))
+    else:
+        if outcome.error:
+            _LOGGER.warning("Product reconcile of %s failed: %s", request.target_key, outcome.error)
+    plan = dict(outcome.plan)
+    feedback = post_reconcile_feedback(
+        record_store=record_store,
+        request=request,
+        plan=plan,
+        error=outcome.error,
+        feedback_token=feedback_token,
+        source=RECONCILE_SOURCE,
+        recorded_at=_utc_now(),
+    )
+    if feedback is not None:
+        plan[PR_FEEDBACK_PLAN_KEY] = feedback
     if outcome.deferred:
         # Folding a request into our running one returns it to pending on completion.
         record_store.request_product_reconcile(
@@ -865,12 +908,11 @@ def run_product_reconcile_once(
             _utc_now(),
         )
     if outcome.error:
-        _LOGGER.warning("Product reconcile of %s failed: %s", request.target_key, outcome.error)
         return record_store.complete_product_reconcile_request(
-            request.target_key, lease_owner, "failed", outcome.plan, outcome.error
+            request.target_key, lease_owner, "failed", plan, outcome.error
         )
     return record_store.complete_product_reconcile_request(
-        request.target_key, lease_owner, "done", outcome.plan
+        request.target_key, lease_owner, "done", plan
     )
 
 

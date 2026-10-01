@@ -4,7 +4,7 @@ import json
 import re
 import tomllib
 from pathlib import Path
-from typing import Protocol, TypedDict, get_args
+from typing import Literal, Protocol, TypedDict, get_args
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -968,6 +968,42 @@ def update_github_issue_comment(
             f"GitHub comment update response for {owner}/{repo} comment {comment_id} must be an object."
         )
     return payload
+
+
+class GitHubCommentUpsert(TypedDict):
+    action: Literal["created_comment", "updated_comment"]
+    comment_id: int
+    comment_url: str
+
+
+def upsert_github_issue_comment(
+    *, owner: str, repo: str, issue_number: int, token: str, marker: str, body: str
+) -> GitHubCommentUpsert:
+    """Edit the issue's comment that carries the marker, or add it: one comment per marker."""
+    existing_comment = find_github_issue_comment_by_marker(
+        owner=owner, repo=repo, issue_number=issue_number, token=token, marker=marker
+    )
+    if existing_comment is None:
+        created_comment = create_github_issue_comment(
+            owner=owner, repo=repo, issue_number=issue_number, token=token, body=body
+        )
+        created_comment_id = created_comment.get("id")
+        return {
+            "action": "created_comment",
+            "comment_id": created_comment_id if isinstance(created_comment_id, int) else 0,
+            "comment_url": _github_comment_url(created_comment),
+        }
+    existing_comment_id = existing_comment.get("id")
+    if not isinstance(existing_comment_id, int):
+        raise click.ClickException("Existing GitHub feedback comment is missing a numeric id.")
+    updated_comment = update_github_issue_comment(
+        owner=owner, repo=repo, comment_id=existing_comment_id, token=token, body=body
+    )
+    return {
+        "action": "updated_comment",
+        "comment_id": existing_comment_id,
+        "comment_url": _github_comment_url(updated_comment),
+    }
 
 
 def delete_github_issue_comment(*, owner: str, repo: str, comment_id: int, token: str) -> None:

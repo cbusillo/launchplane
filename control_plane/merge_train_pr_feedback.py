@@ -9,12 +9,7 @@ from control_plane.contracts.merge_train_pr_feedback_record import (
     build_merge_train_pr_feedback_id,
     merge_train_pr_feedback_marker,
 )
-from control_plane.workflows.launchplane import (
-    _github_comment_url,
-    create_github_issue_comment,
-    find_github_issue_comment_by_marker,
-    update_github_issue_comment,
-)
+from control_plane.workflows.launchplane import upsert_github_issue_comment
 
 
 class MergeTrainPrFeedbackEnvelope(BaseModel):
@@ -100,41 +95,17 @@ def build_merge_train_pr_feedback_record(
         error_message = "Configured merge train GitHub token is not available."
     else:
         try:
-            existing_comment = find_github_issue_comment_by_marker(
+            comment = upsert_github_issue_comment(
                 owner=owner,
                 repo=repo,
                 issue_number=request.pull_request_number,
                 token=token,
                 marker=marker,
+                body=comment_markdown,
             )
-            if existing_comment is not None:
-                existing_comment_id = existing_comment.get("id")
-                if not isinstance(existing_comment_id, int):
-                    raise click.ClickException(
-                        "Existing merge train feedback comment is missing a numeric id."
-                    )
-                updated_comment = update_github_issue_comment(
-                    owner=owner,
-                    repo=repo,
-                    comment_id=existing_comment_id,
-                    token=token,
-                    body=comment_markdown,
-                )
-                delivery_action = "updated_comment"
-                comment_id = existing_comment_id
-                comment_url = _github_comment_url(updated_comment)
-            else:
-                created_comment = create_github_issue_comment(
-                    owner=owner,
-                    repo=repo,
-                    issue_number=request.pull_request_number,
-                    token=token,
-                    body=comment_markdown,
-                )
-                created_comment_id = created_comment.get("id")
-                delivery_action = "created_comment"
-                comment_id = created_comment_id if isinstance(created_comment_id, int) else 0
-                comment_url = _github_comment_url(created_comment)
+            delivery_action = comment["action"]
+            comment_id = comment["comment_id"]
+            comment_url = comment["comment_url"]
             delivery_status = "delivered"
         except click.ClickException as exc:
             delivery_status = "failed"
