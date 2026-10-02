@@ -1597,6 +1597,26 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
         self.assertEqual(self.store.list_preview_records()[0].state, "active")
         self.assertEqual(self.driver.changes, [("refresh", 5), ("refresh", 5)])
 
+    def test_a_failed_replacement_is_not_mistaken_for_the_earlier_preview(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.reconcile()
+        pushed = "b" * 40
+        self.github.pull_request["head"] = {"sha": pushed}
+        self.github.add_run(51, pushed, event="pull_request")
+        self.driver.refresh_status = "fail"
+        self.request("preview", 5)
+        self.assertEqual(self.run_once().state, "failed")
+        # The PR is force-pushed back to the build the preview served before.
+        self.driver.refresh_status = "pass"
+        self.github.pull_request["head"] = {"sha": PR_HEAD}
+        self.request("preview", 5)
+
+        restored = self.reconcile()
+
+        self.assertEqual((restored["action"], restored["preview_result_status"]), ("apply", "pass"))
+        self.assertEqual(self.driver.changes, [("refresh", 5)] * 3)
+
     def test_a_refresh_whose_verification_was_not_recorded_is_run_again(self) -> None:
         self.github.add_run(50, PR_HEAD, event="pull_request")
         self.request("preview", 5)

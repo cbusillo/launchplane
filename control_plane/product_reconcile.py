@@ -1822,14 +1822,21 @@ def _current_preview(
         current_state=preview.state,
         current_preview_url=preview.canonical_url.strip(),
     )
-    generation_id = preview.serving_generation_id or preview.active_generation_id
+    generic_web = reconciles_as_generic_web(profile)
+    # A generic-web refresh changes the preview's one application in place, so its
+    # latest generation is what runs, whatever an earlier one served.
+    generation_id = (
+        preview.active_generation_id or preview.serving_generation_id
+        if generic_web
+        else preview.serving_generation_id or preview.active_generation_id
+    )
     if not generation_id:
         return current, lifecycle_token
     try:
         generation = record_store.read_preview_generation_record(generation_id)
     except FileNotFoundError:
         return current, lifecycle_token
-    if reconciles_as_generic_web(profile) and generation.state != "ready":
+    if generic_web and generation.state != "ready":
         # Its verification is not recorded (the refresh failed, or the worker stopped
         # before recording it), so it serves nothing, though it names its image.
         return current, lifecycle_token
