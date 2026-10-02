@@ -1309,11 +1309,12 @@ def build_odoo_stable_target_replacement_plan(
                     instance=lane.instance,
                 )
             )
+            # A lane may retire a key its site's records hold (for example a shared
+            # integration setting kept off this lane); the retirement wins and the key
+            # is not delivered. Declared and driver keys still cannot be retired.
             control_plane_live_target_runtime.validate_provider_key_retirement(
                 retired_keys=retired_provider_keys,
-                application_keys=site_keys
-                | declared_runtime_keys
-                | ODOO_REPLACEMENT_DRIVER_ENV_KEYS,
+                application_keys=declared_runtime_keys | ODOO_REPLACEMENT_DRIVER_ENV_KEYS,
             )
             # A declaration alone keeps no provider value: what the app gets comes
             # from the site's records.
@@ -1755,11 +1756,7 @@ def execute_odoo_stable_target_replacement_apply(
                 )
             control_plane_live_target_runtime.validate_provider_key_retirement(
                 retired_keys=retired_provider_keys,
-                application_keys=control_plane_runtime_environments.site_application_keys(
-                    site_environment.site_keys
-                )
-                | declared_runtime_keys
-                | ODOO_REPLACEMENT_DRIVER_ENV_KEYS,
+                application_keys=declared_runtime_keys | ODOO_REPLACEMENT_DRIVER_ENV_KEYS,
             )
             runtime_secret_binding_keys = (
                 control_plane_live_target_runtime.require_product_profile_runtime_secret_keys(

@@ -4276,6 +4276,46 @@ class OdooStableTargetReplacementSiteEnvironmentTests(unittest.TestCase):
         self.assertNotIn("PRODUCTION_BACKUP_SSH_", persisted_env)
         self.assertNotIn("production_backup_ssh", persisted_env)
 
+    def test_a_lane_retirement_keeps_a_site_setting_off_that_lane(self) -> None:
+        def write_records(record_store: PostgresRecordStore) -> None:
+            record_store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="context",
+                    context="cm",
+                    env={"ENV_OVERRIDE_CONFIG_PARAM__FISHBOWL__HOST": "fishbowl.example"},
+                    updated_at="2026-07-25T00:00:00Z",
+                    source_label="test",
+                )
+            )
+            (instance_record,) = (
+                record
+                for record in record_store.list_runtime_environment_records()
+                if record.scope == "instance"
+            )
+            record_store.write_runtime_environment_record(
+                instance_record.model_copy(
+                    update={
+                        "schema_version": 2,
+                        "retired_provider_keys": ("ENV_OVERRIDE_CONFIG_PARAM__FISHBOWL__HOST",),
+                    }
+                )
+            )
+
+        result, persisted_env, _sync_source = self._apply(
+            write_records=write_records,
+            policy_rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="ODOO_DB_PASSWORD",
+                    secret_class="testing",
+                    allowed_contexts=("cm",),
+                    allowed_instances=("testing",),
+                ),
+            ),
+        )
+
+        self.assertEqual(result.deploy_status, "pass")
+        self.assertNotIn("FISHBOWL", persisted_env)
+
     def test_testing_lane_refuses_a_site_shared_production_integration_secret_before_writes(
         self,
     ) -> None:
