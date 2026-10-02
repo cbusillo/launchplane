@@ -7,7 +7,7 @@ fails the session and follows the existing fenced completion reporting path.
 The default prompt preserves issue/comment inspection, isolated worktrees, PR
 creation, validation, and completion reporting.
 
-The optional `--command-template` is an explicit operator-supplied shell
+The optional `--command-template` is an explicit admin-supplied shell
 override. Existing worker service arguments must be inspected at cutover:
 remove a legacy override or replace it with the intended Codex Lab command.
 Changing the default does not rewrite an already-running worker's arguments.
@@ -59,7 +59,7 @@ uninspectable worktrees continue to be protected independently.
 Cleanup reconciliation also preserves workspaces awaiting PR feedback and
 reports `awaiting_pull_request_feedback`. A missed closure event can therefore
 retain disk state; absence of closure evidence is not permission to delete it.
-For a missed event, an authorized repository operator can redeliver the
+For a missed event, an authorized repository admin can redeliver the
 original GitHub webhook through GitHub's delivery interface. Launchplane still
 validates the signed event and its request/PR match. Do not replace missing
 closure evidence with a local record edit or manual deletion.
@@ -92,7 +92,7 @@ implementation and remaining service/PostgreSQL acceptance matrix.
 The [feedback continuation foundation](every-code-feedback-resume.md) adds strict
 contracts, isolated SQL evidence and inert launch protocol tests. It does not
 wire the deployed worker or prove positive service-backed restart. A distinct
-exact session handoff receipt and supported operator recovery remain mandatory
+exact session handoff receipt and supported admin recovery remain mandatory
 before production enablement.
 
 The current Codex Lab session client maps this provenance into the Discord Blue
@@ -113,7 +113,7 @@ tokens so outstanding work can be reconciled without duplicate claims.
 Engineering-review jobs already consume a service-authorized absolute
 executable path and SHA-256. At runtime cutover, their authority must identify
 the intended Codex Lab binary and digest through the supported Launchplane
-operator surface. Do not substitute the review binary in code, bypass its hash
+admin surface. Do not substitute the review binary in code, bypass its hash
 check, or treat a repository change as proof that live authority was updated.
 
 ## Cutover verification
@@ -124,12 +124,12 @@ this worker runtime or another concrete dependency is recorded.
 
 1. Inspect the current worker arguments and queued/claimed requests through
    the supported operational surfaces. Drain or reconcile existing leases;
-   do not start a second worker to race the old owner.
+   do not start a second worker to race the old lease holder.
 2. Install and verify the intended Codex Lab binary on the worker host, with
    its own configured home and authentication. Do not copy Every Code state
    into Codex Lab's home as an implicit migration.
 3. Deploy the worker change and replace any explicit legacy command override.
-   Use Launchplane's supported runtime/operator path for managed deployments.
+   Use Launchplane's supported runtime/admin path for managed deployments.
 4. Verify one new request and one feedback relaunch use Codex Lab, preserve
    request/repository/issue provenance, and reach the correct fenced terminal
    record. Verify lease heartbeats separately from process launch success.

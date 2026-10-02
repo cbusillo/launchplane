@@ -18,6 +18,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Literal, Protocol, cast
+from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
 from uuid import uuid4
 
@@ -709,7 +710,7 @@ def _plan_testing_target(
     lane = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
     if lane is None:
         raise ProductReconcileError(f"Product {profile.product} has no testing lane.")
-    desired, rejected = _desired_release(
+    desired, rejected, absent_reason = _desired_release(
         transport=transport, profile=profile, repository_id=repository_id, lane=lane
     )
     current_artifact_id, current_digest = _current_testing_release(
@@ -727,7 +728,7 @@ def _plan_testing_target(
     if rejected:
         plan["rejected_builds"] = rejected
     if desired is None:
-        plan.update(action="none", reason="no_verified_build", held=False)
+        plan.update(action="none", reason=absent_reason, held=False)
         return plan, None
     manifest = desired.manifest
     desired_digest = manifest.image.digest.lower()
@@ -1164,7 +1165,7 @@ def _desired_release(
     profile: LaunchplaneProductProfileRecord,
     repository_id: str,
     lane: ProductLaneProfile,
-) -> tuple[VerifiedBuildArtifact | None, list[dict[str, str]]]:
+) -> tuple[VerifiedBuildArtifact | None, list[dict[str, str]], str]:
     default_branch = profile.default_branch
     workflow_file = BUILD_WORKFLOW_PATH.rsplit("/", 1)[-1]
     query = urlencode(
@@ -1175,12 +1176,32 @@ def _desired_release(
             "per_page": str(TESTING_BUILD_RUN_PAGE_SIZE),
         }
     )
-    payload = _object(
-        transport.get_json(
-            f"/repos/{_repository_path(profile)}/actions/workflows/{workflow_file}/runs?{query}"
-        ),
-        "workflow runs",
-    )
+    try:
+        payload = _object(
+            transport.get_json(
+                f"/repos/{_repository_path(profile)}/actions/workflows/{workflow_file}/runs?{query}"
+            ),
+            "workflow runs",
+        )
+    except BuildProvenanceError as error:
+        if not isinstance(error.__cause__, HTTPError) or error.__cause__.code != 404:
+            raise
+        # A successful, complete Actions inventory distinguishes absence from hidden access.
+        workflows = _object(
+            transport.get_json(
+                f"/repos/{_repository_path(profile)}/actions/workflows?per_page=100"
+            ),
+            "workflows",
+        )
+        entries = workflows.get("workflows")
+        if (
+            not isinstance(entries, list)
+            or workflows.get("total_count") != len(entries)
+            or any(not isinstance(entry, dict) or not entry.get("path") for entry in entries)
+            or any(entry["path"] == BUILD_WORKFLOW_PATH for entry in entries)
+        ):
+            raise
+        return None, [], "build_workflow_missing"
     built_commits = {
         str(run.get("head_sha") or "").lower()
         for run in (item for item in _list(payload.get("workflow_runs")) if isinstance(item, dict))
@@ -1213,10 +1234,11 @@ def _desired_release(
                     image_repository=profile.image.repository,
                 ),
                 rejected,
+                "",
             )
         except BuildProvenanceError as error:
             rejected.append({"commit": commit, "error": str(error)})
-    return None, rejected
+    return None, rejected, "no_verified_build"
 
 
 def _current_testing_release(

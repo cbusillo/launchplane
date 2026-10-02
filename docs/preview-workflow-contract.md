@@ -114,9 +114,9 @@ feedback markdown, or idempotency keys as caller inputs.
 For generic-web application previews, `preview.domain_certificate_type="none"`
 means TLS terminates at the edge ingress: Launchplane creates the Dokploy domain
 on HTTP only, while the public preview URL remains HTTPS. `"letsencrypt"`
-instead makes Dokploy terminate TLS for that domain. This keeps one TLS owner
-per preview route and avoids publishing an inner TLS route when Dokploy has no
-certificate to serve.
+instead makes Dokploy terminate TLS for that domain. This keeps one party
+that manages TLS per preview route and avoids publishing an inner TLS route when
+Dokploy has no certificate to serve.
 
 The generic-web preview-refresh route may return `200` or `202` for a successful
 provider mutation. The reusable lifecycle worker accepts both responses and
@@ -229,55 +229,55 @@ workflow. Odoo preview cleanup retains its existing result mapping until its
 driver route exposes an equivalent typed no-preview outcome.
 
 Manual `workflow_dispatch` may request `refresh` or `destroy` when a product repo
-needs an operator retry path. Manual refresh still follows the same build,
+needs an admin retry path. Manual refresh still follows the same build,
 publish, and Launchplane-refresh handoff as a PR refresh.
 
-## Owner Review Handoff
+## Client Review Handoff
 
-When a ready preview belongs to a repository with an authoritative Owner
+When a ready preview belongs to a repository with an authoritative Client
 requirement, the Launchplane-owned PR feedback comment is the canonical handoff.
 It includes the public preview URL, immutable image and current revision, the
-exact Launchplane Owner-workbench deep link, the PR changes link, a concise test
+exact Launchplane Client-workbench deep link, the PR changes link, a concise test
 plan, Accept and Request changes instructions, a staleness warning, and the next
-Launchplane step. GitHub reviews and comments do not record Owner acceptance.
+Launchplane step. GitHub reviews and comments do not record Client acceptance.
 
-If Owner authority cannot be resolved or the workbench route is unavailable,
-the comment fails closed: it tells reviewers not to merge and exposes no Owner
-action instructions. Repositories classified as not requiring Owner acceptance
-receive the ordinary ready-preview comment without an interactive Owner handoff.
+If Client authority cannot be resolved or the workbench route is unavailable,
+the comment fails closed: it tells reviewers not to merge and exposes no Client
+action instructions. Repositories classified as not requiring Client acceptance
+receive the ordinary ready-preview comment without an interactive Client handoff.
 
-The reconciled pilot keeps the decision itself on a trusted Launchplane Owner
-surface, visually separate from untrusted preview content. Owner acceptance is
+The reconciled pilot keeps the decision itself on a trusted Launchplane Client
+surface, visually separate from untrusted preview content. Client acceptance is
 bound to the complete accepted delivery evidence and is consumed by a separately
 authorized Launchplane delivery job; it never authorizes merge, deploy, source,
 configuration, secrets, or access administration. Changed or incomplete binding
 evidence requires fresh review.
 
-## Owner Review Request
+## Client Review Request
 
-Launchplane does not decide which pull requests a site Owner needs to see. The
-agent (or operator) that opens the pull request marks it with the product's
-Owner review label (`owner.review_label` on the product profile, default
+Launchplane does not decide which pull requests a Client needs to see. The
+agent (or the Director) that opens the pull request marks it with the product's
+Client review label (`owner.review_label` on the product profile, default
 `owner-review`). When a ready preview comment is written for a marked pull
-request, Launchplane mentions the product's Owner with the preview URL and the
+request, Launchplane mentions the product's Client with the preview URL and the
 focused `/ui/owner-review` page. A marked pull request on a product with no
-Owner says so instead of mentioning anyone. Unmarked pull requests get no Owner
+Client says so instead of mentioning anyone. Unmarked pull requests get no Client
 section. If the labels cannot be read, the comment is still delivered without an
-Owner section; release approval is the safety net (see
+Client section; release approval is the safety net (see
 [DIRECTION.md](../DIRECTION.md)).
 
-The Owner's answer is shown on the pull request as one commit status,
+The Client's answer is shown on the pull request as one commit status,
 `launchplane/owner-review`, on the current head. Launchplane writes it with the
 same repository credential that writes the preview comment, when the ready
-preview comment is written and again as soon as the Owner records a decision:
+preview comment is written and again as soon as the Client records a decision:
 
-- marked, Owner set, no decision for the current head: `pending`, "Waiting for
-  @owner to review the preview", linking the focused `/ui/owner-review` page;
+- marked, Client set, no decision for the current head: `pending`, "Waiting for
+  @client to review the preview", linking the focused `/ui/owner-review` page;
 - latest decision recorded for the current head: `success` ("Accepted by
-  @owner") or `failure` ("Changes requested by @owner");
-- a decision recorded for an older head does not count, because the Owner
+  @client") or `failure` ("Changes requested by @client");
+- a decision recorded for an older head does not count, because the Client
   reviews what is actually previewed, so the status returns to `pending`;
-- marked with no Owner: `pending`, "No Owner set for this product";
+- marked with no Client: `pending`, `No Owner set for this product`;
 - unmarked: no status is written.
 
 Status delivery is best-effort. A source-control failure is logged and never
@@ -290,13 +290,13 @@ not a merge or promotion gate.
 Launchplane no longer posts the `manager-preview-approval` status or its managed
 `/preview` command comment on pull requests. Preview refresh, verification,
 destroy, Odoo preview apply, authorization-policy changes, and the signed GitHub
-webhook leave the pull request alone; Owner review is shown by
-`launchplane/owner-review` (see Owner Review Request). When Launchplane next
+webhook leave the pull request alone; Client review is shown by
+`launchplane/owner-review` (see Client Review Request). When Launchplane next
 writes a ready preview comment, a leftover `manager-preview-approval` status on
-the current head is closed once as `success` with "Retired. Owner review is
-recorded in Launchplane.", and a leftover `launchplane/owner-acceptance` check
-run created by Launchplane's advisory app is updated once to `neutral` with the
-title "Retired". Neither signal is created where it does not already exist.
+the current head is closed once as `success` with
+`Retired. Owner review is recorded in Launchplane.`, and a leftover
+`launchplane/owner-acceptance` check run created by Launchplane's advisory app
+is updated once to `neutral` with the title "Retired". Neither signal is created where it does not already exist.
 
 Manager preview approval is retired. Its evaluator, webhook commands, reconcile
 route, and store methods are deleted; existing manager events stay in the
@@ -463,7 +463,7 @@ credentials makes the plan stale and requires new apply inputs. Ready refresh
 plans list in `omitted_integration_credential_keys` the template-lane
 integration credentials the preview receives as empty values because no
 runtime key-safety rule allows them on previews (key names only). Completed exact retries replay the stored apply response only
-while its stored lifecycle evidence remains the current preview owner. A changed
+while its stored lifecycle evidence remains the current preview holder. A changed
 product profile, missing legacy lifecycle evidence, newer serving generation, or
 newer destroy returns a conflict and does not publish ready/destroyed feedback.
 Uncertain operations reconcile against the originally issued plan instead of
@@ -494,16 +494,16 @@ Preview feedback routes receive the status and primitive display facts.
 Launchplane derives the marker, rendered markdown, delivery behavior, and record
 id. If the feedback comment cannot be delivered, Launchplane records the skipped
 or failed feedback result and, when a preview PR feedback notification policy is
-configured, emits operator notification attempts from the control plane. Product
+configured, emits admin notification attempts from the control plane. Product
 workflows should not render fallback PR comments themselves; missing runtime
-GitHub credentials and GitHub API failures are Launchplane-owned operator
+GitHub credentials and GitHub API failures are Launchplane-owned admin
 signals.
 
 Historical runs keep the caller identity from the workflow revision they ran.
 Launchplane intentionally continues to deny retired or renamed caller refs;
-operators must not widen managed authorization to make an obsolete run replay.
+admins must not widen managed authorization to make an obsolete run replay.
 When a stale Launchplane-owned feedback comment remains, use the audited
-operator remediation route to dry-run and reconcile that exact PR instead.
+admin remediation route to dry-run and reconcile that exact PR instead.
 
 Product repos should call the reusable preview feedback workflow instead of
 assembling `/v1/previews/pr-feedback` payloads, markers, or idempotency keys in

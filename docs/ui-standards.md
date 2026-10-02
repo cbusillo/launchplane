@@ -6,16 +6,16 @@ title: UI Standards
 
 Launchplane UI work must read as a product environment control plane, not a
 generic dashboard and not a preview-only queue. The first screen should make the
-operator's current product, lane state, and next safe action obvious.
+admin's current product, lane state, and next safe action obvious.
 
-The Owner-review surface must be a separate product view. It must show a plain-
+The Client-review surface must be a separate product view. It must show a plain-
 language change, isolated preview, current decision, and observed live/delivery
 state, and must offer only accept, request-changes, revoke, and feedback controls.
 It must not expose source, configuration, deploy, merge, secret, policy, or
 access-admin actions, and trusted controls must remain outside untrusted preview
 content.
 
-Use [operator-experience.md](operator-experience.md) for the API-first product
+Use [`operator-experience.md`](operator-experience.md) for the API-first product
 and environment contract. Do not polish the transitional context-picker UI as if
 it were the target model.
 
@@ -51,7 +51,7 @@ forms, but they should not be the primary picker label.
 
 Stable lanes (`testing` and `prod`) belong visually under one product workspace.
 If a generic-web product still has a legacy testing-shaped context, the UI may
-read that route as transition metadata, but the operator model remains one
+read that route as transition metadata, but the admin model remains one
 product with stable lanes and preview inventory under it. Preview routing can
 use a separate technical context while previews are isolated from stable lane
 state.
@@ -92,7 +92,7 @@ Before implementation, each meaningful UI slice should declare:
 
 Before committing a meaningful UI slice, check it against this rubric:
 
-- Can a new operator tell what product/tenant they are looking at within a few
+- Can a new admin tell what product/tenant they are looking at within a few
   seconds?
 - Does the picker show product names instead of raw context strings?
 - Can they tell what is in `prod`, what is in `testing`, and whether previews
@@ -106,7 +106,7 @@ Before committing a meaningful UI slice, check it against this rubric:
   reassuring placeholder?
 - Does every enabled action execute a supported operation or explicit workflow
   dispatch rather than stopping at a review-only request preview?
-- Can the operator diagnose a red environment from placement, domain, ingress,
+- Can the admin diagnose a red environment from placement, domain, ingress,
   TLS, runtime identity, and evidence without opening provider-native tools in
   normal cases?
 

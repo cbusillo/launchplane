@@ -270,7 +270,7 @@ export function ManagedSecretsChangePanel({
     setOwnerLoadError("");
     void readOwnerSecretInputs(config.product, config.environment, controller.signal)
       .then(result => { if (!controller.signal.aborted) setOwnerFields(result.fields); })
-      .catch(() => { if (!controller.signal.aborted) setOwnerLoadError("Saved Owner credentials could not be loaded. Refresh to try again."); });
+      .catch(() => { if (!controller.signal.aborted) setOwnerLoadError("Saved Client credentials could not be loaded. Refresh to try again."); });
     return () => controller.abort();
   }, [config.product, config.environment, fixtureMode, ownerRefresh]);
   const planOperation = useProductConfigOperation(
@@ -417,7 +417,7 @@ export function ManagedSecretsChangePanel({
         clearManagedSecretInputs(secretInputs.current);
         setOwnerFields([]);
         setOwnerRefresh(current => current + 1);
-      }}>Refresh Owner credentials</button> : null}
+      }}>Refresh Client credentials</button> : null}
       <fieldset disabled={!availability.plan.enabled || draftLocked}>
         <legend className="sr-only">Managed secrets to change</legend>
         <div className="product-config-fields">
@@ -476,7 +476,7 @@ export function ManagedSecretsChangePanel({
                   setPlanResult(null);
                   setConfirmed(false);
                 }} />
-                Use the Owner’s saved credential
+                Use the Client’s saved credential
               </label> : null}
             </ManagedSecretInput>
           );})}

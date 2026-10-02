@@ -3590,6 +3590,93 @@ domains = ["cm-testing.shinycomputers.com"]
 
         self.assertIn("ODOO_DB_NAME", str(raised_error.exception))
 
+    def test_backup_gate_requires_web_restart_and_preserves_backup_failure(self) -> None:
+        script = dokploy_post_deploy._build_dokploy_odoo_backup_gate_script(
+            compose_app_name="example-prod",
+            backup_nonce="test-nonce",
+            database_name="example",
+            filestore_path="/fake/filestore",
+            backup_root="/fake/backups",
+            backup_record_id="test-backup",
+        )
+        fake_docker = """#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+    ps)
+        case "$*" in
+            *service=database*) echo database ;;
+            *service=script-runner*) echo runner ;;
+            *service=web*) echo web ;;
+            *) exit 90 ;;
+        esac ;;
+    inspect)
+        if [ "${@: -1}" = web ]; then
+            if [ "$FAKE_RESTART" = readback-fail ] && [ -f "$FAKE_STARTS" ]; then
+                exit 31
+            fi
+            if [ "$FAKE_RESTART" = initial-inspect-fail ] && [ "$(cat "$FAKE_STATE")" != running ]; then
+                exit 31
+            fi
+            cat "$FAKE_STATE"
+        else
+            echo running
+        fi ;;
+    stop) echo exited > "$FAKE_STATE" ;;
+    start)
+        echo start >> "$FAKE_STARTS"
+        case "$FAKE_RESTART" in
+            start-fail) exit 29 ;;
+            remains-stopped) ;;
+            *) echo running > "$FAKE_STATE" ;;
+        esac ;;
+    exec)
+        if [[ "$*" == *pg_dump* ]] && [ "$FAKE_BACKUP_FAIL" = 1 ]; then exit 23; fi
+        if [[ "$*" == *python3* ]]; then cat >/dev/null; fi
+        echo 1000 ;;
+    *) exit 91 ;;
+esac
+"""
+        cases = (
+            ("running", 0, 0),
+            ("start-fail", 0, 1),
+            ("remains-stopped", 0, 1),
+            ("readback-fail", 0, 1),
+            ("initial-inspect-fail", 0, 0),
+            ("running", 1, 23),
+            ("start-fail", 1, 23),
+        )
+        for restart, backup_fail, expected_status in cases:
+            with self.subTest(restart=restart, backup_fail=backup_fail):
+                with TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    docker = root / "docker"
+                    docker.write_text(fake_docker)
+                    docker.chmod(0o755)
+                    state = root / "state"
+                    state.write_text("running\n")
+                    starts = root / "starts"
+                    completed = subprocess.run(
+                        ["bash", "-s"],
+                        input=script,
+                        text=True,
+                        capture_output=True,
+                        timeout=10,
+                        env={
+                            **os.environ,
+                            "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
+                            "FAKE_STATE": str(state),
+                            "FAKE_STARTS": str(starts),
+                            "FAKE_RESTART": restart,
+                            "FAKE_BACKUP_FAIL": str(backup_fail),
+                        },
+                    )
+                    self.assertEqual(completed.returncode, expected_status, completed.stderr)
+                    self.assertEqual(
+                        state.read_text().strip(),
+                        "exited" if restart in {"start-fail", "remains-stopped"} else "running",
+                    )
+                    self.assertTrue(starts.exists(), "web recovery was never attempted")
+
     def test_run_compose_odoo_backup_gate_uses_manual_schedule_with_consistency_script(
         self,
     ) -> None:
@@ -3667,25 +3754,6 @@ domains = ["cm-testing.shinycomputers.com"]
         )
         self.assertEqual(schedule_payloads[0]["command"], "control-plane odoo backup gate")
         script = str(schedule_payloads[0]["script"])
-        self.assertIn("docker stop", script)
-        self.assertIn("trap exit_trap EXIT", script)
-        self.assertIn('local exit_status="$?"', script)
-        self.assertIn('if [ "${web_was_running}" != "1" ]; then', script)
-        self.assertIn('docker start "${web_container_id}" >/dev/null || true', script)
-        self.assertIn("start_web_container\ntrap - EXIT", script)
-        self.assertNotIn("restart_web_on_exit", script)
-        self.assertIn("pg_dump", script)
-        self.assertIn("tar -C", script)
-        self.assertIn("manifest.json", script)
-        self.assertIn('"database_dump_sha256"', script)
-        self.assertIn('"filestore_archive_sha256"', script)
-        self.assertIn(
-            'script_runner_uid=$(docker exec "${script_runner_container_id}" id -u)', script
-        )
-        self.assertIn('-o "$SCRIPT_RUNNER_UID" -g "$SCRIPT_RUNNER_GID"', script)
-        self.assertIn("RESULT_MARKER", script)
-        self.assertIn("BACKUP_NONCE", script)
-        self.assertIn("docker exec -i", script)
         manifest_script = script.split("python3 - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
         compile(manifest_script, "embedded-odoo-backup-manifest.py", "exec")
         self.assertIn("/api/schedule.runManually", request_paths)

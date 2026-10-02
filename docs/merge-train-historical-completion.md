@@ -14,7 +14,7 @@ fenced until a supported disposition exists.
 The existing `POST /v1/work-graph/merge-train/controller/run-once` route accepts
 an optional `historical_completion` selector with `mutate=false`. The repository
 policy's existing `service_authz` still controls access. This adds no grant,
-ordinary-agent authority, or Owner approval requirement.
+ordinary-agent authority, or Client approval requirement.
 
 The selector binds the inspected active record, stable plan, candidate effect,
 policy, and ordered entry identities:
@@ -75,7 +75,7 @@ The typed `result.historical_completion_preflight` distinguishes `eligible`,
 `unsupported`, and `indeterminate`, with closed overall and per-entry reason
 codes. Only positive proof for every entry yields `evidence_eligible=true`.
 Provider failures and unreadable history never prove absence. Responses contain
-bounded evidence rather than provider exception text or Owner/review payloads.
+bounded evidence rather than provider exception text or Client/review payloads.
 
 The preflight creates no controller lease, admission, outcome, run, disposition,
 or idempotency record; an `Idempotency-Key` header does not cache or replay it.
@@ -106,7 +106,7 @@ new `Idempotency-Key`. Filesystem and SQLite cannot apply this operation; there
 is no local-write fallback. A positive native dry-run reports
 `disposition_supported=true` and `mutation_enabled=true`, while
 `fence_released=false` and `admission_created=false`. These capability flags do
-not replace current authorization, positive evidence or operator intent.
+not replace current authorization, positive evidence or admin intent.
 Authorized native responses advertise capability even when provider evidence is
 ineligible. The public adapter endpoint value, when supplied, must be exactly
 `https://api.github.com`; omitting it uses that default.

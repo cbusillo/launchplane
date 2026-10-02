@@ -6,8 +6,8 @@ title: Human-Governed Privileged Operations
 
 Launchplane owns a typed privileged-operation boundary for sensitive control-
 plane work that cannot safely be delegated through static administrator
-credentials. The boundary is separate from Owner Acceptance, Agent Write
-Intents, workflow authorization, and ordinary operator mutations.
+credentials. The boundary is separate from Client Acceptance, Agent Write
+Intents, workflow authorization, and ordinary admin mutations.
 
 The Access policy workbench includes closed candidate preparation for Agent
 delivery administration, administrator product-evidence reads, and agent
@@ -20,8 +20,8 @@ and [Preparing Agent Operate Access](authorization-authority.md#preparing-agent-
 for eligibility, collision, removal, and production-activation boundaries.
 The agent operate candidate is the only one whose browser input includes a
 selection: the administrator checks non-live products, and the server
-revalidates them and derives the operator's agent from the configured local
-operator identity.
+revalidates them and derives the admin's agent from the configured
+`local-operator` identity.
 The product-evidence candidate proposes one read capability across all current
 and future projects for the requesting administrator. Its project-level rule
 uses the Launchplane context. Its environment-level all-instances rule has an
@@ -31,7 +31,7 @@ separate concrete administrator confirmation and governed installation.
 
 The Agent delivery workbench also offers a read-only preparation-input check at
 `GET /v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs`.
-It uses the existing strict policy-administrator and managed-proposal authority
+It uses the existing strict admin and managed-proposal authority
 to resolve current repository, configured-branch, and fixed-scope inspection-App
 setup metadata on the server. The inspection projection reports recorded
 selectors and binding pointers only; it does not read secret versions or values,
@@ -111,12 +111,12 @@ route, execute action, static execution credential, or agent execution path.
 The registry is not an arbitrary route, command, SQL, or payload proxy. New
 descriptors require code, schemas, tests, documentation, and review.
 
-## Owner-Control Contract Seam
+## Admin Confirmation Contract Seam
 
-`contracts/owner-control-contract.json` publishes canonical owner-control
+`contracts/owner-control-contract.json` publishes canonical `owner-control`
 request and response bytes plus generic golden vectors for every registered
 descriptor. It is a cross-host conformance artifact only: it does not issue a
-challenge, consume an owner confirmation, alter browser approval, add a route,
+challenge, consume an admin confirmation, alter browser approval, add a route,
 or authorize execution. See `docs/owner-control-channel.md`.
 
 The DB-backed shadow verifier remains independent from this lifecycle. No
@@ -148,11 +148,11 @@ The mutation routes use a named GitHub-human browser dependency that:
 
 1. authenticates the Launchplane GitHub session;
 2. enforces same-origin/fetch-metadata and single-use CSRF checks for writes;
-3. rejects bearer, GitHub Actions, terminal-agent, local-operator, and local-
+3. rejects bearer, GitHub Actions, terminal-agent, `local-operator`, and local-
    admin identities before policy evaluation.
 
 Plan lists, full records, semantic reviews, and delivery-activation options also
-accept local operators with the descriptor's explicit managed
+accept `local-operator` identities with the descriptor's explicit managed
 read grant. These callers must pass both runtime-policy authorization and a
 fresh active-policy read. Their full-record reads do not reconcile expiry or
 write operation events. Browser-human detail reads retain their existing expiry
@@ -176,13 +176,13 @@ The planning and approval actions are:
 | `authz_policy_operation.cancel`            | `policy_admin`  | GitHub-human policy-plan cancellation           |
 | `authz_policy_operation.approve`           | `policy_admin`  | GitHub-human browser approval                   |
 | `authz_policy_operation.revoke`            | `policy_admin`  | GitHub-human browser revocation                 |
-| `privileged_policy_operation_summary.read` | `read`          | Proposal-owner agent projection                 |
+| `privileged_policy_operation_summary.read` | `read`          | Proposal-author agent projection                |
 | `merge_train_policy_operation.propose`     | `policy_admin`  | Inert GitHub-human or terminal-agent proposal   |
 | `merge_train_policy_operation.read`        | `policy_admin`  | Explicitly authorized policy-plan reads         |
 | `merge_train_policy_operation.cancel`      | `policy_admin`  | GitHub-human policy-plan cancellation           |
 | `merge_train_policy_operation.approve`     | `policy_admin`  | GitHub-human browser approval                   |
 | `merge_train_policy_operation.revoke`      | `policy_admin`  | GitHub-human browser revocation                 |
-| `privileged_merge_train_policy_operation_summary.read` | `read` | Proposal-owner agent projection |
+| `privileged_merge_train_policy_operation_summary.read` | `read` | Proposal-author agent projection |
 
 Approval requires exactly one managed GitHub-human rule that is pinned to
 non-empty immutable `github_ids`. Login, organization, team, or role selectors
@@ -208,15 +208,15 @@ Merge-train policy-operation approval uses the separate
 revocation, cancellation, or terminal-agent summary access for merge-train
 policy imports. The dedicated action family must be activated through the same
 DB-native managed-authz privileged-operation lifecycle with a fresh signed-in
-owner session, exact review, CAS, idempotency, and read-back; the `#2277`
+admin session, exact review, CAS, idempotency, and read-back; the `#2277`
 activation bridge is not a recurring grant path.
 
 The one-time issue `#2277` activation bridge exists only to make this ordinary
 policy-operation lifecycle reachable for an already-authorized immutable-ID
-GitHub-human policy administrator. Its compiled managed set grants that one
+GitHub-human admin. Its compiled managed set grants that one
 human ID exactly the five `authz_policy_operation.*` propose, read, approve,
 revoke, and cancel actions. It grants no agent summary, workflow, terminal,
-operator, local-admin, provider, deployment, wildcard, or policy-write action.
+`local-operator`, local-admin, provider, deployment, wildcard, or policy-write action.
 The caller supplies no rule, selector, principal, action, policy body, or
 managed ID.
 
@@ -280,7 +280,7 @@ canonical poll proof is a DB-backed current heartbeat written only after a
 successful poll transaction. The proof reader requires a fresh heartbeat whose
 internal worker identity matches the selected container. Dokploy first proves
 that its observed hostname is a Docker-assigned prefix of the selected
-container ID, then hashes it for comparison; operator-chosen hostnames fail
+container ID, then hashes it for comparison; admin-chosen hostnames fail
 closed. The heartbeat image must also match both provider observation and
 `expected_image`. Missing, stale, future-dated, identity-mismatched, or
 image-mismatched heartbeats fail closed. Heartbeat persistence failure is a
@@ -382,7 +382,7 @@ The projection fails closed when the persisted descriptor ID/version, safety
 class, request/evidence variant, requester variant, or registered descriptor
 metadata no longer matches the compiled registry. Unknown or drifted data
 returns an unsupported semantic-review error instead of generic approval text.
-Operator-authored request reasons and principal names remain in the authorized
+Admin-authored request reasons and principal names remain in the authorized
 raw detail only; list cards use closed server-authored operation titles. A
 planned or approved record whose stored expiry has passed is projected as
 `past_expiry_unreconciled`, blocked from approval/revocation in the UI, and left
@@ -487,7 +487,7 @@ approve or execute an operation.
 
 `POST /v1/authz-policies/managed-rule-sets/reconcile` remains temporarily
 available for existing protected workflows, but accepts only GitHub Actions
-OIDC workload transport. Browser sessions, terminal agents, local operators,
+OIDC workload transport. Browser sessions, terminal agents, `local-operator` identities,
 local administrators, and other bearer identities fail closed. Signed-in
 humans review and approve `managed-authz-policy-set` records; they cannot call a
 public policy execute route.

@@ -3,7 +3,7 @@ title: Engineering Review Runs
 ---
 
 Engineering review runs are a **shadow-only, non-authoritative evidence path**.
-They do not satisfy merge, readiness, promotion, deployment, or product Owner
+They do not satisfy merge, readiness, promotion, deployment, or product Client
 policy. Every record is fixed to `rollout_mode=shadow`, `authoritative=false`,
 and `enforcement_effect=none`; no gate consumer reads an approved result as
 admission evidence.
@@ -17,7 +17,7 @@ to `engineering_review_mode = "required"`.
 
 ## Server authority
 
-Policy administrators write revisioned DB-backed authority selecting the
+Admins write revisioned DB-backed authority selecting the
 repository, contiguous model slots, controlled worker runtime and host, absolute
 agent executable, expected binary SHA-256, and lease. Compare-and-swap
 writes retain retired history. Repository and runtime identities never come from

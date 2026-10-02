@@ -2,9 +2,9 @@ import { expect, test } from "@playwright/test";
 
 test("Owner cannot accept undisclosed shared component changes", async ({ page }) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=missing");
-  await expect(page.getByText("Shared website components changed outside this repository's checklist. Operator review is required.")).toBeVisible();
+  await expect(page.getByText("Shared website components changed outside this repository's checklist. Admin review is required.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Accept release" })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Record operator approval override" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Record admin approval override" })).toHaveCount(0);
 });
 
 test("An unavailable checklist names its reason code and trace ID", async ({ page }) => {
@@ -56,16 +56,16 @@ test("Operator records a separate reasoned override without Owner controls", asy
   await page.goto("/ui/owner-review?product=example-site&fixture=operator");
   await expect(page.getByRole("button", { name: "Accept release" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Request changes" })).toHaveCount(0);
-  const override = page.getByRole("region", { name: "Operator Approval Override", exact: true });
+  const override = page.getByRole("region", { name: "Admin Approval Override", exact: true });
   const record = override.getByRole("button");
   await expect(record).toBeDisabled();
   await page.screenshot({ path: testInfo.outputPath("operator-initial.png"), fullPage: true });
-  await override.getByRole("textbox").fill("Reviewed the missing instructions with the site Owner.");
+  await override.getByRole("textbox").fill("Reviewed the missing instructions with the Client.");
   await record.click();
   await expect(page.getByRole("status")).toBeVisible();
   const latest = page.getByRole("region", { name: "Latest release decision" });
   await expect(latest).toContainText("site-operator");
-  await expect(latest.getByRole("blockquote")).toHaveText("Reviewed the missing instructions with the site Owner.");
+  await expect(latest.getByRole("blockquote")).toHaveText("Reviewed the missing instructions with the Client.");
   await page.screenshot({ path: testInfo.outputPath("operator-recorded.png"), fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   expect(mutations).toEqual([]);

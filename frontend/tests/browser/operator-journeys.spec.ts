@@ -192,7 +192,7 @@ test.describe("operator journeys", () => {
 
     const card = page.locator('[data-product="example-site"]');
     await expect(card.getByLabel("Recorded decision")).toContainText("Changes requested");
-    await expect(card.getByText("You are not this product's Owner", { exact: false })).toBeVisible();
+    await expect(card.getByText("You are not this product's Client", { exact: false })).toBeVisible();
     await expect(card.getByRole("button", { name: "Accept" })).toHaveCount(0);
     await expect(card.getByRole("button", { name: "Request changes" })).toHaveCount(0);
     await assertDocumentBasics(page);
@@ -206,7 +206,7 @@ test.describe("operator journeys", () => {
       "/ui/owner-review?fixture=products&scenario=no-owner&repository=example%2Fcontrol-plane&pull_request=308",
     );
 
-    await expect(page.getByText("No Owner set for this product", { exact: false })).toBeVisible();
+    await expect(page.getByText("No Client set for this product", { exact: false })).toBeVisible();
     await expect(page.getByRole("button", { name: "Accept" })).toHaveCount(0);
     await assertDocumentBasics(page);
     diagnostics.assertClean();
@@ -835,7 +835,7 @@ test.describe("operator journeys", () => {
       page.getByText("No exact action readiness contract", { exact: true }),
     ).toBeVisible();
     await expect(
-      page.getByText("No operator actions advertised", { exact: true }),
+      page.getByText("No admin actions advertised", { exact: true }),
     ).toBeVisible();
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "action-readiness-empty");
@@ -938,7 +938,7 @@ test.describe("operator journeys", () => {
     await expect(ownerPanel).toBeVisible();
     await expect(
       ownerPanel.getByText(
-        "The Owner can accept or request changes on previews. They can never merge or deploy.",
+        "The Client can accept or request changes on previews. They can never merge or deploy.",
       ),
     ).toBeVisible();
     const saveButton = ownerPanel.getByRole("button", { name: "Save" });
@@ -950,7 +950,7 @@ test.describe("operator journeys", () => {
     await ownerPanel.getByRole("button", { name: "Preview change" }).click();
 
     await expect(ownerPanel.getByRole("status")).toHaveText(
-      "Set the Owner to new-owner (id 7009).",
+      "Set the Client to new-owner (id 7009).",
     );
     await expect(saveButton).toBeEnabled();
     await ownerPanel.getByLabel("GitHub login").fill("someone-else");

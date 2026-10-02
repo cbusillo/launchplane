@@ -114,13 +114,13 @@ The observation command is read-only. By default it reads `RUNNER_NAME`,
 evaluates the readiness contract in the same JSON payload. Docker credential
 isolation is considered present only when the job exposes matching
 `DOCKER_CONFIG` and `LAUNCHPLANE_ISOLATED_DOCKER_CONFIG` values, or when an
-operator passes explicit `--docker-config-isolated` evidence. Missing evidence
+admin passes explicit `--docker-config-isolated` evidence. Missing evidence
 for labels or Docker isolation still fails closed.
 
 Docker toolchain observation is read-only. `--observe-docker-toolchain` collects
 Docker Engine and CLI versions, `docker buildx version`, standard Buildx plugin
 paths, Debian/RPM package evidence when available, and `docker buildx inspect`
-BuildKit evidence. Operators can also pass those values explicitly with
+BuildKit evidence. Admins can also pass those values explicitly with
 `--docker-engine-version`, `--docker-cli-version`, `--docker-buildx-version`,
 `--docker-buildx-plugin-path`, `--docker-buildx-package`,
 `--docker-buildx-source`, and `--buildkit-version` for fixture-driven or
@@ -128,8 +128,8 @@ permission-limited checks. Use `--docker-toolchain-timeout-seconds` to raise the
 per-command timeout on cold or busy Docker daemons.
 
 For live products, use a non-production runner or a read-only observation path
-until the operator explicitly approves host changes. VeriReel production must
-not be used as a runner-baseline test surface without explicit operator
+until the Director explicitly approves host changes. VeriReel production must
+not be used as a runner-baseline test surface without explicit Director
 permission.
 
 ## Control Planning
@@ -169,7 +169,7 @@ uv run launchplane work-graph runner-control-plan \
 
 The command does not contact GitHub and does not mutate hosts. It only evaluates
 the typed runner-control policy and request against the supplied inventory and
-baseline readiness JSON. `--mutate` records the operator's explicit mutation
+baseline readiness JSON. `--mutate` records the admin's explicit mutation
 intent in the request so the planner can tell whether a future host adapter would
 be allowed to proceed, but this CLI command itself remains a dry-run surface.
 
@@ -219,7 +219,7 @@ with existing fleet observations or violations blocks even an absent-lane
 recommendation. By default, any matching existing lane must have a ready
 aggregate baseline packet before the planner can recommend adoption
 verification or remove/recreate; otherwise it returns `decision: blocked` with
-`baseline_not_ready`. The operator may explicitly disable this coarse
+`baseline_not_ready`. The admin may explicitly disable this coarse
 pre-action gate with
 `--allow-missing-baseline-readiness`, but the recommendation remains blocked by
 `supervised_maintainer_required` and does not become completion evidence. The
@@ -244,7 +244,7 @@ The narrow host adapters for creating and retiring a repo-scoped runner lane
 share the manual ops-lane workflow
 `.github/workflows/runner-lane-registration.yml`. The filename remains stable so
 the existing exact GitHub OIDC workflow identity and service-backed audit grant
-do not broaden during the lifecycle expansion. Operators select `register` or
+do not broaden during the lifecycle expansion. Admins select `register` or
 `retire`; both operations share one non-canceling per-repository/per-lane
 concurrency group and the runner-host hygiene lock.
 
@@ -274,7 +274,7 @@ does not request a GitHub registration token. When `--mutate` is explicitly set
 and the registration plan is ready, the executor performs a create-only
 supervised registration: it requests a short-lived GitHub registration token,
 prepares a new lane directory below the approved registration root, downloads
-the operator-supplied GitHub Actions runner package, runs `config.sh`, starts the
+the admin-supplied GitHub Actions runner package, runs `config.sh`, starts the
 root-owned `launchplane-runner@<lane>.service` unit through the reviewed narrow
 privilege boundary, and verifies that GitHub inventory reports exactly one
 online lane with the expected labels before writing a `completed` audit. If any
@@ -307,7 +307,7 @@ Retirement is dry-run by default and mutating CLI use requires service-backed
 audit delivery. A ready retirement requires one exact idle GitHub lane with the
 managed labels, no active repository workflow runs, no target `Runner.Worker`,
 an approved host/root, and an audit key. The mutating executor verifies the
-canonical runner directory and owner, stops and disables only the exact
+canonical runner directory and its ownership, stops and disables only the exact
 root-authorized systemd unit, verifies target processes stopped, then re-reads
 repository runs and GitHub inventory before deleting the unchanged runner ID.
 It verifies GitHub no longer lists the lane and removes the inactive runner
@@ -342,11 +342,11 @@ and a narrow sudo rule or equivalent root helper for `systemctl enable --now`
 and `systemctl is-active` on that template. Durable service-backed audit
 persistence is available through
 `POST /v1/evidence/runner-lane-registration/audits` under
-`runner_lane_registration_audit.write`; descriptor-backed operator routing for
+`runner_lane_registration_audit.write`; descriptor-backed admin routing for
 registration planning remains a later slice. Retirement reuses the same route
 with `operation: retire`, preserving the exact authorized workflow identity and
 persisted audit table while distinguishing lifecycle intent in the typed record.
-The workflow still uploads the JSON artifact so operators can inspect the exact
+The workflow still uploads the JSON artifact so admins can inspect the exact
 plan/result packet.
 
 The current host bootstrap uses a root-owned template that runs the packaged

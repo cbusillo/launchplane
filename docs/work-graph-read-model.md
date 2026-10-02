@@ -14,7 +14,7 @@ leaving a dormant planning subsystem.
 
 ## Purpose
 
-The work graph read model ranks operator work from caller-supplied GitHub and
+The work graph read model ranks Director work from caller-supplied GitHub and
 Code Plans facts. It is a chooser surface, not a second planning database:
 GitHub issues, PRs, Projects, checks, and deployments remain the source of
 truth.
@@ -117,7 +117,7 @@ until Launchplane has an explicit repo classification. Empty planning facts do
 not erase Every Code work-request facts. The snapshot route does not fetch or
 store GitHub issue bodies and does not write new records.
 
-Agents and operator tools can read the same repository classification source
+Agents and admin tools can read the same repository classification source
 without asking for a ranked queue first:
 
 ```sh
@@ -192,13 +192,13 @@ issue is marked with `present_in_project: true` and
 `project_status: "unconfigured"` and `present_in_project: null`.
 
 Project-only issue items that are no longer visible in the configured open issue
-inventory remain in the response for operator review. Closed items use
+inventory remain in the response for Director review. Closed items use
 `project_status: "closed"`; other Project-only items use
 `project_status: "stale"`. The route reports `stale_project_item_count` but does
 not remove or mutate Project items.
 
 Forks and private repositories are supported only through explicit inventory and
-the runtime `GH_TOKEN` permissions. Launchplane does not owner-wide search,
+the runtime `GH_TOKEN` permissions. Launchplane does not search repository-owner-wide,
 fetch issue bodies, or infer product ownership from inbox membership.
 
 When Code Plans Project env is configured, Launchplane can also reconcile the
@@ -235,6 +235,6 @@ issue does not hide successful additions for the same reconciliation pass.
 Do not store copied issue bodies as Launchplane authority. Project fields may be
 used as compact transient facts for ranking and display, but GitHub Projects
 remain the source of truth. When Launchplane needs durable history, store
-snapshots with provenance and make their freshness visible. The normal operator
+snapshots with provenance and make their freshness visible. The normal Launchplane UI
 view should link back to GitHub for planning details and use Launchplane only to
 rank, explain, and connect work to product/environment evidence.

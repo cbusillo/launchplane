@@ -78,7 +78,7 @@ export function EnvironmentActionsView({
           <PlayCircle />
         </span>
         <div>
-          <p className="eyebrow">Operator actions</p>
+          <p className="eyebrow">Admin actions</p>
           <h2>Supported behavior, blockers, and browser boundary</h2>
           <p>
             Launchplane lists descriptor actions as evidence, but the browser only
@@ -106,7 +106,7 @@ export function EnvironmentActionsView({
         key={`${detail.product}:${detail.context}:${detail.environment}`}
       />
 
-      <div className="action-summary-strip" aria-label="Operator action summary">
+      <div className="action-summary-strip" aria-label="Admin action summary">
         <div>
           <strong>{actions.length}</strong>
           <span>advertised</span>
@@ -138,8 +138,8 @@ export function EnvironmentActionsView({
         </ul>
       ) : (
         <MissingEvidenceState
-          detail="The product environment read model did not advertise any operator-visible actions for this lane. Launchplane does not infer controls from driver names or provider state."
-          title="No operator actions advertised"
+          detail="The product environment read model did not advertise any admin-visible actions for this lane. Launchplane does not infer controls from driver names or provider state."
+          title="No admin actions advertised"
         />
       )}
     </section>

@@ -68,7 +68,7 @@ that prove a migration upgrade their own database from the revision they need.
 It verifies the exact checked-in schema head
 and critical indexes/types, and runs focused two-connection concurrency tests
 for mutation reservation/replay/conflict, reconciliation-key fencing, atomic
-business-write completion and rollback, operation claims, stale lease owners,
+business-write completion and rollback, operation claims, stale lease holders,
 lease recovery, and active-operation partial uniqueness. Same-repo CI provides
 the URL via a PostgreSQL service container with an IPv4-only dynamic host port,
 preventing the runner from selecting an IPv6 mapping for an IPv4 connection;
@@ -175,7 +175,7 @@ zero-replica services.
 
 ## Browser smoke
 
-Run the deterministic operator-journey smoke separately from the frontend unit,
+Run the deterministic admin-journey smoke separately from the frontend unit,
 type, OpenAPI, and production-build gate:
 
 ```bash
@@ -223,7 +223,7 @@ forms:
   self-hosted runners, remote actions being pinned to a full commit SHA, or
   `run:` scripts reading inputs and event fields through `env` instead of
   `${{ }}`, and name the workflow file and violated rule on failure.
-- Check that two real files agree, such as an operator wrapper's inputs and the
+- Check that two real files agree, such as an admin wrapper's inputs and the
   pinned worker it forwards to.
 
 ## HTTP and ASGI contracts

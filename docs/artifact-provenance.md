@@ -73,7 +73,7 @@ for a PR preview, with the PR number).
 ## Why a `release` run is trustworthy
 
 A `push` run on the default branch executes the workflow file as merged. Only
-the operator or Launchplane merges to the default branch, so the build steps
+an admin or Launchplane merges to the default branch, so the build steps
 were reviewed like any other code. The image digest in the manifest is what
 buildx reported for the push in that run.
 

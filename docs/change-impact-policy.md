@@ -5,8 +5,8 @@ title: Retired Change-Impact Records
 Path-based approval detection is retired under [DIRECTION.md](../DIRECTION.md).
 The classifier, generated-boundary inference, policy administration, and
 evaluation endpoints have been deleted. Do not create or repair an impact policy
-to unblock a merge. The agent marks a change for Owner review using judgment;
-the production release checklist supplies the Owner approval boundary.
+to unblock a merge. The agent marks a change for Client review using judgment;
+the production release checklist supplies the Client approval boundary.
 
 Merge admission reads current Git identities through `repository_evidence.py`.
 Missing, malformed, incomplete, or changing provider evidence still refuses

@@ -21,7 +21,7 @@ The durable north star is:
 > Product repos build, test, smoke, and publish immutable artifacts, then pass
 > minimal facts. Launchplane derives lifecycle meaning and owns runtime
 > authority: it authorizes, decides, mutates, records, explains, and protects.
-> Operators act through Launchplane, not around it.
+> Admins act through Launchplane, not around it.
 
 Product repos may document non-authoritative runtime contract facts such as
 ports, health paths, smoke commands, package quality gates, and repo ergonomics
@@ -58,9 +58,9 @@ Moving lifecycle truth from code into repo metadata, workflow defaults, TOML,
 JSON, or YAML is still a boundary violation unless the file is docs, tests, or
 Launchplane self-bootstrap.
 
-## Owner test notes
+## `Owner test notes`
 
-Every product pull request includes an **Owner test notes** heading with test
+Every product pull request includes an **`Owner test notes`** heading with test
 instructions or `Nothing for the owner to test`. CI checks presence without
 deciding whether a change needs human review. Add the shared action as a step in
 an existing required CI job, before checking out product code:
@@ -84,7 +84,7 @@ jobs:
 Keep the rest of that job's build and test steps. The immutable action reference
 must name a full commit SHA. No extra token or write permission is required.
 Launchplane compiles the release from actual commits and PR notes, independently
-of GitHub release-issue or milestone membership; see [Owner release review](release-review.md).
+of GitHub release-issue or milestone membership; see [Client release review](release-review.md).
 
 ## Repo Metadata Boundary
 
@@ -92,14 +92,14 @@ Product repos may keep `.github/github.json` as repo ergonomics metadata. It can
 name non-authoritative facts such as the default branch, project type, docs
 index, quality-gate commands, important workflow names, cleanup preferences,
 GitHub signal capability hints, labels used by repo automation, and public repo
-relationships used for navigation or operator orientation.
+relationships used for navigation or admin orientation.
 
 Repo metadata must not become the source of truth for Launchplane lifecycle or
-runtime state. Do not store real product profiles, product domains, owner
+runtime state. Do not store real product profiles, product domains, Client
 identity, Launchplane driver selection, preview slug policy, preview route
 topology, lane URLs, lane health URLs, deploy routes, provider targets, provider
 target ids, runtime environments, managed secret bindings, authz grants,
-operator identities, promotion policy, rollback policy, cleanup protection, or
+admin identities, promotion policy, rollback policy, cleanup protection, or
 production readiness authority in `.github/github.json`.
 
 Thin connector metadata is allowed only when it identifies a generic connection
@@ -116,7 +116,7 @@ health URLs, preview/deploy route configuration, or lane topology is an audit an
 remediation target unless it is explicitly reclassified as a Launchplane-stamped
 read model. A stamped read model must carry provenance that identifies
 Launchplane as the writer, the source record or response it mirrors, the stamp
-time or source hash, and a contract that operator edits are non-authoritative.
+time or source hash, and a contract that admin edits are non-authoritative.
 Launchplane must still read authoritative lifecycle state from DB-backed records
 or driver responses, not from the stamped repo copy.
 
@@ -127,17 +127,17 @@ the hiding place, not the ownership boundary.
 Allowed metadata examples:
 
 - quality gate commands such as `npm test` or `uv run python -m unittest`
-- important workflow display names used for operator navigation
+- important workflow display names used for admin navigation
 - the GitHub variable name that supplies the Launchplane service URL
 - a reusable Launchplane workflow reference or shared request action reference
-- public-safe related repository links used for docs or operator orientation
+- public-safe related repository links used for docs or admin orientation
 
 Disallowed metadata examples:
 
 - concrete product domains, lane URLs, health URLs, or preview URL templates
 - provider target ids, Dokploy compose/application ids, or edge endpoint ids
 - runtime-environment records, managed secret bindings, or secret key maps
-- authz grants, operator subjects, token labels, or workflow policy catalogs
+- authz grants, admin subjects, token labels, or workflow policy catalogs
 - Launchplane route batches, idempotency catalogs, or copied provider payloads
 
 Product repositories should run Launchplane's changed-file authority gate before
@@ -247,7 +247,7 @@ runner.
   immutable artifact reference.
 
 Product-specific checks may stay in the repo when they exercise product behavior
-Launchplane cannot know generically, such as a checkout flow, owner route, QR
+Launchplane cannot know generically, such as a checkout flow, Client route, QR
 scan flow, or domain-specific API behavior. They should send facts to
 Launchplane rather than defining product topology, target inventory, domains, or
 runtime authority. Generic runtime health and revision checks should move to
@@ -414,7 +414,7 @@ Python version, and `[repos.devkit]` / `[repos.shared_addons]` name the
 digests and records them, with every source commit, in the artifact manifest;
 the artifact, not a Launchplane setting, is the exact record of what was built
 (cbusillo/launchplane#2583). The devkit and shared-addons repositories must
-belong to the tenant repository's owner, because the build runs their code with
+belong to the repository owner of the tenant repository, because the build runs their code with
 the source and registry tokens. During the rollout, a tenant revision that does
 not declare these values still gets them from the Launchplane
 `ODOO_DEVKIT_REPOSITORY`, `ODOO_SHARED_ADDONS_REPOSITORY`, `ODOO_VERSION` and
@@ -497,7 +497,7 @@ patterns.
 For new or repaired product repos, prefer this connector over product-repo
 checkout of Launchplane source or direct invocation of Launchplane internals.
 If a repo still needs a compatibility bridge, the bridge must have an issue
-reference, a dated owner, and a delete condition.
+reference, a dated assignee, and a delete condition.
 
 ## Reusable Generic-Web Lifecycle Workflows
 
@@ -510,7 +510,7 @@ source-inventory lookup and validation, promotion request shaping, provider
 mutation, health verification, and release creation or verification. The
 stable deploy workflow derives
 the product key from the caller repository name by default and uses the
-`testing` stable lane unless the caller supplies a narrower operator override.
+`testing` stable lane unless the caller supplies a narrower admin override.
 
 For ordinary same-repository pull requests, prefer the preview facade instead
 of composing image publication, preview lifecycle, product verification, and
@@ -761,9 +761,9 @@ runtime image and must not assume package-manager CLIs remain installed. The
 VeriReel driver therefore invokes the checked-in Prisma binary directly rather
 than relying on npm or `npx` in the hardened runtime stage.
 Product repos should pass an explicit `instance` only for a workflow whose
-operator input or job purpose genuinely selects a different lane.
+admin input or job purpose genuinely selects a different lane.
 Production readiness wrappers may also accept expected runtime build identity
-from operator input or upstream workflow evidence and forward it to
+from admin input or upstream workflow evidence and forward it to
 Launchplane-owned runtime verification.
 
 The product-driver reusable surface is:
@@ -863,7 +863,7 @@ from the current GitHub repository, publish with `docker/login-action` and
 `docker/build-push-action`, then pass the product key, stable-lane intent, tested
 source SHA, immutable image digest, and provider SHA tag. While the current
 `generic-web/deploy` route still requires context or instance compatibility
-fields, product workflows may supply those values from operator-seeded GitHub variables
+fields, product workflows may supply those values from admin-seeded GitHub variables
 as scoped adapter inputs. They are not checked-in product topology or
 durable lifecycle authority, and #1528 owns reducing that bridge behind
 Launchplane-owned reusable lifecycle contracts. The checked-in workflow must not
@@ -993,7 +993,7 @@ When creating a new website repo for Launchplane:
   or the equivalent discrete env keys, then mark lanes as requiring runtime
   identity after the echo is verified.
 - Publish immutable container images or artifacts from GitHub Actions.
-- Apply an operator-owned Launchplane product onboarding manifest to seed the
+- Apply an admin-owned Launchplane product onboarding manifest to seed the
   product profile, lane profiles, target records, runtime environment, disabled
   managed secret binding placeholders, and then update DB-backed authz policy in
   Launchplane.
@@ -1009,3 +1009,8 @@ When creating a new website repo for Launchplane:
 - Keep Launchplane lifecycle config out of the product repo unless this document
   or a driver-specific doc explicitly names a scoped bootstrap or rehearsal
   exception.
+
+A testing reconcile reports `action: none, reason: build_workflow_missing` when
+GitHub returns 404 for Build runs and a complete, accessible Actions workflow
+inventory confirms the Build workflow is absent. Unavailable, incomplete, or
+contradictory workflow reads remain failures; they do not authorize a deploy.
