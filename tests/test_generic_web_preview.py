@@ -270,7 +270,6 @@ class GenericWebPreviewTests(unittest.TestCase):
             source="generic-web-preview",
             discovered_at="2026-04-30T21:00:00Z",
             repository="cbusillo/sellyouroutboard",
-            label="preview",
             anchor_repo="sellyouroutboard",
             preview_slug_prefix="preview-",
             status="pass",

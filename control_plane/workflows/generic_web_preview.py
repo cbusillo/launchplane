@@ -89,7 +89,6 @@ class GenericWebPreviewDesiredStateRequest(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     product: str
     source: str = "generic-web-preview"
-    label: str = "preview"
     max_pages: int = Field(default=10, ge=1, le=20)
 
     @model_validator(mode="after")
@@ -98,8 +97,6 @@ class GenericWebPreviewDesiredStateRequest(BaseModel):
             raise ValueError("Generic web preview desired state requires product.")
         if not self.source.strip():
             raise ValueError("Generic web preview desired state requires source.")
-        if not self.label.strip():
-            raise ValueError("Generic web preview desired state requires label.")
         return self
 
 
@@ -1562,7 +1559,6 @@ def discover_generic_web_preview_desired_state(
         source=request.source,
         discovered_at=discovered_at,
         repository=resolved_profile.repository,
-        label=request.label,
         anchor_repo=_anchor_repo(resolved_profile.repository),
         preview_slug_prefix=_preview_slug_prefix(resolved_profile.preview.slug_template),
         preview_slug_template=resolved_profile.preview.slug_template,

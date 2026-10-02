@@ -140,6 +140,7 @@ PREVIEW_APPLY_TIMEOUT_SECONDS = 600
 TESTING_BUILD_RUN_PAGE_SIZE = 50
 TESTING_VERIFY_LIMIT = 3
 _ENDED_PREVIEW_STATES = frozenset({"destroyed", "teardown_pending"})
+OPEN_PULL_REQUEST_SWEEP_PAGES = 5
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -1111,9 +1112,15 @@ def reconcile_reservation_scope(product: str) -> str:
 
 
 def request_product_reconcile_sweep(
-    record_store: ProductReconcileStore, now: str
+    record_store: ProductReconcileStore,
+    now: str,
+    transport_factory: TransportFactory = resolve_build_provenance_transport,
 ) -> tuple[str, ...]:
-    """Request every mapped product's testing target and every live preview; no GitHub reads."""
+    """Request every mapped product's testing target, live preview and ready PR.
+
+    A preview follows its pull request, so the sweep also lists each product's open
+    PRs: one whose ready event was missed still gets its preview within a sweep.
+    """
     targets: list[ProductReconcileTarget] = []
     inventory_records = record_store.list_repository_inventory_records()
     profiles = record_store.list_product_profile_records()
@@ -1128,6 +1135,12 @@ def request_product_reconcile_sweep(
         preview_context = profile.preview.context.strip()
         if not preview_context:
             continue
+        for number in _open_ready_pull_requests(record_store, profile, transport_factory):
+            targets.append(
+                ProductReconcileTarget(
+                    product=profile.product, target_kind="preview", pull_request_number=number
+                )
+            )
         for preview in record_store.list_preview_records(
             context_name=preview_context, anchor_repo=_preview_anchor_repo(profile)
         ):
@@ -1143,6 +1156,37 @@ def request_product_reconcile_sweep(
     for target in unique_targets.values():
         record_store.request_product_reconcile(target, now)
     return tuple(unique_targets)
+
+
+def _open_ready_pull_requests(
+    record_store: ProductReconcileStore,
+    profile: LaunchplaneProductProfileRecord,
+    transport_factory: TransportFactory,
+) -> tuple[int, ...]:
+    """The product's open, non-draft PRs; an unreadable list only skips this product."""
+    if not profile.preview.enabled:
+        return ()
+    numbers: list[int] = []
+    try:
+        transport = transport_factory(record_store, profile)
+        for page in range(1, OPEN_PULL_REQUEST_SWEEP_PAGES + 1):
+            pulls = _list(
+                transport.get_json(
+                    f"/repos/{_repository_path(profile)}/pulls?state=open&per_page=100&page={page}"
+                )
+            )
+            numbers.extend(
+                pull["number"]
+                for pull in pulls
+                if isinstance(pull, dict)
+                and isinstance(pull.get("number"), int)
+                and not pull.get("draft")
+            )
+            if len(pulls) < 100:
+                break
+    except (BuildProvenanceError, ProductReconcileError, OSError, ValueError) as error:
+        _LOGGER.warning("Sweep could not list %s's open pull requests: %s", profile.product, error)
+    return tuple(numbers)
 
 
 def _has_repository_identity(

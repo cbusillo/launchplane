@@ -118,6 +118,8 @@ class FakeGitHub:
             "head": {"sha": PR_HEAD},
         }
         self.pull_request_reads = 0
+        # The open PR list the sweep reads.
+        self.open_pulls: list[dict[str, object]] = []
         # (read count, change): the PR changes right after that many reads of it.
         self.pull_request_move: tuple[int, dict[str, object]] | None = None
 
@@ -156,6 +158,8 @@ class FakeGitHub:
                 {"sha": sha, "parents": [{"sha": parent}] if parent else []}
                 for sha, parent in self.first_parents.items()
             ]
+        if path.startswith(f"/repos/{REPOSITORY}/pulls?state=open"):
+            return self.open_pulls if "page=1" in path else []
         if path.startswith(f"/repos/{REPOSITORY}/pulls/"):
             current = dict(self.pull_request)
             self.pull_request_reads += 1
@@ -1890,14 +1894,28 @@ class ProductReconcileSweepTests(ProductReconcileTestCase):
         )
         self.write_preview(number=5)
         self.write_preview(number=6, state="destroyed")
+        # PR 7 is ready with no preview yet (its ready event was missed); 8 is a draft.
+        self.github.open_pulls = [{"number": 7, "draft": False}, {"number": 8, "draft": True}]
 
-        requested = request_product_reconcile_sweep(self.store, "2026-09-29T12:00:00Z")
+        requested = request_product_reconcile_sweep(
+            self.store, "2026-09-29T12:00:00Z", lambda _store, _profile: self.github
+        )
 
-        self.assertEqual(set(requested), {"site:testing", "site:preview:5"})
+        self.assertEqual(set(requested), {"site:testing", "site:preview:5", "site:preview:7"})
         self.assertEqual(
             {request.target_key for request in self.store.list_product_reconcile_requests()},
-            {"site:testing", "site:preview:5"},
+            {"site:testing", "site:preview:5", "site:preview:7"},
         )
+
+    def test_an_unreadable_pull_request_list_still_sweeps_the_rest(self) -> None:
+        def no_token(_store: object, _profile: LaunchplaneProductProfileRecord) -> FakeGitHub:
+            raise ProductReconcileError("No build-provenance token: minting failed.")
+
+        self.write_preview(number=5)
+
+        requested = request_product_reconcile_sweep(self.store, "2026-09-29T12:00:00Z", no_token)
+
+        self.assertEqual(set(requested), {"site:testing", "site:preview:5"})
 
 
 class _ClaimOrderStore:

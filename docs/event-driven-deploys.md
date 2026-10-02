@@ -233,8 +233,10 @@ or a backup gate.
 ## Catch-up sweep
 
 Every 30 minutes the worker requests a reconcile of every product's testing
-target, and of every preview target with an existing, not yet destroyed
-preview record. A new PR's preview starts from its events. Reconciling is idempotent, so the sweep runs the same code as
+target, of every preview target with an existing, not yet destroyed preview
+record, and of every open pull request that is not a draft (one list of open
+pull requests per product, with the build-provenance token). A missed ready or
+opened event is corrected within one sweep. Reconciling is idempotent, so the sweep runs the same code as
 the events, and a missed or out-of-order event is corrected within one sweep.
 
 ## Director steps

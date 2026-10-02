@@ -350,7 +350,6 @@ def build_preview_lifecycle_sweep(
             request=GenericWebPreviewDesiredStateRequest(
                 product=profile.product,
                 source=request.source,
-                label=profile.preview.enable_label,
                 max_pages=request.max_pages,
             ),
             discovered_at=utc_now_timestamp(),
