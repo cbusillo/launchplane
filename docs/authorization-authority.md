@@ -108,6 +108,12 @@ definition of administrator. It does not widen anything else:
 - approval and worker reauthorization of privileged operations still require the
   exact managed rule and never consult this shortcut.
 
+`POST /v1/product-profiles/expected-config/apply` refuses a `local_operators`
+caller, in dry-run and apply, when the target product's profile records
+`production_use: live`, with the fixed code `live_product_requires_operator`.
+A live product's expected configuration is changed by the Director, whatever
+rule names that product.
+
 ## Denial Handling
 
 Treat `authorization_denied` as an authority result, not a credential-selection
