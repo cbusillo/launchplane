@@ -543,7 +543,9 @@ class MergeTrainStackDiscoveryTests(unittest.TestCase):
             ),
         )
 
-        result = discover_merge_train_stack(snapshot=snapshot, root_pull_request_number=10)
+        result = discover_merge_train_stack(
+            policy=_policy_for(snapshot), snapshot=snapshot, root_pull_request_number=10
+        )
 
         self.assertEqual(result.status, "ready_for_collapse")
         self.assertEqual(result.stack_order, (10, 11, 12))
@@ -566,7 +568,9 @@ class MergeTrainStackDiscoveryTests(unittest.TestCase):
             ),
         )
 
-        result = discover_merge_train_stack(snapshot=snapshot, root_pull_request_number=20)
+        result = discover_merge_train_stack(
+            policy=_policy_for(snapshot), snapshot=snapshot, root_pull_request_number=20
+        )
 
         self.assertEqual(result.status, "not_stacked")
         self.assertEqual(result.stack_order, (20,))
@@ -588,7 +592,9 @@ class MergeTrainStackDiscoveryTests(unittest.TestCase):
             ),
         )
 
-        result = discover_merge_train_stack(snapshot=snapshot, root_pull_request_number=21)
+        result = discover_merge_train_stack(
+            policy=_policy_for(snapshot), snapshot=snapshot, root_pull_request_number=21
+        )
 
         self.assertEqual(result.status, "not_stacked")
         self.assertEqual(result.unsupported_reasons, ())
@@ -619,7 +625,9 @@ class MergeTrainStackDiscoveryTests(unittest.TestCase):
             ),
         )
 
-        result = discover_merge_train_stack(snapshot=snapshot, root_pull_request_number=30)
+        result = discover_merge_train_stack(
+            policy=_policy_for(snapshot), snapshot=snapshot, root_pull_request_number=30
+        )
 
         self.assertEqual(result.status, "unsupported")
         self.assertIn("multiple stacked child", result.unsupported_reasons[0])
@@ -645,10 +653,87 @@ class MergeTrainStackDiscoveryTests(unittest.TestCase):
             ),
         )
 
-        result = discover_merge_train_stack(snapshot=snapshot, root_pull_request_number=40)
+        result = discover_merge_train_stack(
+            policy=_policy_for(snapshot), snapshot=snapshot, root_pull_request_number=40
+        )
 
         self.assertEqual(result.status, "unsupported")
         self.assertIn("not from the train repository", result.unsupported_reasons[0])
+
+    def test_refuses_a_draft_stacked_child_held_out_of_the_train(self) -> None:
+        # odoo-tenant-cm-website#96 on 2026-10-02: a held draft child was merged into its
+        # ready-to-merge parent #92 by the stack collapse.
+        snapshot = MergeTrainDryRunSnapshot(
+            repository="example/merge-train-repo",
+            base_branch="main",
+            pull_requests=(
+                _pull_request(
+                    50,
+                    head_ref="feature/root",
+                    base_ref="main",
+                    repository="example/merge-train-repo",
+                ),
+                _pull_request(
+                    51,
+                    head_ref="feature/held",
+                    base_ref="feature/root",
+                    repository="example/merge-train-repo",
+                    labels=(),
+                    is_draft=True,
+                ),
+            ),
+        )
+
+        result = discover_merge_train_stack(
+            policy=_policy_for(snapshot), snapshot=snapshot, root_pull_request_number=50
+        )
+
+        self.assertEqual(result.status, "unsupported")
+        self.assertEqual(result.entries, ())
+        self.assertEqual(
+            result.unsupported_reasons,
+            (
+                "stacked pull request #51 is not ready for the train: draft pull request",
+                "stacked pull request #51 is not ready for the train: missing ready-to-merge label",
+            ),
+        )
+
+    def test_refuses_a_stacked_child_not_marked_for_the_train(self) -> None:
+        snapshot = MergeTrainDryRunSnapshot(
+            repository="example/merge-train-repo",
+            base_branch="main",
+            pull_requests=(
+                _pull_request(
+                    60,
+                    head_ref="feature/root",
+                    base_ref="main",
+                    repository="example/merge-train-repo",
+                ),
+                _pull_request(
+                    61,
+                    head_ref="feature/middle",
+                    base_ref="feature/root",
+                    repository="example/merge-train-repo",
+                ),
+                _pull_request(
+                    62,
+                    head_ref="feature/leaf",
+                    base_ref="feature/middle",
+                    repository="example/merge-train-repo",
+                    labels=(),
+                ),
+            ),
+        )
+
+        result = discover_merge_train_stack(
+            policy=_policy_for(snapshot), snapshot=snapshot, root_pull_request_number=60
+        )
+
+        self.assertEqual(result.status, "unsupported")
+        self.assertEqual(
+            result.unsupported_reasons,
+            ("stacked pull request #62 is not ready for the train: missing ready-to-merge label",),
+        )
 
 
 class MergeTrainBlockIntentTests(unittest.TestCase):
@@ -1023,6 +1108,10 @@ def _pull_request(
             "branch_update_required": branch_update_required,
         }
     )
+
+
+def _policy_for(snapshot: MergeTrainDryRunSnapshot) -> MergeTrainPolicy:
+    return build_test_merge_train_policy(repository=snapshot.repository)
 
 
 def _write_policy_file(directory: Path) -> Path:

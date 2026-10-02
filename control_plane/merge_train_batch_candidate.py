@@ -238,6 +238,7 @@ def _execute_plan_mode(
         snapshot=snapshot, dry_run_result=dry_run_result
     ):
         stack_discovery = discover_merge_train_stack(
+            policy=policy,
             snapshot=snapshot,
             root_pull_request_number=selected_pr.number,
         )

@@ -487,13 +487,20 @@ linear stacks, Launchplane should detect the stack rooted at a PR targeting the
 protected base branch, collapse child changes into that root with explicit
 stored evidence and fresh SHA guards, wait for the root PR to pass required
 checks against the base branch, then admit only the root PR to the flat batch
-train. The root PR's `enqueue_label` is the Director/agent intent: it means
-"land this work through Launchplane," including any required same-repository
-linear stack collapse before train admission. Launchplane records a stack
-collapse plan before mutating branches so the root PR, child order, expected
-SHAs, mutation sequence, policy digest, and idempotency evidence remain
-auditable. Ambiguous, forked, cyclic, or unsupported branch-protection cases
-must fail closed with admin-visible reasons.
+train. The root PR's `enqueue_label` starts the train for the stack, but it
+does not speak for the children: collapsing merges a child into the root, so
+every child must itself be ready to land under the same queue eligibility as a
+root (open, not a draft, carrying `enqueue_label` or an allowed dependency
+update, from an allowed author). A child that is not ready refuses the whole
+collapse; the controller reports `stack_unsupported` with a `blocking_reason`
+naming each child and reason. Execution reads each child again from GitHub
+just before merging it, so a child held while a recorded plan runs is not
+merged; a child GitHub already shows as merged by this collapse is recovered,
+not re-read. Launchplane records a stack collapse plan
+before mutating branches so the root PR, child order, expected SHAs, mutation
+sequence, policy digest, and idempotency evidence remain auditable. Ambiguous,
+forked, cyclic, or unsupported branch-protection cases must fail closed with
+admin-visible reasons.
 
 Stack collapse mutates from the leaf PR back toward the root PR. Each child is
 merged into its parent feature branch, and the parent merge commit becomes the

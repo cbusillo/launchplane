@@ -29,6 +29,14 @@ MergeTrainStackCollapseRecordStatus = Literal["active", "superseded"]
 MergeTrainStackCollapseIntentSource = Literal["root_ready_to_merge"]
 
 
+class MergeTrainStackChildNotReadyError(ValueError):
+    """Raised before merging a stacked child that is not itself ready to land."""
+
+    def __init__(self, reasons: tuple[str, ...]) -> None:
+        self.reasons = reasons
+        super().__init__("; ".join(reasons))
+
+
 class MergeTrainStackCollapseEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -241,6 +249,7 @@ def execute_merge_train_stack_collapse_plan(
     *,
     plan: MergeTrainStackCollapsePlan,
     branch_client: MergeTrainStackCollapseBranchClient,
+    child_readiness_reasons: Callable[[int], tuple[str, ...]],
     effect_executor: MergeTrainSemanticEffectExecutor | None = None,
     updated_at: str,
     checkpoint: Callable[[MergeTrainStackCollapsePlan], None] | None = None,
@@ -282,6 +291,10 @@ def execute_merge_train_stack_collapse_plan(
             parent_pull_request_number=mutation.parent_pull_request_number,
         )
         if not merge_commit_sha:
+            # Read just before each new merge: a child can be held while the collapse runs.
+            not_ready_reasons = child_readiness_reasons(mutation.child_pull_request_number)
+            if not_ready_reasons:
+                raise MergeTrainStackChildNotReadyError(not_ready_reasons)
             if effect_executor is None:
                 merge_commit_sha = branch_client.merge_stack_child_into_parent(
                     repository=plan.repository,

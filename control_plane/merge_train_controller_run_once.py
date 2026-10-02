@@ -32,6 +32,7 @@ from control_plane.contracts.merge_train_historical_completion import (
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlan,
     MergeTrainStackCollapsePlanRecord,
+    MergeTrainStackChildNotReadyError,
     build_merge_train_stack_collapse_plan,
     build_merge_train_stack_collapse_plan_record,
     execute_merge_train_stack_collapse_plan,
@@ -45,6 +46,8 @@ from control_plane.merge_train import (
     MergeTrainDryRunResult,
     build_merge_train_dry_run_result,
     discover_merge_train_stack,
+    merge_train_stack_child_readiness_check,
+    merge_train_stack_child_readiness_reasons,
 )
 from control_plane.merge_admission import (
     GuardedMergeAdmission,
@@ -2464,6 +2467,23 @@ def _advance_planned_stack_collapse_record(
         )
         if observed_root_sha != root_pull_request.head_sha:
             return None
+    # A root or child that is no longer ready falls through to live discovery, which
+    # reports why. A child missing from the open snapshot may already be merged, so the
+    # executor recovers it or reads it fresh before merging.
+    pull_requests_by_number = {
+        pull_request.number: pull_request for pull_request in snapshot.pull_requests
+    }
+    pending_pull_request_numbers = (planned_collapse_record.plan.root_pull_request_number,) + tuple(
+        mutation.child_pull_request_number
+        for mutation in planned_collapse_record.plan.mutations
+        if mutation.status != "mutated"
+    )
+    for pull_request_number in pending_pull_request_numbers:
+        pull_request = pull_requests_by_number.get(pull_request_number)
+        if pull_request is not None and merge_train_stack_child_readiness_reasons(
+            repository_policy=repository_policy, pull_request=pull_request
+        ):
+            return None
     try:
         validate_merge_train_stack_collapse_record_for_controller(
             collapse_record=planned_collapse_record,
@@ -2523,13 +2543,31 @@ def _advance_planned_stack_collapse_record(
             )
             stack_collapse_store.write_merge_train_stack_collapse_plan_record(progress_record)
 
-        executed_plan = execute_merge_train_stack_collapse_plan(
-            plan=planned_collapse_record.plan,
-            branch_client=github_client,
-            effect_executor=github_client.semantic_effect_executor,
-            updated_at=recorded_at,
-            checkpoint=checkpoint_collapse_progress,
-        )
+        try:
+            executed_plan = execute_merge_train_stack_collapse_plan(
+                plan=planned_collapse_record.plan,
+                branch_client=github_client,
+                child_readiness_reasons=merge_train_stack_child_readiness_check(
+                    reader=github_client,
+                    repository=planned_collapse_record.plan.repository,
+                    repository_policy=repository_policy,
+                ),
+                effect_executor=github_client.semantic_effect_executor,
+                updated_at=recorded_at,
+                checkpoint=checkpoint_collapse_progress,
+            )
+        except MergeTrainStackChildNotReadyError as error:
+            return {
+                "repository": request.repository,
+                "base_branch": request.base_branch,
+                "mode": "blocked",
+                "controller_action": "stack_unsupported",
+                "blocking_reason": {
+                    "code": "merge_train_stack_unsupported",
+                    "message": str(error),
+                },
+                "merge_train_stack_collapse_plan_record_id": planned_collapse_record.record_id,
+            }
         executed_record = build_merge_train_stack_collapse_plan_record(
             ordinary_job_binding=lease.record.ordinary_job_binding,
             plan=executed_plan,
@@ -2578,6 +2616,7 @@ def _advance_from_live_snapshot(
         snapshot=snapshot, dry_run_result=dry_run_result
     ):
         stack_discovery = discover_merge_train_stack(
+            policy=policy,
             snapshot=snapshot,
             root_pull_request_number=selected_pr.number,
         )
@@ -2633,6 +2672,10 @@ def _advance_from_live_snapshot(
             "base_branch": request.base_branch,
             "mode": "dry-run",
             "controller_action": "stack_unsupported",
+            "blocking_reason": {
+                "code": "merge_train_stack_unsupported",
+                "message": "; ".join(stack_discovery.unsupported_reasons),
+            },
             "dry_run_result": dry_run_result.model_dump(mode="json"),
             "stack_discovery": stack_discovery.model_dump(mode="json"),
         }

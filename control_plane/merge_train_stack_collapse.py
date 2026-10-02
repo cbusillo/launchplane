@@ -14,7 +14,10 @@ from control_plane.contracts.merge_train_stack_collapse import (
     build_merge_train_stack_collapse_plan_record,
     execute_merge_train_stack_collapse_plan,
 )
-from control_plane.merge_train import build_merge_train_dry_run_result
+from control_plane.merge_train import (
+    build_merge_train_dry_run_result,
+    merge_train_stack_child_readiness_check,
+)
 from control_plane.merge_train_batch_candidate import MergeTrainBatchCandidateRecordStore
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
@@ -113,9 +116,17 @@ def execute_merge_train_stack_collapse_run_once(
         api_base_url=request.github_api_base_url,
     )
     if request.mode == "execute":
+        github_client = GitHubMergeTrainClient(transport=transport)
         executed_plan = execute_merge_train_stack_collapse_plan(
             plan=existing_record.plan,
-            branch_client=GitHubMergeTrainClient(transport=transport),
+            branch_client=github_client,
+            child_readiness_reasons=merge_train_stack_child_readiness_check(
+                reader=github_client,
+                repository=request.repository,
+                repository_policy=policy.find_repository_policy(
+                    repository=request.repository, base_branch=request.base_branch
+                ),
+            ),
             updated_at=recorded_at,
             checkpoint=(
                 lambda progress_plan: (

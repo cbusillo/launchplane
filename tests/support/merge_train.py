@@ -82,6 +82,18 @@ class _FakeMergeTrainGitHubClient:
             cast(GitHubMergeTrainClient, self), repository=repository, base_branch=base_branch
         )
 
+    def read_pull_request_snapshot(
+        self, *, repository: str, pull_request_number: int
+    ) -> MergeTrainPullRequestSnapshot:
+        snapshot = _FakeStackedMergeTrainSnapshotReader(
+            transport=self.transport
+        ).read_merge_train_snapshot(repository=repository, base_branch="main")
+        return next(
+            pull_request
+            for pull_request in snapshot.pull_requests
+            if pull_request.number == pull_request_number
+        )
+
     def add_pull_request_label(
         self, *, repository: str, pull_request_number: int, label: str
     ) -> None:
@@ -637,7 +649,7 @@ class _FakeStackedMergeTrainSnapshotReader:
                     url=f"https://github.com/{repository}/pull/2",
                     title="Stacked child PR",
                     created_at="2026-05-08T11:00:00Z",
-                    labels=(),
+                    labels=("ready-to-merge",),
                     actor_role="repo_admin",
                     head_sha="head-child",
                     head_ref="feature/child",
@@ -892,6 +904,7 @@ def _seed_merge_train_stack_collapse_plan_record(
     selected_pr = dry_run_result.selected_pr
     assert selected_pr is not None
     stack_discovery = discover_merge_train_stack(
+        policy=merge_train_policy,
         snapshot=snapshot,
         root_pull_request_number=selected_pr.number,
     )
@@ -934,6 +947,7 @@ def _seed_executed_merge_train_stack_collapse_plan_record(
     executed_plan = execute_merge_train_stack_collapse_plan(
         plan=planned_record.plan,
         branch_client=_FakeMergeTrainGitHubClient(transport=object()),
+        child_readiness_reasons=lambda _pull_request_number: (),
         updated_at="2026-05-13T21:02:00Z",
     )
     executed_record = build_merge_train_stack_collapse_plan_record(
