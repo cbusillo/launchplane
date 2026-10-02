@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone, tzinfo
+from email.message import Message
 import io
 import json
 import unittest
@@ -7,10 +8,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 import click
 
-from control_plane.build_provenance import BUILD_WORKFLOW_PATH
+from control_plane.build_provenance import BUILD_WORKFLOW_PATH, GitHubBuildProvenanceTransport
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetPolicies,
     DokployTargetRecord,
@@ -1621,6 +1623,54 @@ class ProductReconcileGrantTests(ProductReconcileTestCase):
 
 
 class ProductReconcileFailureTests(ProductReconcileTestCase):
+    def test_missing_build_workflow_is_a_noop_only_with_complete_actions_inventory(self) -> None:
+        scenarios: tuple[tuple[dict[str, object] | int, str, str], ...] = (
+            ({"total_count": 0, "workflows": []}, "done", "build_workflow_missing"),
+            ({"total_count": 1, "workflows": [{"path": BUILD_WORKFLOW_PATH}]}, "failed", ""),
+            ({"total_count": 1, "workflows": []}, "failed", ""),
+            ({}, "failed", ""),
+            (404, "failed", ""),
+            (403, "failed", ""),
+        )
+        for inventory, state, reason in scenarios:
+            with self.subTest(inventory=inventory):
+                self.request()
+                original_get = self.github.get_json
+
+                def get_json(path: str) -> object:
+                    if "/actions/workflows/" in path:
+                        transport = GitHubBuildProvenanceTransport(token="test")
+                        with patch(
+                            "control_plane.build_provenance.urlopen",
+                            side_effect=HTTPError(path, 404, "Not Found", Message(), None),
+                        ):
+                            return transport.get_json(path)
+                    if "/actions/workflows?" in path:
+                        if isinstance(inventory, int):
+                            transport = GitHubBuildProvenanceTransport(token="test")
+                            with patch(
+                                "control_plane.build_provenance.urlopen",
+                                side_effect=HTTPError(path, inventory, "Denied", Message(), None),
+                            ):
+                                return transport.get_json(path)
+                        return inventory
+                    return original_get(path)
+
+                with patch.object(self.github, "get_json", side_effect=get_json):
+                    if state == "failed":
+                        with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                            result = self.run_once()
+                    else:
+                        result = self.run_once()
+                self.assertEqual(result.state, state)
+                if state == "done":
+                    self.assertEqual(result.last_plan["action"], "none")
+                    self.assertEqual(result.last_plan["reason"], reason)
+                    self.assertEqual(result.last_error, "")
+                else:
+                    self.assertIn("GitHub read failed", result.last_error)
+                self.assertEqual(self.provider.applied, [])
+
     def test_missing_merge_train_app_fails_without_a_token(self) -> None:
         self.request()
         with self.assertLogs("control_plane.product_reconcile", "WARNING"):
