@@ -108,6 +108,12 @@ definition of administrator. It does not widen anything else:
 - approval and worker reauthorization of privileged operations still require the
   exact managed rule and never consult this shortcut.
 
+`POST /v1/product-profiles/expected-config/apply` refuses a `local_operators`
+caller, in dry-run and apply, when the target product's profile records
+`production_use: live`, with the fixed code `live_product_requires_operator`.
+A live product's expected configuration is changed by the Director, whatever
+rule names that product.
+
 ## Denial Handling
 
 Treat `authorization_denied` as an authority result, not a credential-selection
@@ -641,66 +647,6 @@ removal does not depend on stopping an activation. The separate Agent delivery
 administration set retains its own stop-before-removal requirements. Neither
 intent reads denied product data through an alternate route; normal product
 reads use their existing authorization after any approved installation.
-
-### Preparing Agent Operate Access
-
-The Access policy workbench can prepare the closed
-`agent-operate-product-setup` candidate (launchplane#2467). It is the standing
-"operate" role for the Director's agent: ordinary setup writes on non-live
-products, starting with `product_profile.expected_config.apply` so the agent can
-declare expected settings. Release approval, deploys, secrets, Client
-acceptance, and live products are out of scope; nothing in this set satisfies
-release review.
-
-Preparation uses the same managed `authz_policy_operation.propose` authority and
-fresh immutable-ID administrator checks as the other candidates. The browser
-supplies only the candidate, the add/remove intent, an idempotent source event,
-and, for add, a list of product identifiers chosen with checkboxes. The card
-lists products from the existing product-profile list and hides any product
-recorded `production_use: live`. The server validates every selected id again:
-each must name an existing product profile record, no selected product may be
-recorded `live`, an empty selection is refused, and the list is deduplicated and
-sorted. Products are never hard-coded.
-
-The live boundary is also enforced when the access is used, not only at
-preparation. `POST /v1/product-profiles/expected-config/apply` refuses a
-`local_operators` caller, in both dry-run and apply modes, when the target product's
-profile records `production_use: live`, with the fixed code
-`live_product_requires_operator`. A product approved while non-live and later
-recorded `live` is therefore not writable through this rule, even though the
-rule still names it. Workflow and local-admin callers of that route are
-unchanged.
-
-The principal is never supplied by the browser. The server uses the service's
-configured `local_operator` identity (`LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT` and
-`LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL`, active only when the `local_operator`
-token is configured). That is the only identity the service authenticates as a
-`local_operator`, so it is the identity the Director's agent uses for its standing
-reads; reading it avoids guessing from existing policy rules. Add refuses
-(`authorization_candidate_principal_unavailable`) when no identity is configured
-or either value contains a glob character. The plan binds the reviewed subject
-and token label; a later configuration change does not rebind it.
-
-The isolated `operator.agent-operate` managed set holds one `local_operators`
-rule, `agent-operate-product-setup`, for that exact subject and token label, the
-selected products, the `launchplane` context, no instances, and exactly
-`product_profile.expected_config.apply`. Adding again with the same products is
-already satisfied; a different selection for the same identity prepares a
-replacement of this one rule. A set held by another identity, in another
-principal collection, with more than one rule, or with any other shape is a
-conflict that preparation does not adopt or repair. Replay recognizes only the
-exact shape, the configured identity, and the same normalized product list.
-The review uses the agent-operate wording only when the rule binds the
-service's configured `local_operator` identity (and, for removal, only when an
-identity is configured); a same-shape proposal for any other subject or token
-label gets the generic managed-policy review.
-
-Removal proposes an empty fragment for only this set and does not need the
-configured identity. Review names the selected products and states that the
-access is standing until a separately governed removal. Preparation creates a
-plan for review and changes nothing until approval, current-policy checks,
-worker execution, CAS, and read-back install it. Installing it is a grant, so it
-is a Director decision.
 
 ### Inspecting Pilot Preparation Inputs
 
