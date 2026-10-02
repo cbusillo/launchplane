@@ -401,27 +401,6 @@ def configured_terminal_agent_identity(
         return None
 
 
-def configured_local_operator_identity(
-    config: BearerIdentityConfig,
-) -> LocalOperatorIdentity | None:
-    """Return the configured local operator identity without exposing its bearer secret."""
-    if not config.local_operator_token.strip():
-        return None
-    try:
-        return LocalOperatorIdentity(
-            subject=_required_bearer_identity_config_value(
-                config.local_operator_subject,
-                "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT",
-            ),
-            token_label=_required_bearer_identity_config_value(
-                config.local_operator_token_label,
-                "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL",
-            ),
-        )
-    except PermissionError:
-        return None
-
-
 def read_bearer_token(authorization_header: str) -> str:
     header = authorization_header.strip()
     if not header:
