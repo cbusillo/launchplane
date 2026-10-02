@@ -15012,8 +15012,11 @@ def create_launchplane_fastapi_app(
                 message="Product environment was not found.",
             )
         idempotency_request_payload = None
-        if any(item.owner_submission_version_id for item in environment_request.managed_secrets):
-            # Pin replay to the submitted references, not their decryptable current values.
+        if environment_request.retired_provider_keys or any(
+            item.owner_submission_version_id for item in environment_request.managed_secrets
+        ):
+            # Pin replay to the submitted references, not their decryptable current values,
+            # and to the submitted retirements, not the lane's retirements they are added to.
             # Typed values still require the existing keyed secret fingerprint.
             idempotency_request_payload = {
                 **environment_request.model_dump(mode="json", exclude_none=True),

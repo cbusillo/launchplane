@@ -113,10 +113,38 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(record.retired_provider_keys, ("LEGACY_TUNING", "OLD_RETIRED_KEY"))
         self.assertNotIn("site.example.invalid", review.text + applied.text)
 
+    async def test_a_completed_retirement_replays_after_a_later_retirement(self) -> None:
+        async def retire(key: str, idempotency_key: str) -> _AsgiResponse:
+            change: dict[str, object] = {"retired_provider_keys": [key]}
+            review = await self._submit({"mode": "dry-run", **change})
+            self.assertEqual(review.status_code, 202, review.text)
+            return await self._submit(
+                {"mode": "apply", "confirmation": "APPLY example-site/testing", **change},
+                idempotency_key=idempotency_key,
+            )
+
+        first = await retire("LEGACY_A", "retire-a")
+        self.assertEqual(first.status_code, 202, first.text)
+        second = await retire("LEGACY_B", "retire-b")
+        self.assertEqual(second.status_code, 202, second.text)
+        replay = await self._submit(
+            {
+                "mode": "apply",
+                "confirmation": "APPLY example-site/testing",
+                "retired_provider_keys": ["LEGACY_A"],
+            },
+            idempotency_key="retire-a",
+        )
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertTrue(replay.json()["replayed"])
+        (record,) = self.store.list_runtime_environment_records()
+        self.assertEqual(record.retired_provider_keys, ("LEGACY_A", "LEGACY_B", "OLD_RETIRED_KEY"))
+
     async def test_refuses_a_credential_or_a_declared_secret_as_a_plain_setting(self) -> None:
         for settings in (
             {"PAYMENT_API_KEY": "plain-looking"},
             {"SITE_DATABASE_URL": "postgres://user:hunter2@db.invalid/site"},
+            {"SITE_DSN": "host=db.invalid dbname=site user=site password=hunter2"},
             {"MAIL_RELAY": "smtp.example.invalid"},
             {"not a key": "value"},
         ):
