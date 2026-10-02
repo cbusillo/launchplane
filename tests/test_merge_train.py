@@ -221,8 +221,19 @@ class MergeTrainDryRunTests(unittest.TestCase):
                         ),
                     )
 
+        owner_label = labeled_by(("ready-to-merge",), "repo_owner")[0]
         for label, pull_request in (
             ("label removed", automation_pull_request(labels=())),
+            (
+                "app acting as the owner",
+                automation_pull_request().model_copy(
+                    update={
+                        "label_actors": (
+                            owner_label.model_copy(update={"on_behalf_via_app": "client-agent"}),
+                        )
+                    }
+                ),
+            ),
             (
                 "labeler unreadable",
                 automation_pull_request().model_copy(update={"label_actors": ()}),

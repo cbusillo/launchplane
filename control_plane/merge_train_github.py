@@ -64,8 +64,6 @@ if TYPE_CHECKING:
 
 # GitHub's own identity for commits it signs (web edits and Dependabot).
 _GITHUB_WEB_FLOW_USER_ID = 19864447
-# Bounds the label-event read; a longer history leaves labels without an actor.
-_LABEL_EVENT_PAGE_LIMIT = 10
 
 
 class MergeTrainGitHubError(RuntimeError):
@@ -2085,8 +2083,9 @@ class GitHubMergeTrainSnapshotReader:
     ) -> tuple[MergeTrainLabelActor, ...]:
         # The latest "labeled" event names who applied each current label. A
         # label with no readable event gets no actor, which admission refuses.
-        last_labeler: dict[str, dict[str, object]] = {}
-        for page in range(1, _LABEL_EVENT_PAGE_LIMIT + 1):
+        last_labeled: dict[str, dict[str, object]] = {}
+        page = 1
+        while True:
             payload = self.transport.request(
                 method="GET",
                 path=(
@@ -2105,20 +2104,23 @@ class GitHubMergeTrainSnapshotReader:
                 if not isinstance(name, str) or not name.strip():
                     continue
                 key = name.strip().casefold()
-                actor = event.get("actor")
-                if event.get("event") == "unlabeled" or not isinstance(actor, dict):
-                    last_labeler.pop(key, None)
+                if event.get("event") == "unlabeled":
+                    last_labeled.pop(key, None)
                 else:
-                    last_labeler[key] = actor
+                    last_labeled[key] = event
             if len(payload) < 100:
                 break
-        else:
-            return ()
+            page += 1
         label_actors: list[MergeTrainLabelActor] = []
         for label in labels:
-            actor = last_labeler.get(label.strip().casefold())
-            actor_id = actor.get("id") if actor is not None else None
-            login = actor.get("login") if actor is not None else None
+            labeled_event = last_labeled.get(label.strip().casefold())
+            if labeled_event is None:
+                continue
+            actor = labeled_event.get("actor")
+            if not isinstance(actor, dict):
+                continue
+            actor_id = actor.get("id")
+            login = actor.get("login")
             if type(actor_id) is not int or actor_id <= 0 or not isinstance(login, str):
                 continue
             label_actors.append(
@@ -2129,6 +2131,7 @@ class GitHubMergeTrainSnapshotReader:
                     actor_role=self._actor_role_for_user(
                         repository_path=repository_path, username=login
                     ),
+                    on_behalf_via_app=_on_behalf_via_app(event=labeled_event, actor=actor),
                 )
             )
         return tuple(label_actors)
@@ -2444,6 +2447,18 @@ def _branch_contains_commit_at_pinned_base(
 
 def _validated_model_update(model: ModelT, **updates: object) -> ModelT:
     return type(model).model_validate({**model.model_dump(mode="python"), **updates})
+
+
+def _on_behalf_via_app(*, event: dict[str, object], actor: dict[str, object]) -> str:
+    """Name the GitHub App that acted with a user's token, or return ""."""
+    # An App's own installation token acts as its bot account. With a user
+    # access token GitHub attributes the event to the user, so the user's role
+    # must not stand in for the App's.
+    app = event.get("performed_via_github_app")
+    if not isinstance(app, dict) or actor.get("type") == "Bot":
+        return ""
+    slug = app.get("slug")
+    return slug.strip() if isinstance(slug, str) and slug.strip() else f"app {app.get('id')}"
 
 
 def _repository_path(repository: str) -> str:

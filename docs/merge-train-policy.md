@@ -264,8 +264,11 @@ automation identity, or an actor whose role is in `allowed_actor_roles` (by
 default the repository owner and its admins). Pull-request write access
 includes labels, so a Client's GitHub App or any other collaborator can apply
 the enqueue label; the train reads who applied it from the pull request's latest
-`labeled` event, not from its author. A label applied by anyone else, or whose
-labeler cannot be read, is ignored for admission, and the dry run reports
+`labeled` event, not from its author. A GitHub App that applies the label with
+a user's access token counts as the App, not as that user; an App's own
+installation token is its bot account and needs a trusted automation id. A
+label applied by anyone else, or whose labeler cannot be read, is ignored for
+admission, and the dry run reports
 `<label> label ignored: applied by <login> (<role>), who is not allowed to
 enqueue`. Removing the label, by anyone, still takes the pull request out of
 the queue.

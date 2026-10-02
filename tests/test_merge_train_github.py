@@ -3029,6 +3029,41 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             ),
         )
 
+    def test_snapshot_reader_names_an_app_acting_with_a_user_token(self) -> None:
+        cases = (
+            ("installation token", "Bot", ""),
+            ("user access token", "User", "client-agent"),
+        )
+        for label, actor_type, expected_app in cases:
+            with self.subTest(label):
+                event = {
+                    "event": "labeled",
+                    "label": {"name": "ready-to-merge"},
+                    "actor": {"id": 1, "login": "cbusillo", "type": actor_type},
+                    "performed_via_github_app": {"id": 9, "slug": "client-agent"},
+                }
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _github_branch(),
+                        [_github_pull_request(19)],
+                        _github_pull_request(19),
+                        {"permission": "admin"},
+                        [event],
+                        _combined_status(),
+                        {"check_runs": [_check_run("completed", "success")]},
+                    )
+                )
+
+                snapshot = GitHubMergeTrainSnapshotReader(
+                    transport=transport
+                ).read_merge_train_snapshot(
+                    repository="cbusillo/sellyouroutboard", base_branch="main"
+                )
+
+                self.assertEqual(
+                    snapshot.pull_requests[0].label_actors[0].on_behalf_via_app, expected_app
+                )
+
     def test_snapshot_reader_fails_closed_on_missing_required_shape(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=(_github_branch(), [{"number": 1}])

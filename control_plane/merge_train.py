@@ -59,6 +59,8 @@ class MergeTrainLabelActor(BaseModel):
     actor_id: PositiveInt | None = None
     actor_login: str = ""
     actor_role: str = "unknown"
+    # A GitHub App that applied the label with this actor's user token.
+    on_behalf_via_app: str = Field(default="", exclude_if=lambda value: not value)
 
 
 class MergeTrainPullRequestSnapshot(BaseModel):
@@ -608,6 +610,11 @@ def _enqueue_label_refusal(
     )
     if labeler is None or labeler.actor_id is None:
         return f"{enqueue_label} label ignored: could not read who applied it"
+    if labeler.on_behalf_via_app:
+        return (
+            f"{enqueue_label} label ignored: applied by the {labeler.on_behalf_via_app} "
+            f"GitHub App acting as {labeler.actor_login}, which is not allowed to enqueue"
+        )
     if labeler.actor_id in repository_policy.enqueue.trusted_automation_github_user_ids:
         return ""
     if labeler.actor_role in repository_policy.enqueue.allowed_actor_roles:
