@@ -25,6 +25,7 @@ OdooTargetReplacementPlanBlockerCode = Literal[
     "volume_authority_drift",
     "domains_missing",
     "runtime_keys_undeclared",
+    "provider_keys_unrecorded",
     "upstream_restore_environment_invalid",
     "live_runtime_keys_invalid",
     "compose_or_override_render_failed",
