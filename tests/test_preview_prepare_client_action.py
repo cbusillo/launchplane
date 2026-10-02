@@ -68,8 +68,6 @@ console.log(Object.keys(client).sort().join(','));
             )
             self.assertEqual(import_result.returncode, 0, import_result.stderr)
             self.assertIn("buildSameRepoPreviewPrepareOutputs", import_result.stdout)
-            self.assertIn("hasPreviewLabel", import_result.stdout)
-            self.assertIn("PREVIEW_LABEL_NAME", import_result.stdout)
 
     def test_client_builds_same_repo_refresh_outputs(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -83,7 +81,6 @@ console.log(Object.keys(client).sort().join(','));
                 """
 const outputs = client.buildSameRepoPreviewPrepareOutputs({
   action: 'synchronize',
-  labels: [{ name: 'preview' }],
   currentRepository: 'cbusillo/verireel',
   headRepository: 'cbusillo/verireel',
   actor: 'cbusillo',
@@ -127,8 +124,7 @@ console.log(JSON.stringify(outputs));
                 client_path,
                 """
 const fork = client.buildSameRepoPreviewPrepareOutputs({
-  action: 'labeled',
-  actionLabelName: 'preview',
+  action: 'opened',
   currentRepository: 'cbusillo/verireel',
   headRepository: 'someone/verireel',
   actor: 'contributor',
@@ -138,7 +134,6 @@ const fork = client.buildSameRepoPreviewPrepareOutputs({
 });
 const dependabot = client.buildSameRepoPreviewPrepareOutputs({
   action: 'synchronize',
-  labels: [{ name: 'preview' }],
   currentRepository: 'cbusillo/verireel',
   headRepository: 'cbusillo/verireel',
   actor: 'dependabot[bot]',
@@ -157,6 +152,38 @@ console.log(JSON.stringify({ fork, dependabot }));
         self.assertEqual(outputs["dependabot"]["mode"], "unsupported")
         self.assertEqual(outputs["dependabot"]["preview_supported"], "false")
 
+    def test_client_follows_draft_state_not_labels(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            client_path = Path(temporary_directory) / "preview-client.mjs"
+            self.run_setup_action(
+                output_path=client_path, github_output=Path(temporary_directory) / "out"
+            )
+
+            result = self.run_client_script(
+                client_path,
+                """
+const base = {
+  currentRepository: 'cbusillo/verireel',
+  headRepository: 'cbusillo/verireel',
+  actor: 'cbusillo',
+  prNumber: 42,
+  prSha: 'abc1234',
+  imageName: 'ghcr.io/cbusillo/verireel-app',
+};
+const modes = {
+  draft: client.buildSameRepoPreviewPrepareOutputs({ ...base, action: 'opened', draft: true }).mode,
+  ready: client.buildSameRepoPreviewPrepareOutputs({ ...base, action: 'ready_for_review' }).mode,
+  labeled: client.buildSameRepoPreviewPrepareOutputs({ ...base, action: 'labeled' }).mode,
+};
+console.log(JSON.stringify(modes));
+""",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout), {"draft": "noop", "ready": "refresh", "labeled": "noop"}
+        )
+
     def test_client_fails_closed_when_actor_is_missing(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             client_path = Path(temporary_directory) / "preview-client.mjs"
@@ -169,7 +196,6 @@ console.log(JSON.stringify({ fork, dependabot }));
                 """
 const outputs = client.buildSameRepoPreviewPrepareOutputs({
   action: 'synchronize',
-  labels: [{ name: 'preview' }],
   currentRepository: 'cbusillo/verireel',
   headRepository: 'cbusillo/verireel',
   prNumber: 42,
@@ -198,7 +224,6 @@ console.log(JSON.stringify(outputs));
                 """
 client.buildSameRepoPreviewPrepareOutputs({
   action: 'synchronize',
-  labels: [{ name: 'preview' }],
   currentRepository: 'cbusillo/verireel',
   headRepository: 'cbusillo/verireel',
   actor: 'cbusillo',

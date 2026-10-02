@@ -21,7 +21,9 @@ again:
 - a completed `workflow_run` of the product's `.github/workflows/build.yml`
   from a `push`: the product's **testing** target;
 - a completed build from a `pull_request`, or a PR opened, reopened,
-  synchronized, labeled, unlabeled or closed: that PR's **preview** target.
+  synchronized, marked ready for review, converted to draft, labeled,
+  unlabeled or closed: that PR's **preview** target. Label events only matter
+  for the Client mention below; no label creates or removes a preview.
 
 Launchplane re-reads every fact it acts on through the GitHub API with the
 product's read-only build-provenance token (`verify_build_artifact`). A
@@ -81,9 +83,11 @@ reservation. The webhook request never waits on a deploy.
     its plan as held (`action: wait`, reason `staff_testing`) and deploys
     nothing; see [Staff-testing hold](#staff-testing-hold).
 - **preview:** read the PR now.
-  - If it's open, carries the product's preview label, and its current head
-    has a verified preview build, the desired state is a preview running
-    that build. Otherwise the desired state is no preview.
+  - A preview follows the pull request. If it's open, not a draft, and its
+    current head has a verified preview build, the desired state is a preview
+    running that build. A draft, closed or merged PR has no preview: converting
+    to draft is the off switch, and marking it ready brings the preview back.
+    Labels play no part (#2735).
   - Compare the desired state with the preview record's verified build (run
     id and attempt), not just whether a preview exists, then apply or
     destroy.
@@ -91,7 +95,7 @@ reservation. The webhook request never waits on a deploy.
     and URL come from the product profile as today. The result is posted on
     the PR; see [Pull request feedback](#pull-request-feedback).
   - Read the PR state again after taking the preview's reservation and just
-    before the provider apply; if it closed, lost its label, or moved its
+    before the provider apply; if it closed, became a draft, or moved its
     head, the reservation is released with no provider effect and the
     reconcile runs again.
   - The apply or destroy issues the same service plan as the preview inputs
@@ -229,8 +233,10 @@ or a backup gate.
 ## Catch-up sweep
 
 Every 30 minutes the worker requests a reconcile of every product's testing
-target, and of every preview target with an open labeled PR or an existing
-preview record. Reconciling is idempotent, so the sweep runs the same code as
+target, of every preview target with an existing, not yet destroyed preview
+record, and of every open pull request that is not a draft (one list of open
+pull requests per product, with the build-provenance token). A missed ready or
+opened event is corrected within one sweep. Reconciling is idempotent, so the sweep runs the same code as
 the events, and a missed or out-of-order event is corrected within one sweep.
 
 ## Director steps

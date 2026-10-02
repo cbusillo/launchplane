@@ -2341,7 +2341,6 @@ class PreviewDesiredStateEnvelope(BaseModel):
     context: str
     source: str = "workflow"
     repository: str
-    label: str = "preview"
     anchor_repo: str
     preview_slug_prefix: str = "pr-"
     max_pages: int = Field(default=10, ge=1, le=20)
@@ -2356,8 +2355,6 @@ class PreviewDesiredStateEnvelope(BaseModel):
             raise ValueError("preview desired state requires source")
         if not self.repository.strip():
             raise ValueError("preview desired state requires repository")
-        if not self.label.strip():
-            raise ValueError("preview desired state requires label")
         if not self.anchor_repo.strip():
             raise ValueError("preview desired state requires anchor_repo")
         if not self.preview_slug_prefix.strip():
@@ -21665,7 +21662,6 @@ def create_launchplane_fastapi_app(
             source=desired_state_request.source,
             discovered_at=utc_now_timestamp(),
             repository=desired_state_request.repository,
-            label=desired_state_request.label,
             anchor_repo=desired_state_request.anchor_repo,
             preview_slug_prefix=desired_state_request.preview_slug_prefix,
             max_pages=desired_state_request.max_pages,

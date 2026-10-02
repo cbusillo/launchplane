@@ -15797,7 +15797,8 @@ class PostgresRecordStore(HumanSessionStore):
                 context=record.context,
                 discovered_at=record.discovered_at,
                 repository=record.repository,
-                label=record.label,
+                # Retired with the preview label (#2735); the column stays for older rows.
+                label="",
                 status=record.status,
                 desired_count=record.desired_count,
                 payload=self._payload_dict(record),

@@ -8645,11 +8645,6 @@
       "GenericWebPreviewDesiredStateRequest": {
         "additionalProperties": false,
         "properties": {
-          "label": {
-            "default": "preview",
-            "title": "Label",
-            "type": "string"
-          },
           "max_pages": {
             "default": 10,
             "maximum": 20.0,
@@ -22955,11 +22950,6 @@
           },
           "context": {
             "title": "Context",
-            "type": "string"
-          },
-          "label": {
-            "default": "preview",
-            "title": "Label",
             "type": "string"
           },
           "max_pages": {

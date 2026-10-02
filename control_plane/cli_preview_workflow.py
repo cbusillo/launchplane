@@ -50,13 +50,10 @@ def register_preview_workflow_commands(work_graph: click.Group) -> None:
 @click.option("--head-repository", default="", help="Pull request head owner/name repo.")
 @click.option("--head-sha", default="", help="Pull request head SHA.")
 @click.option(
-    "--label",
-    "label_names",
-    multiple=True,
-    help="Current pull request label. Repeat for each label.",
+    "--draft/--ready",
+    default=None,
+    help="Whether the pull request is a draft. Defaults to the event payload.",
 )
-@click.option("--action-label", default="", help="Label added or removed by this event.")
-@click.option("--preview-label", default="preview", show_default=True)
 @click.option("--product", default="", help="Product key used for idempotency output.")
 @click.option("--context", "context_name", default="", help="Preview context key.")
 @click.option("--run-id", default="", help="GitHub run id. Defaults to GITHUB_RUN_ID.")
@@ -77,9 +74,7 @@ def preview_workflow_decision(
     base_repository: str,
     head_repository: str,
     head_sha: str,
-    label_names: tuple[str, ...],
-    action_label: str,
-    preview_label: str,
+    draft: bool | None,
     product: str,
     context_name: str,
     run_id: str,
@@ -99,9 +94,7 @@ def preview_workflow_decision(
             base_repository=base_repository,
             head_repository=head_repository,
             head_sha=head_sha,
-            label_names=label_names,
-            action_label=action_label,
-            preview_label=preview_label,
+            draft=draft,
         )
         decision = decide_preview_workflow_operation(event)
         idempotency_key = ""
@@ -157,9 +150,7 @@ def _build_preview_workflow_event(
     base_repository: str,
     head_repository: str,
     head_sha: str,
-    label_names: tuple[str, ...],
-    action_label: str,
-    preview_label: str,
+    draft: bool | None,
 ) -> PreviewWorkflowEvent:
     pull_request = _preview_workflow_object(github_event.get("pull_request"))
     repository_payload = _preview_workflow_object(github_event.get("repository"))
@@ -167,10 +158,9 @@ def _build_preview_workflow_event(
     head_payload = _preview_workflow_object(pull_request.get("head"))
     base_repo_payload = _preview_workflow_object(base_payload.get("repo"))
     head_repo_payload = _preview_workflow_object(head_payload.get("repo"))
-    action_label_payload = _preview_workflow_object(github_event.get("label"))
     input_payload = _preview_workflow_object(github_event.get("inputs"))
 
-    resolved_labels = label_names or _preview_workflow_label_names(pull_request.get("labels"))
+    resolved_draft = draft if draft is not None else pull_request.get("draft") is True
     resolved_event_name = _preview_workflow_string(event_name) or os.environ.get(
         "GITHUB_EVENT_NAME", ""
     )
@@ -201,9 +191,6 @@ def _build_preview_workflow_event(
     )
     resolved_actor = actor.strip() or os.environ.get("GITHUB_ACTOR", "").strip()
     resolved_head_sha = head_sha.strip() or _preview_workflow_string(head_payload.get("sha"))
-    resolved_action_label = action_label.strip() or _preview_workflow_string(
-        action_label_payload.get("name")
-    )
     return PreviewWorkflowEvent(
         event_name=cast(PreviewWorkflowEventName, resolved_event_name),
         action=resolved_action,
@@ -215,9 +202,7 @@ def _build_preview_workflow_event(
         base_repository=resolved_base_repository,
         head_repository=resolved_head_repository,
         head_sha=resolved_head_sha,
-        label_names=resolved_labels,
-        action_label=resolved_action_label,
-        preview_label=preview_label,
+        draft=resolved_draft,
     )
 
 
@@ -247,19 +232,3 @@ def _preview_workflow_repository_name(repository_payload: dict[str, object]) -> 
     if owner_login and repository_name:
         return f"{owner_login}/{repository_name}"
     return ""
-
-
-def _preview_workflow_label_names(value: object) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        return ()
-    labels: list[str] = []
-    for item in value:
-        if isinstance(item, str):
-            label = item.strip()
-        elif isinstance(item, dict):
-            label = _preview_workflow_string(item.get("name"))
-        else:
-            label = ""
-        if label:
-            labels.append(label)
-    return tuple(labels)

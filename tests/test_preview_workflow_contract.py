@@ -81,54 +81,56 @@ def _event(**overrides: object) -> PreviewWorkflowEvent:
         "base_repository": "cbusillo/sellyouroutboard",
         "head_repository": "cbusillo/sellyouroutboard",
         "head_sha": "abc123",
-        "label_names": ("preview",),
-        "preview_label": "preview",
     }
     values.update(overrides)
     return PreviewWorkflowEvent.model_validate(values)
 
 
 class PreviewWorkflowContractTests(unittest.TestCase):
-    def test_same_repo_labeled_pr_refreshes_preview(self) -> None:
-        decision = decide_preview_workflow_operation(
-            _event(action="labeled", action_label="preview")
-        )
+    def test_same_repo_ready_pr_refreshes_preview_on_every_ready_event(self) -> None:
+        for action in ("opened", "reopened", "synchronize", "ready_for_review"):
+            with self.subTest(action=action):
+                decision = decide_preview_workflow_operation(_event(action=action))
 
-        self.assertEqual(decision.operation, "refresh")
-        self.assertEqual(decision.reason, "preview_label_added")
-        self.assertEqual(decision.execution_trust, "same_repo")
-        self.assertEqual(decision.launchplane_route_path, "/v1/drivers/generic-web/preview-refresh")
-        self.assertEqual(decision.feedback_status, "pending")
-        self.assertTrue(decision.product_build_required)
-        self.assertTrue(decision.launchplane_feedback_required)
+                self.assertEqual(decision.operation, "refresh")
+                self.assertEqual(decision.reason, f"pull_request_{action}")
+                self.assertEqual(decision.execution_trust, "same_repo")
+                self.assertEqual(
+                    decision.launchplane_route_path, "/v1/drivers/generic-web/preview-refresh"
+                )
+                self.assertTrue(decision.product_build_required)
+                self.assertTrue(decision.launchplane_feedback_required)
 
-    def test_same_repo_preview_label_removal_uses_trusted_cleanup(self) -> None:
+    def test_draft_pr_gets_no_preview(self) -> None:
+        decision = decide_preview_workflow_operation(_event(action="opened", draft=True))
+
+        self.assertEqual(decision.operation, "ignore")
+        self.assertEqual(decision.reason, "pull_request_draft")
+
+    def test_converting_to_draft_destroys_the_preview(self) -> None:
         decision = decide_preview_workflow_operation(
-            _event(
-                event_name="pull_request_target",
-                action="unlabeled",
-                action_label="preview",
-                label_names=("bug",),
-            )
+            _event(event_name="pull_request_target", action="converted_to_draft", draft=True)
         )
 
         self.assertEqual(decision.operation, "destroy")
-        self.assertEqual(decision.reason, "preview_label_removed")
+        self.assertEqual(decision.reason, "pull_request_converted_to_draft")
         self.assertEqual(decision.feedback_status, "destroyed")
-        self.assertTrue(decision.launchplane_feedback_required)
 
-    def test_same_repo_unlabeled_pr_is_ignored(self) -> None:
-        decision = decide_preview_workflow_operation(_event(label_names=("bug",)))
+    def test_label_events_change_no_preview(self) -> None:
+        for event_name in ("pull_request", "pull_request_target"):
+            for action in ("labeled", "unlabeled"):
+                with self.subTest(event_name=event_name, action=action):
+                    decision = decide_preview_workflow_operation(
+                        _event(event_name=event_name, action=action)
+                    )
 
-        self.assertEqual(decision.operation, "ignore")
-        self.assertEqual(decision.reason, "preview_label_not_enabled")
+                    self.assertEqual(decision.operation, "ignore")
 
     def test_pull_request_target_fork_preview_writes_unsupported_notice_only(self) -> None:
         decision = decide_preview_workflow_operation(
             _event(
                 event_name="pull_request_target",
-                action="labeled",
-                action_label="preview",
+                action="opened",
                 head_repository="somebody/sellyouroutboard",
             )
         )
@@ -156,12 +158,12 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertEqual(decision.reason, "pull_request_target_does_not_change_preview")
 
     def test_pull_request_cleanup_is_ignored(self) -> None:
-        decision = decide_preview_workflow_operation(
-            _event(action="unlabeled", action_label="preview", label_names=("bug",))
-        )
+        for action in ("closed", "converted_to_draft"):
+            with self.subTest(action=action):
+                decision = decide_preview_workflow_operation(_event(action=action))
 
-        self.assertEqual(decision.operation, "ignore")
-        self.assertEqual(decision.reason, "pull_request_cleanup_runs_on_target")
+                self.assertEqual(decision.operation, "ignore")
+                self.assertEqual(decision.reason, "pull_request_cleanup_runs_on_target")
 
     def test_dependabot_pull_request_event_fails_closed(self) -> None:
         with self.assertRaises(ValidationError):
@@ -286,7 +288,7 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         destroy_request = GenericWebPreviewDestroyRequest(
             product="demo",
             anchor_pr_number=42,
-            destroy_reason="preview_label_removed",
+            destroy_reason="pull_request_closed",
         )
 
         self.assertEqual(refresh_request.preview_slug, "")
@@ -306,7 +308,7 @@ class PreviewWorkflowDecisionCliTests(unittest.TestCase):
                         "repository": {"full_name": "cbusillo/sellyouroutboard"},
                         "pull_request": {
                             "number": 105,
-                            "labels": [{"name": "preview"}],
+                            "draft": False,
                             "base": {
                                 "repo": {"full_name": "cbusillo/sellyouroutboard"},
                             },
@@ -345,7 +347,7 @@ class PreviewWorkflowDecisionCliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         payload = json.loads(result.output)
         self.assertEqual(payload["event"]["anchor_pr_number"], 105)
-        self.assertEqual(payload["event"]["label_names"], ["preview"])
+        self.assertFalse(payload["event"]["draft"])
         self.assertEqual(payload["decision"]["operation"], "refresh")
         self.assertEqual(
             payload["decision"]["launchplane_route_path"],
@@ -366,7 +368,6 @@ class PreviewWorkflowDecisionCliTests(unittest.TestCase):
                         "repository": {"full_name": "cbusillo/sellyouroutboard"},
                         "pull_request": {
                             "number": 108,
-                            "labels": [{"name": "preview"}],
                             "base": {
                                 "repo": {"full_name": "cbusillo/sellyouroutboard"},
                             },
@@ -417,7 +418,7 @@ class PreviewWorkflowDecisionCliTests(unittest.TestCase):
                 "--event-name",
                 "pull_request_target",
                 "--action",
-                "labeled",
+                "opened",
                 "--repository",
                 "cbusillo/sellyouroutboard",
                 "--anchor-repo",
@@ -430,10 +431,6 @@ class PreviewWorkflowDecisionCliTests(unittest.TestCase):
                 "cbusillo/sellyouroutboard",
                 "--head-repository",
                 "someone/sellyouroutboard",
-                "--label",
-                "preview",
-                "--action-label",
-                "preview",
                 "--product",
                 "sell-your-outboard",
                 "--context",
@@ -474,8 +471,7 @@ class PreviewWorkflowDecisionCliTests(unittest.TestCase):
                 "cbusillo/sellyouroutboard",
                 "--head-repository",
                 "cbusillo/sellyouroutboard",
-                "--label",
-                "bug",
+                "--draft",
                 "--product",
                 "sell-your-outboard",
                 "--context",

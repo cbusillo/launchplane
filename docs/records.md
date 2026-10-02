@@ -1459,8 +1459,9 @@ records what it decided and did as `last_plan`:
   the request is `failed`, and its error ends with the last attempt's code and
   summary. A lane with another active operation leaves the
   request `pending` (`deferred: lane_busy`).
-- preview: `apply`, `destroy`, `wait` (open and labeled but no verified build
-  yet), or `none`. An apply or destroy issues the preview plan the inputs route
+- preview: `apply`, `destroy`, `wait` (open, not a draft, but no verified
+  build yet), or `none`. A draft, closed or merged PR wants no preview
+  (`pull_request_draft`, `pull_request_not_open`). An apply or destroy issues the preview plan the inputs route
   would and runs it through the durable preview operation under reservation
   scope `launchplane-reconcile:<product>`. Its key is the product, PR, verified
   build run and attempt (or `destroy`), and the preview record's current
@@ -2537,10 +2538,12 @@ credential, runtime grant, or stored record is changed by this code retirement.
 ## Launchplane Preview Desired State Record
 
 - One append-only record per Launchplane discovery of desired preview anchors.
-- Record the product/context/source, GitHub repository, label, anchor repo,
-  preview slug prefix, discovered timestamp, discovered desired previews, and
-  pass/fail status.
-- Desired-state records let Launchplane own the recurring PR label discovery
+- Record the product/context/source, GitHub repository, anchor repo, preview
+  slug prefix, discovered timestamp, discovered desired previews, and pass/fail
+  status. The desired previews are the open pull requests that are not drafts;
+  labels play no part (#2735). Records written earlier also name a label, which
+  is ignored on read.
+- Desired-state records let Launchplane own the recurring open-PR discovery
   loop before it plans cleanup against provider inventory.
 
 ## Launchplane Preview Lifecycle Cleanup Record

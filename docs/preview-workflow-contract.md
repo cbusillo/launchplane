@@ -75,13 +75,13 @@ event, decision, route path, feedback status, and run-scoped idempotency key as
 JSON so product workflows can branch on the shared contract instead of
 duplicating event semantics.
 
-Same-repository preview build jobs that need an importable helper for GitHub
-event labels and image tags should use
+Same-repository preview build jobs that need an importable helper for the
+GitHub event decision and image tags should use
 `cbusillo/launchplane/.github/actions/setup-preview-prepare-client@<launchplane-sha>`.
 The
 generated client is read-only and product-agnostic: callers pass the current
-repository, head repository, PR author, PR number, source SHA, image name,
-labels, and run URL; the client returns refresh/unsupported/noop mode, same-repo
+repository, head repository, PR author, PR number, draft state, source SHA,
+image name, and run URL; the client returns refresh/unsupported/noop mode, same-repo
 support flags, `pr-<number>` image tags, and full image references. It does not
 call Launchplane, choose provider targets, render comments, derive preview URLs,
 or store lifecycle truth.
@@ -186,15 +186,15 @@ generic-web preview workflow only when all of these conditions hold:
 
 - The PR head repository equals `github.repository`.
 - The PR author is not `dependabot[bot]`.
-- The PR currently has the `preview` label.
-- For `labeled` events, the changed label is `preview`.
+- The PR is not a draft.
 
-This preserves `opened`, `reopened`, `synchronize`, and `edited` refreshes for
-trusted same-repository PRs that already carry the preview label. Any PR not
-meeting every condition must skip the reusable refresh workflow.
+A preview follows the pull request: `opened`, `reopened`, `synchronize`, and
+`ready_for_review` refresh it for trusted same-repository PRs that are not
+drafts. Labels play no part (#2735). Any PR not meeting every condition must
+skip the reusable refresh workflow.
 
 Same-repository preview cleanup uses `pull_request_target`: closing the PR or
-removing the preview label runs `destroy` from the base-branch workflow. This
+converting it to draft runs `destroy` from the base-branch workflow. This
 gives destructive cleanup an exact GitHub OIDC `workflow_ref`; it does not
 check out or execute pull-request code. Fork and Dependabot PRs use the same
 trusted workflow only for unsupported or cleared notices. The job must call
@@ -484,8 +484,8 @@ records used by refresh. Odoo preview verification uses this generic-web route;
 the former Odoo-shaped preview verification alias is retired.
 
 Preview destroy routes receive the PR number, source/run metadata, and an
-explicit destroy reason such as `pull_request_closed`, `preview_label_removed`,
-or `manual_destroy_requested`. Generic-web preview destroy follows the same
+explicit destroy reason such as `pull_request_closed`,
+`pull_request_converted_to_draft`, or `manual_destroy_requested`. Generic-web preview destroy follows the same
 context and slug policy as refresh: callers should pass PR identity, and
 Launchplane derives the preview context and preview slug from the product
 profile before provider deletion.

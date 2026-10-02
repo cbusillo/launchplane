@@ -173,9 +173,21 @@ class GitHubAppWebhookTests(unittest.TestCase):
         )
         self.deliver(_pull_request("labeled"), event="pull_request", delivery_id="label")
         self.deliver(_pull_request("closed", number=9), event="pull_request", delivery_id="close")
+        # A preview follows draft state, so leaving and entering draft is a preview event.
+        self.deliver(
+            _pull_request("ready_for_review", number=10), event="pull_request", delivery_id="ready"
+        )
+        self.deliver(
+            _pull_request("converted_to_draft", number=11),
+            event="pull_request",
+            delivery_id="draft",
+        )
 
         requests = {r.target_key: r for r in self.store.list_product_reconcile_requests()}
-        self.assertEqual(set(requests), {"site:preview:7", "site:preview:8", "site:preview:9"})
+        self.assertEqual(
+            set(requests),
+            {f"site:preview:{number}" for number in (7, 8, 9, 10, 11)},
+        )
         self.assertEqual(requests["site:preview:7"].request_count, 2)
         self.assertEqual(requests["site:preview:7"].pull_request_number, 7)
 

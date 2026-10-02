@@ -977,8 +977,9 @@ capture status, not policy actor IDs or logins.
 one transaction records the `X-GitHub-Delivery` id and folds a reconcile request
 for the chosen target: a completed `.github/workflows/build.yml`
 `workflow_run` from `push` selects the product's testing target; one from
-`pull_request`, or a PR `opened`/`reopened`/`synchronize`/`labeled`/
-`unlabeled`/`closed` delivery, selects that PR's preview target. Each target
+`pull_request`, or a PR `opened`/`reopened`/`synchronize`/
+`ready_for_review`/`converted_to_draft`/`labeled`/`unlabeled`/`closed`
+delivery, selects that PR's preview target. Each target
 has at most one request row; new requests fold into it. A repeated delivery id
 changes nothing. Other events, unknown or ambiguous repositories, and `ping`
 return `202` and record nothing. The body only chooses the target; the future
