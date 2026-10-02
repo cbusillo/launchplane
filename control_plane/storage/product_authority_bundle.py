@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 import json
 from typing import Protocol
 
@@ -10,7 +11,11 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    is_exclusive_product_context,
+    product_context_owner_map,
+)
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentDeleteEvent,
@@ -119,6 +124,9 @@ class ProductAuthorityBundle(BaseModel):
     delete_dokploy_target_ids: tuple[DokployTargetIdRecord, ...] = ()
     delete_provider_targets: tuple[ProviderTargetRecord, ...] = ()
     idempotency_record: LaunchplaneIdempotencyRecord | None = None
+    # (product, context) that must still own the context exclusively when the
+    # bundle commits; checked under the same lock as product-profile writes.
+    required_context_owner: tuple[str, str] | None = None
 
     @model_validator(mode="after")
     def validate_runtime_environment_routes(self) -> ProductAuthorityBundle:
@@ -170,6 +178,23 @@ class ProductAuthorityBundle(BaseModel):
                 self.idempotency_record is not None,
             )
         )
+
+
+class ProductContextOwnershipError(PermissionError):
+    """The bundle's context no longer belongs to its product alone."""
+
+
+def require_bundle_context_owner(
+    bundle: ProductAuthorityBundle,
+    profiles: Iterable[LaunchplaneProductProfileRecord],
+) -> None:
+    if bundle.required_context_owner is None:
+        return
+    product, context = bundle.required_context_owner
+    if not is_exclusive_product_context(
+        context=context, product=product, owners=product_context_owner_map(profiles)
+    ):
+        raise ProductContextOwnershipError("The context must belong to the named product only.")
 
 
 class ProductAuthorityBundleStore(Protocol):

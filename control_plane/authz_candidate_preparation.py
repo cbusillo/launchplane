@@ -10,7 +10,11 @@ from control_plane.contracts.ordinary_agent_activation import (
 )
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.authz_scope import DOKPLOY_TARGET_LANE_SETUP_ACTION
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    is_exclusive_product_context,
+    product_context_owner_map,
+)
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.privileged_operation import (
     ORDINARY_AGENT_DELIVERY_ACTIVATION_APPROVE_ACTION,
@@ -948,30 +952,19 @@ def product_context_owners(record_store: object) -> dict[str, frozenset[str]]:
     lister = getattr(record_store, "list_product_profile_records", None)
     if not callable(lister):
         raise TypeError("Agent product setup requires product profile storage.")
-    owners: dict[str, set[str]] = {}
-    for record in lister():
-        profile = (
-            record
-            if isinstance(record, LaunchplaneProductProfileRecord)
-            else LaunchplaneProductProfileRecord.model_validate(record)
-        )
-        contexts = {lane.context for lane in profile.lanes} | set(profile.historical_contexts)
-        for context in contexts:
-            if context.strip():
-                owners.setdefault(context.strip().lower(), set()).add(profile.product)
-    return {context: frozenset(products) for context, products in owners.items()}
+    return product_context_owner_map(
+        record
+        if isinstance(record, LaunchplaneProductProfileRecord)
+        else LaunchplaneProductProfileRecord.model_validate(record)
+        for record in lister()
+    )
 
 
 def is_exclusive_product_lane_context(
     *, context: str, product: str, owners: dict[str, frozenset[str]]
 ) -> bool:
     """True when ``context`` is canonical, not Launchplane's, and only ``product`` uses it."""
-    return (
-        _is_exact_terminal_selector(context)
-        and context == context.strip().lower()
-        and context != LAUNCHPLANE_SERVICE_CONTEXT
-        and owners.get(context) == frozenset((product,))
-    )
+    return is_exclusive_product_context(context=context, product=product, owners=owners)
 
 
 def agent_product_setup_grants_match_records(

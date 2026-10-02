@@ -792,6 +792,7 @@ from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.factory import storage_backend_name
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
+    ProductContextOwnershipError,
     ProductProfileConflictError,
     RuntimeEnvironmentConflictError,
 )
@@ -14928,6 +14929,16 @@ def create_launchplane_fastapi_app(
                 response=product_config_response,
             )
         else:
+            if isinstance(identity, LocalOperatorIdentity) and product_config_request.context:
+                # Re-checked under the profile-write lock when the bundle commits.
+                authority_bundle = authority_bundle.model_copy(
+                    update={
+                        "required_context_owner": (
+                            product_config_request.product,
+                            product_config_request.context,
+                        )
+                    }
+                )
             try:
                 database_store.write_product_authority_bundle(
                     authority_bundle_with_apply_idempotency(
@@ -14940,6 +14951,13 @@ def create_launchplane_fastapi_app(
                         response=product_config_response,
                     )
                 )
+            except ProductContextOwnershipError as error:
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="local_operator_lane_scope_required",
+                    message=str(error),
+                ) from error
             except Exception as write_error:
                 if not normalized_idempotency_key:
                     raise

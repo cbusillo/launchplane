@@ -661,6 +661,7 @@ from control_plane.storage import landing_authority
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
     ProductProfileConflictError,
+    require_bundle_context_owner,
     ProductAuthorityBundle,
     ProviderTargetWrite,
     RuntimeEnvironmentConflictError,
@@ -6248,6 +6249,14 @@ class PostgresRecordStore(HumanSessionStore):
                     for record in (*bundle.product_profiles, *bundle.expected_product_profiles)
                 ),
             )
+            if bundle.required_context_owner is not None:
+                require_bundle_context_owner(
+                    bundle,
+                    (
+                        self._read_product_profile_payload(row.payload)
+                        for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
+                    ),
+                )
             for expected_profile in bundle.expected_product_profiles:
                 current_profile_row = session.scalar(
                     select(LaunchplaneProductProfileRow)
@@ -34615,6 +34624,8 @@ class PostgresRecordStore(HumanSessionStore):
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> None:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            # Same order as bundle writes, which may check context ownership.
+            self._lock_product_authority_bundle_write(session)
             self._lock_landing_authority(session, landing_authority.product_profile(record.product))
             session.merge(self._product_profile_row(record))
             session.commit()

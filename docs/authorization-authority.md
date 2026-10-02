@@ -652,7 +652,10 @@ reads use their existing authorization after any approved installation.
 
 The Access policy workbench can prepare the closed `agent-product-setup`
 candidate (launchplane#2766). It lets the Director's agent set up named
-products' testing lanes and production backup policy, each write dry-run first.
+products' testing lanes and production backup policy. The agent's helpers dry-run
+each write first; product config and backup authority also bind apply to the
+reviewed digest, while Dokploy target setup relies on its confirmation, reason
+and idempotency key.
 It replaces the earlier "operate" card, which #2750 removed.
 
 For each selected product the isolated `operator.agent-product-setup` managed
@@ -696,8 +699,8 @@ reconcile, which can deploy.
 
 What it can reach on a live product: the testing lane's settings and secrets,
 the testing lane's new compose target, and production's backup policy. The
-backup policy is the gate promotions rely on, so every apply is dry-run first
-and bound to the reviewed digest. It cannot deploy, promote, roll back, run a
+backup policy is the gate promotions rely on, so its apply is bound to the
+reviewed dry-run digest. It cannot deploy, promote, roll back, run a
 backup, change the Client or release review, or touch another product. Live
 products are therefore listed and accepted.
 
