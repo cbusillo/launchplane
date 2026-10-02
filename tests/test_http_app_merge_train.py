@@ -3901,6 +3901,84 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(branch_updates, [])
 
+    async def test_refreshed_collapsed_root_lands_with_its_children_disposed(self) -> None:
+        refreshed = {"value": False}
+
+        class RefreshableRootReader(_FakeCollapsedRootStackedMergeTrainSnapshotReader):
+            def read_merge_train_snapshot(
+                self, *, repository: str, base_branch: str
+            ) -> MergeTrainDryRunSnapshot:
+                snapshot = super().read_merge_train_snapshot(
+                    repository=repository, base_branch=base_branch
+                )
+                root = snapshot.pull_requests[0]
+                if refreshed["value"]:
+                    root = root.model_copy(update={"head_sha": "refreshed-root-head"})
+                else:
+                    root = root.model_copy(update={"branch_update_required": True})
+                return snapshot.model_copy(update={"pull_requests": (root,)})
+
+        class RefreshingClient(_FakeMergeTrainGitHubClient):
+            def update_pull_request_branch(
+                self, *, repository: str, pull_request_number: int, expected_head_sha: str
+            ) -> None:
+                refreshed["value"] = True
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            _seed_executed_merge_train_stack_collapse_plan_record(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            results = []
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    RefreshableRootReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    RefreshingClient,
+                ),
+            ):
+                for _ in range(6):
+                    response = await _post_merge_train_controller_run_once(app, request_payload)
+                    results.append(response.json()["result"])
+
+        self.assertEqual(
+            [result["controller_action"] for result in results],
+            [
+                "update_branch",
+                "plan_candidate",
+                "build_candidate",
+                "observe_candidate",
+                "plan_landing",
+                "land_batch",
+            ],
+        )
+        landed = results[-1]
+        self.assertEqual(landed["stack_collapse_plan"]["status"], "ready_for_train")
+        self.assertEqual(
+            [
+                disposition["status"]
+                for disposition in landed["stack_collapse_plan"]["child_dispositions"]
+            ],
+            ["closed"],
+        )
+
     async def test_cleanup_failure_after_landing_is_reported_without_rollback(self) -> None:
         _CleanupFailingMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls = 0
         with (

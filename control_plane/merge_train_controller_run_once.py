@@ -882,6 +882,50 @@ def latest_merge_train_stack_collapse_plan_record_for_completed_landing(
     return latest_merge_train_stack_collapse_progress_record(compatible_records)
 
 
+def _stack_collapse_record_landed_after_root_refresh(
+    *,
+    record_store: MergeTrainStackCollapsePlanRecordStore,
+    github_client: GitHubMergeTrainClient,
+    repository: str,
+    base_branch: str,
+    landing_plan: MergeTrainBatchLandingPlan,
+    policy_sha256: str,
+) -> MergeTrainStackCollapsePlanRecord | None:
+    """Find a collapse whose root's branch was refreshed before the root landed.
+
+    The refresh moves the root's head past the plan's collapsed head, so the
+    exact-head match above fails. The plan still applies when its root merged in
+    this landing and the base branch now contains the collapsed head: the
+    children's commits reached the base with the root.
+    """
+    merged_roots = {
+        entry.pull_request_number for entry in landing_plan.entries if entry.status == "merged"
+    }
+    contained: dict[str, bool] = {}
+    landed_records: list[MergeTrainStackCollapsePlanRecord] = []
+    for record in record_store.list_merge_train_stack_collapse_plan_records(
+        repository=repository,
+        base_branch=base_branch,
+        status="active",
+        limit=100,
+    ):
+        if not (
+            record.plan.status in {"waiting_for_root_checks", "ready_for_train"}
+            and record.plan.policy_key == landing_plan.policy_key
+            and record.plan.policy_sha256 == policy_sha256 == landing_plan.policy_sha256
+            and record.plan.root_pull_request_number in merged_roots
+        ):
+            continue
+        collapsed_head_sha = stack_collapse_expected_root_head_sha(record.plan)
+        if collapsed_head_sha not in contained:
+            contained[collapsed_head_sha] = github_client.branch_contains_commit(
+                repository=repository, branch_ref=base_branch, commit_sha=collapsed_head_sha
+            )
+        if contained[collapsed_head_sha]:
+            landed_records.append(record)
+    return latest_merge_train_stack_collapse_progress_record(tuple(landed_records))
+
+
 def _advance_active_landing_record(
     *,
     request: MergeTrainControllerRunOnceEnvelope,
@@ -1432,6 +1476,13 @@ def _finish_landed_merge_train_batch(
         )
     collapse_record = latest_merge_train_stack_collapse_plan_record_for_completed_landing(
         record_store=stack_collapse_store,
+        repository=request.repository,
+        base_branch=request.base_branch,
+        landing_plan=landed_plan,
+        policy_sha256=policy_sha256,
+    ) or _stack_collapse_record_landed_after_root_refresh(
+        record_store=stack_collapse_store,
+        github_client=github_client,
         repository=request.repository,
         base_branch=request.base_branch,
         landing_plan=landed_plan,
