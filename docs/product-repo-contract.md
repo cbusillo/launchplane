@@ -292,7 +292,8 @@ home for generated-user admin helper scripts.
   cleanup.
 - Promotion, rollback, deployment, preview, inventory, and cleanup records.
 - Protected artifact inventory used by registry cleanup to identify live
-  testing, production, release-tuple, and active-preview image references.
+  testing, production, release-tuple, and active-preview image references, and
+  each stable lane's default rollback target.
 
 ## Minimal Trigger Inputs
 
@@ -453,6 +454,14 @@ or has unresolved live-artifact warnings for the registry being cleaned. Product
 cleanup jobs should treat Launchplane-protected image references and artifact
 ids as a deny set; they must not infer that testing, production, or active
 preview artifacts are deletable from local tag shape alone.
+
+The retention contract also covers the default rollback target. For every
+stable context and instance, the inventory protects the artifact a rollback
+without an explicit artifact would deploy: the newest passing deployment of an
+artifact other than the lane's latest one. Those entries carry reason
+`previous-good-deployment`, and their artifact ids and image references are in
+the same `artifact_ids` and `image_references` lists, so a cleanup that honors
+the inventory keeps the previous-good image without a product repo change.
 
 Cleanup consumers must check both `artifact_ids` and `image_references` from the
 protected inventory. Some active-preview protections come from ready PR feedback

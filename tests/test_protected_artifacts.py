@@ -6,16 +6,34 @@ from unittest import TestCase
 from click.testing import CliRunner
 
 from control_plane.cli import main
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.promotion_record import ArtifactIdentityReference
 from control_plane.contracts.protected_artifacts import build_protected_artifact_set
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.support.protected_artifacts import (
     _active_preview,
     _deploy,
+    _manifest,
     _preview_generation,
     _profile,
     seed_protected_artifact_store,
 )
+
+
+def _prod_deployment(
+    *, artifact_id: str, source_git_ref: str, finished_at: str
+) -> DeploymentRecord:
+    return DeploymentRecord(
+        record_id=f"deployment-verireel-prod-{artifact_id}",
+        artifact_identity=ArtifactIdentityReference(artifact_id=artifact_id),
+        context="verireel",
+        instance="prod",
+        source_git_ref=source_git_ref,
+        deploy=_deploy("verireel-prod").model_copy(
+            update={"started_at": finished_at, "finished_at": finished_at}
+        ),
+    )
 
 
 class ProtectedArtifactTests(TestCase):
@@ -56,6 +74,48 @@ class ProtectedArtifactTests(TestCase):
         )
         self.assertTrue(
             any("artifact-preview-verireel-pr-196" in warning for warning in protected.warnings)
+        )
+
+    def test_build_protected_artifact_set_protects_previous_good_rollback_target(self) -> None:
+        previous_source_git_ref = "0123456789abcdef0123456789abcdef01234567"
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            seed_protected_artifact_store(store)
+            previous_manifest = _manifest(
+                "artifact-verireel-prod-previous",
+                previous_source_git_ref,
+                f"sha-{previous_source_git_ref}",
+            )
+            store.write_artifact_manifest(previous_manifest)
+            store.write_deployment_record(
+                _prod_deployment(
+                    artifact_id="artifact-verireel-prod-previous",
+                    source_git_ref=previous_source_git_ref,
+                    finished_at="2026-06-02T20:01:00Z",
+                )
+            )
+            store.write_deployment_record(
+                _prod_deployment(
+                    artifact_id="artifact-verireel-prod",
+                    source_git_ref="b6c883432baeaa4bf3dfe7c1c833265868da9346",
+                    finished_at="2026-06-03T20:01:00Z",
+                )
+            )
+
+            protected = build_protected_artifact_set(store, product="verireel")
+
+        previous_digest_reference = (
+            f"{previous_manifest.image.repository}@{previous_manifest.image.digest}"
+        )
+        self.assertIn("artifact-verireel-prod-previous", protected.artifact_ids)
+        self.assertIn(previous_digest_reference, protected.image_references)
+        self.assertIn(previous_manifest.image.digest, protected.image_digests)
+        previous_good_entries = [
+            entry for entry in protected.entries if entry.reason == "previous-good-deployment"
+        ]
+        self.assertEqual(
+            [(entry.instance, entry.artifact_id) for entry in previous_good_entries],
+            [("prod", "artifact-verireel-prod-previous")],
         )
 
     def test_build_protected_artifact_set_keeps_linked_preview_rollout_images(

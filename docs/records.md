@@ -467,11 +467,13 @@ existing ORM rows and contract payloads behind the storage boundary so the next
 driver descriptor and GUI slices can consume a stable API shape.
 
 - `ProtectedArtifactSet`: registry-cleanup read model built from current
-  environment inventory, release tuples, active preview generations, ready
-  preview feedback, product profiles, and artifact manifests. It is not a new
-  durable record family; it is the Launchplane-owned liveness projection that
-  cleanup consumers must load before deleting registry artifacts. Missing
-  manifests for live inventory, release, or preview artifacts are returned as
+  environment inventory, each stable lane's previous passing deployment of a
+  different artifact (the default rollback target), release tuples, active
+  preview generations, ready preview feedback, product profiles, and artifact
+  manifests. It is not a new durable record family; it is the
+  Launchplane-owned liveness projection that cleanup consumers must load before
+  deleting registry artifacts. Missing manifests for live inventory, rollback,
+  release, or preview artifacts are returned as
   warnings while the artifact id remains protected, so cleanup stays fail-closed
   instead of treating unresolved live images as deletable.
 
