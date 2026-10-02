@@ -43,6 +43,7 @@ from control_plane import authz_policy_recovery as control_plane_authz_policy_re
 from control_plane import authz_diagnostics as control_plane_authz_diagnostics
 from control_plane import authz_repository_scope as control_plane_authz_repository_scope
 from control_plane import ingress_route_scope as control_plane_ingress_route_scope
+from control_plane.authz_scope import DOKPLOY_TARGET_LANE_SETUP_ACTION
 from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
     execute_dokploy_target_setup,
@@ -762,6 +763,7 @@ from control_plane.service_auth import (
     LocalAdminIdentity,
     LocalOperatorIdentity,
     TerminalAgentIdentity,
+    configured_local_operator_identity,
     configured_terminal_agent_identity,
     TokenVerifier,
     agent_authz_audit,
@@ -5001,6 +5003,9 @@ def create_launchplane_fastapi_app(
         policy_reader=lambda: resolved_authz_policy_runtime.policy,
         policy_record_reader=lambda: read_active_authz_policy_record(get_record_store()),
         read_configured_terminal_identity=lambda: configured_terminal_agent_identity(
+            bearer_identity_config or BearerIdentityConfig()
+        ),
+        read_configured_local_operator_identity=lambda: configured_local_operator_identity(
             bearer_identity_config or BearerIdentityConfig()
         ),
     )
@@ -23198,11 +23203,23 @@ def create_launchplane_fastapi_app(
             record_store=record_store,
             trace_id=trace_id,
         )
+        # A lane-scoped grant may only create that lane's compose: adopting or
+        # re-pointing could bind the lane to another lane's provider target.
         can_setup_target = resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action="dokploy_target.setup",
             product=setup_request.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ) or (
+            setup_request.operation == "create-compose"
+            and setup_request.context != _LAUNCHPLANE_SERVICE_CONTEXT
+            and resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action=DOKPLOY_TARGET_LANE_SETUP_ACTION,
+                product=setup_request.product,
+                context=setup_request.context,
+                target=AuthorizationTarget(scope="instance", instances=(setup_request.instance,)),
+            )
         )
         can_repair_domain_authority = setup_request.operation == "repair-domain-authority" and (
             can_setup_target

@@ -9,6 +9,8 @@ from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationRecord,
 )
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.authz_scope import DOKPLOY_TARGET_LANE_SETUP_ACTION
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.privileged_operation import (
     ORDINARY_AGENT_DELIVERY_ACTIVATION_APPROVE_ACTION,
@@ -28,6 +30,8 @@ from control_plane.service_auth import (
     AuthorizationTarget,
     GitHubHumanPolicyRule,
     LaunchplaneAuthzPolicy,
+    LocalOperatorIdentity,
+    LocalOperatorPolicyRule,
     TerminalAgentIdentity,
     TerminalAgentPolicyRule,
     authz_selector_matches,
@@ -64,10 +68,31 @@ ADMINISTRATOR_PRODUCT_EVIDENCE_READ_REASON = (
 )
 ADMINISTRATOR_PRODUCT_EVIDENCE_READ_RELATED_ISSUE = "#2058"
 
+LAUNCHPLANE_SERVICE_PRODUCT = "launchplane"
+LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
+
+AGENT_PRODUCT_SETUP_CANDIDATE_ID: Final = "agent-product-setup"
+AGENT_PRODUCT_SETUP_MANAGED_SET_ID = "operator.agent-product-setup"
+AGENT_PRODUCT_SETUP_REASON = (
+    "Prepare agent product setup: testing settings, the testing compose target and the "
+    "production backup policy of the selected products."
+)
+AGENT_PRODUCT_SETUP_RELATED_ISSUE = "#2766"
+AGENT_PRODUCT_SETUP_MAX_PRODUCTS = 20
+# Each selected product gets exactly these rules, bound to one lane each:
+# (rule id suffix, granted on the product itself, lane, actions).
+_AGENT_PRODUCT_SETUP_RULE_SHAPES: Final = (
+    ("testing-config", True, "testing", ("product_config.plan", "product_config.apply")),
+    ("prod-backup-policy", True, "prod", ("production_backup_authority.write",)),
+    # Dokploy target setup is authorized on Launchplane's service product.
+    ("testing-target", False, "testing", (DOKPLOY_TARGET_LANE_SETUP_ACTION,)),
+)
+
 AuthorizationCandidateId = Literal[
     "ordinary-agent-delivery-administration",
     "administrator-product-evidence-read",
     "ordinary-agent-enrollment-requester",
+    "agent-product-setup",
 ]
 AuthorizationCandidateIntent = Literal["add", "remove"]
 AuthorizationCandidateState = Literal["available", "active", "conflict"]
@@ -80,6 +105,9 @@ AuthorizationCandidatePreparationReason = Literal[
     "current_activation_requires_stop",
     "activation_storage_unavailable",
     "activation_history_truncated",
+    "candidate_principal_unavailable",
+    "candidate_products_required",
+    "candidate_product_unavailable",
 ]
 
 
@@ -804,6 +832,281 @@ def is_legacy_administrator_product_evidence_read_request(
     )
 
 
+_AgentProductSetupState = Literal["absent", "present", "conflict"]
+# (product, lane context, subject, token label) for one product's prepared rules.
+_AgentProductSetupGrant = tuple[str, str, str, str]
+
+
+def _agent_product_setup_rules(
+    *,
+    product: str,
+    context: str,
+    subject: str,
+    token_label: str,
+) -> tuple[LocalOperatorPolicyRule, ...]:
+    return tuple(
+        LocalOperatorPolicyRule(
+            managed_set_id=AGENT_PRODUCT_SETUP_MANAGED_SET_ID,
+            managed_rule_id=f"{product}.{suffix}",
+            subjects=(subject,),
+            token_labels=(token_label,),
+            products=(product if on_product else LAUNCHPLANE_SERVICE_PRODUCT,),
+            contexts=(context,),
+            instances=(instance,),
+            actions=actions,
+        )
+        for suffix, on_product, instance, actions in _AGENT_PRODUCT_SETUP_RULE_SHAPES
+    )
+
+
+def _sorted_actions(rule: LocalOperatorPolicyRule) -> LocalOperatorPolicyRule:
+    return rule.model_copy(update={"actions": tuple(sorted(rule.actions))})
+
+
+def _agent_product_setup_grants(
+    rules: tuple[LocalOperatorPolicyRule, ...],
+) -> tuple[_AgentProductSetupGrant, ...] | None:
+    """Return each product's grant when the rules are exactly the prepared shape."""
+    groups: dict[str, list[LocalOperatorPolicyRule]] = {}
+    for rule in rules:
+        product, separator, _ = (rule.managed_rule_id or "").rpartition(".")
+        if (
+            rule.managed_set_id != AGENT_PRODUCT_SETUP_MANAGED_SET_ID
+            or not separator
+            or not _is_exact_terminal_selector(product)
+            or len(rule.contexts) != 1
+            or len(rule.subjects) != 1
+            or len(rule.token_labels) != 1
+        ):
+            return None
+        groups.setdefault(product, []).append(rule)
+    grants: list[_AgentProductSetupGrant] = []
+    for product, group in sorted(groups.items()):
+        first = group[0]
+        grant = (product, first.contexts[0], first.subjects[0], first.token_labels[0])
+        if not all(_is_exact_terminal_selector(value) for value in grant[1:]):
+            return None
+        expected = _agent_product_setup_rules(
+            product=product, context=grant[1], subject=grant[2], token_label=grant[3]
+        )
+        by_id = {rule.managed_rule_id: _sorted_actions(rule) for rule in group}
+        if len(by_id) != len(group) or by_id != {
+            rule.managed_rule_id: _sorted_actions(rule) for rule in expected
+        }:
+            return None
+        grants.append(grant)
+    if not grants or len({grant[2:] for grant in grants}) != 1:
+        return None
+    return tuple(grants)
+
+
+def _agent_product_setup_rule_state(
+    policy: LaunchplaneAuthzPolicy,
+) -> tuple[_AgentProductSetupState, tuple[_AgentProductSetupGrant, ...]]:
+    owned_rules = tuple(
+        (principal_type, rule)
+        for principal_type, rule in _rules(policy)
+        if getattr(rule, "managed_set_id", None) == AGENT_PRODUCT_SETUP_MANAGED_SET_ID
+    )
+    if not owned_rules:
+        return "absent", ()
+    if policy.schema_version not in (2, 3) or any(
+        principal_type != "local_operators" or not isinstance(rule, LocalOperatorPolicyRule)
+        for principal_type, rule in owned_rules
+    ):
+        return "conflict", ()
+    grants = _agent_product_setup_grants(
+        tuple(rule for _, rule in owned_rules if isinstance(rule, LocalOperatorPolicyRule))
+    )
+    if grants is None:
+        return "conflict", ()
+    return "present", grants
+
+
+def agent_product_setup_state(
+    policy: LaunchplaneAuthzPolicy,
+    *,
+    identity: LocalOperatorIdentity | None,
+) -> AuthorizationCandidateState:
+    """Report whether the set is absent, the exact prepared shape, or foreign."""
+    state, grants = _agent_product_setup_rule_state(policy)
+    if state == "absent":
+        return "available"
+    if state == "conflict":
+        return "conflict"
+    if identity is None or grants[0][2:] != (identity.subject, identity.token_label):
+        return "conflict"
+    return "active"
+
+
+def agent_product_setup_products(policy: LaunchplaneAuthzPolicy) -> tuple[str, ...]:
+    """Products the current set covers, or none when it is absent or foreign."""
+    state, grants = _agent_product_setup_rule_state(policy)
+    return tuple(grant[0] for grant in grants) if state == "present" else ()
+
+
+def normalize_agent_product_setup_products(products: tuple[str, ...]) -> tuple[str, ...]:
+    """Dedupe and sort a browser product selection without trusting its order."""
+    return tuple(sorted({product.strip() for product in products if product.strip()}))
+
+
+def _require_agent_product_setup_lanes(
+    *,
+    record_store: object,
+    products: tuple[str, ...],
+) -> tuple[tuple[str, str], ...]:
+    """Return each selected product with its one lane context, or refuse."""
+    normalized = normalize_agent_product_setup_products(products)
+    if not normalized:
+        raise AuthorizationCandidatePreparationError(
+            "candidate_products_required",
+            "Agent product setup requires at least one selected product.",
+        )
+    if len(normalized) > AGENT_PRODUCT_SETUP_MAX_PRODUCTS:
+        raise AuthorizationCandidatePreparationError(
+            "candidate_product_unavailable",
+            "Agent product setup accepts a bounded product selection.",
+        )
+    if any(not _is_exact_terminal_selector(product) for product in normalized):
+        raise AuthorizationCandidatePreparationError(
+            "candidate_product_unavailable",
+            "Agent product setup requires exact product identifiers.",
+        )
+    reader = getattr(record_store, "read_product_profile_record", None)
+    if not callable(reader):
+        raise TypeError("Agent product setup preparation requires product profile storage.")
+    selected: list[tuple[str, str]] = []
+    for product in normalized:
+        try:
+            record = reader(product)
+        except FileNotFoundError as error:
+            raise AuthorizationCandidatePreparationError(
+                "candidate_product_unavailable",
+                "A selected product has no product profile record.",
+            ) from error
+        profile = (
+            record
+            if isinstance(record, LaunchplaneProductProfileRecord)
+            else LaunchplaneProductProfileRecord.model_validate(record)
+        )
+        contexts = {lane.context.strip() for lane in profile.lanes if lane.context.strip()}
+        context = next(iter(contexts)) if len(contexts) == 1 else ""
+        if (
+            profile.product != product
+            or not _is_exact_terminal_selector(context)
+            or context == LAUNCHPLANE_SERVICE_CONTEXT
+        ):
+            raise AuthorizationCandidatePreparationError(
+                "candidate_product_unavailable",
+                "A selected product needs a profile whose lanes share one product context.",
+            )
+        selected.append((product, context))
+    return tuple(selected)
+
+
+def compile_agent_product_setup_candidate(
+    *,
+    current_policy: LaunchplaneAuthzPolicy,
+    identity: LocalOperatorIdentity | None,
+    intent: AuthorizationCandidateIntent,
+    products: tuple[str, ...],
+    record_store: object,
+) -> tuple[Literal["planned", "already_satisfied"], ManagedAuthzPolicySetProposalInput | None]:
+    """Compile the closed product setup set for the service-configured local operator."""
+    state, existing_grants = _agent_product_setup_rule_state(current_policy)
+    if state == "conflict":
+        raise AuthorizationCandidatePreparationError(
+            "candidate_set_conflict",
+            "The agent product setup set is occupied or has an unexpected shape.",
+        )
+    if current_policy.schema_version not in (2, 3):
+        raise AuthorizationCandidatePreparationError(
+            "candidate_set_conflict",
+            "Agent product setup requires authorization policy version 2 or 3.",
+        )
+    if intent == "remove":
+        if state == "absent":
+            return "already_satisfied", None
+        desired_rules: tuple[LocalOperatorPolicyRule, ...] = ()
+    else:
+        if (
+            identity is None
+            or not _is_exact_terminal_selector(identity.subject)
+            or not _is_exact_terminal_selector(identity.token_label)
+        ):
+            raise AuthorizationCandidatePreparationError(
+                "candidate_principal_unavailable",
+                "No exact configured local operator identity is available.",
+            )
+        selected = _require_agent_product_setup_lanes(record_store=record_store, products=products)
+        desired_rules = tuple(
+            rule
+            for product, context in selected
+            for rule in _agent_product_setup_rules(
+                product=product,
+                context=context,
+                subject=identity.subject,
+                token_label=identity.token_label,
+            )
+        )
+        if existing_grants:
+            if existing_grants[0][2:] != (identity.subject, identity.token_label):
+                raise AuthorizationCandidatePreparationError(
+                    "candidate_set_conflict",
+                    "The agent product setup set belongs to a different local operator identity.",
+                )
+            if existing_grants == tuple(
+                (product, context, identity.subject, identity.token_label)
+                for product, context in selected
+            ):
+                return "already_satisfied", None
+    return (
+        "planned",
+        ManagedAuthzPolicySetProposalInput(
+            managed_set_id=AGENT_PRODUCT_SETUP_MANAGED_SET_ID,
+            desired_policy=LaunchplaneAuthzPolicy(
+                schema_version=current_policy.schema_version,
+                local_operators=desired_rules,
+            ),
+            schema_migration="reject",
+            administrator_quorum_change=None,
+            reason=AGENT_PRODUCT_SETUP_REASON,
+            related_issue=AGENT_PRODUCT_SETUP_RELATED_ISSUE,
+        ),
+    )
+
+
+def agent_product_setup_request_grants(
+    request: ManagedAuthzPolicySetProposalInput,
+    *,
+    intent: AuthorizationCandidateIntent,
+) -> tuple[_AgentProductSetupGrant, ...] | None:
+    """Recognize the exact product setup shape, independently of audit wording.
+
+    Returns each product's grant for an add, an empty tuple for a removal, and
+    ``None`` when the request is not this candidate's shape.
+    """
+    desired = request.desired_policy
+    if (
+        request.managed_set_id != AGENT_PRODUCT_SETUP_MANAGED_SET_ID
+        or request.schema_migration != "reject"
+        or request.administrator_quorum_change is not None
+        or request.ordinary_agent_preparation_context is not None
+        or desired.schema_version not in (2, 3)
+        or desired.administrator_quorum is not None
+        or desired.github_actions
+        or desired.github_humans
+        or desired.terminal_agents
+        or desired.local_admins
+        or desired.ordinary_agents
+    ):
+        return None
+    rules = desired.local_operators
+    if intent == "remove":
+        return () if not rules else None
+    return _agent_product_setup_grants(rules)
+
+
 def compile_authorization_candidate(
     *,
     candidate_id: AuthorizationCandidateId,
@@ -812,7 +1115,17 @@ def compile_authorization_candidate(
     intent: AuthorizationCandidateIntent,
     record_store: object,
     configured_terminal_identity: TerminalAgentIdentity | None = None,
+    configured_local_operator_identity: LocalOperatorIdentity | None = None,
+    products: tuple[str, ...] = (),
 ) -> tuple[Literal["planned", "already_satisfied"], ManagedAuthzPolicySetProposalInput | None]:
+    if candidate_id == AGENT_PRODUCT_SETUP_CANDIDATE_ID:
+        return compile_agent_product_setup_candidate(
+            current_policy=current_policy,
+            identity=configured_local_operator_identity,
+            intent=intent,
+            products=products,
+            record_store=record_store,
+        )
     if candidate_id == ORDINARY_AGENT_DELIVERY_ADMINISTRATION_CANDIDATE_ID:
         return compile_ordinary_agent_delivery_administration_candidate(
             current_policy=current_policy,
@@ -868,7 +1181,25 @@ def authorization_candidate_request_matches(
     request: ManagedAuthzPolicySetProposalInput,
     github_id: int,
     intent: AuthorizationCandidateIntent,
+    products: tuple[str, ...] = (),
+    configured_local_operator_identity: LocalOperatorIdentity | None = None,
 ) -> bool:
+    if candidate_id == AGENT_PRODUCT_SETUP_CANDIDATE_ID:
+        grants = agent_product_setup_request_grants(request, intent=intent)
+        if grants is None:
+            return False
+        if intent == "remove":
+            return not products
+        return (
+            configured_local_operator_identity is not None
+            and grants[0][2:]
+            == (
+                configured_local_operator_identity.subject,
+                configured_local_operator_identity.token_label,
+            )
+            and tuple(grant[0] for grant in grants)
+            == normalize_agent_product_setup_products(products)
+        )
     if candidate_id == ORDINARY_AGENT_DELIVERY_ADMINISTRATION_CANDIDATE_ID:
         recognized = is_ordinary_agent_delivery_administration_request(request)
     elif candidate_id == ADMINISTRATOR_PRODUCT_EVIDENCE_READ_CANDIDATE_ID:

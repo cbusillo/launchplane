@@ -4,6 +4,7 @@ import { useCallback, useRef, useState } from "react";
 import {
   LaunchplaneApiError,
   approvePrivilegedOperation,
+  listProductProfiles,
   planOrdinaryAgentDeliveryActivation,
   prepareAuthorizationCandidate,
   readOrdinaryAgentDeliveryActivationOptions,
@@ -181,7 +182,10 @@ function DefaultPrivilegedOperationsRoute({
             ) : null}
             {descriptorId === "managed-authz-policy-set" &&
             operationId === null ? (
-              <AccessPolicyComposer refresh={resource.refresh} />
+              <AccessPolicyComposer
+                fixtureMode={fixtureMode}
+                refresh={resource.refresh}
+              />
             ) : null}
             <PrivilegedOperationPlanList data={data} refresh={resource.refresh} />
           </>
@@ -191,7 +195,13 @@ function DefaultPrivilegedOperationsRoute({
   );
 }
 
-function AccessPolicyComposer({ refresh }: { refresh: () => void }) {
+function AccessPolicyComposer({
+  fixtureMode,
+  refresh,
+}: {
+  fixtureMode: DevFixtureMode;
+  refresh: () => void;
+}) {
   return (
     <div className="privileged-operation-access-policy-options">
       <AuthorizationCandidateCard
@@ -217,8 +227,217 @@ function AccessPolicyComposer({ refresh }: { refresh: () => void }) {
         alreadyRemovedMessage="Project evidence access is already removed."
         refresh={refresh}
       />
+      <AgentProductSetupCandidateCard fixtureMode={fixtureMode} refresh={refresh} />
     </div>
   );
+}
+
+type AgentProductSetupChoice = { product: string; displayName: string };
+
+const AGENT_PRODUCT_SETUP_CANDIDATE_ID: AuthorizationCandidateId =
+  "agent-product-setup";
+
+function AgentProductSetupCandidateCard({
+  fixtureMode,
+  refresh,
+}: {
+  fixtureMode: DevFixtureMode;
+  refresh: () => void;
+}) {
+  const loader = useCallback(
+    async (signal: AbortSignal): Promise<AgentProductSetupChoice[]> => {
+      const profiles = fixtureMode
+        ? (await fixtureDelay(signal), agentProductSetupProfilesFixture())
+        : (await listProductProfiles(signal)).profiles;
+      return profiles
+        .map((profile) => ({
+          product: profile.product,
+          displayName: profile.display_name || profile.product,
+        }))
+        .sort((left, right) => left.product.localeCompare(right.product));
+    },
+    [fixtureMode],
+  );
+  const products = useEngineeringResource(
+    loader,
+    `agent-product-setup-products:${fixtureMode}`,
+  );
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const [pendingIntent, setPendingIntent] =
+    useState<AuthorizationCandidateIntent | null>(null);
+  const [message, setMessage] = useState("");
+  const [traceId, setTraceId] = useState("");
+  const retryKeys = useRef<Partial<Record<string, string>>>({});
+
+  function toggle(product: string) {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(product)) next.delete(product);
+      else next.add(product);
+      return next;
+    });
+  }
+
+  async function prepare(
+    intent: AuthorizationCandidateIntent,
+    available: readonly AgentProductSetupChoice[],
+  ) {
+    const chosen =
+      intent === "add"
+        ? available
+            .map((choice) => choice.product)
+            .filter((product) => selected.has(product))
+        : [];
+    if (intent === "add" && chosen.length === 0) {
+      setMessage("Choose at least one product.");
+      setTraceId("");
+      return;
+    }
+    setPendingIntent(intent);
+    setMessage("");
+    setTraceId("");
+    const retryKey = `${intent}:${chosen.join(",")}`;
+    const sourceEventId =
+      retryKeys.current[retryKey] ??
+      `ui:authorization-candidate:${AGENT_PRODUCT_SETUP_CANDIDATE_ID}:${intent}:${crypto.randomUUID()}`;
+    retryKeys.current[retryKey] = sourceEventId;
+    try {
+      const response = await prepareAuthorizationCandidate(
+        AGENT_PRODUCT_SETUP_CANDIDATE_ID,
+        intent,
+        sourceEventId,
+        undefined,
+        intent === "add" ? chosen : undefined,
+      );
+      setTraceId(response.trace_id);
+      if (response.state === "planned" && response.operation_id) {
+        delete retryKeys.current[retryKey];
+        window.location.assign(
+          `/ui/engineering/privileged-operations?operation_id=${encodeURIComponent(response.operation_id)}`,
+        );
+        return;
+      }
+      if (response.state === "planned") {
+        setMessage("The plan was prepared, but its review is not available yet.");
+      } else {
+        delete retryKeys.current[retryKey];
+        setMessage(
+          intent === "add"
+            ? "Agent product setup already covers exactly these products."
+            : "Agent product setup is already removed.",
+        );
+        refresh();
+      }
+    } catch (error) {
+      if (error instanceof LaunchplaneApiError) {
+        setMessage(error.message);
+        setTraceId(error.traceId);
+      } else {
+        setMessage("The access policy plan could not be prepared.");
+      }
+    } finally {
+      setPendingIntent(null);
+    }
+  }
+
+  return (
+    <section
+      aria-labelledby="agent-product-setup-heading"
+      className="privileged-operation-card"
+    >
+      <header>
+        <div>
+          <span className="engineering-kicker">Access policy</span>
+          <h2 id="agent-product-setup-heading">Prepare agent product setup</h2>
+          <p>
+            On each selected product, the Director's agent may plan and apply
+            settings and secrets on the testing lane, create the testing lane's
+            Dokploy compose target (create only), and write the production
+            backup policy that promotion's backup gate relies on. It cannot
+            change the Client or release review, deploy, promote, roll back, run
+            a backup, or reach any other product. The selection replaces the
+            products already covered. This creates a plan for review and changes
+            nothing until it is approved; installed access stays until a separate
+            removal plan is approved.
+          </p>
+        </div>
+      </header>
+      <EngineeringResourceGate
+        noun="Products"
+        refresh={products.refresh}
+        state={products.state}
+      >
+        {(choices) => (
+          <>
+            {choices.length ? (
+              <fieldset className="agent-product-setup-products">
+                <legend>Products</legend>
+                {choices.map((choice) => (
+                  <label key={choice.product}>
+                    <input
+                      checked={selected.has(choice.product)}
+                      disabled={pendingIntent !== null}
+                      onChange={() => toggle(choice.product)}
+                      type="checkbox"
+                    />{" "}
+                    {choice.displayName}
+                    {choice.displayName !== choice.product ? (
+                      <> ({choice.product})</>
+                    ) : null}
+                  </label>
+                ))}
+              </fieldset>
+            ) : (
+              <p role="status">No products are recorded.</p>
+            )}
+            <div className="privileged-operation-actions activation-plan-actions">
+              <button
+                disabled={pendingIntent !== null || selected.size === 0}
+                onClick={() => void prepare("add", choices)}
+                type="button"
+              >
+                {pendingIntent === "add"
+                  ? "Preparing access…"
+                  : "Prepare product setup access"}
+              </button>
+              <button
+                disabled={pendingIntent !== null}
+                onClick={() => void prepare("remove", choices)}
+                type="button"
+              >
+                {pendingIntent === "remove"
+                  ? "Preparing removal…"
+                  : "Prepare product setup removal"}
+              </button>
+            </div>
+          </>
+        )}
+      </EngineeringResourceGate>
+      {message ? (
+        <p className="privileged-operation-terminal-reason" role="status">
+          {message}
+          {traceId ? (
+            <>
+              <br />
+              Trace: {traceId}
+            </>
+          ) : null}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+function agentProductSetupProfilesFixture(): Array<{
+  product: string;
+  display_name: string;
+  production_use: "unknown" | "prelaunch" | "live";
+}> {
+  return [
+    { product: "example-shop", display_name: "Example Shop", production_use: "prelaunch" },
+    { product: "example-docs", display_name: "Example Docs", production_use: "unknown" },
+    { product: "example-live", display_name: "Example Live", production_use: "live" },
+  ];
 }
 
 function AuthorizationCandidateCard({

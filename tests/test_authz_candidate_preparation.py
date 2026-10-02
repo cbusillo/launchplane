@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import unittest
 
 from control_plane.authz_candidate_preparation import (
+    AGENT_PRODUCT_SETUP_MANAGED_SET_ID,
     ADMINISTRATOR_PRODUCT_EVIDENCE_CONTEXT_RULE_ID,
     ADMINISTRATOR_PRODUCT_EVIDENCE_ENVIRONMENT_RULE_ID,
     ADMINISTRATOR_PRODUCT_EVIDENCE_READ_ACTIONS,
@@ -14,6 +16,11 @@ from control_plane.authz_candidate_preparation import (
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
     TERMINAL_ENROLLMENT_POLICY_MANAGED_SET_ID,
     administrator_product_evidence_read_state,
+    agent_product_setup_products,
+    agent_product_setup_request_grants,
+    agent_product_setup_state,
+    authorization_candidate_request_matches,
+    compile_agent_product_setup_candidate,
     compile_administrator_product_evidence_read_candidate,
     compile_terminal_enrollment_policy_candidate,
     is_terminal_enrollment_requester_request,
@@ -28,10 +35,16 @@ from control_plane.contracts.ordinary_agent import (
     OrdinaryAgentPolicyRule,
     OrdinaryAgentTarget,
 )
+from control_plane.contracts.privileged_operation import ManagedAuthzPolicySetProposalInput
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductImageProfile,
+)
 from control_plane.service_auth import (
     AuthorizationTarget,
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
+    LocalOperatorIdentity,
     TerminalAgentIdentity,
 )
 from tests.test_ordinary_agent_activation_storage import _record, _revoked
@@ -766,3 +779,356 @@ class AdministratorProductEvidenceCandidateCompilerTests(unittest.TestCase):
                     }
                 )
                 self.assertFalse(is_administrator_product_evidence_read_request(changed_request))
+
+
+def _setup_profile(
+    product: str,
+    contexts: tuple[tuple[str, str], ...] | None = None,
+    production_use: str = "live",
+) -> LaunchplaneProductProfileRecord:
+    lanes = contexts if contexts is not None else (("prod", product),)
+    return LaunchplaneProductProfileRecord.model_validate(
+        {
+            "product": product,
+            "production_use": production_use,
+            "display_name": product.title(),
+            "repository": f"example/{product}",
+            "driver_id": "generic-web",
+            "image": ProductImageProfile().model_dump(mode="json"),
+            "lanes": [{"instance": instance, "context": context} for instance, context in lanes],
+            "updated_at": "2026-10-01T12:00:00+00:00",
+            "source": "test:agent-product-setup",
+        }
+    )
+
+
+@dataclass
+class _ProductProfileStore:
+    profiles: tuple[LaunchplaneProductProfileRecord, ...] = (
+        _setup_profile("example-shop"),
+        _setup_profile("example-docs", (("testing", "docs-ctx"), ("prod", "docs-ctx"))),
+        _setup_profile("example-split", (("testing", "split-a"), ("prod", "split-b"))),
+        _setup_profile("example-laneless", ()),
+        _setup_profile("example-service", (("prod", "launchplane"),)),
+    )
+
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
+        for profile in self.profiles:
+            if profile.product == product:
+                return profile
+        raise FileNotFoundError(product)
+
+
+_OPERATOR = LocalOperatorIdentity(subject="operator-agent", token_label="operator-agent-token")
+
+
+def _setup_rules(
+    product: str = "example-shop",
+    context: str = "example-shop",
+    *,
+    subject: str = "operator-agent",
+    token_label: str = "operator-agent-token",
+) -> list[dict[str, object]]:
+    common = {
+        "managed_set_id": AGENT_PRODUCT_SETUP_MANAGED_SET_ID,
+        "subjects": [subject],
+        "token_labels": [token_label],
+        "contexts": [context],
+    }
+    return [
+        {
+            **common,
+            "managed_rule_id": f"{product}.testing-config",
+            "products": [product],
+            "instances": ["testing"],
+            "actions": ["product_config.plan", "product_config.apply"],
+        },
+        {
+            **common,
+            "managed_rule_id": f"{product}.prod-backup-policy",
+            "products": [product],
+            "instances": ["prod"],
+            "actions": ["production_backup_authority.write"],
+        },
+        {
+            **common,
+            "managed_rule_id": f"{product}.testing-target",
+            "products": ["launchplane"],
+            "instances": ["testing"],
+            "actions": ["dokploy_target.lane_setup"],
+        },
+    ]
+
+
+def _setup_policy(*rules: dict[str, object], schema_version: int = 2) -> LaunchplaneAuthzPolicy:
+    payload = _policy().model_dump(mode="json")
+    payload["schema_version"] = schema_version
+    payload["local_operators"] = [
+        {
+            "managed_set_id": "operator.standing-read",
+            "managed_rule_id": "operator-agent-reader",
+            "subjects": ["operator-agent"],
+            "token_labels": ["operator-agent-token"],
+            "actions": ["product_profile.read"],
+        },
+        *rules,
+    ]
+    return LaunchplaneAuthzPolicy.model_validate(payload)
+
+
+class AgentProductSetupCandidateCompilerTests(unittest.TestCase):
+    def _compile(
+        self,
+        policy: LaunchplaneAuthzPolicy,
+        *,
+        intent: str = "add",
+        products: tuple[str, ...] = ("example-shop",),
+        identity: LocalOperatorIdentity | None = _OPERATOR,
+    ) -> tuple[str, ManagedAuthzPolicySetProposalInput | None]:
+        return compile_agent_product_setup_candidate(
+            current_policy=policy,
+            identity=identity,
+            intent=intent,  # type: ignore[arg-type]
+            products=products,
+            record_store=_ProductProfileStore(),
+        )
+
+    def test_add_compiles_three_lane_bound_rules_per_selected_product(self) -> None:
+        state, candidate = self._compile(
+            _setup_policy(schema_version=3),
+            products=(" example-shop", "example-docs", "example-shop"),
+        )
+
+        self.assertEqual(state, "planned")
+        assert candidate is not None
+        self.assertEqual(candidate.managed_set_id, AGENT_PRODUCT_SETUP_MANAGED_SET_ID)
+        self.assertEqual(candidate.desired_policy.schema_version, 3)
+        self.assertEqual(candidate.schema_migration, "reject")
+        self.assertIsNone(candidate.administrator_quorum_change)
+        self.assertEqual(candidate.desired_policy.github_humans, ())
+        rules = {rule.managed_rule_id: rule for rule in candidate.desired_policy.local_operators}
+        self.assertEqual(
+            sorted(rules),
+            [
+                "example-docs.prod-backup-policy",
+                "example-docs.testing-config",
+                "example-docs.testing-target",
+                "example-shop.prod-backup-policy",
+                "example-shop.testing-config",
+                "example-shop.testing-target",
+            ],
+        )
+        config = rules["example-docs.testing-config"]
+        self.assertEqual(
+            (config.products, config.contexts, config.instances, set(config.actions)),
+            (
+                ("example-docs",),
+                ("docs-ctx",),
+                ("testing",),
+                {"product_config.plan", "product_config.apply"},
+            ),
+        )
+        backup = rules["example-docs.prod-backup-policy"]
+        self.assertEqual(
+            (backup.products, backup.contexts, backup.instances, backup.actions),
+            (("example-docs",), ("docs-ctx",), ("prod",), ("production_backup_authority.write",)),
+        )
+        target = rules["example-docs.testing-target"]
+        self.assertEqual(
+            (target.products, target.contexts, target.instances, target.actions),
+            (("launchplane",), ("docs-ctx",), ("testing",), ("dokploy_target.lane_setup",)),
+        )
+        granted = {action for rule in rules.values() for action in rule.actions}
+        self.assertNotIn("product_profile.write", granted)
+        self.assertNotIn("dokploy_target.setup", granted)
+        self.assertEqual(
+            agent_product_setup_request_grants(candidate, intent="add"),
+            (
+                ("example-docs", "docs-ctx", "operator-agent", "operator-agent-token"),
+                ("example-shop", "example-shop", "operator-agent", "operator-agent-token"),
+            ),
+        )
+        self.assertIsNone(agent_product_setup_request_grants(candidate, intent="remove"))
+        self.assertTrue(
+            authorization_candidate_request_matches(
+                candidate_id="agent-product-setup",
+                request=candidate,
+                github_id=123,
+                intent="add",
+                products=("example-shop", "example-docs"),
+                configured_local_operator_identity=_OPERATOR,
+            )
+        )
+        self.assertFalse(
+            authorization_candidate_request_matches(
+                candidate_id="agent-product-setup",
+                request=candidate,
+                github_id=123,
+                intent="add",
+                products=("example-shop",),
+                configured_local_operator_identity=_OPERATOR,
+            )
+        )
+
+    def test_live_product_is_accepted(self) -> None:
+        state, _candidate = self._compile(_setup_policy(), products=("example-shop",))
+        self.assertEqual(state, "planned")
+
+    def test_add_refuses_unknown_empty_glob_and_ambiguous_products(self) -> None:
+        policy = _setup_policy()
+        for products, reason in (
+            ((), "candidate_products_required"),
+            (("  ",), "candidate_products_required"),
+            (("missing-product",), "candidate_product_unavailable"),
+            (("example-*",), "candidate_product_unavailable"),
+            (("example-split",), "candidate_product_unavailable"),
+            (("example-laneless",), "candidate_product_unavailable"),
+            (("example-service",), "candidate_product_unavailable"),
+        ):
+            with self.subTest(products=products):
+                with self.assertRaises(AuthorizationCandidatePreparationError) as raised:
+                    self._compile(policy, products=products)
+                self.assertEqual(raised.exception.reason_code, reason)
+
+    def test_add_requires_exact_configured_local_operator(self) -> None:
+        for identity in (
+            None,
+            LocalOperatorIdentity(subject="operator-*", token_label="operator-agent-token"),
+            LocalOperatorIdentity(subject="operator-agent", token_label=" "),
+        ):
+            with self.subTest(identity=identity):
+                with self.assertRaises(AuthorizationCandidatePreparationError) as raised:
+                    self._compile(_setup_policy(), identity=identity)
+                self.assertEqual(raised.exception.reason_code, "candidate_principal_unavailable")
+
+    def test_matching_set_is_noop_and_new_selection_replaces_it(self) -> None:
+        policy = _setup_policy(*_setup_rules())
+        self.assertEqual(self._compile(policy), ("already_satisfied", None))
+        self.assertEqual(agent_product_setup_state(policy, identity=_OPERATOR), "active")
+        self.assertEqual(agent_product_setup_products(policy), ("example-shop",))
+        state, candidate = self._compile(policy, products=("example-shop", "example-docs"))
+        self.assertEqual(state, "planned")
+        assert candidate is not None
+        self.assertEqual(len(candidate.desired_policy.local_operators), 6)
+
+    def test_remove_proposes_empty_fragment_and_absent_remove_is_noop(self) -> None:
+        self.assertEqual(
+            self._compile(_setup_policy(), intent="remove", products=()),
+            ("already_satisfied", None),
+        )
+        state, candidate = self._compile(
+            _setup_policy(*_setup_rules(subject="other-operator")),
+            intent="remove",
+            products=(),
+            identity=None,
+        )
+        self.assertEqual(state, "planned")
+        assert candidate is not None
+        self.assertEqual(candidate.desired_policy.local_operators, ())
+        self.assertEqual(agent_product_setup_request_grants(candidate, intent="remove"), ())
+        self.assertTrue(
+            authorization_candidate_request_matches(
+                candidate_id="agent-product-setup",
+                request=candidate,
+                github_id=123,
+                intent="remove",
+            )
+        )
+        self.assertFalse(
+            authorization_candidate_request_matches(
+                candidate_id="agent-product-setup",
+                request=candidate,
+                github_id=123,
+                intent="add",
+                configured_local_operator_identity=_OPERATOR,
+            )
+        )
+
+    def test_foreign_or_malformed_set_is_conflict(self) -> None:
+        shop = _setup_rules()
+        widened = json.loads(json.dumps(shop))
+        widened[0]["instances"] = ["testing", "prod"]
+        extra_action = json.loads(json.dumps(shop))
+        extra_action[1]["actions"] = ["production_backup_authority.write", "promotion.write"]
+        service_target = json.loads(json.dumps(shop))
+        service_target[2]["actions"] = ["dokploy_target.setup"]
+        service_target[2]["instances"] = []
+        missing_rule = shop[:2]
+        cases = (
+            _setup_policy(*_setup_rules(subject="other-operator")),
+            _setup_policy(*widened),
+            _setup_policy(*extra_action),
+            _setup_policy(*service_target),
+            _setup_policy(*missing_rule),
+            _setup_policy(*_setup_rules(), *_setup_rules("example-docs", "docs-ctx", subject="x")),
+        )
+        for policy in cases:
+            with self.subTest(policy=policy.local_operators[1:]):
+                self.assertEqual(agent_product_setup_state(policy, identity=_OPERATOR), "conflict")
+                if policy is not cases[0]:
+                    self.assertEqual(agent_product_setup_products(policy), ())
+                with self.assertRaises(AuthorizationCandidatePreparationError) as raised:
+                    self._compile(policy)
+                self.assertEqual(raised.exception.reason_code, "candidate_set_conflict")
+        human_occupied = LaunchplaneAuthzPolicy.model_validate(
+            {
+                **_setup_policy().model_dump(mode="json"),
+                "github_humans": [
+                    {
+                        "managed_set_id": AGENT_PRODUCT_SETUP_MANAGED_SET_ID,
+                        "managed_rule_id": "example-shop.testing-config",
+                        "github_ids": [123],
+                        "products": ["example-shop"],
+                        "contexts": ["example-shop"],
+                        "instances": ["testing"],
+                        "actions": ["product_config.plan"],
+                    }
+                ],
+            }
+        )
+        with self.assertRaises(AuthorizationCandidatePreparationError):
+            self._compile(human_occupied, intent="remove", products=())
+
+    def test_recognizer_rejects_tampered_requests(self) -> None:
+        _state, candidate = self._compile(_setup_policy(schema_version=3))
+        assert candidate is not None
+        payload = candidate.model_dump(mode="json")
+        tampered: list[dict[str, object]] = []
+        for suffix, key, value in (
+            ("testing-config", "actions", ["product_config.apply", "product_profile.write"]),
+            ("testing-config", "instances", ["*"]),
+            ("prod-backup-policy", "instances", ["testing"]),
+            ("testing-target", "products", ["example-shop"]),
+            ("testing-target", "contexts", ["other-context"]),
+            ("testing-config", "subjects", ["operator-agent", "other"]),
+            ("prod-backup-policy", "managed_rule_id", "example-shop.other-rule"),
+        ):
+            mutated = json.loads(json.dumps(payload))
+            (rule,) = (
+                rule
+                for rule in mutated["desired_policy"]["local_operators"]
+                if rule["managed_rule_id"] == f"example-shop.{suffix}"
+            )
+            rule[key] = value
+            tampered.append(mutated)
+        extra_principal = json.loads(json.dumps(payload))
+        extra_principal["desired_policy"]["github_humans"] = [
+            {
+                "managed_set_id": AGENT_PRODUCT_SETUP_MANAGED_SET_ID,
+                "managed_rule_id": "extra",
+                "github_ids": [123],
+                "roles": ["admin"],
+            }
+        ]
+        tampered.append(extra_principal)
+        migration = json.loads(json.dumps(payload))
+        migration["schema_migration"] = "migrate_v2_to_v3"
+        migration["desired_policy"]["schema_version"] = 3
+        tampered.append(migration)
+        for mutated in tampered:
+            with self.subTest(mutated=mutated):
+                try:
+                    request = ManagedAuthzPolicySetProposalInput.model_validate(mutated)
+                except ValueError:
+                    continue
+                self.assertIsNone(agent_product_setup_request_grants(request, intent="add"))

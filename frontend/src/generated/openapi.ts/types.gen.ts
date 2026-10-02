@@ -204,8 +204,9 @@ export type AuthorizationCandidatePolicyProvenance = {
 };
 
 export type AuthorizationCandidatePrepareEnvelope = {
-    candidate_id: 'ordinary-agent-delivery-administration' | 'administrator-product-evidence-read' | 'ordinary-agent-enrollment-requester';
+    candidate_id: 'ordinary-agent-delivery-administration' | 'administrator-product-evidence-read' | 'ordinary-agent-enrollment-requester' | 'agent-product-setup';
     intent: 'add' | 'remove';
+    products?: Array<string>;
     source_event_id: string;
 };
 
@@ -2427,7 +2428,7 @@ export type PrivilegedOperationSemanticReview = {
     rollback: PrivilegedOperationSemanticReviewRollback;
     safety_class: 'secret_backed' | 'policy_admin';
     schema_version: number;
-    title: 'Managed-secret re-encryption review' | 'Managed authorization policy review' | 'Review agent delivery administration' | 'Review administrator product evidence access' | 'Review client delivery access' | 'Review terminal client connection requests' | 'Review removing terminal client connection requests' | 'Managed merge-train policy review' | 'Review agent delivery setup' | 'Review stopping agent delivery';
+    title: 'Managed-secret re-encryption review' | 'Managed authorization policy review' | 'Review agent delivery administration' | 'Review administrator product evidence access' | 'Review agent product setup access' | 'Review removing agent product setup access' | 'Review client delivery access' | 'Review terminal client connection requests' | 'Review removing terminal client connection requests' | 'Managed merge-train policy review' | 'Review agent delivery setup' | 'Review stopping agent delivery';
 };
 
 export type PrivilegedOperationSemanticReviewActivityEntry = {
