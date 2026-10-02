@@ -57,6 +57,7 @@ __all__ = [
     "dispatch_generic_web_promotion_workflow_result",
     "build_generic_web_promotion_workflow_outbox_delivery",
     "execute_generic_web_prod_promotion_result",
+    "generic_web_promotion_outcome_is_settled",
     "resolve_generic_web_promotion_destination_lane",
     "resolve_generic_web_promotion_workflow_lane",
     "should_store_generic_web_promotion_idempotency",
@@ -87,6 +88,9 @@ class GenericWebProdPromotionRecords(BaseModel):
     release_status: str = ""
     release_tag: str = ""
     release_url: str = ""
+    rollback_status: str = ""
+    rollback_target_deployment_record_id: str = ""
+    rollback_deployment_record_id: str = ""
     dry_run: str = ""
 
 
@@ -112,6 +116,9 @@ class GenericWebProdPromotionResponseResult(BaseModel):
     release_status: Literal["pending", "pass", "fail", "skipped"] = "skipped"
     release_tag: str = ""
     release_url: str = ""
+    rollback_status: Literal["pending", "pass", "fail", "skipped"] = "skipped"
+    rollback_target_deployment_record_id: str = ""
+    rollback_deployment_record_id: str = ""
     target_name: str = ""
     target_id: str = ""
     target_category: Literal[
@@ -375,6 +382,21 @@ def should_store_generic_web_promotion_idempotency(
     return not any(str(value).strip() == "fail" for value in statuses)
 
 
+def generic_web_promotion_outcome_is_settled(
+    driver_result: GenericWebProdPromotionResult,
+) -> bool:
+    """Whether a live promotion left production in a known state.
+
+    A failed promotion whose rollback restored and verified the previous
+    deployment is finished, so its provider operation completes instead of
+    fencing the target for recovery.
+    """
+    return (
+        should_store_generic_web_promotion_idempotency(driver_result)
+        or driver_result.rollback_status == "pass"
+    )
+
+
 def _read_generic_web_promotion_profile(
     *, record_store: object, product: str
 ) -> LaunchplaneProductProfileRecord:
@@ -410,6 +432,9 @@ def _prod_promotion_records(driver_result: dict[str, object]) -> dict[str, objec
         "release_status",
         "release_tag",
         "release_url",
+        "rollback_status",
+        "rollback_target_deployment_record_id",
+        "rollback_deployment_record_id",
         "dry_run",
     )
     return {key: str(driver_result[key]) for key in keys if key in driver_result}

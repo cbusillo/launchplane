@@ -15,7 +15,7 @@ from control_plane.contracts.deploy_target import DeployedTargetReference, Provi
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
 )
-from control_plane.contracts.deployment_record import ResolvedTargetEvidence
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
@@ -35,6 +35,7 @@ from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     DeploymentEvidence,
     HealthcheckEvidence,
+    ReleaseStatus,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
@@ -1683,12 +1684,33 @@ class FastApiProductPromotionTests(unittest.IsolatedAsyncioTestCase):
                 updated_at=now,
             )
         )
-        store.write_environment_inventory(
-            _inventory(
-                instance="prod",
-                artifact_id=PROD_ARTIFACT,
-                source_git_ref=PROD_SOURCE_REF,
-                updated_at=now,
+        prod_inventory = _inventory(
+            instance="prod",
+            artifact_id=PROD_ARTIFACT,
+            source_git_ref=PROD_SOURCE_REF,
+            updated_at=now,
+        )
+        store.write_environment_inventory(prod_inventory)
+        # The deployment production runs is the promotion's rollback target.
+        store.write_deployment_record(
+            DeploymentRecord(
+                record_id=prod_inventory.deployment_record_id,
+                artifact_identity=prod_inventory.artifact_identity,
+                context=prod_inventory.context,
+                instance=prod_inventory.instance,
+                source_git_ref=prod_inventory.source_git_ref,
+                resolved_target=ResolvedTargetEvidence(
+                    target_type="application", target_id="app-prod", target_name="atlas-prod"
+                ),
+                runtime_identity=prod_inventory.runtime_identity.model_copy(
+                    update={
+                        "image_reference": f"ghcr.io/example/atlas-commerce:sha-{PROD_SOURCE_REF}"
+                    }
+                )
+                if prod_inventory.runtime_identity is not None
+                else None,
+                deploy=prod_inventory.deploy,
+                destination_health=prod_inventory.destination_health,
             )
         )
         store.write_provider_target_record(
@@ -1762,6 +1784,70 @@ class GenericWebPromotionAdapterInventoryTests(unittest.TestCase):
         self.assertEqual(arguments["normalized_artifact_id"], TESTING_ARTIFACT)
         self.assertEqual(arguments["request_deploy_reference"], TESTING_DEPLOY_REFERENCE)
         self.assertEqual(arguments["request_source_git_ref"], TESTING_SOURCE_REF)
+
+
+class GenericWebPromotionAdapterRollbackTests(unittest.TestCase):
+    @staticmethod
+    def _apply(*, rollback_status: ReleaseStatus) -> bool:
+        from control_plane.drivers.generic_web_dispatch import GenericWebProdPromotionEnvelope
+        from control_plane.generic_web_promotion_http import GenericWebProdPromotionRecords
+        from control_plane.http_routes.generic_web import (
+            _GenericWebProdPromotionProviderMutationAdapter,
+        )
+        from control_plane.workflows.generic_web_promotion import GenericWebProdPromotionResult
+
+        profile = _profile()
+        lane = next(candidate for candidate in profile.lanes if candidate.instance == "prod")
+        result = GenericWebProdPromotionResult(
+            product="atlas-commerce",
+            context="atlas-commerce",
+            from_instance="testing",
+            to_instance="prod",
+            artifact_id=TESTING_ARTIFACT,
+            promotion_record_id="promotion-atlas",
+            promotion_status="fail",
+            deployment_status="pass",
+            destination_health_status="fail",
+            rollback_status=rollback_status,
+        )
+        with (
+            patch(
+                "control_plane.http_routes.generic_web.default_generic_web_deploy_provider",
+                return_value=Mock(),
+            ),
+            patch(
+                "control_plane.http_routes.generic_web.execute_generic_web_prod_promotion_result",
+                return_value=(GenericWebProdPromotionRecords(), result),
+            ),
+            patch.object(
+                _GenericWebProdPromotionProviderMutationAdapter,
+                "resolve_deploy_target",
+                return_value=Mock(),
+            ),
+        ):
+            adapter = _GenericWebProdPromotionProviderMutationAdapter(
+                control_plane_root=Path("."),
+                record_store=Mock(),
+                promotion_request=GenericWebProdPromotionEnvelope.model_validate(
+                    {
+                        "schema_version": 1,
+                        "product": "atlas-commerce",
+                        "promotion": {"schema_version": 1, "product": "atlas-commerce"},
+                    }
+                ),
+                profile=profile,
+                lane=lane,
+                trace_id="trace-rollback",
+                validate_before_effect=lambda _target: None,
+            )
+            outcome = adapter.apply("operation-key", Mock())
+        return outcome.durable
+
+    def test_rolled_back_failure_settles_instead_of_fencing_the_target(self) -> None:
+        self.assertTrue(self._apply(rollback_status="pass"))
+
+    def test_failed_rollback_still_requires_reconciliation(self) -> None:
+        self.assertFalse(self._apply(rollback_status="fail"))
 
 
 if __name__ == "__main__":
