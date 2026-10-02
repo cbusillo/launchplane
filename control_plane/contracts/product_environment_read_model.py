@@ -949,9 +949,9 @@ def _product_config_input_blockers(
     blockers: list[str] = []
     if not prerequisites.storage_ready:
         blockers.append("DB-backed product configuration storage is unavailable.")
-    if item_count == 0:
-        label = "runtime settings" if input_kind == "runtime_settings" else "managed secrets"
-        blockers.append(f"Product profile does not declare {label} for this environment.")
+    # A site's own runtime settings need no declaration; managed secrets still do.
+    if input_kind == "managed_secrets" and item_count == 0:
+        blockers.append("Product profile does not declare managed secrets for this environment.")
     if input_kind == "managed_secrets":
         if not prerequisites.secret_key_ready:
             blockers.append("Managed-secret write encryption is unavailable.")
