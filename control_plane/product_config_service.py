@@ -6,6 +6,7 @@ from typing import Protocol, cast
 
 import click
 
+from control_plane import live_target_runtime
 from control_plane import product_config as control_plane_product_config
 from control_plane import provider_key_adoption
 from control_plane import secrets as control_plane_secrets
@@ -147,6 +148,15 @@ class LaneProviderEnvStore(Protocol):
         self, *, context_name: str, instance_name: str
     ) -> DokployTargetIdRecord: ...
 
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]: ...
+
 
 def read_lane_provider_env(
     *,
@@ -194,7 +204,37 @@ def read_lane_provider_env(
         if profile.driver_id == "odoo" and target_record.target_type == "compose"
         else {}
     )
-    return provider_key_adoption.LaneProviderEnv(env=env, template_defaults=template_defaults)
+    # Keys the deploy takes from the tracked target or a managed secret are already
+    # recorded; the lane's runtime-environment records are checked by the planner.
+    secret_keys = {
+        binding.binding_key
+        for binding in record_store.list_secret_bindings(
+            integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+            context_name=context_name,
+            limit=None,
+        )
+        if binding.status == "configured"
+        and binding.context == context_name
+        and binding.instance in {"", instance_name}
+    }
+    application_keys = live_target_runtime.product_lane_declared_keys(
+        record_store=cast(live_target_runtime.LiveTargetRuntimeProfileStore, record_store),
+        product_name=product,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+    return provider_key_adoption.LaneProviderEnv(
+        env=env,
+        template_defaults=template_defaults,
+        recorded_keys=frozenset(target_record.env) | frozenset(secret_keys),
+        unretirable_keys=frozenset(
+            key
+            for key in env
+            if live_target_runtime.provider_key_retirement_blocked(
+                key, application_keys=application_keys
+            )
+        ),
+    )
 
 
 def apply_product_config_service_request(

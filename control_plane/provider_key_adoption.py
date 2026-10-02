@@ -42,10 +42,17 @@ class ProviderKeyAdoptionError(ValueError):
 
 @dataclass(frozen=True)
 class LaneProviderEnv:
-    """The lane's current provider env and the defaults its compose template supplies."""
+    """The lane's current provider env, read by the service, and what decides each key.
+
+    ``recorded_keys`` are keys other site records already supply for the lane, such as
+    the tracked target's env and managed secret bindings. ``unretirable_keys`` are
+    declared application or driver settings, which a template default never retires.
+    """
 
     env: Mapping[str, str]
     template_defaults: Mapping[str, str]
+    recorded_keys: frozenset[str] = frozenset()
+    unretirable_keys: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -114,7 +121,7 @@ def plan_provider_key_adoption(
     dispositions: list[tuple[str, ProviderKeyDisposition]] = []
     for key in keys:
         disposition: ProviderKeyDisposition
-        if key in recorded_keys:
+        if key in recorded_keys or key in provider.recorded_keys:
             disposition = "already_recorded"
         elif key not in provider.env:
             disposition = "missing"
@@ -122,6 +129,7 @@ def plan_provider_key_adoption(
             disposition = "refused_credential"
         elif (
             key in provider.template_defaults
+            and key not in provider.unretirable_keys
             and provider.env[key].strip() == provider.template_defaults[key]
         ):
             disposition = "template_default"

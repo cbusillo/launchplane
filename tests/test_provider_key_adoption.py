@@ -10,6 +10,7 @@ from control_plane import product_config as control_plane_product_config
 from control_plane import product_config_service
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy.compose import odoo_compose_template_defaults
@@ -43,7 +44,9 @@ def _plan(
 ) -> dict[str, object]:
     provider = LaneProviderEnv(
         env=provider_env or {},
-        template_defaults={"APP_WORKERS": "6"},
+        template_defaults={"APP_WORKERS": "6", "APP_ADDONS_PATH": "/default"},
+        recorded_keys=frozenset({"TRACKED_SETTING"}),
+        unretirable_keys=frozenset({"APP_ADDONS_PATH"}),
     )
     return control_plane_product_config.apply_product_config_bundle(
         record_store=store,
@@ -77,7 +80,9 @@ class ProviderKeyAdoptionTests(unittest.TestCase):
         provider_env = {
             "APP_LABEL": ADOPTED_VALUE,
             "APP_WORKERS": "6",
+            "APP_ADDONS_PATH": "/default",
             "SITE_SETTING": "provider-copy",
+            "TRACKED_SETTING": "provider-copy",
             "APP_CALLBACK_URL": CREDENTIAL_URL,
             "APP_SIGNING_SECRET": "private-secret-value",
             "APP_BUILD_REF": "ghp_" + "a" * 36,
@@ -88,7 +93,9 @@ class ProviderKeyAdoptionTests(unittest.TestCase):
                 "adopt_provider_keys": [
                     "APP_LABEL",
                     "APP_WORKERS",
+                    "APP_ADDONS_PATH",
                     "SITE_SETTING",
+                    "TRACKED_SETTING",
                     "APP_CALLBACK_URL",
                     "APP_SIGNING_SECRET",
                     "APP_BUILD_REF",
@@ -106,7 +113,9 @@ class ProviderKeyAdoptionTests(unittest.TestCase):
             {
                 "APP_LABEL": "adopted",
                 "APP_WORKERS": "template_default",
+                "APP_ADDONS_PATH": "adopted",
                 "SITE_SETTING": "already_recorded",
+                "TRACKED_SETTING": "already_recorded",
                 "APP_CALLBACK_URL": "refused_credential",
                 "APP_SIGNING_SECRET": "refused_credential",
                 "APP_BUILD_REF": "refused_credential",
@@ -190,6 +199,18 @@ class LaneProviderEnvReadTests(unittest.TestCase):
             target_id="compose-cm-testing",
             target_type="compose",
             target_name="cm-testing",
+            env={"TRACKED_SETTING": "tracked-value"},
+        )
+        self.store.write_secret_binding(
+            SecretBinding(
+                binding_id="binding-cm-shared",
+                secret_id="secret-cm-shared",
+                integration="runtime_environment",
+                binding_key="SHARED_SERVICE_PASSWORD",
+                context="cm",
+                created_at="2026-10-02T00:00:00Z",
+                updated_at="2026-10-02T00:00:00Z",
+            )
         )
 
     def _read(self, *, product: str, instance: str = "testing") -> LaneProviderEnv:
@@ -202,7 +223,7 @@ class LaneProviderEnvReadTests(unittest.TestCase):
             patch.object(
                 dokploy_api,
                 "fetch_dokploy_target_payload",
-                return_value={"env": f"APP_LABEL={ADOPTED_VALUE}\n"},
+                return_value={"env": f"APP_LABEL={ADOPTED_VALUE}\nODOO_ADDONS_PATH=/x\n"},
             ) as fetch,
         ):
             provider = product_config_service.read_lane_provider_env(
@@ -220,8 +241,12 @@ class LaneProviderEnvReadTests(unittest.TestCase):
             LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
         )
         provider = self._read(product="odoo-tenant-cm")
-        self.assertEqual(dict(provider.env), {"APP_LABEL": ADOPTED_VALUE})
+        self.assertEqual(provider.env["APP_LABEL"], ADOPTED_VALUE)
         self.assertEqual(dict(provider.template_defaults), odoo_compose_template_defaults())
+        self.assertEqual(
+            provider.recorded_keys, frozenset({"TRACKED_SETTING", "SHARED_SERVICE_PASSWORD"})
+        )
+        self.assertEqual(provider.unretirable_keys, frozenset({"ODOO_ADDONS_PATH"}))
 
     def test_refuses_a_lane_the_product_does_not_own(self) -> None:
         self.store.write_product_profile_record(
