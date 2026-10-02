@@ -167,6 +167,10 @@ LAUNCHPLANE_REUSABLE_WORKFLOW_PATTERN = re.compile(
     r"^cbusillo/launchplane/\.github/workflows/[A-Za-z0-9_.-]+\.yml@(?:main|[0-9a-f]{40})$"
 )
 LAUNCHPLANE_CONFIG_AUTHORITY_WORKFLOW_PATH = ".github/workflows/launchplane-config-authority.yml"
+# A reusable workflow in the same repository names a file, not authority.
+SAME_REPOSITORY_REUSABLE_WORKFLOW_PATTERN = re.compile(
+    r"\./\.github/workflows/[A-Za-z0-9_-]+\.ya?ml"
+)
 LAUNCHPLANE_CONFIG_AUTHORITY_REUSABLE_WORKFLOW_PATTERN = re.compile(
     r"^cbusillo/launchplane/\.github/workflows/"
     r"reusable-product-repo-config-authority\.yml@(?P<revision>[^\s]+)$"
@@ -3312,6 +3316,8 @@ def _is_workflow_mechanic_key_value(*, key: str, value: object) -> bool:
         return True
     if key_text == "PATH" and re.fullmatch(r"[A-Za-z0-9_.-]+\.json", value_text):
         return True
+    if key_text == "USES" and SAME_REPOSITORY_REUSABLE_WORKFLOW_PATTERN.fullmatch(value_text):
+        return True
     if key_text == "IF" and value_text == (
         "${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}"
     ):
@@ -3448,6 +3454,7 @@ def _is_github_action_metadata_mechanic(*, path: str, key: str, value: object) -
 
 def _is_workflow_image_artifact_mechanic(*, path: str, key: str, value: object) -> bool:
     if path not in {
+        ".github/workflows/build.yml",
         ".github/workflows/deploy-launchplane.yml",
         ".github/workflows/launchplane-deploy.yml",
     }:
@@ -3473,7 +3480,11 @@ def _is_github_context_or_step_output_reference(value_text: str) -> bool:
     match = GITHUB_EXPRESSION_PATTERN.match(value_text)
     if match is None:
         return False
-    return bool(GITHUB_CONTEXT_OR_STEP_OUTPUT_REFERENCE_PATTERN.match(match.group("body").strip()))
+    body = match.group("body").strip()
+    # github.token is a credential, not image metadata.
+    if body == "github.token":
+        return False
+    return bool(GITHUB_CONTEXT_OR_STEP_OUTPUT_REFERENCE_PATTERN.match(body))
 
 
 def _is_github_step_output_reference(value_text: str) -> bool:

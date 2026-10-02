@@ -31,6 +31,7 @@ from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStructuralEntryObservation,
     MergeTrainStructuralEvaluationInput,
 )
+from control_plane.merge_train import MergeTrainLabelActor
 from control_plane.merge_train_github import GitHubMergeTrainClient
 from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader
 from control_plane.merge_train_github import MergeTrainGitHubError
@@ -2677,10 +2678,12 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 ],
                 _github_pull_request(42, mergeable=True),
                 {"permission": "admin"},
+                _label_events(),
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
                 _github_pull_request(43, base_ref="feature-root", head_ref="feature-child"),
                 {"permission": "admin"},
+                _label_events(),
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
             )
@@ -2718,10 +2721,12 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 "/repos/cbusillo/sellyouroutboard/pulls?state=open&sort=created&direction=asc&per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/pulls/42",
                 "/repos/cbusillo/sellyouroutboard/collaborators/cbusillo/permission",
+                "/repos/cbusillo/sellyouroutboard/issues/42/events?per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/commits/head-42/status?per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/commits/head-42/check-runs?per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/pulls/43",
                 "/repos/cbusillo/sellyouroutboard/collaborators/cbusillo/permission",
+                "/repos/cbusillo/sellyouroutboard/issues/43/events?per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/commits/head-43/status?per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/commits/head-43/check-runs?per_page=100&page=1",
             ],
@@ -2737,6 +2742,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 [_github_pull_request(15, author_association="CONTRIBUTOR")],
                 _github_pull_request(15, author_association="CONTRIBUTOR"),
                 MergeTrainGitHubError("permission not found", status_code=404),
+                _label_events(),
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
             )
@@ -2808,6 +2814,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     [pull_request],
                     pull_request,
                     MergeTrainGitHubError("permission not found", status_code=404),
+                    _label_events(),
                     commits,
                 ]
                 if expected == "patch_or_minor" or label == "force-pushed by someone else":
@@ -2832,6 +2839,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 [_github_pull_request(16)],
                 _github_pull_request(16),
                 {"permission": "admin"},
+                _label_events(),
                 _combined_status(),
                 {
                     "total_count": 101,
@@ -2867,6 +2875,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 [_github_pull_request(17)],
                 _github_pull_request(17),
                 {"permission": "admin"},
+                _label_events(),
                 {
                     "state": "pending",
                     "total_count": 101,
@@ -2911,6 +2920,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 [
                     _github_pull_request(number),
                     {"permission": "admin"},
+                    _label_events(),
                     _combined_status(),
                     {"check_runs": [_check_run("completed", "success")]},
                 ]
@@ -2931,6 +2941,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _github_branch(),
                 [_github_pull_request(12, author_association="OWNER")],
                 _github_pull_request(12, author_association="OWNER"),
+                _label_events(),
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
             )
@@ -2950,6 +2961,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 [_github_pull_request(13)],
                 _github_pull_request(13, mergeable=None, mergeable_state="behind"),
                 {"permission": "admin"},
+                _label_events(),
                 _combined_status(),
                 {"check_runs": [_check_run("queued", None)]},
             )
@@ -2972,6 +2984,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 [_github_pull_request(14)],
                 _github_pull_request(14),
                 {"permission": "admin"},
+                _label_events(),
                 _combined_status(statuses=()),
                 {"check_runs": [_check_run("completed", "success")]},
             )
@@ -2983,6 +2996,74 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
 
         self.assertEqual(snapshot.pull_requests[0].required_checks_status, "pass")
 
+    def test_snapshot_reader_records_who_last_applied_each_label(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(),
+                [_github_pull_request(18)],
+                _github_pull_request(18),
+                {"permission": "admin"},
+                _label_events(
+                    ("labeled", "ready-to-merge", 1, "cbusillo"),
+                    ("unlabeled", "ready-to-merge", 1, "cbusillo"),
+                    ("labeled", "ready-to-merge", 77, "client-agent[bot]"),
+                ),
+                {"permission": "write"},
+                _combined_status(),
+                {"check_runs": [_check_run("completed", "success")]},
+            )
+        )
+
+        snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+            repository="cbusillo/sellyouroutboard", base_branch="main"
+        )
+
+        self.assertEqual(
+            snapshot.pull_requests[0].label_actors,
+            (
+                MergeTrainLabelActor(
+                    label="ready-to-merge",
+                    actor_id=77,
+                    actor_login="client-agent[bot]",
+                ),
+            ),
+        )
+
+    def test_snapshot_reader_names_an_app_acting_with_a_user_token(self) -> None:
+        cases = (
+            ("installation token", "Bot", ""),
+            ("user access token", "User", "client-agent"),
+        )
+        for label, actor_type, expected_app in cases:
+            with self.subTest(label):
+                event = {
+                    "event": "labeled",
+                    "label": {"name": "ready-to-merge"},
+                    "actor": {"id": 1, "login": "cbusillo", "type": actor_type},
+                    "performed_via_github_app": {"id": 9, "slug": "client-agent"},
+                }
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _github_branch(),
+                        [_github_pull_request(19)],
+                        _github_pull_request(19),
+                        {"permission": "admin"},
+                        [event],
+                        _combined_status(),
+                        {"check_runs": [_check_run("completed", "success")]},
+                    )
+                )
+
+                snapshot = GitHubMergeTrainSnapshotReader(
+                    transport=transport
+                ).read_merge_train_snapshot(
+                    repository="cbusillo/sellyouroutboard", base_branch="main"
+                )
+
+                self.assertEqual(
+                    snapshot.pull_requests[0].label_actors[0].on_behalf_via_app, expected_app
+                )
+
     def test_snapshot_reader_fails_closed_on_missing_required_shape(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=(_github_branch(), [{"number": 1}])
@@ -2992,6 +3073,18 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
                 repository="cbusillo/sellyouroutboard", base_branch="main"
             )
+
+
+def _label_events(
+    *events: tuple[str, str, int, str],
+) -> list[dict[str, object]]:
+    """Issue events as (event, label, actor id, actor login); by default the owner labels."""
+    return [
+        {"event": event, "label": {"name": label}, "actor": {"id": actor_id, "login": login}}
+        for event, label, actor_id, login in (
+            events or (("labeled", "ready-to-merge", 1, "cbusillo"),)
+        )
+    ]
 
 
 def _github_commit(

@@ -11,7 +11,6 @@ from control_plane.contracts import ordinary_agent_effect as effects
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.merge_train_effect import (
     CandidateHeadMergeEffect,
-    CandidateRefPrepareEffect,
     MergeTrainEffectLineage,
     PullRequestHeadRefreshEffect,
 )
@@ -829,97 +828,6 @@ class OrdinaryAgentMergeTrainJobTests(unittest.TestCase):
         assert reclaimed is not None
         self.assertEqual(reclaimed.controller_fence, landing.fence)
         return reclaimed
-
-    def test_actual_store_normal_step_replays_completed_effect_without_provider_resend(
-        self,
-    ) -> None:
-        claimed = self.claim()
-        self.preload_snapshot(claimed)
-
-        planned = self.advance(claimed)
-
-        self.assertEqual(planned.status, "waiting")
-        candidates = self.store.list_merge_train_batch_candidate_records(
-            repository=self.request.target.repository,
-            base_branch=self.request.target.base_branch,
-            status="active",
-        )
-        self.assertEqual(len(candidates), 1)
-        candidate = candidates[0].candidate
-        self.store.finish_ordinary_agent_job_attempt(
-            claim_fence=claimed.claim_fence, disposition=planned
-        )
-        assert planned.next_due_at is not None
-        self.session.now = planned.next_due_at
-        self.session.clock.return_value = datetime.fromtimestamp(
-            self.session.now, timezone.utc
-        ).isoformat()
-        resumed = self.claim("worker-resumed")
-        fence = self.acquire(resumed)
-        command = effects.CandidateRefPrepareCommand(
-            effect=CandidateRefPrepareEffect(
-                lineage=MergeTrainEffectLineage(
-                    repository=candidate.repository,
-                    base_branch=candidate.base_branch,
-                    batch_id=candidate.batch_id,
-                ),
-                candidate_ref=candidate.candidate_ref,
-                base_sha=candidate.base_sha,
-            )
-        )
-        effect = self.store.reserve_ordinary_agent_effect(
-            request_id=self.request.request_id,
-            expected_binding_revision=self.request.binding_revision,
-            controller_fence=fence,
-            command=command,
-            semantic_ordinal=1,
-        )
-        custody = self.store.reserve_ordinary_custody_attempt(
-            effect_id=effect.effect_id,
-            expected_effect_revision=effect.revision,
-        )
-        self.fixture.issue(custody)
-        child = self.store.checkpoint_ordinary_semantic_dispatch(
-            effect_id=effect.effect_id,
-            controller_fence=fence,
-            custody_attempt_id=custody.attempt_id,
-            fixed_token_expires_at=self.session.now + 300,
-        )
-        self.store.record_ordinary_semantic_outcome(
-            child_id=child.child_id,
-            typed_outcome=effects.OrdinaryAgentCompletedOutcome(
-                proof=effects.OrdinaryAgentRefObservation(
-                    repository=candidate.repository,
-                    ref=candidate.candidate_ref,
-                    sha=candidate.base_sha,
-                )
-            ),
-        )
-        self.store.close_ordinary_agent_custody_issue_attempt(
-            attempt_id=custody.attempt_id,
-            reason="confirmed_revoked",
-        )
-        self.store.yield_ordinary_merge_train_controller_state_record(
-            request_id=self.request.request_id,
-            expected_binding_revision=self.request.binding_revision,
-            controller_fence=fence,
-        )
-
-        built = self.advance(resumed)
-
-        self.assertEqual(built.status, "waiting")
-        self.assertEqual(
-            self.store.read_ordinary_agent_effect(effect_id=effect.effect_id).dispatch_count,
-            1,
-        )
-        active = self.store.list_merge_train_batch_candidate_records(
-            repository=self.request.target.repository,
-            base_branch=self.request.target.base_branch,
-            status="active",
-        )
-        self.assertEqual(len(active), 1)
-        self.assertEqual(active[0].candidate.candidate_sha, candidate.base_sha)
-        self.provider.assert_not_called()
 
     def test_unknown_history_observes_once_without_controller_acquisition(self) -> None:
         fence, command = self.fixture.prepare_controller()

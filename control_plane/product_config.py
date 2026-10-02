@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 from json import JSONDecodeError
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal, NotRequired, Protocol, TypedDict, cast, get_args
 
 import click
 
+from control_plane import provider_key_adoption
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentScope
@@ -70,6 +72,10 @@ class _ProductConfigRuntimeInput(TypedDict):
     instance: str
     env: dict[str, object]
     retired_provider_keys: NotRequired[tuple[str, ...] | None]
+    adopt_provider_keys: NotRequired[tuple[str, ...] | None]
+
+
+LaneProviderEnvReader = Callable[[], provider_key_adoption.LaneProviderEnv]
 
 
 class _ProductConfigSecretWritePlan(TypedDict):
@@ -168,6 +174,8 @@ def normalize_product_config_payload(payload: dict[str, object]) -> dict[str, ob
     }
     if runtime_input.get("retired_provider_keys") is not None:
         normalized_runtime_input["retired_provider_keys"] = runtime_input["retired_provider_keys"]
+    if runtime_input.get("adopt_provider_keys") is not None:
+        normalized_runtime_input["adopt_provider_keys"] = runtime_input["adopt_provider_keys"]
     return {
         "schema_version": payload.get("schema_version", 1),
         "product": product,
@@ -185,6 +193,7 @@ def apply_product_config_bundle(
     mode: ProductConfigMode,
     actor: str,
     source_label: str,
+    lane_provider_env_reader: LaneProviderEnvReader | None = None,
 ) -> dict[str, object]:
     result, bundle = plan_product_config_authority_bundle(
         record_store=record_store,
@@ -192,6 +201,7 @@ def apply_product_config_bundle(
         mode=mode,
         actor=actor,
         source_label=source_label,
+        lane_provider_env_reader=lane_provider_env_reader,
     )
     if mode == "apply":
         record_store.write_product_authority_bundle(bundle)
@@ -205,6 +215,7 @@ def plan_product_config_authority_bundle(
     mode: ProductConfigMode,
     actor: str,
     source_label: str,
+    lane_provider_env_reader: LaneProviderEnvReader | None = None,
 ) -> tuple[dict[str, object], ProductAuthorityBundle]:
     if mode not in {"dry-run", "apply"}:
         raise ProductConfigError("Product config mode must be 'dry-run' or 'apply'.")
@@ -218,13 +229,42 @@ def plan_product_config_authority_bundle(
     _require_product_config_master_key_if_needed(secrets)
 
     existing_runtime_records = record_store.list_runtime_environment_records()
+    retired_provider_keys = runtime_input.get("retired_provider_keys")
+    adoption = _plan_provider_key_adoption(
+        existing_records=existing_runtime_records,
+        runtime_input=runtime_input,
+        lane_provider_env_reader=lane_provider_env_reader,
+    )
+    if adoption is not None:
+        if mode == "apply" and adoption.refused_keys:
+            raise ProductConfigError(
+                "Provider key adoption names keys that are missing on the provider or look "
+                "like credentials; remove them and review a fresh dry run.",
+                code="provider_key_adoption_refused",
+            )
+        runtime_env = {**runtime_env, **adoption.adopted_env}
+        if adoption.template_default_keys:
+            current_record = _find_runtime_environment_record(
+                existing_records=existing_runtime_records,
+                scope=str(runtime_input["scope"]),
+                context_name=str(runtime_input["context"]),
+                instance_name=str(runtime_input["instance"]),
+            )
+            base_retired_keys = (
+                retired_provider_keys
+                if retired_provider_keys is not None
+                else (current_record.retired_provider_keys if current_record is not None else ())
+            )
+            retired_provider_keys = tuple(
+                sorted(set(base_retired_keys) | set(adoption.template_default_keys))
+            )
     runtime_record, runtime_summary = _plan_product_config_runtime_environment(
         existing_records=existing_runtime_records,
         scope=str(runtime_input["scope"]),
         context_name=str(runtime_input["context"]),
         instance_name=str(runtime_input["instance"]),
         env=runtime_env,
-        retired_provider_keys=runtime_input.get("retired_provider_keys"),
+        retired_provider_keys=retired_provider_keys,
         source_label=source_label,
     )
     secret_summaries: list[dict[str, object]] = []
@@ -321,6 +361,7 @@ def plan_product_config_authority_bundle(
         "runtime_environment": runtime_summary,
         "runtime_key_safety": runtime_key_safety_summary,
         "secrets": secret_summaries,
+        "provider_key_adoption": adoption.summary() if adoption is not None else [],
         "summary": {
             "runtime_changed_key_count": len(
                 cast(list[object], runtime_summary.get("changed_keys", []))
@@ -378,7 +419,8 @@ def _product_config_runtime_input(
         raw_env = {
             key: value
             for key, value in runtime_payload.items()
-            if key not in {"scope", "context", "instance", "retired_provider_keys"}
+            if key
+            not in {"scope", "context", "instance", "retired_provider_keys", "adopt_provider_keys"}
         }
     runtime_context = str(runtime_payload.get("context", context_name) or "").strip()
     runtime_instance = str(runtime_payload.get("instance", instance_name) or "").strip()
@@ -416,13 +458,68 @@ def _product_config_runtime_input(
             raise ProductConfigError(str(error)) from error
         if scope != "instance":
             raise ProductConfigError("Provider key retirement requires an instance-scoped request.")
+    adopt_keys = None
+    if runtime_payload.get("adopt_provider_keys") is not None:
+        if payload.get("schema_version", 1) != 2:
+            raise ProductConfigError(
+                "Provider key adoption requires product-config schema version 2."
+            )
+        if scope != "instance":
+            raise ProductConfigError("Provider key adoption requires an instance-scoped request.")
+        try:
+            adopt_keys = provider_key_adoption.normalize_adopt_provider_keys(
+                runtime_payload["adopt_provider_keys"]
+            )
+        except provider_key_adoption.ProviderKeyAdoptionError as error:
+            raise ProductConfigError(str(error), code=error.code) from error
+        configured_keys = {str(key).strip() for key in raw_env} | set(retired_keys or ())
+        if configured_keys & set(adopt_keys):
+            raise ProductConfigError(
+                "A provider key cannot be both adopted and set or retired in the same request."
+            )
     return {
         "scope": scope,
         "context": runtime_context,
         "instance": runtime_instance,
         "env": raw_env,
         "retired_provider_keys": retired_keys,
+        "adopt_provider_keys": adopt_keys,
     }
+
+
+def _plan_provider_key_adoption(
+    *,
+    existing_records: tuple[RuntimeEnvironmentRecord, ...],
+    runtime_input: _ProductConfigRuntimeInput,
+    lane_provider_env_reader: LaneProviderEnvReader | None,
+) -> provider_key_adoption.ProviderKeyAdoptionPlan | None:
+    adopt_keys = runtime_input.get("adopt_provider_keys")
+    if adopt_keys is None:
+        return None
+    if lane_provider_env_reader is None:
+        raise ProductConfigError(
+            "Provider key adoption needs the service's read of the lane's provider env.",
+            code="provider_env_unavailable",
+        )
+    context_name = str(runtime_input["context"])
+    instance_name = str(runtime_input["instance"])
+    # Keys the lane's own records already supply are delivered from those records.
+    recorded_keys = frozenset(
+        key
+        for record in existing_records
+        if (record.scope == "context" and record.context == context_name)
+        or (
+            record.scope == "instance"
+            and record.context == context_name
+            and record.instance == instance_name
+        )
+        for key in record.env
+    )
+    return provider_key_adoption.plan_provider_key_adoption(
+        keys=adopt_keys,
+        provider=lane_provider_env_reader(),
+        recorded_keys=recorded_keys,
+    )
 
 
 def _normalize_product_config_runtime_env(raw_env: object) -> dict[str, ScalarValue]:

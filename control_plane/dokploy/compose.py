@@ -291,6 +291,25 @@ networks:
 """
 
 
+_COMPOSE_DEFAULT_PATTERN = re.compile(r"(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}]*)\}")
+
+
+def odoo_compose_template_defaults() -> dict[str, str]:
+    """Each env key the Odoo compose template gives exactly one default, with that default.
+
+    A key the template reads with two different defaults is left out, so no caller
+    treats either one as the value the lane would get.
+    """
+    compose_file = render_odoo_raw_compose_file(
+        image_reference="template-defaults",
+        hold_web_until_integration_readback=False,
+    )
+    defaults: dict[str, set[str]] = {}
+    for key, default in _COMPOSE_DEFAULT_PATTERN.findall(compose_file):
+        defaults.setdefault(key, set()).add(default)
+    return {key: next(iter(values)) for key, values in defaults.items() if len(values) == 1}
+
+
 def compose_file_sha256(compose_file: str) -> str:
     return hashlib.sha256(compose_file.encode("utf-8")).hexdigest()
 

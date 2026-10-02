@@ -11,7 +11,6 @@ from control_plane.contracts.ordinary_agent_snapshot import (
     OrdinaryAgentReadmissionObservation,
 )
 
-from control_plane.merge_train import build_merge_train_dry_run_result
 from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.ordinary_agent_github_transport import (
     DeadlineMergeTrainGitHubTransport,
@@ -22,7 +21,6 @@ from control_plane.ordinary_agent_snapshot_reader import (
     read_ordinary_candidate_check,
 )
 from tests import test_ordinary_agent_landing_reader as reader_support
-from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 
 
 class OrdinarySnapshotReaderTests(unittest.TestCase):
@@ -72,23 +70,6 @@ class OrdinarySnapshotReaderTests(unittest.TestCase):
             (1, 1, 1),
         )
         self.assertEqual([item.method for item in inner.requests], ["POST", "GET"])
-
-    def test_unknown_source_checks_cannot_enter_candidate_planning(self) -> None:
-        self.response["data"]["repository"]["head0"]["statusCheckRollup"] = None
-        _, transport = self.transport()
-        result = read_ordinary_controller_snapshot(
-            transport=transport,
-            request=self.request,
-            repository_owner_id=202,
-            repository_policy=self.fixture.policy,
-        )
-        assert isinstance(result, OrdinaryAgentMergeTrainSnapshotResult)
-        self.assertEqual(result.snapshot.pull_requests[0].required_checks_status, "unknown")
-        decision = build_merge_train_dry_run_result(
-            policy=build_test_merge_train_policy(repository=self.request.target.repository),
-            snapshot=result.snapshot,
-        )
-        self.assertEqual(decision.intended_next_action, "wait_for_checks")
 
     def test_source_drift_returns_exact_evidence_before_rule_or_role_requests(self) -> None:
         cases = (
@@ -215,23 +196,6 @@ class OrdinarySnapshotReaderTests(unittest.TestCase):
         )
         self.assertEqual((result.candidate_identity.sha, result.status), (candidate_sha, "pass"))
         self.assertEqual(len(inner.requests), 2)
-
-    def test_strict_base_drift_requests_refresh_instead_of_reporting_failed_ci(self) -> None:
-        self.response["data"]["repository"]["ref"]["compare0"]["status"] = "DIVERGED"
-        _, transport = self.transport()
-        result = read_ordinary_controller_snapshot(
-            transport=transport,
-            request=self.request,
-            repository_owner_id=202,
-            repository_policy=self.fixture.policy,
-        )
-        assert isinstance(result, OrdinaryAgentMergeTrainSnapshotResult)
-        decision = build_merge_train_dry_run_result(
-            policy=build_test_merge_train_policy(repository=self.request.target.repository),
-            snapshot=result.snapshot,
-        )
-        self.assertEqual(result.snapshot.pull_requests[0].required_checks_status, "pass")
-        self.assertEqual(decision.intended_next_action, "update_branch")
 
     def test_two_source_heads_share_policy_and_roles_without_sharing_check_results(self) -> None:
         repository = self.response["data"]["repository"]

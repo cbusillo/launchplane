@@ -2573,6 +2573,7 @@ export type ProductConfigApplyResult = {
     mode: 'dry-run' | 'apply';
     next_actions: Array<ProductConfigLiveTargetRuntimeNextAction>;
     product: string;
+    provider_key_adoption: Array<ProductConfigProviderKeyAdoptionResult>;
     reason: string;
     runtime_environment: ProductConfigRuntimeEnvironmentResult;
     runtime_key_safety: ProductConfigRuntimeKeySafetyResult;
@@ -2630,6 +2631,11 @@ export type ProductConfigOperationAvailability = {
     requires_reason: boolean;
     route_path: string;
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+};
+
+export type ProductConfigProviderKeyAdoptionResult = {
+    disposition: 'adopted' | 'template_default' | 'already_recorded' | 'refused_credential' | 'missing';
+    key: string;
 };
 
 export type ProductConfigRuntimeEnvironmentRecordSummary = {

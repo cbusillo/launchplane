@@ -16,6 +16,7 @@ from control_plane.merge_train_controller_run_once import (
     _merge_train_candidate_matches_dry_run_queue,
 )
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
+from tests.support.merge_train import labeled_by
 
 
 class MergeTrainBatchContractTests(unittest.TestCase):
@@ -266,6 +267,7 @@ def _pull_request(
             "title": f"PR {number}",
             "created_at": created_at,
             "labels": ("ready-to-merge",),
+            "label_actors": labeled_by(("ready-to-merge",)),
             "actor_role": "repo_admin",
             "head_sha": f"head-{number}",
             "base_ref": "main",

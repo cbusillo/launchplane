@@ -106,8 +106,8 @@ class LiveTargetRuntimeProfileStore(RuntimeKeySafetyPolicyReadStore, Protocol):
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
 
-def validate_provider_key_retirement(*, retired_keys: set[str], application_keys: set[str]) -> None:
-    protected_keys = {
+_RETIREMENT_PROTECTED_KEYS = frozenset(
+    {
         "PLATFORM_CONTEXT",
         "PLATFORM_INSTANCE",
         "DOCKER_IMAGE_REFERENCE",
@@ -127,9 +127,20 @@ def validate_provider_key_retirement(*, retired_keys: set[str], application_keys
         LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,
         LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
     }
-    if retired_keys & (application_keys | protected_keys) or any(
-        key.startswith(ODOO_OVERRIDE_SECRET_ENV_PREFIX) for key in retired_keys
-    ):
+)
+
+
+def provider_key_retirement_blocked(key: str, declared: set[str]) -> bool:
+    """Whether retiring ``key`` would remove a declared application or driver setting."""
+    return (
+        key in declared
+        or key in _RETIREMENT_PROTECTED_KEYS
+        or key.startswith(ODOO_OVERRIDE_SECRET_ENV_PREFIX)
+    )
+
+
+def validate_provider_key_retirement(*, retired_keys: set[str], application_keys: set[str]) -> None:
+    if any(provider_key_retirement_blocked(key, application_keys) for key in retired_keys):
         raise LiveTargetRuntimeError(
             "Provider key retirement conflicts with declared application or driver settings.",
             code="runtime_retirement_conflict",

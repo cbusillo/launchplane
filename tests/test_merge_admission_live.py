@@ -52,6 +52,7 @@ from tests.test_merge_readiness import (
     _evaluate,
     _policy_fingerprints,
 )
+from tests.support.merge_train import labeled_by
 
 
 class _StaticSnapshotReader:
@@ -159,6 +160,7 @@ def _queued_pull_request(
         number=number,
         created_at=created_at,
         labels=("ready-to-merge",),
+        label_actors=labeled_by(("ready-to-merge",), "repo_owner"),
         actor_role="repo_owner",
         head_sha=head_sha,
         base_sha=BASE_SHA,
