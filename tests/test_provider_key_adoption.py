@@ -10,7 +10,7 @@ from control_plane import product_config as control_plane_product_config
 from control_plane import product_config_service
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
-from control_plane.contracts.secret_record import SecretBinding
+from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy.compose import odoo_compose_template_defaults
@@ -201,17 +201,34 @@ class LaneProviderEnvReadTests(unittest.TestCase):
             target_name="cm-testing",
             env={"TRACKED_SETTING": "tracked-value"},
         )
-        self.store.write_secret_binding(
-            SecretBinding(
-                binding_id="binding-cm-shared",
+        self.store.write_secret_record(
+            SecretRecord(
                 secret_id="secret-cm-shared",
+                scope="context",
                 integration="runtime_environment",
-                binding_key="SHARED_SERVICE_PASSWORD",
+                name="shared-service-password",
                 context="cm",
+                current_version_id="version-cm-shared",
                 created_at="2026-10-02T00:00:00Z",
                 updated_at="2026-10-02T00:00:00Z",
             )
         )
+        # A binding whose secret record is gone delivers nothing, so it records nothing.
+        for secret_id, binding_key in (
+            ("secret-cm-shared", "SHARED_SERVICE_PASSWORD"),
+            ("secret-cm-removed", "REMOVED_SERVICE_PASSWORD"),
+        ):
+            self.store.write_secret_binding(
+                SecretBinding(
+                    binding_id=f"binding-{secret_id}",
+                    secret_id=secret_id,
+                    integration="runtime_environment",
+                    binding_key=binding_key,
+                    context="cm",
+                    created_at="2026-10-02T00:00:00Z",
+                    updated_at="2026-10-02T00:00:00Z",
+                )
+            )
 
     def _read(self, *, product: str, instance: str = "testing") -> LaneProviderEnv:
         with (

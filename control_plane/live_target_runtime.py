@@ -130,20 +130,17 @@ _RETIREMENT_PROTECTED_KEYS = frozenset(
 )
 
 
-def provider_key_retirement_blocked(key: str, *, application_keys: set[str]) -> bool:
+def provider_key_retirement_blocked(key: str, declared: set[str]) -> bool:
     """Whether retiring ``key`` would remove a declared application or driver setting."""
     return (
-        key in application_keys
+        key in declared
         or key in _RETIREMENT_PROTECTED_KEYS
         or key.startswith(ODOO_OVERRIDE_SECRET_ENV_PREFIX)
     )
 
 
 def validate_provider_key_retirement(*, retired_keys: set[str], application_keys: set[str]) -> None:
-    if any(
-        provider_key_retirement_blocked(key, application_keys=application_keys)
-        for key in retired_keys
-    ):
+    if any(provider_key_retirement_blocked(key, application_keys) for key in retired_keys):
         raise LiveTargetRuntimeError(
             "Provider key retirement conflicts with declared application or driver settings.",
             code="runtime_retirement_conflict",

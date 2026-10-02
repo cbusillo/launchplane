@@ -32,6 +32,7 @@ from control_plane.runtime_key_safety import (
     runtime_key_safety_environment_class,
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
+from control_plane.runtime_environments import site_secret_scopes
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import RuntimeEnvironmentConflictError
 
@@ -137,7 +138,7 @@ def _runtime_key_safety_ready(
     return evaluation.status == "pass"
 
 
-class LaneProviderEnvStore(Protocol):
+class LaneProviderEnvStore(control_plane_secrets.SecretBindingSelectionStore, Protocol):
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
     def read_dokploy_target_record(
@@ -147,15 +148,6 @@ class LaneProviderEnvStore(Protocol):
     def read_dokploy_target_id_record(
         self, *, context_name: str, instance_name: str
     ) -> DokployTargetIdRecord: ...
-
-    def list_secret_bindings(
-        self,
-        *,
-        integration: str = "",
-        context_name: str = "",
-        instance_name: str = "",
-        limit: int | None = None,
-    ) -> tuple[SecretBinding, ...]: ...
 
 
 def read_lane_provider_env(
@@ -206,18 +198,15 @@ def read_lane_provider_env(
     )
     # Keys the deploy takes from the tracked target or a managed secret are already
     # recorded; the lane's runtime-environment records are checked by the planner.
-    secret_keys = {
-        binding.binding_key
-        for binding in record_store.list_secret_bindings(
-            integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-            context_name=context_name,
-            limit=None,
-        )
-        if binding.status == "configured"
-        and binding.context == context_name
-        and binding.instance in {"", instance_name}
-    }
-    application_keys = live_target_runtime.product_lane_declared_keys(
+    # The same selection the deploy's secret delivery makes for this lane.
+    secret_keys = control_plane_secrets.resolve_effective_secret_bindings_from_store(
+        record_store=record_store,
+        integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+        context_name=context_name,
+        instance_name=instance_name,
+        scopes=site_secret_scopes(instance_name),
+    ).keys()
+    declared = live_target_runtime.product_lane_declared_keys(
         record_store=cast(live_target_runtime.LiveTargetRuntimeProfileStore, record_store),
         product_name=product,
         context_name=context_name,
@@ -228,11 +217,7 @@ def read_lane_provider_env(
         template_defaults=template_defaults,
         recorded_keys=frozenset(target_record.env) | frozenset(secret_keys),
         unretirable_keys=frozenset(
-            key
-            for key in env
-            if live_target_runtime.provider_key_retirement_blocked(
-                key, application_keys=application_keys
-            )
+            key for key in env if live_target_runtime.provider_key_retirement_blocked(key, declared)
         ),
     )
 
