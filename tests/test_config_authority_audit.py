@@ -2312,6 +2312,15 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "${{ github.repository_owner }}",
             ),
             (".github/workflows/ci.yml", "context", "."),
+            (".github/workflows/build.yml", "context", "."),
+            (".github/workflows/build.yml", "file", "docker/Dockerfile.sync"),
+            (
+                ".github/workflows/build.yml",
+                "IMAGE_REPOSITORY",
+                "${{ steps.image_metadata.outputs.image_repository }}",
+            ),
+            (".github/workflows/build.yml", "password", "${{ github.token }}"),
+            (".github/workflows/build.yml", "uses", "./.github/workflows/tests.yml"),
             (
                 ".github/workflows/launchplane-deploy.yml",
                 "IMAGE_REPOSITORY",
@@ -2426,6 +2435,12 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 )
 
         rejected_thin_connectors = (
+            (".github/workflows/build.yml", "uses", "./scripts/workflows/tests.yml"),
+            (
+                ".github/workflows/build.yml",
+                "uses",
+                "./.github/workflows/../../other/tests.yml",
+            ),
             (
                 ".github/workflows/launchplane-deploy.yml",
                 "uses",
