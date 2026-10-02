@@ -399,11 +399,13 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             store = self._store(root)
-            no_plan = self._app(store, root, "product_environment.read")
+            no_grant = self._app(store, root, "deployment.read")
+            read_only = self._app(store, root, "product_environment.read")
             plan_only = self._app(store, root, "product_config.plan")
 
-            denied_read = await self._get(no_plan)
-            denied_dry_run = await self._post(no_plan, _payload())
+            denied_read = await self._get(no_grant)
+            read = await self._get(read_only)
+            denied_dry_run = await self._post(read_only, _payload())
             dry_run = await self._post(plan_only, _payload())
             denied_apply = await self._post(
                 plan_only,
@@ -415,6 +417,7 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
             stored = _read_hold(store)
 
         self.assertEqual(denied_read.status_code, 403)
+        self.assertEqual(read.status_code, 200, read.text)
         self.assertEqual(denied_dry_run.status_code, 403)
         self.assertEqual(dry_run.status_code, 202)
         self.assertEqual(denied_apply.status_code, 403)

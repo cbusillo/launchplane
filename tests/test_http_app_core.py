@@ -2231,6 +2231,94 @@ class FastApiOdooOperationStatusReadTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("result", payload)
 
+    async def test_operation_status_read_grant_returns_structured_status_only(self) -> None:
+        running = _running_odoo_target_replacement_record()
+        failed = type(running).model_validate(
+            {
+                **running.model_dump(mode="json"),
+                "status": "fail",
+                "phase": "failed",
+                "deployment_record_id": "deployment-20261002T223945Z-cm-testing",
+                "finished_at": "2026-05-17T00:02:00Z",
+                "error_code": "deploy_failed",
+                "error_message": "Provider refused host db.internal at 10.20.30.40.",
+                "error_detail_keys": ["ODOO_DB_HOST"],
+                "result": {
+                    "product": "odoo-tenant-cm",
+                    "context": "cm",
+                    "instance": "testing",
+                    "strategy": "recreate-in-place",
+                    "deploy_status": "fail",
+                    "target_id": "provider-target-secret-id",
+                    "target_name": "cm-testing-private-target",
+                    "health_url": "https://10.20.30.40/web/health",
+                    "artifact_id": "artifact-cm-run-1",
+                    "error_message": "Traceback mentioning db.internal",
+                },
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record_store.write_odoo_stable_target_replacement_operation_record(failed)
+            path = "/v1/drivers/odoo/target-replacement/operations/operation-cm-testing"
+            headers = {"Authorization": "Bearer valid-token"}
+
+            def app_reading(contexts: tuple[str, ...]) -> FastAPI:
+                return create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_odoo_operation_status_identity()),
+                    authz_policy=_odoo_operation_status_policy(
+                        action="operations.read",
+                        products=("launchplane",),
+                        contexts=contexts,
+                        instances=("testing",),
+                        schema_version=2,
+                    ),
+                    record_store_factory=lambda: record_store,
+                )
+
+            response = await _asgi_get(app_reading(("cm",)), path, headers=headers)
+            denied = await _asgi_get(app_reading(("opw",)), path, headers=headers)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(
+            payload["operation"],
+            {
+                "operation_id": "operation-cm-testing",
+                "product": "odoo-tenant-cm",
+                "context": "cm",
+                "instance": "testing",
+                "status": "fail",
+                "phase": "failed",
+                "created_at": "2026-05-17T00:00:00Z",
+                "updated_at": "2026-05-17T00:01:00Z",
+                "started_at": "2026-05-17T00:01:00Z",
+                "finished_at": "2026-05-17T00:02:00Z",
+                "attempt": 0,
+                "deployment_record_id": "deployment-20261002T223945Z-cm-testing",
+                "error_code": "deploy_failed",
+                "error_detail_keys": ["ODOO_DB_HOST"],
+                "poll_url": path,
+                "free_text_omitted": True,
+            },
+        )
+        self.assertEqual(
+            payload["result"],
+            {
+                "deploy_status": "fail",
+                "post_deploy_status": "skipped",
+                "post_deploy_override_status": "skipped",
+                "health_status": "skipped",
+                "canonical_status": "skipped",
+                "logo_status": "skipped",
+                "artifact_id": "artifact-cm-run-1",
+            },
+        )
+        for private_text in ("db.internal", "10.20.30.40", "provider-target", "private-target"):
+            self.assertNotIn(private_text, response.text)
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(denied.json()["error"]["code"], "authorization_denied")
+
     async def test_operation_status_routes_require_authentication(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_odoo_operation_status_identity()),

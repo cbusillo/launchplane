@@ -906,6 +906,86 @@ class OdooProdPromotionOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.json()["error"]["code"], "lane_busy")
             execute.assert_not_called()
 
+    async def test_operations_read_grant_reads_release_status_without_free_text(self) -> None:
+        promotion = OdooProdPromotionOperationRecord.model_validate(
+            {
+                **_operation().model_dump(mode="json"),
+                "status": "fail",
+                "phase": "failed",
+                "finished_at": "2026-09-30T00:05:00Z",
+                "error_code": "promotion_failed",
+                "error_message": "Backup host backup.internal at 10.9.8.7 refused.",
+            }
+        )
+        rollback = OdooProdRollbackOperationRecord.model_validate(
+            {
+                **_rollback_operation().model_dump(mode="json"),
+                "status": "fail",
+                "phase": "failed",
+                "finished_at": "2026-09-30T00:05:00Z",
+                "error_code": "Provider said: backup.internal down",
+                "error_message": "Provider at 10.9.8.7 refused.",
+            }
+        )
+
+        def app_with(actions: tuple[str, ...], store: PostgresRecordStore) -> FastAPI:
+            return create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_workflow_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "schema_version": 2,
+                        "github_actions": [
+                            {
+                                "repository": "every/verireel",
+                                "actions": list(actions),
+                                "products": ["launchplane"],
+                                "contexts": ["cm"],
+                                "instances": ["prod"],
+                            }
+                        ],
+                    }
+                ),
+                record_store_factory=lambda: store,
+            )
+
+        query = urlencode({"product": "odoo-tenant-cm", "context": "cm"})
+        headers = {"Authorization": "Bearer valid-token"}
+        with TemporaryDirectory() as directory:
+            store = _store(directory)
+            store.write_odoo_prod_promotion_operation_record(promotion)
+            store.write_odoo_prod_rollback_operation_record(rollback)
+            reader = app_with(("operations.read",), store)
+            promotion_read = await get(
+                reader,
+                f"/v1/odoo-prod-promotions/operations/{promotion.operation_id}?{query}",
+                headers=headers,
+            )
+            rollback_read = await get(
+                reader,
+                f"/v1/odoo-prod-rollbacks/operations/{rollback.operation_id}?{query}",
+                headers=headers,
+            )
+            denied = await get(
+                app_with(("deployment.read",), store),
+                f"/v1/odoo-prod-promotions/operations/{promotion.operation_id}?{query}",
+                headers=headers,
+            )
+
+        self.assertEqual(promotion_read.status_code, 200, promotion_read.text)
+        promotion_view = promotion_read.json()["operation"]
+        self.assertEqual(
+            (promotion_view["status"], promotion_view["phase"], promotion_view["error_code"]),
+            ("fail", "failed", "promotion_failed"),
+        )
+        self.assertEqual(promotion_view["error_message"], "")
+        self.assertIsNone(promotion_view.get("result"))
+        self.assertEqual(rollback_read.status_code, 200, rollback_read.text)
+        self.assertEqual(rollback_read.json()["operation"]["error_code"], "unrecognized_code")
+        for response in (promotion_read, rollback_read):
+            self.assertNotIn("backup.internal", response.text)
+            self.assertNotIn("10.9.8.7", response.text)
+        self.assertEqual(denied.status_code, 403)
+
 
 @unittest.skipUnless(
     os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "Real PostgreSQL test URL is required"

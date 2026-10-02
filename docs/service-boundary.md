@@ -126,11 +126,18 @@ governed expectation, custody and currentness contract.
     payloads
 - native FastAPI Odoo operation status reads:
   - `GET /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}`,
-    requiring `odoo_stable_bootstrap.execute` for the stored operation product
-    and context
-  - `GET /v1/drivers/odoo/target-replacement/operations/{operation_id}`,
-    requiring `odoo_target_replacement_apply.execute` for the stored operation
-    product and context
+    `.../target-replacement/operations/{operation_id}`,
+    `.../prod-backup-restore/operations/{operation_id}` and
+    `.../prod-retained-volume-backup-import/operations/{operation_id}`, plus
+    `GET /v1/odoo-prod-promotions/operations/{operation_id}` and
+    `GET /v1/odoo-prod-rollbacks/operations/{operation_id}`. The action that
+    starts the operation, on the stored operation's product, context and
+    instance, reads the full record. `operations.read` on the Launchplane
+    product for the operation's context and instance, the scope that reads
+    the context's recent deployments, reads its structured status: ids,
+    statuses, phases, times, attempt, the error code and the env-key names the
+    failure is about, marked `free_text_omitted`. It never carries the error
+    message, request, plan, checkpoint evidence or provider output.
 - native FastAPI protected artifact inventory route:
   - `GET /v1/artifacts/protected`, requiring `artifact_protection.read` for
     the requested product and either the requested context or whole-product
@@ -2772,8 +2779,8 @@ context, preserve the `driver_id` filter, and continue accepting the dedicated
 Every Code worker token for the collection route only. Product profile show
 reads load the stored profile first, check `product_profile.read` against the
 stored profile product and Launchplane service context, and return the typed
-profile envelope. Ingress route audit reads check `ingress_route.plan` against
-the requested query product/context before storage access, require those
+profile envelope. Ingress route audit reads check `route_binding.read` or
+`ingress_route.plan` against the requested query product/context before storage access, require those
 scope query parameters for list and single-record reads, preserve optional
 `status`, `mode`, `provider_host_id`, `trace_id`, `idempotency_key`, and `limit`
 list filters, and return `404 not_found` when a record exists outside the
