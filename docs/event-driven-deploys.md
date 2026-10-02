@@ -130,9 +130,11 @@ reservation. The webhook request never waits on a deploy.
     of the product's old preview workflow was. The refresh waits until the
     preview's health endpoint reports the expected build, and the reconcile
     then records that as the generation's verification, so the preview serves
-    it. A refresh of an image that failed is not retried until the PR has a new
-    build (a push, or a re-run of its Build workflow). Driver and provider text
-    goes to the worker log only; the plan and the PR comment carry statuses.
+    it. A generation without that record serves nothing, so a refresh the
+    worker stopped in the middle of runs again. A build run whose refresh failed
+    is not retried until the PR has a new build run (a push, or a re-run of its
+    Build workflow). Driver and provider text goes to the worker log only; the
+    plan and the PR comment carry statuses.
 
 Each target keeps one reconcile request with its state, attempt count, last
 plan and last error. `GET /v1/product-profiles/{product}/reconcile-requests`

@@ -1588,14 +1588,33 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
         self.assertIn("tries again when the PR has a new build", failures[-1].last_error)
         self.assertEqual(self.driver.changes, [("refresh", 5)])
 
+        # A re-run of the Build workflow can produce the same image; it is tried again.
         self.driver.refresh_status = "pass"
-        pushed = "b" * 40
-        self.github.pull_request["head"] = {"sha": pushed}
-        self.github.add_run(51, pushed, event="pull_request")
+        self.github.add_run(51, PR_HEAD, event="pull_request")
         self.request("preview", 5)
 
         self.assertEqual(self.reconcile()["preview_result_status"], "pass")
         self.assertEqual(self.store.list_preview_records()[0].state, "active")
+        self.assertEqual(self.driver.changes, [("refresh", 5), ("refresh", 5)])
+
+    def test_a_refresh_whose_verification_was_not_recorded_is_run_again(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        with patch(
+            "control_plane.product_reconcile.apply_generic_web_preview_verification_result",
+            side_effect=RuntimeError("worker stopped"),
+        ):
+            self.assertEqual(self.run_once().state, "failed")
+        self.request("preview", 5)
+
+        recovered = self.reconcile()
+
+        self.assertEqual(
+            (recovered["action"], recovered["preview_result_status"]), ("apply", "pass")
+        )
+        (preview,) = self.store.list_preview_records()
+        self.assertEqual(preview.state, "active")
+        self.assertEqual(preview.serving_generation_id, preview.active_generation_id)
 
     def test_a_pr_that_moves_before_the_provider_change_is_reconciled_again(self) -> None:
         self.github.add_run(50, PR_HEAD, event="pull_request")

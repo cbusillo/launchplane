@@ -1002,6 +1002,7 @@ def reconcile_preview_target(
     pull_request_number: int,
     control_plane_root: Path | None,
     preview_hooks: PreviewProviderHooks,
+    previous_plan: dict[str, object] | None = None,
 ) -> ReconcileOutcome:
     """Apply or destroy the PR's preview so it matches what the PR asks for now."""
     decision = _plan_preview_target(
@@ -1029,6 +1030,7 @@ def reconcile_preview_target(
             pull_request_number=pull_request_number,
             control_plane_root=control_plane_root,
             preview_hooks=preview_hooks,
+            previous_plan=previous_plan or {},
         )
     return _run_preview_operation(
         record_store=record_store,
@@ -1287,6 +1289,7 @@ def _run_generic_web_preview_operation(
     pull_request_number: int,
     control_plane_root: Path,
     preview_hooks: PreviewProviderHooks,
+    previous_plan: dict[str, object],
 ) -> ReconcileOutcome:
     """Refresh or destroy the PR's generic-web preview in-process, as its routes do.
 
@@ -1319,21 +1322,21 @@ def _run_generic_web_preview_operation(
             "Launchplane's reconcile may not change this preview destination."
         )
     plan["preview_slug"] = preview_slug
-    if isinstance(verified, VerifiedGenericWebBuild) and _generic_web_preview_failed(
-        record_store=record_store,
-        profile=profile,
-        pull_request_number=pull_request_number,
-        image_reference=verified.image_reference,
-    ):
-        # Every sweep would otherwise run the same failing refresh again.
-        plan["preview_result_status"] = "fail"
-        return ReconcileOutcome(
-            plan,
-            error=(
-                "The preview of this build failed; Launchplane tries again when the PR has "
-                "a new build (a push, or a re-run of its Build workflow)."
-            ),
-        )
+    if isinstance(verified, VerifiedGenericWebBuild):
+        build_run = f"run-{verified.source_build.run_id}-{verified.source_build.run_attempt}"
+        plan["preview_build_run"] = build_run
+        if previous_plan.get("preview_build_run") == build_run and previous_plan.get(
+            "preview_result_status"
+        ) in {"fail", "blocked"}:
+            # Every sweep would otherwise run the same failing refresh again.
+            plan["preview_result_status"] = previous_plan["preview_result_status"]
+            return ReconcileOutcome(
+                plan,
+                error=(
+                    "The preview of this build failed; Launchplane tries again when the PR "
+                    "has a new build (a push, or a re-run of its Build workflow)."
+                ),
+            )
     if decision.observed and _pull_request_moved(
         transport=transport,
         profile=profile,
@@ -1421,31 +1424,6 @@ def _run_generic_web_preview_operation(
     return ReconcileOutcome(plan)
 
 
-def _generic_web_preview_failed(
-    *,
-    record_store: ProductReconcileStore,
-    profile: LaunchplaneProductProfileRecord,
-    pull_request_number: int,
-    image_reference: str,
-) -> bool:
-    """Whether the preview's latest refresh was of this image and failed."""
-    preview = find_preview_record(
-        record_store=cast(PreviewMutationRecordStore, record_store),
-        context_name=profile.preview.context.strip(),
-        anchor_repo=_preview_anchor_repo(profile),
-        anchor_pr_number=pull_request_number,
-    )
-    if preview is None or preview.state in _ENDED_PREVIEW_STATES:
-        return False
-    if not preview.latest_generation_id:
-        return False
-    try:
-        generation = record_store.read_preview_generation_record(preview.latest_generation_id)
-    except FileNotFoundError:
-        return False
-    return generation.state == "failed" and generation.artifact_id == image_reference
-
-
 def _record_generic_web_preview_serving(
     *,
     record_store: ProductReconcileStore,
@@ -1521,6 +1499,7 @@ def reconcile_product_request(
         )
     assert request.pull_request_number is not None
     return reconcile_preview_target(
+        previous_plan=dict(request.last_plan),
         record_store=record_store,
         profile=profile,
         repository_id=identity.repository_id,
@@ -1850,8 +1829,9 @@ def _current_preview(
         generation = record_store.read_preview_generation_record(generation_id)
     except FileNotFoundError:
         return current, lifecycle_token
-    if generation.state == "failed":
-        # A first generation that failed serves nothing, though it names its image.
+    if reconciles_as_generic_web(profile) and generation.state != "ready":
+        # Its verification is not recorded (the refresh failed, or the worker stopped
+        # before recording it), so it serves nothing, though it names its image.
         return current, lifecycle_token
     digest = ""
     if generation.runtime_identity is not None:
