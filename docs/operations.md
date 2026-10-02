@@ -2639,7 +2639,9 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   secrets, a value the provider env text cannot carry intact (such as a
   multiline value), and provider-only environment settings that no Launchplane
   record for the site holds, preventing silent loss of configuration; record
-  such a setting for the site or retire it. Read-only replacement planning
+  such a setting for the site or retire it. A lane's retirement also wins over
+  a key its site's records hold, which keeps a shared setting off one lane;
+  declared and driver keys cannot be retired. Read-only replacement planning
   names those provider-only keys (`provider_keys_unrecorded`) and lists the key
   names it would deliver (`delivered_runtime_keys`), reading record and secret
   binding names without decrypting any secret. Upstream-restore plans still
