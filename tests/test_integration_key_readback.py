@@ -119,6 +119,20 @@ class IntegrationKeyReadbackTests(unittest.TestCase):
         self.assertEqual(evidence.status, "fail")
         self.assertEqual(evidence.findings[0].code, "unclassified_binding")
 
+    def test_a_failed_read_is_unavailable_not_an_error(self) -> None:
+        class _BrokenStore(_ReadbackStore):
+            def list_secret_bindings(self, **_filters: object) -> tuple[SecretBinding, ...]:
+                raise ConnectionError("database connection dropped")
+
+        with self.assertLogs("control_plane.integration_key_readback", level="WARNING"):
+            evidence = integration_key_readback(
+                record_store=_BrokenStore(bindings=()),
+                context_name=_CONTEXT,
+                instance_name="testing",
+            )
+
+        self.assertEqual(evidence.status, "unavailable")
+
     def test_lane_without_integration_keys_or_policy(self) -> None:
         self.assertEqual(
             self._readback(_binding("CONTACT_ALERT_DISCORD_WEBHOOK_URL")).status, "skipped"

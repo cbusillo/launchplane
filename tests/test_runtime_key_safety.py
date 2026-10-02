@@ -636,6 +636,29 @@ class RuntimeKeySafetyTests(unittest.TestCase):
         self.assertEqual(accepted.status, "pass")
         self.assertEqual(accepted.reported, ())
 
+    def test_a_policy_rule_does_not_excuse_a_declared_shared_key_from_its_reason(self) -> None:
+        evaluation = evaluate_runtime_key_safety(
+            target=RuntimeKeySafetyTarget(
+                context="repairshopr-sync", instance="testing", environment_class="testing"
+            ),
+            required_binding_keys=("REPAIRSHOPR_API_TOKEN",),
+            secret_bindings=(
+                _binding(
+                    binding_key="REPAIRSHOPR_API_TOKEN",
+                    context="repairshopr-sync",
+                    instance="testing",
+                ).model_copy(update={"declared_secret_class": "shared_safe"}),
+            ),
+            secret_rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="REPAIRSHOPR_API_TOKEN", secret_class="shared_safe"
+                ),
+            ),
+        )
+
+        self.assertEqual(evaluation.status, "fail")
+        self.assertEqual(evaluation.findings[0].code, "sharing_reason_missing")
+
     def test_sharing_reason_is_not_needed_for_test_keys_or_on_production(self) -> None:
         cases: tuple[tuple[str, RuntimeEnvironmentClass, RuntimeSecretClass], ...] = (
             ("testing", "testing", "testing"),

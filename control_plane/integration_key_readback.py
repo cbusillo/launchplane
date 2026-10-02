@@ -13,6 +13,7 @@ would roll a live site back on a refusal (launchplane#2768).
 
 from __future__ import annotations
 
+import logging
 from typing import cast
 
 from control_plane import secrets as control_plane_secrets
@@ -31,10 +32,31 @@ from control_plane.runtime_key_safety import (
     runtime_secret_binding_matches_target,
 )
 
+_LOGGER = logging.getLogger(__name__)
 _REQUIRED_STORE_METHODS = ("list_runtime_key_safety_policy_records", "list_secret_bindings")
 
 
 def integration_key_readback(
+    *, record_store: object, context_name: str, instance_name: str
+) -> IntegrationKeyReadbackEvidence:
+    # Advisory and after the provider deploy: a failed read, such as a dropped
+    # database connection, is recorded as unavailable and never interrupts the
+    # deploy's completion or its deployment record.
+    try:
+        return _integration_key_readback(
+            record_store=record_store, context_name=context_name, instance_name=instance_name
+        )
+    except Exception:
+        _LOGGER.warning(
+            "Integration key read-back unavailable for %s/%s.",
+            context_name,
+            instance_name,
+            exc_info=True,
+        )
+        return IntegrationKeyReadbackEvidence(status="unavailable")
+
+
+def _integration_key_readback(
     *, record_store: object, context_name: str, instance_name: str
 ) -> IntegrationKeyReadbackEvidence:
     if not all(callable(getattr(record_store, name, None)) for name in _REQUIRED_STORE_METHODS):

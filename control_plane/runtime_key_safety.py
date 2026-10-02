@@ -315,38 +315,25 @@ def evaluate_runtime_key_safety(
             )
             continue
 
-        rule = rules_by_binding_key.get(binding.binding_key)
-        if rule is None and _binding_stored_for_exact_stable_lane(
-            binding=binding,
+        binding_findings = _evaluate_binding(
             target=target,
+            binding=binding,
+            rule=rules_by_binding_key.get(binding.binding_key),
             extra_integration_key_markers=extra_integration_key_markers,
-        ):
-            class_findings = _evaluate_declared_secret_class(target=target, binding=binding)
-            findings.extend(class_findings)
-            missing_reason = _missing_sharing_reason(
-                target=target,
-                binding=binding,
-                extra_integration_key_markers=extra_integration_key_markers,
-            )
-            if missing_reason is not None and not class_findings:
-                if unreasoned_shared_integration_keys == "refuse":
-                    findings.append(missing_reason)
-                else:
-                    reported.append(missing_reason)
-            continue
-        if rule is None:
-            findings.append(
-                RuntimeKeySafetyFinding(
-                    code="unclassified_binding",
-                    binding_key=binding.binding_key,
-                    binding_id=binding.binding_id,
-                    secret_id=binding.secret_id,
-                    detail=f"Managed secret binding {binding.binding_key!r} has no runtime key safety rule.",
-                )
-            )
-            continue
-
-        findings.extend(_evaluate_binding_rule(target=target, binding=binding, rule=rule))
+        )
+        findings.extend(binding_findings)
+        # A declared shared_safe production key needs its reason whether the lane
+        # or a policy rule classifies it.
+        missing_reason = _missing_sharing_reason(
+            target=target,
+            binding=binding,
+            extra_integration_key_markers=extra_integration_key_markers,
+        )
+        if missing_reason is not None and not binding_findings:
+            if unreasoned_shared_integration_keys == "refuse":
+                findings.append(missing_reason)
+            else:
+                reported.append(missing_reason)
 
     return RuntimeKeySafetyEvaluation(
         status="fail" if findings else "pass",
@@ -354,6 +341,32 @@ def evaluate_runtime_key_safety(
         checked_binding_keys=checked_binding_keys,
         findings=tuple(findings),
         reported=tuple(reported),
+    )
+
+
+def _evaluate_binding(
+    *,
+    target: RuntimeKeySafetyTarget,
+    binding: SecretBinding,
+    rule: RuntimeSecretSafetyRule | None,
+    extra_integration_key_markers: tuple[str, ...],
+) -> tuple[RuntimeKeySafetyFinding, ...]:
+    if rule is not None:
+        return _evaluate_binding_rule(target=target, binding=binding, rule=rule)
+    if _binding_stored_for_exact_stable_lane(
+        binding=binding,
+        target=target,
+        extra_integration_key_markers=extra_integration_key_markers,
+    ):
+        return _evaluate_declared_secret_class(target=target, binding=binding)
+    return (
+        RuntimeKeySafetyFinding(
+            code="unclassified_binding",
+            binding_key=binding.binding_key,
+            binding_id=binding.binding_id,
+            secret_id=binding.secret_id,
+            detail=f"Managed secret binding {binding.binding_key!r} has no runtime key safety rule.",
+        ),
     )
 
 
