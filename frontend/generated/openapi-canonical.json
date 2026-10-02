@@ -26761,6 +26761,13 @@
             "title": "Product",
             "type": "string"
           },
+          "provider_key_adoption": {
+            "items": {
+              "$ref": "#/components/schemas/ProductConfigProviderKeyAdoptionResult"
+            },
+            "title": "Provider Key Adoption",
+            "type": "array"
+          },
           "reason": {
             "default": "",
             "title": "Reason",
@@ -27052,6 +27059,33 @@
           "enabled"
         ],
         "title": "ProductConfigOperationAvailability",
+        "type": "object"
+      },
+      "ProductConfigProviderKeyAdoptionResult": {
+        "additionalProperties": false,
+        "description": "One key named for adoption and what the service decided; never its value.",
+        "properties": {
+          "disposition": {
+            "enum": [
+              "adopted",
+              "template_default",
+              "already_recorded",
+              "refused_credential",
+              "missing"
+            ],
+            "title": "Disposition",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "disposition"
+        ],
+        "title": "ProductConfigProviderKeyAdoptionResult",
         "type": "object"
       },
       "ProductConfigRuntimeEnvironmentRecordSummary": {
@@ -73536,6 +73570,20 @@
                   "ProductConfigRuntimeInput": {
                     "additionalProperties": true,
                     "properties": {
+                      "adopt_provider_keys": {
+                        "anyOf": [
+                          {
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Adopt Provider Keys"
+                      },
                       "context": {
                         "anyOf": [
                           {

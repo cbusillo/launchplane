@@ -21904,6 +21904,13 @@
             "title": "Product",
             "type": "string"
           },
+          "provider_key_adoption": {
+            "items": {
+              "$ref": "#/components/schemas/ProductConfigProviderKeyAdoptionResult"
+            },
+            "title": "Provider Key Adoption",
+            "type": "array"
+          },
           "reason": {
             "default": "",
             "title": "Reason",
@@ -21945,6 +21952,7 @@
           "mode",
           "next_actions",
           "product",
+          "provider_key_adoption",
           "reason",
           "runtime_environment",
           "runtime_key_safety",
@@ -22205,6 +22213,33 @@
           "trust_state"
         ],
         "title": "ProductConfigOperationAvailability",
+        "type": "object"
+      },
+      "ProductConfigProviderKeyAdoptionResult": {
+        "additionalProperties": false,
+        "description": "One key named for adoption and what the service decided; never its value.",
+        "properties": {
+          "disposition": {
+            "enum": [
+              "adopted",
+              "template_default",
+              "already_recorded",
+              "refused_credential",
+              "missing"
+            ],
+            "title": "Disposition",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "disposition",
+          "key"
+        ],
+        "title": "ProductConfigProviderKeyAdoptionResult",
         "type": "object"
       },
       "ProductConfigRuntimeEnvironmentRecordSummary": {

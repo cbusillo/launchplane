@@ -2278,6 +2278,20 @@ return a typed blocked result rather than guessing a domain.
   restore removed values; recovery requires a separately reviewed application
   configuration or managed secret update. Do not roll the service back to a
   version that cannot read nonempty version-2 runtime records.
+- To record a lane's provider-only settings without anyone handling their
+  values, submit product-config `schema_version: 2` with an instance-scoped
+  `runtime_env.adopt_provider_keys` list of key names. The service reads the
+  lane's current provider env itself and reports one disposition per key in
+  `provider_key_adoption`, names only: `adopted` (recorded on the lane with
+  the provider's value), `template_default` (equal to the Odoo compose
+  template's default, so it is retired and the template supplies the same
+  value), `already_recorded` (the lane's site records already supply it; left
+  alone), `refused_credential` (its name or value looks like a credential;
+  record it as a managed secret instead) or `missing` (not on the provider).
+  Apply refuses while any key is `refused_credential` or `missing`; drop those
+  keys and review a fresh dry run. A key cannot be adopted and also set or
+  retired in the same request. Apply reads the provider again, so a value
+  changed on the provider after the dry run is the one recorded.
 - Platform credentials never reach an app runtime. Every path that renders or
   writes an app runtime environment (live-target runtime sync, ship and
   promotion, Odoo stable bootstrap and target replacement, backup restore, and
