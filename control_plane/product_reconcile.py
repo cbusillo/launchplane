@@ -2,9 +2,10 @@
 
 A reconcile reads GitHub's record of the product's builds and Launchplane's own
 records, decides what should change, and does it under Launchplane's own
-reconcile grant (``launchplane_reconcile_authorization``): it queues the testing
-lane's stable target replacement, and applies or destroys the PR's preview. It
-records what it decided and did as the plan on its request.
+reconcile grant (``launchplane_reconcile_authorization``): it queues an Odoo
+testing lane's stable target replacement, deploys a generic-web testing lane,
+and applies or destroys the PR's preview. It records what it decided and did as
+the plan on its request.
 """
 
 from __future__ import annotations
@@ -33,9 +34,11 @@ from control_plane.build_provenance import (
     GitHubBuildProvenanceTransport,
     VerifiedArtifactStore,
     VerifiedBuildArtifact,
+    VerifiedGenericWebBuild,
     first_parent_history,
     record_verified_build_artifact,
     verify_build_artifact,
+    verify_generic_web_build,
 )
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -59,6 +62,16 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
+from control_plane.generic_web_deploy_http import (
+    GENERIC_WEB_DEPLOY_ROUTE,
+    GenericWebDeployEnvelope,
+    GenericWebDeployProductMismatchError,
+    GenericWebDeployRouteDependencyError,
+    resolve_generic_web_deploy_lane,
+)
+from control_plane.generic_web_deploy_provider_adapter import (
+    GenericWebDeployProviderMutationAdapter,
+)
 from control_plane.github_app_identity import (
     GitHubAppIdentity,
     GitHubAppIdentityError,
@@ -68,7 +81,9 @@ from control_plane.github_app_identity import (
 from control_plane.launchplane_reconcile_authorization import (
     TESTING_INSTANCE,
     build_launchplane_reconcile_authorization,
+    launchplane_reconcile_generic_web_testing_allowed,
     launchplane_reconcile_preview_destination_allowed,
+    reconciles_as_generic_web,
 )
 from control_plane.merge_train_github_token import MERGE_TRAIN_GITHUB_APP_SECRET_INTEGRATION
 from control_plane.merge_train_policy_source import (
@@ -116,12 +131,21 @@ from control_plane.product_repository_identity import (
     product_repository_identity_from_inventory,
     resolve_product_repository_identity,
 )
-from control_plane.provider_operations import DurableProviderOperationStore
+from control_plane.provider_operations import (
+    DurableProviderOperationResult,
+    DurableProviderOperationStore,
+    run_durable_provider_operation,
+)
 from control_plane.service_human_auth import launchplane_public_origin_from_env
 from control_plane.testing_lane_hold import (
     STAFF_TESTING_HOLD_REASON,
     is_staff_testing_hold_cancellation,
     read_staff_testing_hold,
+)
+from control_plane.workflows.generic_web_deploy import GenericWebDeployRequest
+from control_plane.workflows.generic_web_deploy_provider import (
+    GenericWebDeployProvider,
+    default_generic_web_deploy_provider,
 )
 from control_plane.workflows.launchplane import PreviewMutationRecordStore, find_preview_record
 from control_plane.workflows.odoo_preview_runtime import (
@@ -210,6 +234,15 @@ class PreviewProviderHooks:
     build_inputs: Callable[..., dict[str, object]] = build_odoo_preview_apply_inputs_result
     execute_apply: ExecuteOdooPreviewApply = execute_odoo_preview_apply_result
     observe_apply: ObserveOdooPreviewApply = observe_odoo_preview_apply_result
+
+
+@dataclass(frozen=True)
+class TestingProviderHooks:
+    """The provider a generic-web testing deploy runs through; tests replace it with a fake."""
+
+    generic_web_deploy_provider: Callable[[], GenericWebDeployProvider] = (
+        default_generic_web_deploy_provider
+    )
 
 
 @dataclass(frozen=True)
@@ -333,8 +366,10 @@ def reconcile_testing_target(
     profile: LaunchplaneProductProfileRecord,
     repository_id: str,
     transport: BuildProvenanceTransport,
+    control_plane_root: Path | None = None,
+    testing_hooks: TestingProviderHooks = TestingProviderHooks(),
 ) -> ReconcileOutcome:
-    """Queue the testing lane's deploy of its desired artifact when it runs anything else."""
+    """Deploy the testing lane's desired artifact when it runs anything else."""
     plan, desired = _plan_testing_target(
         record_store=record_store,
         profile=profile,
@@ -343,6 +378,15 @@ def reconcile_testing_target(
     )
     if desired is None or plan["action"] != "deploy":
         return ReconcileOutcome(plan)
+    if isinstance(desired, VerifiedGenericWebBuild):
+        return _deploy_generic_web_testing(
+            record_store=record_store,
+            profile=profile,
+            plan=plan,
+            desired=desired,
+            control_plane_root=control_plane_root,
+            testing_hooks=testing_hooks,
+        )
     try:
         lane = resolve_odoo_target_replacement_apply_lane(
             record_store=record_store, product=profile.product, instance=TESTING_INSTANCE
@@ -351,7 +395,7 @@ def reconcile_testing_target(
         OdooTargetReplacementApplyProductMismatchError,
         OdooTargetReplacementApplyRouteDependencyError,
     ):
-        # Only the Odoo testing deploy runs on Launchplane's reconcile grant today.
+        # Only Odoo and generic-web testing deploys run on Launchplane's reconcile grant.
         plan.update(held=True, reason="no_reconcile_deploy_for_driver")
         return ReconcileOutcome(plan)
     hold = read_staff_testing_hold(record_store=record_store, context=lane.context)
@@ -470,6 +514,143 @@ def reconcile_testing_target(
         queued_operation_id=str(operation.get("operation_id") or ""),
         queued_operation_status=str(operation.get("status") or ""),
     )
+    return ReconcileOutcome(plan)
+
+
+def _deploy_generic_web_testing(
+    *,
+    record_store: ProductReconcileStore,
+    profile: LaunchplaneProductProfileRecord,
+    plan: dict[str, object],
+    desired: VerifiedGenericWebBuild,
+    control_plane_root: Path | None,
+    testing_hooks: TestingProviderHooks,
+) -> ReconcileOutcome:
+    """Deploy the verified image to the generic-web testing lane, in-process.
+
+    It runs the deploy route's durable provider operation under the reconcile's
+    reservation scope. A deploy whose provider outcome is unknown stays reserved
+    for generic-web deploy recovery and is never bypassed; a recorded result for
+    the same image and starting point is replayed, not run again.
+    """
+    if control_plane_root is None:
+        raise ProductReconcileError("A generic-web testing deploy needs the control-plane root.")
+    try:
+        _profile, lane = resolve_generic_web_deploy_lane(
+            record_store=record_store, product=profile.product, instance=TESTING_INSTANCE
+        )
+    except (GenericWebDeployProductMismatchError, GenericWebDeployRouteDependencyError) as error:
+        raise ProductReconcileError(
+            f"Product {profile.product} has no generic-web testing lane."
+        ) from error
+    if not launchplane_reconcile_generic_web_testing_allowed(
+        record_store=record_store,
+        product=profile.product,
+        context=lane.context,
+        instance=lane.instance,
+    ):
+        raise ProductReconcileError("Launchplane's reconcile may not deploy this lane.")
+    hold = read_staff_testing_hold(record_store=record_store, context=lane.context)
+    if hold is not None:
+        plan.update(
+            action="wait",
+            held=True,
+            reason=STAFF_TESTING_HOLD_REASON,
+            hold_reason=hold.reason,
+            hold_recorded_by=hold.recorded_by,
+            hold_recorded_at=hold.recorded_at,
+        )
+        return ReconcileOutcome(plan)
+    envelope = GenericWebDeployEnvelope(
+        product=profile.product,
+        deploy=GenericWebDeployRequest(
+            product=profile.product,
+            instance=TESTING_INSTANCE,
+            artifact_id=desired.image_reference,
+            source_git_ref=desired.manifest.source_commit,
+        ),
+    )
+    # What testing ran when this deploy was decided is part of its key: a testing
+    # lane changed since (a rollback, an admin deploy) gets the desired image again.
+    starting_point = str(plan.get("current_image_digest") or "") or "none"
+    idempotency_key = (
+        f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:{TESTING_INSTANCE}:"
+        f"{desired.manifest.image.digest}:from-{starting_point}"
+    )
+    trace_id = f"{RECONCILE_SOURCE}-{uuid4().hex}"
+    plan.update(held=False, deploy_idempotency_key=idempotency_key)
+    try:
+        result = run_durable_provider_operation(
+            store=cast(DurableProviderOperationStore, record_store),
+            scope=reconcile_reservation_scope(profile.product),
+            route_path=GENERIC_WEB_DEPLOY_ROUTE,
+            idempotency_key=idempotency_key,
+            request_fingerprint=_fingerprint(envelope.model_dump(mode="json")),
+            lease_owner=trace_id,
+            response_trace_id=trace_id,
+            adapter=GenericWebDeployProviderMutationAdapter(
+                control_plane_root=control_plane_root,
+                record_store=record_store,
+                deploy_request=envelope,
+                profile=profile,
+                lane=lane,
+                trace_id=trace_id,
+                deploy_provider=testing_hooks.generic_web_deploy_provider(),
+            ),
+        )
+    except (FileNotFoundError, ValueError, click.ClickException) as error:
+        # Refused before any provider change; the next event or sweep tries again.
+        message = error.format_message() if isinstance(error, click.ClickException) else error
+        plan["deploy_operation_status"] = "refused"
+        return ReconcileOutcome(plan, error=f"The testing deploy was refused: {message}")
+    return _generic_web_testing_outcome(plan=plan, result=result)
+
+
+def _generic_web_testing_outcome(
+    *, plan: dict[str, object], result: DurableProviderOperationResult
+) -> ReconcileOutcome:
+    plan["deploy_operation_status"] = result.status
+    if result.status == "in_progress" or (
+        result.status == "target_busy"
+        and (result.record is None or result.record.state != "reconcile_required")
+    ):
+        plan["deferred"] = "lane_busy"
+        return ReconcileOutcome(plan, deferred=True)
+    if result.status in {"target_busy", "reconcile_required"}:
+        return ReconcileOutcome(
+            plan,
+            error=(
+                "A testing deploy's provider outcome is unknown; Launchplane deploys this "
+                "lane again after generic-web deploy recovery settles it."
+            ),
+        )
+    if result.status == "conflict":
+        return ReconcileOutcome(
+            plan, error="A different testing deploy is recorded under this deploy's key."
+        )
+    driver_result = result.response_payload.get("result")
+    driver_result = driver_result if isinstance(driver_result, dict) else {}
+    records = result.response_payload.get("records")
+    deployment_record_id = (
+        str(records.get("deployment_record_id") or "") if isinstance(records, dict) else ""
+    )
+    deploy_status = str(driver_result.get("deploy_status") or "")
+    post_deploy_status = str(driver_result.get("post_deploy_status") or "")
+    plan.update(
+        deployment_record_id=deployment_record_id,
+        deploy_status=deploy_status,
+        post_deploy_status=post_deploy_status,
+    )
+    if deploy_status != "pass" or post_deploy_status == "fail":
+        # Statuses only: the driver's message can name provider targets and hosts.
+        return ReconcileOutcome(
+            plan,
+            error=(
+                f"The testing deploy failed: deploy {deploy_status or 'unknown'}, "
+                f"post-deploy {post_deploy_status or 'unknown'}. Launchplane deploys "
+                "again when a newer build is verified or the testing lane changes."
+            ),
+        )
     return ReconcileOutcome(plan)
 
 
@@ -706,7 +887,7 @@ def _plan_testing_target(
     profile: LaunchplaneProductProfileRecord,
     repository_id: str,
     transport: BuildProvenanceTransport,
-) -> tuple[dict[str, object], VerifiedBuildArtifact | None]:
+) -> tuple[dict[str, object], VerifiedBuildArtifact | VerifiedGenericWebBuild | None]:
     """Desired: the newest first-parent default-branch commit with a verified release build."""
     lane = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
     if lane is None:
@@ -731,14 +912,18 @@ def _plan_testing_target(
     if desired is None:
         plan.update(action="none", reason=absent_reason, held=False)
         return plan, None
-    manifest = desired.manifest
-    desired_digest = manifest.image.digest.lower()
+    desired_artifact_id = (
+        desired.image_reference
+        if isinstance(desired, VerifiedGenericWebBuild)
+        else desired.manifest.artifact_id
+    )
+    desired_digest = desired.manifest.image.digest.lower()
     plan.update(
-        desired_artifact_id=manifest.artifact_id,
-        desired_commit=manifest.source_commit,
+        desired_artifact_id=desired_artifact_id,
+        desired_commit=desired.manifest.source_commit,
         desired_image_digest=desired_digest,
     )
-    if manifest.artifact_id == current_artifact_id or desired_digest == current_digest:
+    if desired_artifact_id == current_artifact_id or desired_digest == current_digest:
         plan.update(action="none", reason="already_deployed", held=False)
     else:
         plan.update(action="deploy")
@@ -1015,6 +1200,7 @@ def reconcile_product_request(
     transport_factory: TransportFactory = resolve_build_provenance_transport,
     control_plane_root: Path | None = None,
     preview_hooks: PreviewProviderHooks = PreviewProviderHooks(),
+    testing_hooks: TestingProviderHooks = TestingProviderHooks(),
 ) -> ReconcileOutcome:
     try:
         profile = record_store.read_product_profile_record(request.product)
@@ -1032,6 +1218,8 @@ def reconcile_product_request(
             profile=profile,
             repository_id=identity.repository_id,
             transport=transport,
+            control_plane_root=control_plane_root,
+            testing_hooks=testing_hooks,
         )
     assert request.pull_request_number is not None
     return reconcile_preview_target(
@@ -1053,6 +1241,7 @@ def run_product_reconcile_once(
     transport_factory: TransportFactory = resolve_build_provenance_transport,
     control_plane_root: Path | None = None,
     preview_hooks: PreviewProviderHooks = PreviewProviderHooks(),
+    testing_hooks: TestingProviderHooks = TestingProviderHooks(),
     feedback_token: FeedbackTokenFactory = resolve_pull_request_feedback_token,
     public_origin: Callable[[], str] = launchplane_public_origin_from_env,
 ) -> ProductReconcileRequestRecord | None:
@@ -1067,6 +1256,7 @@ def run_product_reconcile_once(
             transport_factory=transport_factory,
             control_plane_root=control_plane_root,
             preview_hooks=preview_hooks,
+            testing_hooks=testing_hooks,
         )
     except Exception as error:
         _LOGGER.warning("Product reconcile of %s failed: %s", request.target_key, error)
@@ -1209,7 +1399,7 @@ def _desired_release(
     profile: LaunchplaneProductProfileRecord,
     repository_id: str,
     lane: ProductLaneProfile,
-) -> tuple[VerifiedBuildArtifact | None, list[dict[str, str]], str]:
+) -> tuple[VerifiedBuildArtifact | VerifiedGenericWebBuild | None, list[dict[str, str]], str]:
     default_branch = profile.default_branch
     workflow_file = BUILD_WORKFLOW_PATH.rsplit("/", 1)[-1]
     query = urlencode(
@@ -1265,10 +1455,20 @@ def _desired_release(
                 if len(ordered) == len(built_commits):
                     break
     rejected: list[dict[str, str]] = []
+    generic_web = reconciles_as_generic_web(profile)
     for commit in ordered[:TESTING_VERIFY_LIMIT]:
         try:
-            return (
-                verify_build_artifact(
+            verified: VerifiedBuildArtifact | VerifiedGenericWebBuild = (
+                verify_generic_web_build(
+                    transport=transport,
+                    repository=profile.repository,
+                    repository_id=repository_id,
+                    commit=commit,
+                    purpose="release",
+                    image_repository=profile.image.repository,
+                )
+                if generic_web
+                else verify_build_artifact(
                     transport=transport,
                     repository=profile.repository,
                     repository_id=repository_id,
@@ -1276,10 +1476,9 @@ def _desired_release(
                     purpose="release",
                     context=lane.context,
                     image_repository=profile.image.repository,
-                ),
-                rejected,
-                "",
+                )
             )
+            return verified, rejected, ""
         except BuildProvenanceError as error:
             rejected.append({"commit": commit, "error": str(error)})
     return None, rejected, "no_verified_build"

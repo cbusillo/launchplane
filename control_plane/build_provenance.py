@@ -10,12 +10,12 @@ import io
 import json
 import zipfile
 from collections.abc import Iterator
-from typing import Protocol
+from typing import Literal, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
@@ -123,9 +123,129 @@ def verify_build_artifact(
     image_repository: str,
     pull_request_number: int | None = None,
 ) -> VerifiedBuildArtifact:
-    """Return the manifest GitHub's build run proves for this commit, or raise."""
-    repository_path = _repository_path(repository)
+    """Return the Odoo manifest GitHub's build run proves for this commit, or raise."""
     commit = commit.strip().lower()
+    source_build, manifest_payload = _verified_build_run(
+        transport=transport,
+        repository=repository,
+        repository_id=repository_id,
+        commit=commit,
+        purpose=purpose,
+        pull_request_number=pull_request_number,
+    )
+    try:
+        manifest = ArtifactIdentityManifest.model_validate(manifest_payload)
+    except ValidationError as error:
+        raise BuildProvenanceError(
+            "The build manifest is not a valid artifact manifest."
+        ) from error
+    if manifest.schema_version != 2:
+        raise BuildProvenanceError("The build manifest must be schema version 2.")
+    if manifest.source_commit != commit:
+        raise BuildProvenanceError("The build manifest names a different source commit.")
+    if manifest.image.repository.rstrip("/") != image_repository.strip().rstrip("/"):
+        raise BuildProvenanceError("The build manifest names a different image repository.")
+    tenant_locks = [
+        lock
+        for lock in (
+            manifest.dependency_provenance.uv_locks if manifest.dependency_provenance else ()
+        )
+        if lock.scope == "tenant"
+    ]
+    if not tenant_locks or tenant_locks[0].source_repository.casefold() != repository.casefold():
+        raise BuildProvenanceError("The build manifest's tenant lock is not from this repository.")
+    return VerifiedBuildArtifact(
+        manifest=manifest.model_copy(
+            update={
+                "artifact_id": (
+                    f"artifact-{context}-run-{source_build.run_id}-{source_build.run_attempt}"
+                ),
+                "source_build": source_build.model_copy(
+                    update={"manifest_artifact_id": manifest.artifact_id}
+                ),
+            }
+        )
+    )
+
+
+class GenericWebBuildImage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repository: str = Field(min_length=1)
+    digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
+class GenericWebBuildManifest(BaseModel):
+    """What a generic-web build uploads: the commit it built and the image it pushed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1]
+    kind: Literal["generic-web"]
+    source_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    image: GenericWebBuildImage
+
+
+class VerifiedGenericWebBuild(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    manifest: GenericWebBuildManifest
+    source_build: ArtifactSourceBuild
+
+    @property
+    def image_reference(self) -> str:
+        """The immutable image a generic-web lane deploys and records as its artifact."""
+        return f"{self.manifest.image.repository}@{self.manifest.image.digest}"
+
+
+def verify_generic_web_build(
+    *,
+    transport: BuildProvenanceTransport,
+    repository: str,
+    repository_id: str,
+    commit: str,
+    purpose: BuildPurpose,
+    image_repository: str,
+    pull_request_number: int | None = None,
+) -> VerifiedGenericWebBuild:
+    """Return the image GitHub's build run proves for this commit, or raise.
+
+    The run checks are the Odoo build's; only the manifest differs. Nothing is
+    recorded: a generic-web lane's runtime identity is its record of what it runs.
+    """
+    commit = commit.strip().lower()
+    source_build, manifest_payload = _verified_build_run(
+        transport=transport,
+        repository=repository,
+        repository_id=repository_id,
+        commit=commit,
+        purpose=purpose,
+        pull_request_number=pull_request_number,
+    )
+    try:
+        manifest = GenericWebBuildManifest.model_validate(manifest_payload)
+    except ValidationError as error:
+        raise BuildProvenanceError(
+            "The build manifest is not a valid generic-web build manifest."
+        ) from error
+    if manifest.source_commit != commit:
+        raise BuildProvenanceError("The build manifest names a different source commit.")
+    if manifest.image.repository.rstrip("/") != image_repository.strip().rstrip("/"):
+        raise BuildProvenanceError("The build manifest names a different image repository.")
+    return VerifiedGenericWebBuild(manifest=manifest, source_build=source_build)
+
+
+def _verified_build_run(
+    *,
+    transport: BuildProvenanceTransport,
+    repository: str,
+    repository_id: str,
+    commit: str,
+    purpose: BuildPurpose,
+    pull_request_number: int | None,
+) -> tuple[ArtifactSourceBuild, dict[str, object]]:
+    """The build run that proves this commit, and its uploaded manifest, unvalidated."""
+    repository_path = _repository_path(repository)
     if not repository_id.strip():
         raise BuildProvenanceError("The product needs its immutable repository id recorded.")
     if purpose == "preview" and pull_request_number is None:
@@ -168,28 +288,6 @@ def verify_build_artifact(
         run_id=run_id,
         run_attempt=run_attempt,
     )
-    try:
-        manifest = ArtifactIdentityManifest.model_validate(manifest_payload)
-    except ValidationError as error:
-        raise BuildProvenanceError(
-            "The build manifest is not a valid artifact manifest."
-        ) from error
-    if manifest.schema_version != 2:
-        raise BuildProvenanceError("The build manifest must be schema version 2.")
-    if manifest.source_commit != commit:
-        raise BuildProvenanceError("The build manifest names a different source commit.")
-    if manifest.image.repository.rstrip("/") != image_repository.strip().rstrip("/"):
-        raise BuildProvenanceError("The build manifest names a different image repository.")
-    tenant_locks = [
-        lock
-        for lock in (
-            manifest.dependency_provenance.uv_locks if manifest.dependency_provenance else ()
-        )
-        if lock.scope == "tenant"
-    ]
-    if not tenant_locks or tenant_locks[0].source_repository.casefold() != repository.casefold():
-        raise BuildProvenanceError("The build manifest's tenant lock is not from this repository.")
-
     source_build = ArtifactSourceBuild(
         repository=repository,
         repository_id=repository_id.strip(),
@@ -200,16 +298,9 @@ def verify_build_artifact(
         run_id=run_id,
         run_attempt=run_attempt,
         github_artifact_id=github_artifact_id,
-        manifest_artifact_id=manifest.artifact_id,
+        manifest_artifact_id="",
     )
-    return VerifiedBuildArtifact(
-        manifest=manifest.model_copy(
-            update={
-                "artifact_id": f"artifact-{context}-run-{run_id}-{run_attempt}",
-                "source_build": source_build,
-            }
-        )
-    )
+    return source_build, manifest_payload
 
 
 class VerifiedArtifactStore(Protocol):
