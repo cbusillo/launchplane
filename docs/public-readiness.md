@@ -56,11 +56,11 @@ The safe public posture while Launchplane is still becoming a generalized
 product is:
 
 - public source code
-- private runtime secrets and operator catalogs
+- private runtime secrets and admin catalogs
 - public or private GHCR package visibility chosen independently from source
   visibility
 - no checked-in live environment identifiers, credentials, or rendered secret
   files
 
-That posture is workable because private operator knowledge is not stored in the
+That posture is workable because private admin knowledge is not stored in the
 repo.

@@ -402,8 +402,8 @@ function ControllerStatus({
           <small>{humanize(status.admission.reason_code)}</small>
         </div>
         <div>
-          <span>Lease owner</span>
-          <strong>{status.controller_diagnostics?.owner || "No active owner"}</strong>
+          <span>Lease holder</span>
+          <strong>{status.controller_diagnostics?.owner || "No active holder"}</strong>
           <small>
             {formatAge(status.controller_diagnostics?.heartbeat_age_seconds)} heartbeat
           </small>

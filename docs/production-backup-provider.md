@@ -22,7 +22,7 @@ after an operation finishes.
 The enqueue and cancel routes accept a bearer or OIDC caller, or a signed-in
 browser session through the CSRF-checked browser-mutation dependency; terminal
 agent tokens are refused. A caller needs exactly one matching managed rule,
-except a signed-in policy administrator, whose backup records a
+except a signed-in admin, whose backup records a
 `policy_administrator` grant that the worker re-checks against the active policy
 before the capture's first effect.
 
@@ -73,7 +73,7 @@ files with mode 0600, exposes them to SSH through its own procfs descriptors, an
 closes them on completion. It never writes the material to disk. A runtime
 without Linux memfd support fails closed. Strict host-key checking stays enabled.
 
-An operator must install the reviewed `scripts/proxmox-prod-gate-filter.sh` on
+An admin must install the reviewed `scripts/proxmox-prod-gate-filter.sh` on
 the bound host and pin its forced-command environment to one guest, storage and
 snapshot prefix. `PROD_GATE_GUEST_KIND` selects `lxc` or `qemu`; the existing
 `PROD_GATE_ALLOWED_CTID` variable carries the exact guest ID for either kind.
@@ -120,7 +120,7 @@ is zero. Existing snapshots outside that format are kept. Retention failure is
 recorded separately with a bounded error code and does not invalidate a verified
 capture when the worker can commit its result; authority or lease loss stops
 further deletion. A worker crash or expired lease still fails closed, including
-during retention. Saved verified-capture evidence remains available for operator
+during retention. Saved verified-capture evidence remains available for admin
 reconciliation; recovery does not automatically authorize a promotion.
 
 Deploying this code does not install host filters, grant access, create secret

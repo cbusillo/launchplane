@@ -85,10 +85,10 @@ export function ProductOwnerPanel({
         const denied = error instanceof LaunchplaneApiError && error.statusCode === 403;
         setResource({
           error: denied
-            ? "This session cannot read the product's Owner."
+            ? "This session cannot read the product's Client."
             : error instanceof Error
               ? error.message
-              : "Launchplane could not read the product's Owner.",
+              : "Launchplane could not read the product's Client.",
           owner: NO_PRODUCT_OWNER,
           status: "error",
         });
@@ -179,16 +179,16 @@ export function ProductOwnerPanel({
       <header className="product-config-panel-header">
         <span aria-hidden="true">{ownerSet ? <UserCheck /> : <UserX />}</span>
         <div>
-          <p className="eyebrow">Owner</p>
+          <p className="eyebrow">Client</p>
           <h2 id="product-owner-title">
             {resource.status === "loading"
-              ? "Reading the Owner"
+              ? "Reading the Client"
               : resource.status === "error"
-                ? "Owner unavailable"
+                ? "Client unavailable"
                 : productOwnerLabel(resource.owner)}
           </h2>
           <p>
-            The Owner can accept or request changes on previews. They can never merge or
+            The Client can accept or request changes on previews. They can never merge or
             deploy.
           </p>
         </div>
@@ -196,7 +196,7 @@ export function ProductOwnerPanel({
       {resource.status === "error" ? <InlineFormError message={resource.error} /> : null}
       {resource.status === "ready" ? (
         <>
-          <fieldset aria-label="Change the Owner" disabled={locked}>
+          <fieldset aria-label="Change the Client" disabled={locked}>
             <div className="product-config-field">
               <label htmlFor="product-owner-login">
                 GitHub login
@@ -225,8 +225,8 @@ export function ProductOwnerPanel({
             <p className="product-owner-plan" role="status">
               {saved
                 ? plan.after.githubId
-                  ? `Saved. The Owner is now ${productOwnerLabel(plan.after)}.`
-                  : "Saved. This product has no Owner."
+                  ? `Saved. The Client is now ${productOwnerLabel(plan.after)}.`
+                  : "Saved. This product has no Client."
                 : productOwnerPlanSummary(plan)}
             </p>
           ) : null}

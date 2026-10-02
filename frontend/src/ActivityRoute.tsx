@@ -204,7 +204,7 @@ function ActivityPage({
           {activity.display_name}
         </AppLink>
         <div>
-          <p className="eyebrow">Operator timeline</p>
+          <p className="eyebrow">Activity timeline</p>
           <h1 data-route-heading tabIndex={-1}>
             Recent activity
           </h1>

@@ -9,7 +9,7 @@ Ordinary guarded delivery requires a current, independently observed provider
 protection result. Launchplane refreshes that evidence on demand during ordinary
 admission and finite-job continuation, using the same engineering delegation.
 There is no separate client preflight, public refresh route or inspection daemon.
-Owner preview acceptance remains a separate gate and grants no operating power.
+Client preview acceptance remains a separate gate and grants no operating power.
 
 This document describes the source contract approved in issue #2369 under
 #2240. Installing source does not configure an inspection App, change a provider
@@ -39,7 +39,7 @@ into a later proposal or replaces that operation's fresh record resolution.
 The inspection App is separate from the ordinary delivery App. Resolve its App
 identity from Launchplane's DB-backed service runtime environment and its exact
 current private-key binding/version from managed secrets. There is no ambient
-GitHub token, owner key, workflow secret or ordinary-custody fallback. Missing or
+GitHub token, admin key, workflow secret or ordinary-custody fallback. Missing or
 ambiguous durable configuration stops before inspection reservation or charge;
 a transient database failure does not establish that a binding was removed.
 
@@ -51,7 +51,7 @@ fixed diagnostic GETs. Giving that permission to the constrained delivery App
 would let it alter the protections that constrain it, so its existing permission
 ceiling stays unchanged.
 
-The adapter verifies the App, installation, owner, repository, permissions and
+The adapter verifies the App, installation, account owner, repository, permissions and
 token expiry before using a token. It bounds evaluated rules, applicable ruleset
 reads, inherited visibility and classic branch-protection reads. Missing fields,
 redacted bypass actors, unsupported rule semantics and incomplete pagination
@@ -80,7 +80,7 @@ allowed merge methods. An empty scanning list or `pull_request: null` requires
 complete provider proof of absence. Native approval counts may be zero through
 six; this contract invents no additional human review requirement. Allowed merge
 methods remain explicit when native review is absent and must include `merge`.
-The existing Launchplane engineering and Owner gates remain independent.
+The existing Launchplane engineering and Client gates remain independent.
 
 The first supported writer restriction has exactly one applicable ruleset
 containing `update`. It contains only that rule and has exactly one Integration

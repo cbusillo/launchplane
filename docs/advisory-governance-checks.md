@@ -8,8 +8,8 @@ Launchplane projects engineering review into the `launchplane/engineering-review
 GitHub check as a neutral advisory observation. GitHub is a visibility and routing
 surface; this projection grants no merge, promotion, or deployment authority.
 
-Owner preview review uses the `launchplane/owner-review` commit status described
-in [preview-workflow-contract.md](preview-workflow-contract.md#owner-review-request).
+Client preview review uses the `launchplane/owner-review` commit status described
+in [preview-workflow-contract.md](preview-workflow-contract.md#client-review-request).
 The exact-binding `launchplane/owner-acceptance` check is retired. When Launchplane
 next publishes current review feedback, it neutralizes any old App-owned check
 on that head with the title "Retired" and a pointer to the current status. It
@@ -35,7 +35,7 @@ permission, repository-count, repository-id, or repository-name validation
 failure. A cleanup failure is attached to the original validation error rather
 than replacing it. Tokens are never logged or persisted.
 
-Registering and installing the live App is an operator authorization step. The
+Registering and installing the live App is an admin authorization step. The
 code and dry-run contracts remain testable before that authorization exists;
 missing identity or installation state fails the projection route closed.
 
@@ -49,8 +49,8 @@ The retired `/v1/owner-acceptance/project` route and
 `/ui/engineering/owner-acceptance` workbench have been removed. Current preview
 review uses `/ui/owner-review` and the `launchplane/owner-review` commit status.
 `OwnerReviewStatusPublisher` can neutralize an old `launchplane/owner-acceptance`
-check on the same pull request; it does not evaluate or write old Owner events.
-See [owner-acceptance.md](owner-acceptance.md).
+check on the same pull request; it does not evaluate or write old Client events.
+See [`owner-acceptance.md`](owner-acceptance.md).
 
 ## No Feedback Loop
 
@@ -62,6 +62,6 @@ separate cutover. Tests prove that preview, merge, and admission results are
 unchanged when GitHub projections are present, `in_progress`, completed, or
 failed.
 
-The retired Owner projection is never a required check or merge authority.
+The retired Client projection is never a required check or merge authority.
 Current product review and release checklist decisions are separate Launchplane
-records, and the release checklist remains the production Owner gate.
+records, and the release checklist remains the production Client gate.

@@ -8,15 +8,15 @@ title: Coding Standards
 - Keep any compatibility bridge explicit and removable; do not normalize it
   into a permanent abstraction.
 - Do not parse logs when explicit records or typed contracts should exist.
-- Do not hard-code real tenant, product, repository, branch, domain, or operator
+- Do not hard-code real tenant, product, repository, branch, domain, or admin
   values as production defaults, smoke fixtures, fallback policy, checked-in
   import catalogs, or implicit runtime authority. Real-world examples may
   appear only in docs or tests, and they must not be reachable by production
-  code without a stored runtime record or operator-supplied input.
+  code without a stored runtime record or admin-supplied input.
 - Do not move real mutable configuration from code into checked-in config files
   as a workaround. Real product, tenant, repository, branch, domain, lane,
-  provider-target, runtime-environment, authz, operator, or secret-binding
-  identity belongs in Launchplane records or operator-supplied input, not in
+  provider-target, runtime-environment, authz, admin, or secret-binding
+  identity belongs in Launchplane records or admin-supplied input, not in
   production code, workflow defaults, repo metadata, TOML, JSON, YAML, or local
   fallback catalogs.
 - Code may define schemas, validators, typed contracts, generic disabled
@@ -26,7 +26,7 @@ title: Coding Standards
 - Preserve minimal diffs and readable history.
 - Update docs whenever behavior or repo ownership changes.
 - Do not turn an inferred design preference into a purchase, physical-device,
-  custody, or recurring human-operations requirement. Record explicit owner
+  custody, or recurring human-operations requirement. Record explicit Director
   approval in the owning issue before planning or implementing such an
   obligation.
 - Protect pull-request merges with stable aggregate status checks that fail

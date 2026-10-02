@@ -120,7 +120,7 @@ export function EngineeringGovernanceProjectionRoute({
       <EngineeringBoundaryNote title="Readiness, admission, and landing">
         Current readiness reports the machine checks for this change. An admission
         records permission for one exact merge attempt; the landing outcome records
-        what happened. Site Owners review previews and release checklists in the
+        what happened. Clients review previews and release checklists in the
         product review flow. Their decisions do not enter merge readiness here.
       </EngineeringBoundaryNote>
 

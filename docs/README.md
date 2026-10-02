@@ -11,6 +11,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
 
 - [DIRECTION.md](../DIRECTION.md) — what Launchplane is for, who may do what, and
   where agents stop.
+- [role-words.md](role-words.md) — Director, Client, the admin permission, and
+  what legacy `owner` and `operator` identifiers mean.
 - [architecture.md](architecture.md) — ownership boundaries and system shape.
 - [config-boundary.md](config-boundary.md) — bootstrap-vs-DB config authority
   and checked-in config authority limits.
@@ -32,8 +34,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   Launchplane driver type or product driver.
 - [ui-standards.md](ui-standards.md) — tenant-first Launchplane UI direction and
   review rubric.
-- [operator-experience.md](operator-experience.md) — product, environment,
-  owner-review, settings, promotion, cleanup, and UI delivery contract.
+- [`operator-experience.md`](operator-experience.md) — product, environment,
+  Client-review, settings, promotion, cleanup, and UI delivery contract.
 - [post-v2-audit.md](post-v2-audit.md) — post-v2 product, security,
   persistence, contract, test, and modularity audit baseline and execution
   graph.
@@ -61,25 +63,25 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [provider-delivery-inspection.md](provider-delivery-inspection.md) — RETIRED, scheduled for deletion; see DIRECTION.md.
 - [agent-context-boundary.md](agent-context-boundary.md) — public-safe agent
   context, caller profiles, scoped intent, redaction, and provenance boundary.
-- [agent-operator-contract.md](agent-operator-contract.md) — generated,
-  public-safe agent/operator operation, workflow, lifecycle, and safety contract.
+- [`agent-operator-contract.md`](agent-operator-contract.md) — generated,
+  public-safe agent/admin operation, workflow, lifecycle, and safety contract.
 - [engineering-review-runs.md](engineering-review-runs.md) — shadow-only review
   run records, dispatch binding, credential boundary, and worker lifecycle.
 - [engineering-review-decisions.md](engineering-review-decisions.md) — exact-head
   classification plus independent-run evaluation and shadow GitHub projection.
-- [product-owner-policy.md](product-owner-policy.md) — retired Owner policy
-  history and the current product-profile Owner boundary.
-- [owner-acceptance.md](owner-acceptance.md) — current Owner review and the
+- [`product-owner-policy.md`](product-owner-policy.md) — retired Client policy
+  history and the current product-profile Client boundary.
+- [`owner-acceptance.md`](owner-acceptance.md) — current Client review and the
   compatibility boundary for retired acceptance history.
-- [release-review.md](release-review.md) — Owner checklist decisions for production
-  promotion, revision changes, and recorded operator overrides.
-- [owner-control-channel.md](owner-control-channel.md) — public canonical owner
+- [release-review.md](release-review.md) — Client checklist decisions for production
+  promotion, revision changes, and recorded admin overrides.
+- [`owner-control-channel.md`](owner-control-channel.md) — public canonical admin
   challenge payloads, cross-host conformance artifact, and deferred runtime boundary.
 - [privileged-operations.md](privileged-operations.md) — typed human-governed
   planning, managed-rule authorization, redaction, and future execution boundary.
 - [change-impact-policy.md](change-impact-policy.md) — retired classifier history and the
   independent repository-evidence boundary.
-- [operations.md](operations.md) — operator workflows and runtime boundary rules.
+- [operations.md](operations.md) — admin workflows and runtime boundary rules.
 - [production-backup-provider.md](production-backup-provider.md) — typed
   Proxmox/PBS capture, host boundary, evidence and rollout prerequisites.
 - [records.md](records.md) — persisted record formats and storage policy.
@@ -92,7 +94,7 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [dependency-health-contract.md](dependency-health-contract.md) — causal
   pull-request dependency comparisons and absolute health evidence.
 - [advisory-governance-checks.md](advisory-governance-checks.md) — dedicated
-  GitHub App identity, stable advisory engineering/Owner check runs, replay,
+  GitHub App identity, stable advisory engineering/Client check runs, replay,
   drift, and authority self-exclusion.
 - [style/python.md](style/python.md) — Python conventions.
 - [style/testing.md](style/testing.md) — testing conventions.

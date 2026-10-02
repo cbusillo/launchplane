@@ -1,25 +1,25 @@
 ---
-title: Agent Operator Contract
+title: Agent Admin Contract
 ---
 
-# Agent Operator Contract
+# Agent Admin Contract
 
 Launchplane publishes a checked-in, public-safe contract for external agent and
-operator tooling at `contracts/agent-operator-contract.json`. Launchplane owns
+admin tooling at `contracts/agent-operator-contract.json`. Launchplane owns
 the producer artifact and its quality gate. External skills are consumers; they
 do not become runtime authority and must not block ordinary Launchplane feature
 delivery.
 
 ## Generate And Check
 
-Generate the canonical OpenAPI document, UI bindings, and agent/operator
+Generate the canonical OpenAPI document, UI bindings, and agent/admin
 contract together:
 
 ```bash
 pnpm --dir frontend generate:openapi
 ```
 
-Generate only the agent/operator contract:
+Generate only the agent/admin contract:
 
 ```bash
 uv run launchplane service export-agent-contract \
@@ -59,7 +59,7 @@ The artifact contains:
 
 Anything not explicitly selected by the generator is absent. The artifact must
 never contain real product, tenant, repository, branch, domain, lane,
-provider-target, credential, operator, or runtime-topology authority.
+provider-target, credential, admin, or runtime-topology authority.
 
 `apply_odoo_addon_settings` is the supported write for an Odoo lane's
 addon settings on its instance-override record, with Shopify as the first
@@ -68,7 +68,7 @@ mode requires the reviewed dry-run digest. It is a service route, not a
 protected workflow.
 
 The browser-only activation self-check is intentionally absent from this
-agent/operator allow-list. It accepts only the signed-in human's Launchplane
+agent/admin allow-list. It accepts only the signed-in human's Launchplane
 session cookie and has no bearer helper or agent surface.
 
 The ordinary finite-job status GET is included for `ordinary_agent_client`

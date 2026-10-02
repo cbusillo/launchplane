@@ -353,7 +353,7 @@ function AgentOperateCandidateCard({
             Prepare agent operate access
           </h2>
           <p>
-            Let the operator's agent declare expected settings on the selected
+            Let the Director's agent declare expected settings on the selected
             non-live products. Live products are not listed. This creates a plan
             for review and changes nothing until it is approved. It does not
             allow release approval or deploys. If installed, the access stays
