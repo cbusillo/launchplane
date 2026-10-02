@@ -1,8 +1,9 @@
 # Direction
 
-This file is the current direction for Launchplane. When an issue, milestone,
-or other document disagrees with it, this file wins and the other source is
-corrected or closed. Issues are a work list, not instructions.
+This file is the current direction for Launchplane. The Director's overall
+direction in `cbusillo/direction` comes first. When an issue, milestone, or
+other document here disagrees with this file, this file wins and the other
+source is corrected or closed. Issues are a work list, not instructions.
 
 ## Purpose
 
@@ -37,13 +38,11 @@ Only an admin or Launchplane merges. Clients can veto a change, never merge
 one. The merge train is the delivery path; when the train itself is broken,
 merge through the protected branch and record why in the pull request.
 
-Each product records its Client: the person whose business it serves, whose
-acceptance releases it. A production release needs the Client's acceptance,
-unless the Client is the Director, the person whose direction this file
-follows; then the Director's standing direction is the acceptance. Either way
-the release runs the same gated path: verified backup, release record,
-post-deploy checks, automatic rollback. Admin is a permission, not a role; the
-Director normally holds it.
+Launchplane records each product's Client and runs every production release
+through the same gated path: verified backup, release record, post-deploy
+checks, automatic rollback. Who accepts a release is set in
+`cbusillo/direction`. Admin is a permission, not a role; the Director normally
+holds it.
 
 ## Stop Boundaries
 
