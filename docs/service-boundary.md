@@ -2128,13 +2128,22 @@ The signed-in browser uses the narrower product-owned operation
 the only product-config operation in the generated UI write allowlist. It
 accepts signed-in GitHub human and configured `local_operator`/`local_admin` identities;
 GitHub Actions automation continues to use the generic route. Its body contains
-mode, reason, exact apply confirmation, runtime settings, or managed secrets;
-runtime and secret inputs cannot be combined in one browser request.
+mode, reason, exact apply confirmation, and either runtime changes (runtime
+settings and `retired_provider_keys`) or managed secrets; runtime and secret
+inputs cannot be combined in one browser request.
 Launchplane resolves product, context, instance, scope, and source label from
 the stored product profile and lane. Managed-secret inputs identify a declared
 binding by both integration and binding key; Launchplane resolves that pair to
-the stored requirement and rejects keys or bindings not declared for that
-environment. Apply requires exact confirmation text
+the stored requirement and rejects bindings not declared for that environment.
+Runtime settings need no declaration: a key the profile does not declare is the
+site's own setting. Because no declaration vouches for it, Launchplane refuses
+it with `runtime_setting_refused` when it is not an env key name, names a
+declared managed-secret binding, or looks like a credential by name or value.
+On a `live` product, the `local_operator` credential cannot record an
+undeclared setting (`live_product_requires_operator`), the same guard as
+declaring a key. `retired_provider_keys` adds keys to the lane's existing
+retirements and runs the product-config retirement checks: an exact lane, and
+never a declared application or driver setting. Apply requires exact confirmation text
 `APPLY {product}/{environment}` in addition to the matching dry-run and stable
 idempotency key.
 
