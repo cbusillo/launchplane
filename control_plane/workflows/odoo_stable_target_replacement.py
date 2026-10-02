@@ -20,6 +20,7 @@ from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
     artifact_manifest_matches_image_repository,
 )
+from control_plane.runtime_platform_credentials import PlatformCredentialRefusedError
 from control_plane.contracts.deployment_record import (
     DeploymentFailure,
     DeploymentRecord,
@@ -1043,12 +1044,19 @@ def _deploy_step_failure(error: click.ClickException) -> DeploymentFailure:
     A check before the provider env write raises its own code; anything else in
     the deploy step is ``deploy_failed``. The error's message never reaches it.
     """
-    code = error.code if isinstance(error, OdooTargetReplacementStageError) else ""
+    code = ""
+    keys: tuple[str, ...] = ()
+    if isinstance(error, OdooTargetReplacementStageError):
+        code, keys = error.code, error.detail_keys
+    elif isinstance(error, PlatformCredentialRefusedError):
+        # The site resolver's own refusal, raised before anything is rendered.
+        code = deploy_blocked_code("platform_credential_refused")
+        keys = tuple(finding.key for finding in error.findings)
     description = deploy_failure_description(code)
     if not description:
         code = DEPLOY_FAILED_CODE
         description = deploy_failure_description(code)
-    keys = error.detail_keys if isinstance(error, OdooTargetReplacementStageError) else ()
+        keys = ()
     return DeploymentFailure(code=code, description=description, keys=keys)
 
 

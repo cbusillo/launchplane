@@ -18,6 +18,10 @@ DEPLOY_BLOCKED_DESCRIPTIONS: dict[str, str] = {
     "site_environment_unresolved": (
         "Launchplane could not resolve the site's runtime settings from its records."
     ),
+    "platform_credential_refused": (
+        "A setting the site's records would carry is a platform credential, which never "
+        "belongs in an app runtime."
+    ),
     "lane_profile_unresolved": (
         "Launchplane could not read the lane's settings from the product profile."
     ),

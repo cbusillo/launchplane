@@ -3298,7 +3298,8 @@ apply coverage first, then use the service-backed workflow.
 Before it writes the provider env, the deploy step checks the target and the
 site's settings. Each check that stops the deploy has its own code,
 `deploy_blocked.<check>`: `provider_target_unreadable`,
-`site_environment_unresolved`, `lane_profile_unresolved`, `retirement_changed`,
+`site_environment_unresolved`, `platform_credential_refused`,
+`lane_profile_unresolved`, `retirement_changed`,
 `retirement_conflict`, `runtime_secret_values_missing`,
 `runtime_key_safety_refused`, `runtime_key_safety_unavailable`,
 `runtime_settings_unavailable`, `compose_keys_missing`,

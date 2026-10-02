@@ -1068,6 +1068,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertEqual(result.deploy_status, "fail")
         self.assertIn("DOKPLOY_TOKEN", result.error_message)
         self.assertNotIn("record-deploy-token", result.error_message)
+        self.assertEqual(result.error_code, "deploy_blocked.platform_credential_refused")
+        self.assertEqual(result.error_detail_keys, ("DOKPLOY_TOKEN",))
+        failure = store.deployment_records[-1].failure
+        assert failure is not None
+        self.assertNotIn("record-deploy-token", failure.model_dump_json())
         sync_source.assert_not_called()
         update_env.assert_not_called()
 
