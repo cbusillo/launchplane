@@ -882,7 +882,7 @@ def _render_preview_pr_feedback_markdown(
                 "",
                 "Controls:",
                 "- Push new commits to refresh this preview.",
-                "- Convert the PR to a draft, or close or merge it, to remove the preview.",
+                "- Close or merge the PR to remove the preview.",
                 "- Preview inventory, lifecycle plans, and cleanup evidence are recorded in Launchplane.",
             ]
         )

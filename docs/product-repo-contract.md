@@ -521,7 +521,7 @@ name: Launchplane Preview
 
 "on":
   pull_request:
-    types: [opened, reopened, synchronize, ready_for_review]
+    types: [opened, reopened, synchronize]
 
 permissions:
   contents: read
@@ -530,8 +530,7 @@ jobs:
   preview:
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.user.login != 'dependabot[bot]' &&
-      !github.event.pull_request.draft
+      github.event.pull_request.user.login != 'dependabot[bot]'
     permissions:
       contents: read
       packages: write
@@ -573,7 +572,7 @@ name: Launchplane Preview Notice
 
 "on":
   pull_request_target:
-    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft, closed]
+    types: [opened, reopened, synchronize, closed]
 
 permissions:
   contents: read
