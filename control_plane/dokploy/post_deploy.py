@@ -2702,16 +2702,25 @@ start_web_container() {{
         return
     fi
     local current_status
-    current_status=$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}" 2>/dev/null || true)
+    current_status=$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}") || return 1
     if [ "${{current_status}}" != "running" ]; then
         echo "Starting web container ${{web_container_id}}"
-        docker start "${{web_container_id}}" >/dev/null || true
+        docker start "${{web_container_id}}" >/dev/null || return 1
+    fi
+    current_status=$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}") || return 1
+    if [ "${{current_status}}" != "running" ]; then
+        echo "Web container did not return to running after the backup." >&2
+        return 1
     fi
 }}
 
 exit_trap() {{
     local exit_status="$?"
-    start_web_container
+    if ! start_web_container; then
+        if [ "${{exit_status}}" -eq 0 ]; then
+            exit_status=1
+        fi
+    fi
     exit "${{exit_status}}"
 }}
 
