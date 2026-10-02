@@ -13,9 +13,21 @@ it.
 - A workflow at `.github/workflows/build.yml`
   that runs on `push` to the default branch and on `pull_request`.
 - For each run attempt, an Actions artifact named
-  `artifact-manifest-<run_attempt>` holding one devkit artifact manifest
-  (schema v2): `source_commit`, `image.repository`, `image.digest`, and the
-  dependency provenance.
+  `artifact-manifest-<run_attempt>` holding one manifest file:
+  - an Odoo product: one devkit artifact manifest (schema v2) with
+    `source_commit`, `image.repository`, `image.digest`, and the dependency
+    provenance;
+  - a generic-web product: the commit it built and the image it pushed, nothing
+    else:
+
+    ```json
+    {
+      "schema_version": 1,
+      "kind": "generic-web",
+      "source_commit": "<40-hex commit>",
+      "image": {"repository": "<image repository>", "digest": "sha256:<64-hex>"}
+    }
+    ```
 
 That is the whole contract. The repository holds no Launchplane secret, grant,
 workflow reference, or setting.
@@ -52,15 +64,20 @@ for a PR preview, with the PR number).
    `artifact-manifest-<attempt>`. There must be exactly one, not expired,
    holding exactly one manifest file.
 6. The manifest must have `source_commit == commit`, `image.repository` equal
-   to the product's image repository, and a digest in `sha256:` form. The
-   tenant lock's source repository must be the product repository, as the
-   current publish route already checks.
-7. Record the artifact under a key Launchplane assigns from verified identity:
+   to the product's image repository, and a digest in `sha256:` form. For an
+   Odoo manifest, the tenant lock's source repository must be the product
+   repository, as the current publish route already checks.
+7. Odoo only: record the artifact under a key Launchplane assigns from verified identity:
    repository id, run id, run attempt and GitHub artifact id. Store the
    workflow path, event and `purpose` beside them. The manifest's own
    `artifact_id` is data, never a key, so a PR build cannot claim a release's
    record. The record is immutable: a second write with the same key and
    different content fails and overwrites nothing.
+
+A verified generic-web build is not recorded in the artifact store
+(`verify_generic_web_build`). Its artifact is the immutable image
+`<repository>@<digest>`; the testing deploy records it as the lane's runtime
+identity, and promotion and rollback read that.
 
 ## Where each purpose may go
 

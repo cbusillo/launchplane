@@ -49,6 +49,7 @@ from control_plane.contracts.durable_operation_authorization import (
 )
 from control_plane.launchplane_reconcile_authorization import (
     build_launchplane_reconcile_authorization,
+    launchplane_reconcile_generic_web_testing_allowed,
 )
 from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_ROUTE,
@@ -63,6 +64,7 @@ from control_plane.product_reconcile import (
     TESTING_FAILURE_DESCRIPTIONS,
     PreviewProviderHooks,
     ProductReconcileError,
+    TestingProviderHooks,
     request_product_reconcile_sweep,
     resolve_build_provenance_transport,
     resolve_pull_request_feedback_token,
@@ -89,7 +91,11 @@ from control_plane.workflows.odoo_stable_operation_worker import (
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.support.durable_operations import durable_operation_authorization_payload
 from tests.support.artifact_manifests import artifact_manifest_v2
-from tests.support.profiles import _odoo_preview_profile_payload
+from control_plane.workflows.generic_web_deploy_provider import (
+    GenericWebProviderDeploymentObservation,
+)
+from tests.support.profiles import _odoo_preview_profile_payload, product_profile_payload
+from tests.test_generic_web_deploy import _FakeGenericWebDeployProvider
 from tests.support.stores import sqlite_database_url
 
 REPOSITORY = "example/site"
@@ -398,6 +404,7 @@ class ProductReconcileTestCase(unittest.TestCase):
         self.root = Path(temporary_directory.name)
         self.comments = FakeGitHubComments()
         self.public_origin = "https://launchplane.example.test"
+        self.testing_hooks = TestingProviderHooks()
         for module in (
             "control_plane.workflows.launchplane",
             "control_plane.product_reconcile_feedback",
@@ -419,6 +426,7 @@ class ProductReconcileTestCase(unittest.TestCase):
             transport_factory=lambda _store, _profile: self.github,
             control_plane_root=self.root,
             preview_hooks=self.provider.hooks(),
+            testing_hooks=self.testing_hooks,
             feedback_token=lambda _store, _profile: "feedback-token",
             public_origin=lambda: self.public_origin,
         )
@@ -1046,6 +1054,186 @@ class ProductReconcileStaffTestingHoldTests(ProductReconcileTestCase):
         self.assertNotIn("last_failed_operation_id", redeployed)
         retry = self.store.read_odoo_stable_target_replacement_operation_record(second)
         self.assertTrue(retry.idempotency_key.endswith(f":after-{first}"))
+
+
+class FakeGenericWebGitHub(FakeGitHub):
+    """example/site as a generic-web product: its build uploads the generic-web manifest."""
+
+    def get_bytes(self, path: str) -> bytes:
+        run_id = int(path.split("/actions/artifacts/")[1].split("/")[0]) // 10
+        commit = cast(str, self.runs[run_id]["head_sha"])
+        manifest = {
+            "schema_version": 1,
+            "kind": "generic-web",
+            "source_commit": commit,
+            "image": {"repository": IMAGE_REPOSITORY, "digest": _digest(commit)},
+        }
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as zip_file:
+            zip_file.writestr("artifact-manifest.json", json.dumps(manifest))
+        return archive.getvalue()
+
+
+def _generic_web_profile() -> LaunchplaneProductProfileRecord:
+    payload = product_profile_payload("site")
+    payload.update(
+        repository=REPOSITORY,
+        image={"repository": IMAGE_REPOSITORY},
+        lanes=(
+            {"instance": "testing", "context": "cm", "base_url": "https://testing.example.test"},
+            {"instance": "prod", "context": "cm", "base_url": "https://example.test"},
+        ),
+        preview={"enabled": False},
+    )
+    return LaunchplaneProductProfileRecord.model_validate(payload)
+
+
+class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.store.write_product_profile_record(_generic_web_profile())
+        self.github = FakeGenericWebGitHub()
+        self.deploys = _FakeGenericWebDeployProvider(
+            observation=GenericWebProviderDeploymentObservation(
+                outcome="present",
+                deployment_status="success",
+                deployment_id="deployment-provider-1",
+                started_at="2026-10-02T12:00:00Z",
+                finished_at="2026-10-02T12:01:00Z",
+            ),
+            target_name="site-testing-app",
+        )
+        self.testing_hooks = TestingProviderHooks(generic_web_deploy_provider=lambda: self.deploys)
+
+    def test_a_merge_deploys_its_verified_image_to_testing_with_no_grant(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.github.add_run(30, OLDER)
+        self.comments.merged[DEPLOYABLE] = 12
+        self.request()
+
+        plan = self.reconcile()
+
+        image = f"{IMAGE_REPOSITORY}@{_digest(DEPLOYABLE)}"
+        self.assertEqual(
+            (plan["action"], plan["desired_commit"], plan["desired_artifact_id"]),
+            ("deploy", DEPLOYABLE, image),
+        )
+        self.assertEqual(
+            (plan["deploy_status"], plan["deploy_operation_status"]), ("pass", "completed")
+        )
+        (deployed,) = self.deploys.runtime_identities
+        self.assertEqual(
+            (deployed.instance, deployed.artifact_id, deployed.source_git_ref),
+            ("testing", image, DEPLOYABLE),
+        )
+        inventory = self.store.read_environment_inventory(
+            context_name="cm", instance_name="testing"
+        )
+        assert inventory.runtime_identity is not None
+        self.assertEqual(inventory.runtime_identity.image_reference, image)
+        # Nothing went to the Odoo artifact store or its operation queue.
+        self.assertEqual(self.store.list_artifact_manifests(), ())
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
+        (comment,) = self.comments.on(12)
+        self.assertIn("The testing lane runs this change.", cast(str, comment["body"]))
+        view = product_reconcile_request_view(
+            self.store.read_product_reconcile_request("site:testing")
+        )
+        self.assertEqual(view.last_plan["desired_image_digest"], _digest(DEPLOYABLE))
+
+        self.request()
+        repeated = self.reconcile()
+
+        self.assertEqual((repeated["action"], repeated["reason"]), ("none", "already_deployed"))
+        self.assertEqual(len(self.deploys.runtime_identities), 1)
+
+    def test_testing_rolled_back_to_the_same_older_image_is_deployed_again(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        self.reconcile()
+        deployed = self.store.read_environment_inventory(context_name="cm", instance_name="testing")
+        assert deployed.runtime_identity is not None
+        older = f"{IMAGE_REPOSITORY}@{_digest(OLDER)}"
+        # An admin rolls testing back; the rollback records a deployment of its own.
+        self.store.write_environment_inventory(
+            deployed.model_copy(
+                update={
+                    "deployment_record_id": "deployment-rollback",
+                    "runtime_identity": deployed.runtime_identity.model_copy(
+                        update={"artifact_id": older, "image_reference": older}
+                    ),
+                }
+            )
+        )
+        self.request()
+
+        redeployed = self.reconcile()
+
+        self.assertEqual((redeployed["action"], redeployed["deploy_status"]), ("deploy", "pass"))
+        self.assertEqual(len(self.deploys.runtime_identities), 2)
+        self.assertTrue(
+            cast(str, redeployed["deploy_idempotency_key"]).endswith(":from-deployment-rollback")
+        )
+
+    def test_a_refused_deploy_keeps_provider_text_out_of_the_error(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.comments.merged[DEPLOYABLE] = 12
+
+        self.request()
+
+        with patch.object(
+            self.deploys,
+            "resolve_deploy_target",
+            side_effect=click.ClickException("target site-testing-app (id target-123) on host-7"),
+        ):
+            completed = self.run_once()
+
+        self.assertEqual(completed.state, "failed")
+        self.assertIn("refused before any provider change", completed.last_error)
+        (comment,) = self.comments.on(12)
+        for text in (completed.last_error, cast(str, comment["body"])):
+            self.assertNotIn("host-7", text)
+            self.assertNotIn("target-123", text)
+        self.assertEqual(self.deploys.runtime_identities, [])
+
+    def test_a_deploy_with_an_unknown_outcome_is_not_run_again(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.deploys.deploy_error = click.ClickException("provider timed out at host-7")
+        self.deploys.observation = GenericWebProviderDeploymentObservation(outcome="unknown")
+        self.request()
+
+        first = self.run_once()
+        self.request()
+        second = self.run_once()
+
+        for completed in (first, second):
+            self.assertEqual(completed.state, "failed")
+            self.assertIn("generic-web deploy recovery", completed.last_error)
+            self.assertNotIn("host-7", completed.last_error)
+        self.assertEqual(len(self.deploys.runtime_identities), 1)
+
+    def test_a_held_testing_lane_waits_and_deploys_nothing(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.hold_testing()
+        self.request()
+
+        plan = self.reconcile()
+
+        self.assertEqual((plan["action"], plan["reason"]), ("wait", "staff_testing"))
+        self.assertEqual(self.deploys.runtime_identities, [])
+
+    def test_the_reconcile_may_deploy_only_the_generic_web_testing_lane(self) -> None:
+        def allowed(*, product: str = "site", instance: str = "testing") -> bool:
+            return launchplane_reconcile_generic_web_testing_allowed(
+                record_store=self.store, product=product, context="cm", instance=instance
+            )
+
+        self.assertTrue(allowed())
+        self.assertFalse(allowed(instance="prod"))
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(_profile())
+        )
+        self.assertFalse(allowed())
 
 
 class _MinuteClock(datetime):

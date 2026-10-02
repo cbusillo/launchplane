@@ -2,7 +2,8 @@
 
 Status: issue #2605. The receiver, the reconciler, its acting on testing and
 previews, and the staff-testing hold on the testing lane are built. Its pull
-request feedback is built (#2659). Depends on
+request feedback is built (#2659). Generic-web testing lanes deploy from the
+reconciler too (#2742); generic-web previews do not yet (#2740). Depends on
 [artifact provenance](artifact-provenance.md).
 
 A product repository never calls Launchplane. Launchplane hears GitHub's
@@ -78,6 +79,26 @@ reservation. The webhook request never waits on a deploy.
     artifact the reconcile fails until a newer build.
   - That operation already runs Odoo post-deploy, so there is no separate
     post-deploy step.
+  - **Generic-web:** the reconcile deploys the verified image itself, in
+    process, through the generic-web deploy route's durable provider
+    operation, under reservation scope `launchplane-reconcile:<product>`.
+    Nothing goes to the artifact store; the deploy records the image as the
+    lane's runtime identity. Its key is the desired digest plus the deployment
+    record testing ran when the deploy was decided, so a repeated reconcile
+    replays a recorded result instead of deploying again. Every deploy and
+    rollback records a new deployment, so a lane changed since (even back to the
+    same older image) gets the desired image again. A replayed success whose
+    image Launchplane's testing record does not show (a deploy recovery that
+    closed out from runtime evidence records none) fails the reconcile instead of
+    being announced; the next verified build or an admin deploy records it. A deploy whose
+    provider outcome is unknown stays reserved for generic-web deploy recovery
+    and fails the reconcile until it settles; one that failed with a recorded
+    result is not retried until a newer build or the lane changes. A refusal
+    before any provider change (a missing target, say) is tried again at the
+    next event or sweep. The plan records `deploy_operation_status`,
+    `deploy_status`, `post_deploy_status` and `deployment_record_id`, never the
+    driver's message; a refusal's reason goes to the worker log only. A product on any other driver is held with
+    `no_reconcile_deploy_for_driver`.
   - If the lane is busy, the reconcile stays pending and runs again after it.
   - While the testing lane is held for staff testing, the reconcile records
     its plan as held (`action: wait`, reason `staff_testing`) and deploys
@@ -215,9 +236,10 @@ instead: caller identity type `launchplane_reconcile`, subject
 the reconciler. It is stored only on the stable target replacement of a
 product's own testing lane, the one operation it queues for later.
 
-A preview apply or destroy runs in-process, so it carries no grant: the
-reconciler checks directly that the destination is the product's own preview,
-in its preview context, before it runs.
+A preview apply or destroy, and a generic-web testing deploy, run in-process,
+so they carry no grant: the reconciler checks directly that the destination is
+the product's own preview, in its preview context, or a generic-web product's
+own `testing` lane (never `prod`), before it runs.
 
 No request can supply it: route payloads forbid unknown fields, no request or
 response schema carries a durable authorization, and each route builds its
