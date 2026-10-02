@@ -251,6 +251,8 @@ export function environmentForFixture(
             status: "configured",
             updated_at: OBSERVED_AT,
             trust_state: "recorded",
+            declared_secret_class: null,
+            sharing_reason: null,
           },
         ],
   };
