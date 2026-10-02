@@ -1,3 +1,4 @@
+from functools import partial
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -24,6 +25,7 @@ from control_plane.merge_train import (
 from control_plane.merge_train_github import MergeTrainGitHubError
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
+from tests.support.merge_train import labeled_by
 
 
 CLI_MAIN = cast(Command, main)
@@ -150,7 +152,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
                 base_branch="main",
                 pull_requests=(
                     _pull_request(4, labels=()),
-                    _pull_request(5, actor_role="external_contributor"),
+                    _pull_request(5, actor_role="external_contributor", labeler_role="repo_admin"),
                 ),
             ),
         )
@@ -180,6 +182,65 @@ class MergeTrainDryRunTests(unittest.TestCase):
         self.assertTrue(result.queue[0].eligible)
         self.assertEqual(result.queue[1].actor_role, "unknown")
         self.assertIn("actor role is not allowed to enqueue", result.queue[1].ineligible_reasons)
+
+    def test_enqueue_label_admits_only_when_applied_by_an_allowed_actor(self) -> None:
+        trusted_automation_id = 279560559
+        client_app_id = 987654321
+        automation_pull_request = partial(
+            _pull_request, 6, actor_id=trusted_automation_id, actor_role="unknown"
+        )
+        cases = (
+            ("trusted automation", trusted_automation_id, "unknown", True),
+            ("repository admin", 1001, "repo_admin", True),
+            ("third-party app", client_app_id, "unknown", False),
+        )
+        for label, labeler_id, labeler_role, admitted in cases:
+            with self.subTest(label):
+                result = build_merge_train_dry_run_result(
+                    policy=build_test_merge_train_policy(
+                        trusted_automation_github_user_ids=(trusted_automation_id,)
+                    ),
+                    snapshot=MergeTrainDryRunSnapshot(
+                        repository="cbusillo/sellyouroutboard",
+                        base_branch="main",
+                        pull_requests=(
+                            automation_pull_request(
+                                labeler_id=labeler_id, labeler_role=labeler_role
+                            ),
+                        ),
+                    ),
+                )
+
+                self.assertEqual(result.queue[0].eligible, admitted)
+                if not admitted:
+                    self.assertEqual(
+                        result.queue[0].ineligible_reasons,
+                        (
+                            f"ready-to-merge label ignored: applied by labeler-{client_app_id} "
+                            "(unknown), who is not allowed to enqueue",
+                        ),
+                    )
+
+        for label, pull_request in (
+            ("label removed", automation_pull_request(labels=())),
+            (
+                "labeler unreadable",
+                automation_pull_request().model_copy(update={"label_actors": ()}),
+            ),
+        ):
+            with self.subTest(label):
+                result = build_merge_train_dry_run_result(
+                    policy=build_test_merge_train_policy(
+                        trusted_automation_github_user_ids=(trusted_automation_id,)
+                    ),
+                    snapshot=MergeTrainDryRunSnapshot(
+                        repository="cbusillo/sellyouroutboard",
+                        base_branch="main",
+                        pull_requests=(pull_request,),
+                    ),
+                )
+
+                self.assertFalse(result.queue[0].eligible)
 
     def test_dry_run_enqueues_only_within_major_dependency_updates_without_label(self) -> None:
         policy = _dependency_update_policy(49699333)
@@ -1075,6 +1136,8 @@ def _pull_request(
     labels: tuple[str, ...] = ("ready-to-merge",),
     actor_id: int | None = None,
     actor_role: str = "repo_admin",
+    labeler_id: int | None = None,
+    labeler_role: str | None = None,
     is_draft: bool = False,
     mergeable: str = "mergeable",
     required_checks_status: str = "pass",
@@ -1094,6 +1157,12 @@ def _pull_request(
             "title": f"PR {number}",
             "created_at": created_at,
             "labels": labels,
+            # By default the author applied the labels.
+            "label_actors": labeled_by(
+                labels,
+                labeler_role or actor_role,
+                actor_id=labeler_id or actor_id or 1001,
+            ),
             "actor_id": actor_id,
             "actor_role": actor_role,
             "is_draft": is_draft,

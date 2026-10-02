@@ -50,6 +50,17 @@ class MergeTrainSnapshotReader(Protocol):
     ) -> "MergeTrainDryRunSnapshot": ...
 
 
+class MergeTrainLabelActor(BaseModel):
+    """Who last applied a label the pull request carries now."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str
+    actor_id: PositiveInt | None = None
+    actor_login: str = ""
+    actor_role: str = "unknown"
+
+
 class MergeTrainPullRequestSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -60,6 +71,10 @@ class MergeTrainPullRequestSnapshot(BaseModel):
     is_draft: bool = False
     created_at: str
     labels: tuple[str, ...] = ()
+    # The enqueue label admits a pull request only when its labeler may enqueue.
+    label_actors: tuple[MergeTrainLabelActor, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     actor_id: PositiveInt | None = None
     actor_role: str = "unknown"
     head_sha: str
@@ -551,12 +566,10 @@ def _build_queue_entry(
         pull_request.actor_id is not None
         and pull_request.actor_id in repository_policy.enqueue.dependency_update_github_user_ids
     )
-    if (
-        repository_policy.enqueue.label_required
-        and repository_policy.enqueue_label not in pull_request.labels
-    ):
+    label_refusal = _enqueue_label_refusal(repository_policy, pull_request)
+    if repository_policy.enqueue.label_required and label_refusal:
         if not is_dependency_update:
-            ineligible_reasons.append(f"missing {repository_policy.enqueue_label} label")
+            ineligible_reasons.append(label_refusal)
         elif pull_request.dependency_update_class != "patch_or_minor":
             ineligible_reasons.append("dependency update needs agent review")
     if (
@@ -577,6 +590,32 @@ def _build_queue_entry(
         branch_update_required=pull_request.branch_update_required,
         eligible=not ineligible_reasons,
         ineligible_reasons=tuple(ineligible_reasons),
+    )
+
+
+def _enqueue_label_refusal(
+    repository_policy: MergeTrainRepositoryPolicy,
+    pull_request: MergeTrainPullRequestSnapshot,
+) -> str:
+    """Return why the enqueue label does not admit the pull request, or ""."""
+    enqueue_label = repository_policy.enqueue_label
+    if enqueue_label not in pull_request.labels:
+        return f"missing {enqueue_label} label"
+    # Pull-request write access includes labels, so the label counts only when
+    # the actor who applied it may enqueue, whoever authored the pull request.
+    labeler = next(
+        (actor for actor in pull_request.label_actors if actor.label == enqueue_label), None
+    )
+    if labeler is None or labeler.actor_id is None:
+        return f"{enqueue_label} label ignored: could not read who applied it"
+    if labeler.actor_id in repository_policy.enqueue.trusted_automation_github_user_ids:
+        return ""
+    if labeler.actor_role in repository_policy.enqueue.allowed_actor_roles:
+        return ""
+    login = labeler.actor_login or f"user id {labeler.actor_id}"
+    return (
+        f"{enqueue_label} label ignored: applied by {login} "
+        f"({labeler.actor_role}), who is not allowed to enqueue"
     )
 
 

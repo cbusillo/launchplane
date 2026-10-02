@@ -8,6 +8,7 @@ from control_plane.merge_train_github import MergeTrainGitHubStaleHeadError
 from control_plane.workflows.merge_train_worker import MergeTrainWorkerClients
 from control_plane.workflows.merge_train_worker import run_merge_train_worker_step
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
+from tests.support.merge_train import labeled_by
 
 
 class _FakeLabelClient:
@@ -242,6 +243,7 @@ def _pull_request(
         title=f"Pull request {number}",
         created_at=f"2026-05-08T10:{number:02d}:00Z",
         labels=labels,
+        label_actors=labeled_by(labels, "repo_owner"),
         actor_role="repo_owner",
         head_sha=f"head-{number}",
         base_ref="main",

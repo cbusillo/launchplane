@@ -259,6 +259,17 @@ reported as `trusted_automation` in controller dry-run output. The default list
 is empty, so existing owner/admin-only policies remain fail-closed and unchanged.
 Logins are diagnostic labels, not policy identity, because logins can be renamed.
 
+Only an actor allowed to enqueue may put a pull request in the train: a trusted
+automation identity, or an actor whose role is in `allowed_actor_roles` (by
+default the repository owner and its admins). Pull-request write access
+includes labels, so a Client's GitHub App or any other collaborator can apply
+the enqueue label; the train reads who applied it from the pull request's latest
+`labeled` event, not from its author. A label applied by anyone else, or whose
+labeler cannot be read, is ignored for admission, and the dry run reports
+`<label> label ignored: applied by <login> (<role>), who is not allowed to
+enqueue`. Removing the label, by anyone, still takes the pull request out of
+the queue.
+
 `dependency_update_github_user_ids` names dependency-update bots, for example
 Dependabot. Each id must also be in `trusted_automation_github_user_ids`. A pull
 request from one of them enqueues without the enqueue label only when every
@@ -490,9 +501,9 @@ checks against the base branch, then admit only the root PR to the flat batch
 train. The root PR's `enqueue_label` starts the train for the stack, but it
 does not speak for the children: collapsing merges a child into the root, so
 every child must itself be ready to land under the same queue eligibility as a
-root (open, not a draft, carrying `enqueue_label` or an allowed dependency
-update, from an allowed author). A child that is not ready refuses the whole
-collapse; the controller reports `stack_unsupported` with a `blocking_reason`
+root (open, not a draft, carrying `enqueue_label` applied by an allowed actor
+or an allowed dependency update, from an allowed author). A child that is not
+ready refuses the whole collapse; the controller reports `stack_unsupported` with a `blocking_reason`
 naming each child and reason. Execution reads each child again from GitHub
 just before merging it, so a child held while a recorded plan runs is not
 merged; a child GitHub already shows as merged by this collapse is recovered,

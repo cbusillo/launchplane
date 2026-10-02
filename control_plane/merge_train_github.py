@@ -50,6 +50,7 @@ from control_plane.merge_train_dependency_updates import DependencyUpdateClass
 from control_plane.merge_train_dependency_updates import classify_dependency_update
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import MergeTrainDryRunSnapshot
+from control_plane.merge_train import MergeTrainLabelActor
 from control_plane.merge_train import MergeTrainMergeableState
 from control_plane.merge_train import MergeTrainPullRequestSnapshot
 from control_plane.merge_train import MergeTrainPullRequestState
@@ -63,6 +64,8 @@ if TYPE_CHECKING:
 
 # GitHub's own identity for commits it signs (web edits and Dependabot).
 _GITHUB_WEB_FLOW_USER_ID = 19864447
+# Bounds the label-event read; a longer history leaves labels without an actor.
+_LABEL_EVENT_PAGE_LIMIT = 10
 
 
 class MergeTrainGitHubError(RuntimeError):
@@ -1857,6 +1860,7 @@ class LegacyMergeTrainEffectExecutor:
 class GitHubMergeTrainSnapshotReader:
     def __init__(self, *, transport: MergeTrainGitHubTransport) -> None:
         self.transport = transport
+        self._actor_roles: dict[tuple[str, str], str] = {}
 
     def read_merge_train_snapshot(
         self, *, repository: str, base_branch: str
@@ -1958,6 +1962,16 @@ class GitHubMergeTrainSnapshotReader:
             username=_required_text(user.get("login"), "GitHub pull request user requires login."),
             author_association=str(source.get("author_association") or ""),
         )
+        labels = _labels(source.get("labels"))
+        label_actors = (
+            self._label_actors(
+                repository_path=repository_path,
+                pull_request_number=pull_request_number,
+                labels=labels,
+            )
+            if labels
+            else ()
+        )
         dependency_update_class = (
             self._safe_dependency_update_class(
                 repository_path=repository_path,
@@ -1977,7 +1991,8 @@ class GitHubMergeTrainSnapshotReader:
             created_at=_required_text(
                 source.get("created_at"), "GitHub pull request entry requires created_at."
             ),
-            labels=_labels(source.get("labels")),
+            labels=labels,
+            label_actors=label_actors,
             actor_id=actor_id,
             actor_role=actor_role,
             head_sha=head_sha,
@@ -2065,11 +2080,79 @@ class GitHubMergeTrainSnapshotReader:
                 return True
         return False
 
+    def _label_actors(
+        self, *, repository_path: str, pull_request_number: int, labels: tuple[str, ...]
+    ) -> tuple[MergeTrainLabelActor, ...]:
+        # The latest "labeled" event names who applied each current label. A
+        # label with no readable event gets no actor, which admission refuses.
+        last_labeler: dict[str, dict[str, object]] = {}
+        for page in range(1, _LABEL_EVENT_PAGE_LIMIT + 1):
+            payload = self.transport.request(
+                method="GET",
+                path=(
+                    f"/repos/{repository_path}/issues/{pull_request_number}/events"
+                    f"?per_page=100&page={page}"
+                ),
+            )
+            if not isinstance(payload, list):
+                raise MergeTrainGitHubError("GitHub issue events response must be a JSON array.")
+            for item in payload:
+                event = _json_object(item, "GitHub issue event")
+                if event.get("event") not in {"labeled", "unlabeled"}:
+                    continue
+                label = event.get("label")
+                name = label.get("name") if isinstance(label, dict) else None
+                if not isinstance(name, str) or not name.strip():
+                    continue
+                key = name.strip().casefold()
+                actor = event.get("actor")
+                if event.get("event") == "unlabeled" or not isinstance(actor, dict):
+                    last_labeler.pop(key, None)
+                else:
+                    last_labeler[key] = actor
+            if len(payload) < 100:
+                break
+        else:
+            return ()
+        label_actors: list[MergeTrainLabelActor] = []
+        for label in labels:
+            actor = last_labeler.get(label.strip().casefold())
+            actor_id = actor.get("id") if actor is not None else None
+            login = actor.get("login") if actor is not None else None
+            if type(actor_id) is not int or actor_id <= 0 or not isinstance(login, str):
+                continue
+            label_actors.append(
+                MergeTrainLabelActor(
+                    label=label,
+                    actor_id=actor_id,
+                    actor_login=login,
+                    actor_role=self._actor_role_for_user(
+                        repository_path=repository_path, username=login
+                    ),
+                )
+            )
+        return tuple(label_actors)
+
+    def _actor_role_for_user(self, *, repository_path: str, username: str) -> str:
+        owner = repository_path.split("/", 1)[0]
+        if username.casefold() == owner.casefold():
+            return "repo_owner"
+        # One snapshot usually sees the same few labelers on every pull request.
+        cache_key = (repository_path, username.casefold())
+        if cache_key not in self._actor_roles:
+            self._actor_roles[cache_key] = self._collaborator_role(
+                repository_path=repository_path, username=username
+            )
+        return self._actor_roles[cache_key]
+
     def _actor_role_for_pull_request(
         self, *, repository_path: str, username: str, author_association: str
     ) -> str:
         if author_association.upper() == "OWNER":
             return "repo_owner"
+        return self._collaborator_role(repository_path=repository_path, username=username)
+
+    def _collaborator_role(self, *, repository_path: str, username: str) -> str:
         try:
             payload = _json_object(
                 self.transport.request(
