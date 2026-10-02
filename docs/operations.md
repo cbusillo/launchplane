@@ -2445,7 +2445,11 @@ context only, and `context_instance` has both context and instance.
   the web service while capturing, and writes the backup-gate record only after
   the exact schedule deployment emits nonce-, record-, and database-bound
   completion evidence with non-empty artifact sizes and SHA-256 values. A
-  provider `done` status without that bounded marker fails the gate. Directory
+  provider `done` status without that bounded marker fails the gate. A web
+  service stopped for capture must restart successfully and read back as
+  `running`; restart or final status-read failure makes the schedule fail. Recovery
+  on an earlier backup failure still attempts the restart and preserves that
+  original non-zero exit status. Directory
   preparation accepts only the dedicated `/volumes/data/backups/launchplane`
   tree and assigns only its exact backup-root/database/record path to the
   script-runner identity, so stale root-owned directories cannot make `pg_dump`
