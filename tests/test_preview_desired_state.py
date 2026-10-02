@@ -1,8 +1,12 @@
 import unittest
+
+import click
 from pathlib import Path
 from unittest.mock import patch
 
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
+from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
+from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
 from control_plane.workflows.preview_desired_state import (
     discover_github_preview_desired_state,
     list_github_open_ready_pull_requests,
@@ -121,6 +125,50 @@ class PreviewDesiredStateTests(unittest.TestCase):
         )
 
         self.assertNotIn("label", record.model_dump())
+
+    def test_a_list_cut_off_at_the_page_limit_fails_instead_of_shrinking(self) -> None:
+        full_page = [
+            {
+                "number": number,
+                "draft": False,
+                "html_url": f"https://github.com/every/verireel/pull/{number}",
+                "head": {"sha": "a" * 40},
+            }
+            for number in range(1, 101)
+        ]
+        with (
+            patch(
+                "control_plane.workflows.preview_desired_state.github_api_request",
+                return_value=full_page,
+            ),
+            self.assertRaisesRegex(click.ClickException, "list is incomplete"),
+        ):
+            list_github_open_ready_pull_requests(
+                owner="every", repo="verireel", token="token", max_pages=1
+            )
+
+    def test_unknown_desired_previews_block_cleanup_of_every_preview(self) -> None:
+        scan = PreviewInventoryScanRecord(
+            scan_id="scan-1",
+            context="verireel-testing",
+            scanned_at="2026-10-02T16:00:00Z",
+            source="launchplane-preview-lifecycle",
+            status="pass",
+            preview_count=1,
+            preview_slugs=("pr-7",),
+        )
+
+        plan = build_preview_lifecycle_plan(
+            product="verireel",
+            context="verireel-testing",
+            planned_at="2026-10-02T16:00:00Z",
+            source="launchplane-preview-lifecycle",
+            desired_previews=(),
+            latest_inventory_scan=scan,
+            desired_state_error="GitHub pull request list timed out.",
+        )
+
+        self.assertEqual((plan.status, plan.orphaned_slugs), ("fail", ()))
 
 
 if __name__ == "__main__":

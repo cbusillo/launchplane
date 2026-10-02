@@ -73,8 +73,12 @@ def list_github_open_ready_pull_requests(
                 )
             pull_requests.append({"number": number, "html_url": pr_url, "head_sha": head_sha})
         if len(payload) < per_page:
-            break
-    return tuple(sorted(pull_requests, key=lambda item: item["number"]))
+            return tuple(sorted(pull_requests, key=lambda item: item["number"]))
+    # A partial list would make the unlisted PRs' previews look orphaned.
+    raise click.ClickException(
+        f"{owner}/{repo} has more than {max_pages * per_page} open pull requests; "
+        "the list is incomplete."
+    )
 
 
 def build_preview_desired_state_record(

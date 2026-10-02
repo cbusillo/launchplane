@@ -366,6 +366,7 @@ def build_preview_lifecycle_sweep(
             source=request.source,
             desired_previews=desired_state.desired_previews,
             desired_state_id=desired_state_id,
+            desired_state_error=desired_state.error_message,
             latest_inventory_scan=_latest_preview_inventory_scan(
                 record_store=record_store,
                 context_name=profile.preview.context,
