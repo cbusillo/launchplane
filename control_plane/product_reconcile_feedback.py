@@ -259,7 +259,10 @@ def _testing_feedback(*, plan: dict[str, object], error: str) -> _Feedback | Non
         status = "waiting"
     elif action == "deploy" and plan.get("queued_operation_id"):
         status = "queued"
-    elif action == "none" and reason == "already_deployed":
+    elif (action == "none" and reason == "already_deployed") or (
+        # A generic-web testing deploy runs in the reconcile and records its deployment.
+        action == "deploy" and plan.get("deployment_record_id")
+    ):
         status = "deployed"
     else:
         return None
