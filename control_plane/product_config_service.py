@@ -94,10 +94,11 @@ def _runtime_key_safety_ready(
     try:
         policy_store = cast(RuntimeKeySafetyPolicyReadStore, record_store)
         policy = latest_active_runtime_key_safety_policy(policy_store)
-        # A writer's declared class lives on the lane's stored binding; carry it
-        # onto the stand-in binding so readiness matches the real evaluation.
-        declared_classes = {
-            binding.binding_key: binding.declared_secret_class
+        # A writer's declared class and sharing reason live on the lane's stored
+        # binding; carry them onto the stand-in binding so readiness matches the
+        # real evaluation.
+        lane_bindings = {
+            binding.binding_key: binding
             for binding in policy_store.list_secret_bindings(
                 integration="runtime_environment",
                 context_name=lane.context,
@@ -124,7 +125,16 @@ def _runtime_key_safety_ready(
                     binding_key=binding_key,
                     context=lane.context,
                     instance=lane.instance,
-                    declared_secret_class=declared_classes.get(binding_key),
+                    declared_secret_class=(
+                        lane_bindings[binding_key].declared_secret_class
+                        if binding_key in lane_bindings
+                        else None
+                    ),
+                    sharing_reason=(
+                        lane_bindings[binding_key].sharing_reason
+                        if binding_key in lane_bindings
+                        else None
+                    ),
                     created_at="1970-01-01T00:00:00Z",
                     updated_at="1970-01-01T00:00:00Z",
                 )
@@ -132,6 +142,7 @@ def _runtime_key_safety_ready(
             ),
             secret_rules=policy.rules,
             integration_key_markers=policy.integration_key_markers,
+            unreasoned_shared_integration_keys="report",
         )
     except (AttributeError, TypeError, ValueError):
         return False

@@ -4,13 +4,16 @@ import unittest
 
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeEnvironmentClass,
+    RuntimeKeySafetyEvaluation,
     RuntimeKeySafetyPolicyRecord,
     RuntimeKeySafetyTarget,
     RuntimeSecretClass,
     RuntimeSecretSafetyRule,
     RuntimeSecretSafetyTargetScope,
+    UnreasonedSharedIntegrationKeyMode,
 )
 from control_plane.contracts.secret_record import SecretBinding
+from control_plane.contracts.secret_record import SecretSharingReason
 from control_plane.contracts.secret_record import SecretStatus
 from control_plane.runtime_key_safety import (
     evaluate_runtime_key_safety,
@@ -591,6 +594,79 @@ class RuntimeKeySafetyTests(unittest.TestCase):
                 self.assertEqual(evaluation.status, expected_status)
                 if expected_status == "fail":
                     self.assertEqual(evaluation.findings[0].code, "secret_class_not_allowed")
+
+    def test_shared_safe_integration_key_on_testing_needs_a_sharing_reason(self) -> None:
+        target = RuntimeKeySafetyTarget(
+            context="repairshopr-sync", instance="testing", environment_class="testing"
+        )
+        unreasoned = _binding(
+            binding_key="REPAIRSHOPR_API_TOKEN", context="repairshopr-sync", instance="testing"
+        ).model_copy(update={"declared_secret_class": "shared_safe"})
+        reasoned = unreasoned.model_copy(
+            update={
+                "sharing_reason": SecretSharingReason(
+                    kind="read_only_source",
+                    reason="Testing imports from the production account.",
+                    evidence="The Client confirmed a read-only token on 2026-10-02.",
+                )
+            }
+        )
+
+        def evaluate(
+            binding: SecretBinding, mode: UnreasonedSharedIntegrationKeyMode = "refuse"
+        ) -> RuntimeKeySafetyEvaluation:
+            return evaluate_runtime_key_safety(
+                target=target,
+                required_binding_keys=(binding.binding_key,),
+                secret_bindings=(binding,),
+                secret_rules=(),
+                unreasoned_shared_integration_keys=mode,
+            )
+
+        refused = evaluate(unreasoned)
+        self.assertEqual(refused.status, "fail")
+        self.assertEqual(refused.findings[0].code, "sharing_reason_missing")
+
+        # Deploy and read-back paths report a key bound before reasons existed.
+        reported = evaluate(unreasoned, mode="report")
+        self.assertEqual(reported.status, "pass")
+        self.assertEqual(reported.reported[0].code, "sharing_reason_missing")
+
+        accepted = evaluate(reasoned)
+        self.assertEqual(accepted.status, "pass")
+        self.assertEqual(accepted.reported, ())
+
+    def test_sharing_reason_is_not_needed_for_test_keys_or_on_production(self) -> None:
+        cases: tuple[tuple[str, RuntimeEnvironmentClass, RuntimeSecretClass], ...] = (
+            ("testing", "testing", "testing"),
+            ("prod", "prod", "shared_safe"),
+        )
+        for instance, environment_class, declared_class in cases:
+            with self.subTest(instance=instance, declared_class=declared_class):
+                evaluation = evaluate_runtime_key_safety(
+                    target=RuntimeKeySafetyTarget(
+                        context="opw", instance=instance, environment_class=environment_class
+                    ),
+                    required_binding_keys=("SHOPIFY_ACCESS_TOKEN",),
+                    secret_bindings=(
+                        _binding(binding_key="SHOPIFY_ACCESS_TOKEN", instance=instance).model_copy(
+                            update={"declared_secret_class": declared_class}
+                        ),
+                    ),
+                    secret_rules=(),
+                )
+
+                self.assertEqual(evaluation.status, "pass")
+                self.assertEqual(evaluation.reported, ())
+
+    def test_sharing_reason_requires_a_declared_class_and_evidence(self) -> None:
+        with self.assertRaises(ValueError):
+            SecretBinding.model_validate(
+                _binding(binding_key="REPAIRSHOPR_API_TOKEN").model_dump()
+                | {"sharing_reason": {"kind": "pre_live", "reason": "r", "evidence": "e"}}
+            )
+        with self.assertRaises(ValueError):
+            SecretSharingReason(kind="read_only_source", reason="Imports only.", evidence=" ")
 
     def test_policy_integration_key_markers_extend_the_default_markers(self) -> None:
         target = RuntimeKeySafetyTarget(

@@ -356,6 +356,7 @@ export type DeploymentRecordOutput = {
     deployed_target: DeployedTargetReference | null;
     destination_health: HealthcheckEvidence;
     instance: string;
+    integration_key_readback: IntegrationKeyReadbackEvidence | null;
     no_cache: boolean;
     post_deploy_update: PostDeployUpdateEvidence;
     record_id: string;
@@ -772,6 +773,17 @@ export type InspectionSetupRuntimeMetadata = {
     app_id: string | null;
     recorded_at: string | null;
     state: 'not_evaluated' | 'metadata_recorded' | 'record_missing' | 'record_unreadable' | 'record_ambiguous' | 'app_id_missing' | 'app_id_invalid' | 'unavailable';
+};
+
+export type IntegrationKeyReadbackEvidence = {
+    checked_binding_keys: Array<string>;
+    findings: Array<IntegrationKeyReadbackFinding>;
+    status: 'pass' | 'reported' | 'fail' | 'unavailable' | 'skipped';
+};
+
+export type IntegrationKeyReadbackFinding = {
+    binding_key: string;
+    code: string;
 };
 
 export type LaunchplaneAuthzPolicyOutput = {
@@ -3580,9 +3592,11 @@ export type ProductSecretBindingSummary = {
     binding_key: string;
     binding_type: string;
     context: string;
+    declared_secret_class: 'prod_only' | 'testing' | 'preview' | 'non_prod' | 'shared_safe' | null;
     instance: string;
     integration: string;
     secret_id: string;
+    sharing_reason: SecretSharingReason | null;
     status: string;
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported' | 'disabled';
     updated_at: string;
@@ -3932,7 +3946,7 @@ export type RuntimeIdentity = {
 export type RuntimeKeySafetyFinding = {
     binding_id: string;
     binding_key: string;
-    code: 'ambiguous_binding' | 'binding_disabled' | 'binding_missing' | 'context_not_allowed' | 'instance_not_allowed' | 'secret_class_not_allowed' | 'unclassified_binding' | 'unknown_environment_class';
+    code: 'ambiguous_binding' | 'binding_disabled' | 'binding_missing' | 'context_not_allowed' | 'instance_not_allowed' | 'secret_class_not_allowed' | 'sharing_reason_missing' | 'unclassified_binding' | 'unknown_environment_class';
     detail: string;
     secret_class: string;
     secret_id: string;
@@ -3955,8 +3969,17 @@ export type SecretBinding = {
     integration: string;
     schema_version: number;
     secret_id: string;
+    sharing_reason: SecretSharingReason | null;
     status: 'configured' | 'disabled';
     updated_at: string;
+};
+
+export type SecretSharingReason = {
+    evidence: string;
+    kind: 'dev_store' | 'read_only_source' | 'pre_live' | 'site_shared';
+    reason: string;
+    recorded_at: string;
+    recorded_by: string;
 };
 
 export type StructuredHealthEvidence = {

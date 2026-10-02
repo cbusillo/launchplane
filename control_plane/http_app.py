@@ -5516,6 +5516,7 @@ def create_launchplane_fastapi_app(
                     ),
                 ),
                 required_binding_keys=request.secret_bindings,
+                unreasoned_shared_integration_keys="report",
             )
         except (AttributeError, ValueError):
             return secret_evidence_for_agent_write_intent(
@@ -7748,7 +7749,8 @@ def create_launchplane_fastapi_app(
         try:
             result = control_plane_integration_allowances.read_integration_allowances(
                 record_store=cast(
-                    control_plane_integration_allowances.IntegrationAllowancesStore, record_store
+                    control_plane_integration_allowances.IntegrationAllowancesReadStore,
+                    record_store,
                 ),
                 product=product,
                 context=context,
