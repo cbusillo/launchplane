@@ -1903,7 +1903,6 @@ class EveryCodeGitHubWebhookRequestTests(unittest.TestCase):
                     [{"name": "preview-approved"}],
                     {},
                     {},
-                    [{"name": "ready-to-merge"}],
                     {"owner": {"login": "cbusillo", "type": "User"}},
                     {"assignees": [{"login": "cbusillo"}]},
                 ],
@@ -1969,11 +1968,13 @@ class EveryCodeGitHubWebhookRequestTests(unittest.TestCase):
         preview_validation = ok_response["result"]["preview_validation"]
         self.assertEqual(preview_validation["command"], "ok")
         self.assertEqual(preview_validation["merge_owner"], "cbusillo")
-        self.assertEqual(
-            github_request.call_args_list[3].kwargs["body"], {"labels": ["ready-to-merge"]}
+        # A source issue author may be a Client, so approval never enqueues the merge.
+        self.assertNotIn(
+            {"labels": ["ready-to-merge"]},
+            [call.kwargs.get("body") for call in github_request.call_args_list],
         )
         self.assertEqual(
-            github_request.call_args_list[5].kwargs["body"], {"assignees": ["cbusillo"]}
+            github_request.call_args_list[4].kwargs["body"], {"assignees": ["cbusillo"]}
         )
         create_comment.assert_called_once()
         self.assertIn("@cbusillo", create_comment.call_args.kwargs["body"])
@@ -2055,7 +2056,6 @@ class EveryCodeGitHubWebhookRequestTests(unittest.TestCase):
                     [{"name": "preview-approved"}],
                     {},
                     {},
-                    [{"name": "ready-to-merge"}],
                     {"owner": {"login": "cbusillo", "type": "User"}},
                     {"assignees": [{"login": "cbusillo"}]},
                 ],

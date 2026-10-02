@@ -50,6 +50,7 @@ from control_plane.merge_train_dependency_updates import DependencyUpdateClass
 from control_plane.merge_train_dependency_updates import classify_dependency_update
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import MergeTrainDryRunSnapshot
+from control_plane.merge_train import MergeTrainLabelActor
 from control_plane.merge_train import MergeTrainMergeableState
 from control_plane.merge_train import MergeTrainPullRequestSnapshot
 from control_plane.merge_train import MergeTrainPullRequestState
@@ -1857,6 +1858,7 @@ class LegacyMergeTrainEffectExecutor:
 class GitHubMergeTrainSnapshotReader:
     def __init__(self, *, transport: MergeTrainGitHubTransport) -> None:
         self.transport = transport
+        self._actor_roles: dict[tuple[str, str], str] = {}
 
     def read_merge_train_snapshot(
         self, *, repository: str, base_branch: str
@@ -1958,6 +1960,16 @@ class GitHubMergeTrainSnapshotReader:
             username=_required_text(user.get("login"), "GitHub pull request user requires login."),
             author_association=str(source.get("author_association") or ""),
         )
+        labels = _labels(source.get("labels"))
+        label_actors = (
+            self._label_actors(
+                repository_path=repository_path,
+                pull_request_number=pull_request_number,
+                labels=labels,
+            )
+            if labels
+            else ()
+        )
         dependency_update_class = (
             self._safe_dependency_update_class(
                 repository_path=repository_path,
@@ -1977,7 +1989,8 @@ class GitHubMergeTrainSnapshotReader:
             created_at=_required_text(
                 source.get("created_at"), "GitHub pull request entry requires created_at."
             ),
-            labels=_labels(source.get("labels")),
+            labels=labels,
+            label_actors=label_actors,
             actor_id=actor_id,
             actor_role=actor_role,
             head_sha=head_sha,
@@ -2065,11 +2078,84 @@ class GitHubMergeTrainSnapshotReader:
                 return True
         return False
 
+    def _label_actors(
+        self, *, repository_path: str, pull_request_number: int, labels: tuple[str, ...]
+    ) -> tuple[MergeTrainLabelActor, ...]:
+        # The latest "labeled" event names who applied each current label. A
+        # label with no readable event gets no actor, which admission refuses.
+        last_labeled: dict[str, dict[str, object]] = {}
+        page = 1
+        while True:
+            payload = self.transport.request(
+                method="GET",
+                path=(
+                    f"/repos/{repository_path}/issues/{pull_request_number}/events"
+                    f"?per_page=100&page={page}"
+                ),
+            )
+            if not isinstance(payload, list):
+                raise MergeTrainGitHubError("GitHub issue events response must be a JSON array.")
+            for item in payload:
+                event = _json_object(item, "GitHub issue event")
+                if event.get("event") not in {"labeled", "unlabeled"}:
+                    continue
+                label = event.get("label")
+                name = label.get("name") if isinstance(label, dict) else None
+                if not isinstance(name, str) or not name.strip():
+                    continue
+                key = name.strip().casefold()
+                if event.get("event") == "unlabeled":
+                    last_labeled.pop(key, None)
+                else:
+                    last_labeled[key] = event
+            if len(payload) < 100:
+                break
+            page += 1
+        label_actors: list[MergeTrainLabelActor] = []
+        for label in labels:
+            labeled_event = last_labeled.get(label.strip().casefold())
+            if labeled_event is None:
+                continue
+            actor = labeled_event.get("actor")
+            if not isinstance(actor, dict):
+                continue
+            actor_id = actor.get("id")
+            login = actor.get("login")
+            if type(actor_id) is not int or actor_id <= 0 or not isinstance(login, str):
+                continue
+            label_actors.append(
+                MergeTrainLabelActor(
+                    label=label,
+                    actor_id=actor_id,
+                    actor_login=login,
+                    actor_role=self._actor_role_for_user(
+                        repository_path=repository_path, username=login
+                    ),
+                    on_behalf_via_app=_on_behalf_via_app(event=labeled_event, actor=actor),
+                )
+            )
+        return tuple(label_actors)
+
+    def _actor_role_for_user(self, *, repository_path: str, username: str) -> str:
+        owner = repository_path.split("/", 1)[0]
+        if username.casefold() == owner.casefold():
+            return "repo_owner"
+        # One snapshot usually sees the same few labelers on every pull request.
+        cache_key = (repository_path, username.casefold())
+        if cache_key not in self._actor_roles:
+            self._actor_roles[cache_key] = self._collaborator_role(
+                repository_path=repository_path, username=username
+            )
+        return self._actor_roles[cache_key]
+
     def _actor_role_for_pull_request(
         self, *, repository_path: str, username: str, author_association: str
     ) -> str:
         if author_association.upper() == "OWNER":
             return "repo_owner"
+        return self._collaborator_role(repository_path=repository_path, username=username)
+
+    def _collaborator_role(self, *, repository_path: str, username: str) -> str:
         try:
             payload = _json_object(
                 self.transport.request(
@@ -2361,6 +2447,18 @@ def _branch_contains_commit_at_pinned_base(
 
 def _validated_model_update(model: ModelT, **updates: object) -> ModelT:
     return type(model).model_validate({**model.model_dump(mode="python"), **updates})
+
+
+def _on_behalf_via_app(*, event: dict[str, object], actor: dict[str, object]) -> str:
+    """Name the GitHub App that acted with a user's token, or return ""."""
+    # An App's own installation token acts as its bot account. With a user
+    # access token GitHub attributes the event to the user, so the user's role
+    # must not stand in for the App's.
+    app = event.get("performed_via_github_app")
+    if not isinstance(app, dict) or actor.get("type") == "Bot":
+        return ""
+    slug = app.get("slug")
+    return slug.strip() if isinstance(slug, str) and slug.strip() else f"app {app.get('id')}"
 
 
 def _repository_path(repository: str) -> str:

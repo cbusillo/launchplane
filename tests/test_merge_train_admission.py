@@ -36,6 +36,7 @@ from control_plane.merge_train_admission import evaluate_merge_train_admission_f
 from control_plane.workflows.merge_train_worker import MergeTrainWorkerClients
 from control_plane.workflows.merge_train_worker import run_merge_train_worker_step
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
+from tests.support.merge_train import labeled_by
 
 
 class _FakeMergeClient:
@@ -1343,6 +1344,7 @@ def _pull_request(
         title=f"Pull request {number}",
         created_at="2026-05-09T01:00:00Z",
         labels=("ready-to-merge",),
+        label_actors=labeled_by(("ready-to-merge",), "repo_owner"),
         actor_role="repo_owner",
         head_sha=f"head-{number}",
         base_ref="main",
