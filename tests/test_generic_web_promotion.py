@@ -858,6 +858,10 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         self.assertIn("source unhealthy", result.error_message)
         self.assertEqual(store.deployments, {})
         self.assertEqual(len(store.promotions), 1)
+        failure = next(iter(store.promotions.values())).failure
+        assert failure is not None
+        self.assertEqual(failure.code, "source_health_failed")
+        self.assertNotIn("source unhealthy", failure.model_dump_json())
         deploy.assert_not_called()
 
     def test_deploy_failure_marks_destination_health_skipped(self) -> None:
@@ -891,6 +895,15 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         self.assertEqual(result.source_health_status, "pass")
         self.assertEqual(result.destination_health_status, "skipped")
         self.assertEqual(healthcheck.call_count, 1)
+        failure = next(iter(store.promotions.values())).failure
+        assert failure is not None
+        self.assertEqual(
+            (failure.code, failure.description),
+            (
+                "destination_deploy_failed",
+                "Deploying the artifact to the destination lane failed.",
+            ),
+        )
 
     def test_missing_runtime_identity_fails_promotion_without_inventory_refresh(self) -> None:
         store = _GenericWebPromotionStore(_profile())
@@ -928,6 +941,8 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         self.assertEqual(promotion.destination_health.status, "fail")
         self.assertEqual(promotion.destination_health.runtime_identity_status, "missing")
         self.assertEqual(promotion.deploy.status, "pass")
+        assert promotion.failure is not None
+        self.assertEqual(promotion.failure.code, "destination_health_failed")
 
     def test_runtime_identity_mismatch_fails_promotion_without_inventory_refresh(self) -> None:
         store = _GenericWebPromotionStore(_profile())

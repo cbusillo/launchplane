@@ -21,11 +21,8 @@ from control_plane.contracts.artifact_identity import (
     artifact_manifest_matches_image_repository,
 )
 from control_plane.runtime_platform_credentials import PlatformCredentialRefusedError
-from control_plane.contracts.deployment_record import (
-    DeploymentFailure,
-    DeploymentRecord,
-    ResolvedTargetEvidence,
-)
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.promotion_record import RecordFailure
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -1020,7 +1017,7 @@ def _write_failed_deployment(
     runtime_identity: RuntimeIdentity | None = None,
     post_deploy_update: PostDeployUpdateEvidence | None = None,
     destination_health: HealthcheckEvidence | None = None,
-    failure: DeploymentFailure | None = None,
+    failure: RecordFailure | None = None,
 ) -> None:
     record = build_deployment_record(
         request=ship_request,
@@ -1038,7 +1035,7 @@ def _write_failed_deployment(
     record_store.write_deployment_record(record.model_copy(update={"failure": failure}))
 
 
-def _deploy_step_failure(error: click.ClickException) -> DeploymentFailure:
+def _deploy_step_failure(error: click.ClickException) -> RecordFailure:
     """The deploy step's failure as its code, fixed description and key names.
 
     A check before the provider env write raises its own code; anything else in
@@ -1057,7 +1054,7 @@ def _deploy_step_failure(error: click.ClickException) -> DeploymentFailure:
         code = DEPLOY_FAILED_CODE
         description = deploy_failure_description(code)
         keys = ()
-    return DeploymentFailure(code=code, description=description, keys=keys)
+    return RecordFailure(code=code, description=description, keys=keys)
 
 
 def _runtime_error_binding_keys(

@@ -347,12 +347,6 @@ export type DeploymentEvidenceOutput = {
     target_type: 'application' | 'compose';
 };
 
-export type DeploymentFailure = {
-    code: string;
-    description: string;
-    keys: Array<string>;
-};
-
 export type DeploymentRecordOutput = {
     artifact_identity: ArtifactIdentityReference | null;
     bootstrap: BootstrapEvidence;
@@ -361,7 +355,7 @@ export type DeploymentRecordOutput = {
     deploy: DeploymentEvidenceOutput;
     deployed_target: DeployedTargetReference | null;
     destination_health: HealthcheckEvidence;
-    failure: DeploymentFailure | null;
+    failure: RecordFailure | null;
     instance: string;
     no_cache: boolean;
     post_deploy_update: PostDeployUpdateEvidence;
@@ -3696,6 +3690,7 @@ export type ProductionBackupGateRequest = {
 export type ProductionBackupGateResponse = {
     backup_record_id: string;
     error_code: string;
+    error_description: string;
     evidence: {
         [key: string]: string;
     };
@@ -3713,6 +3708,7 @@ export type PromotionRecordOutput = {
     deploy: DeploymentEvidenceOutput;
     deployment_record_id: string;
     destination_health: HealthcheckEvidence;
+    failure: RecordFailure | null;
     from_instance: string;
     post_deploy_update: PostDeployUpdateEvidence;
     record_id: string;
@@ -3764,6 +3760,12 @@ export type ProviderTargetRecord = {
     target_category: 'application' | 'compose' | 'container' | 'service' | 'static' | 'unknown';
     target_id: string;
     updated_at: string;
+};
+
+export type RecordFailure = {
+    code: string;
+    description: string;
+    keys: Array<string>;
 };
 
 export type ReleaseChecklist = {

@@ -431,14 +431,58 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     payload=_apply_payload(plan.json()),
                 )
             profile = store.read_product_profile_record("example-site")
-            outcomes = {
-                record.outcome
-                for record in store.list_product_retirement_records(product="example-site")
-            }
+            records = store.list_product_retirement_records(product="example-site")
+            outcomes = {record.outcome for record in records}
+            reconcile_record = next(
+                record for record in records if record.outcome == "reconcile_required"
+            )
+            reader = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(
+                    schema_version=2,
+                    local_operators=(
+                        LocalOperatorPolicyRule(
+                            subjects=("local-owner-agent",),
+                            token_labels=("local-owner-write",),
+                            products=("launchplane",),
+                            contexts=("example-site",),
+                            instances=("prod",),
+                            actions=("operations.read",),
+                        ),
+                    ),
+                ),
+                bearer_identity_config=_local_operator_bearer_config(
+                    token_label="local-owner-write"
+                ),
+                record_store_factory=lambda: store,
+            )
+            read = await _asgi_request(
+                reader,
+                "GET",
+                f"/v1/product-retirements/{reconcile_record.record_id}",
+                headers={"Authorization": "Bearer local-operator-token"},
+            )
+            denied = await _asgi_request(
+                app,
+                "GET",
+                f"/v1/product-retirements/{reconcile_record.record_id}",
+                headers={"Authorization": "Bearer local-operator-token"},
+            )
             store.close()
         self.assertEqual(apply.status_code, 409)
         self.assertEqual(profile.lifecycle_state, "retiring")
         self.assertIn("reconcile_required", outcomes)
+        self.assertEqual(read.status_code, 200, read.text)
+        view = read.json()["record"]
+        self.assertEqual(
+            (view["outcome"], view["lifecycle_after"], view["provider_effect_attempted"]),
+            ("reconcile_required", "retiring", True),
+        )
+        self.assertEqual(view["error_code"], reconcile_record.mutation_evidence.error_code)
+        self.assertTrue(view["free_text_omitted"])
+        self.assertNotIn("lost response", read.text)
+        self.assertNotIn(reconcile_record.reason, read.text)
+        self.assertEqual(denied.status_code, 403)
 
 
 if __name__ == "__main__":
