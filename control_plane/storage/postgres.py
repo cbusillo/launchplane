@@ -608,6 +608,7 @@ from control_plane.ordinary_agent_lifecycle import (
     supersede_authentication_credential_record,
 )
 from control_plane.production_backup_authority import (
+    ProductionBackupAuthorityScopeError,
     ProductionBackupAuthorityWritePlan,
     ProductionBackupAuthorityWriteEnvelope,
     ProductionBackupAuthorityWriteResult,
@@ -6937,6 +6938,7 @@ class PostgresRecordStore(HumanSessionStore):
         envelope: ProductionBackupAuthorityWriteEnvelope,
         mutation: DbOnlyMutationRequest,
         response_payload_builder: Callable[[ProductionBackupAuthorityWriteResult], dict[str, Any]],
+        revision_guard: Callable[[tuple[ProductionBackupPolicyRecord, ...]], str] | None = None,
     ) -> ProductionBackupAuthorityCompareWriteResult:
         if envelope.mode != "apply":
             raise ValueError("Production backup authority compare-write requires apply mode.")
@@ -6959,6 +6961,7 @@ class PostgresRecordStore(HumanSessionStore):
                 plan = self._plan_production_backup_authority_in_session(
                     session=session,
                     envelope=envelope,
+                    revision_guard=revision_guard,
                 )
             except Exception:
                 session.delete(reservation_row)
@@ -6994,6 +6997,7 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         session: Any,
         envelope: ProductionBackupAuthorityWriteEnvelope,
+        revision_guard: Callable[[tuple[ProductionBackupPolicyRecord, ...]], str] | None = None,
     ) -> ProductionBackupAuthorityWritePlan:
         target_statement = select(LaunchplaneProductionBackupTargetRow)
         policy_statement = select(LaunchplaneProductionBackupPolicyRow)
@@ -7014,6 +7018,10 @@ class PostgresRecordStore(HumanSessionStore):
             )
             for row in session.scalars(policy_statement).all()
         )
+        if revision_guard is not None:
+            refusal = revision_guard(policy_records)
+            if refusal:
+                raise ProductionBackupAuthorityScopeError(refusal)
         return plan_production_backup_authority_write_from_records(
             target_records=target_records,
             policy_records=policy_records,

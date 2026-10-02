@@ -8073,6 +8073,14 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             denied_message=_TESTING_HOLD_DENIED_MESSAGE,
         )
+        if isinstance(identity, LocalOperatorIdentity) and not hold_request.hold:
+            # Lifting a hold requests a testing reconcile, which can deploy.
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="local_operator_lane_scope_required",
+                message="The operator's agent can set a testing hold but not lift one.",
+            )
         _require_lane_product_config_lane(
             record_store=record_store,
             product=hold_request.product,

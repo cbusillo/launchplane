@@ -19,8 +19,9 @@ from control_plane.http_routes.support import (
 )
 from control_plane.production_backup_authority import (
     ProductionBackupAuthorityConflictError,
+    ProductionBackupAuthorityScopeError,
     ProductionBackupAuthoritySequenceError,
-    ProductionBackupAuthorityStore,
+    lane_bound_target_revision_refusal,
     ProductionBackupAuthorityWriteEnvelope,
     ProductionBackupAuthorityWriteResult,
     plan_production_backup_authority_write,
@@ -291,8 +292,9 @@ def _execute_write(
     try:
         authority_store = require_production_backup_authority_store(record_store)
         if isinstance(identity, LocalOperatorIdentity):
-            target_refusal = _local_operator_target_refusal(
-                store=authority_store, envelope=envelope
+            target_refusal = lane_bound_target_revision_refusal(
+                policy_records=authority_store.list_production_backup_policy_records(),
+                envelope=envelope,
             )
             if target_refusal:
                 raise dependencies.http_error(
@@ -347,7 +349,25 @@ def _execute_write(
                 trace_id=current_trace_id,
                 result=locked_result,
             ).model_dump(mode="json"),
+            # Re-checked on the locked policy records, so a concurrent policy
+            # change can't slip between the check above and the write.
+            revision_guard=(
+                (
+                    lambda policy_records: lane_bound_target_revision_refusal(
+                        policy_records=policy_records, envelope=envelope
+                    )
+                )
+                if isinstance(identity, LocalOperatorIdentity)
+                else None
+            ),
         )
+    except ProductionBackupAuthorityScopeError as error:
+        raise dependencies.http_error(
+            status_code=403,
+            trace_id=current_trace_id,
+            code="local_operator_lane_scope_required",
+            message=str(error),
+        ) from error
     except (
         ProductionBackupAuthorityConflictError,
         ProductionBackupAuthoritySequenceError,
@@ -452,30 +472,6 @@ def _preflight_apply(
             message="Production backup authority apply requires reconciliation.",
         )
     return None
-
-
-def _local_operator_target_refusal(
-    *,
-    store: ProductionBackupAuthorityStore,
-    envelope: ProductionBackupAuthorityWriteEnvelope,
-) -> str:
-    """Keep the operator's agent's target revisions on its own policy.
-
-    Target records are global, so a revision submitted with one product's
-    policy would otherwise change what another product's policy resolves.
-    Referencing a shared target without revising it stays allowed.
-    """
-    policy = envelope.policy
-    revised = {target.target_id for target in envelope.targets}
-    if not revised <= set(policy.target_ids):
-        return "Every submitted target must be one this backup policy uses."
-    lane = (policy.product, policy.context, policy.instance)
-    for record in store.list_production_backup_policy_records():
-        if record.status != "active" or (record.product, record.context, record.instance) == lane:
-            continue
-        if revised & set(record.target_ids):
-            return "A submitted target is used by another product's backup policy."
-    return ""
 
 
 def _require_write_authorization(

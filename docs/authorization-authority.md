@@ -689,7 +689,10 @@ another lane, such as production, resolves. Backup authority applies from a
 submitted policy doesn't use, or one another product's active backup policy
 uses; backup targets are global records, so revising one would change another
 product's backup. Referencing a shared target without revising it stays
-allowed.
+allowed. The check runs again inside the locked write against the locked policy
+records, so a concurrent policy change can't slip in between. A `local_operators`
+caller may set a testing hold but not lift one: lifting requests a testing
+reconcile, which can deploy.
 
 What it can reach on a live product: the testing lane's settings and secrets,
 the testing lane's new compose target, and production's backup policy. The

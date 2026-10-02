@@ -14,7 +14,11 @@ from control_plane.contracts.dokploy_target_record import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
+from control_plane.service_auth import (
+    BearerIdentityConfig,
+    GitHubActionsIdentity,
+    LaunchplaneAuthzPolicy,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_lane_hold import (
@@ -394,6 +398,51 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lifted.json()["result"]["action"], "clear")
         self.assertTrue(lifted.json()["result"]["reconcile_requested"])
         self.assertEqual([request.target_key for request in requests], [f"{_PRODUCT}:testing"])
+
+    async def test_operator_agent_can_set_but_not_lift_a_hold(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._store(root)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "schema_version": 2,
+                        "local_operators": [
+                            {
+                                "subjects": ["operator-agent"],
+                                "token_labels": ["operator-agent-token"],
+                                "products": [_PRODUCT],
+                                "contexts": [_CONTEXT],
+                                "instances": ["testing"],
+                                "actions": ["product_config.plan", "product_config.apply"],
+                            }
+                        ],
+                    }
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+                bearer_identity_config=BearerIdentityConfig(
+                    local_operator_token="local-operator-token",
+                    local_operator_subject="operator-agent",
+                    local_operator_token_label="operator-agent-token",
+                ),
+            )
+            headers = {"Authorization": "Bearer local-operator-token"}
+            hold = await http_request(
+                app, "POST", TESTING_HOLD_APPLY_ROUTE, headers=headers, payload=_payload()
+            )
+            lift = await http_request(
+                app,
+                "POST",
+                TESTING_HOLD_APPLY_ROUTE,
+                headers=headers,
+                payload=_payload(hold=False, reason="Staff testing finished."),
+            )
+
+        self.assertEqual(hold.status_code, 202, hold.text)
+        self.assertEqual(lift.status_code, 403, lift.text)
+        self.assertEqual(lift.json()["error"]["code"], "local_operator_lane_scope_required")
 
     async def test_plan_and_apply_require_their_actions(self) -> None:
         with TemporaryDirectory() as directory:
