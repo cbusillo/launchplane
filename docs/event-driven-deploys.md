@@ -88,7 +88,9 @@ reservation. The webhook request never waits on a deploy.
     replays a recorded result instead of deploying again. Every deploy and
     rollback records a new deployment, so a lane changed since (even back to the
     same older image) gets the desired image again. A replayed success whose
-    image testing does not run fails the reconcile instead of being announced. A deploy whose
+    image Launchplane's testing record does not show (a deploy recovery that
+    closed out from runtime evidence records none) fails the reconcile instead of
+    being announced; the next verified build or an admin deploy records it. A deploy whose
     provider outcome is unknown stays reserved for generic-web deploy recovery
     and fails the reconcile until it settles; one that failed with a recorded
     result is not retried until a newer build or the lane changes. A refusal

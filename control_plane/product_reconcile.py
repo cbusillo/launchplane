@@ -618,9 +618,16 @@ def _deploy_generic_web_testing(
         record_store=record_store, profile=profile, lane=lane
     )
     if desired.manifest.image.digest.lower() != current_digest:
-        # A recorded success whose image testing does not run: never announce it as running.
+        # A recorded success Launchplane's testing record does not show (a recovery that
+        # closed out from runtime evidence records no deployment): promotion reads that
+        # record, so the image is never announced as running.
         return ReconcileOutcome(
-            plan, error="The testing deploy passed, but the testing lane does not run its image."
+            plan,
+            error=(
+                "The testing deploy is recorded as passed, but no deployment of its image is "
+                "recorded for the testing lane. The next verified build, or an admin deploy "
+                "of this image, records one."
+            ),
         )
     plan.update(current_artifact_id=current_artifact_id, current_image_digest=current_digest)
     return outcome
