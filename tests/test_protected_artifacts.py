@@ -86,6 +86,13 @@ class ProtectedArtifactTests(TestCase):
                 previous_source_git_ref,
                 f"sha-{previous_source_git_ref}",
             )
+            previous_manifest = previous_manifest.model_copy(
+                update={
+                    "image": previous_manifest.image.model_copy(
+                        update={"digest": "sha256:previousgoodprod"}
+                    )
+                }
+            )
             store.write_artifact_manifest(previous_manifest)
             store.write_deployment_record(
                 _prod_deployment(
@@ -117,6 +124,7 @@ class ProtectedArtifactTests(TestCase):
             [(entry.instance, entry.artifact_id) for entry in previous_good_entries],
             [("prod", "artifact-verireel-prod-previous")],
         )
+        self.assertIn(previous_digest_reference, previous_good_entries[0].image_references)
 
     def test_build_protected_artifact_set_keeps_linked_preview_rollout_images(
         self,
