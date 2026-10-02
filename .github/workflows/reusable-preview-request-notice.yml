@@ -16,11 +16,6 @@ name: Reusable Preview Request Notice
         required: false
         default: ""
         type: string
-      preview_label:
-        description: Label that requests preview automation.
-        required: false
-        default: preview
-        type: string
       timeout-ms:
         description: Launchplane request timeout in milliseconds.
         required: false
@@ -82,7 +77,6 @@ jobs:
         id: notice
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          PREVIEW_LABEL: ${{ inputs.preview_label }}
           RUN_URL: >-
             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{
               github.run_id }}
@@ -97,19 +91,8 @@ jobs:
               throw new Error('pull_request payload is required.');
             }
 
-            const previewLabelName = String(process.env.PREVIEW_LABEL || 'preview')
-              .trim()
-              .toLowerCase();
-            if (!previewLabelName) {
-              throw new Error('preview_label must not be empty.');
-            }
-
-            const labels = pullRequest.labels || [];
-            const previewRequested = labels.some((label) =>
-              String(typeof label === 'string' ? label : label?.name || '')
-                .trim()
-                .toLowerCase() === previewLabelName,
-            );
+            // A preview follows the PR: open and ready for review means a preview.
+            const previewRequested = pullRequest.draft !== true;
             const headRepoFullName = String(pullRequest.head.repo?.full_name || '');
             const repositoryFullName = String(context.payload.repository?.full_name || '');
             const sameRepo =
@@ -129,29 +112,20 @@ jobs:
               executionTrust === 'dependabot' || executionTrust === 'fork';
             const action = String(context.payload.action || '').trim();
             const closed = action === 'closed';
-            const changedLabel = String(context.payload.label?.name || '')
-              .trim()
-              .toLowerCase();
-            const previewLabelChanged = changedLabel === previewLabelName;
+            const toDraft = action === 'converted_to_draft';
             const previewRefreshAction =
               action === 'opened' ||
               action === 'reopened' ||
-              action === 'edited' ||
+              action === 'ready_for_review' ||
               action === 'synchronize';
             const shouldSetUnsupported =
-              unsupportedTrust &&
-              ((previewRefreshAction && previewRequested) ||
-                (action === 'labeled' && previewLabelChanged));
-            const shouldClear =
-              unsupportedTrust &&
-              (closed || (action === 'unlabeled' && previewLabelChanged));
-            const shouldCleanup =
-              executionTrust === 'same_repo' &&
-              (closed || (action === 'unlabeled' && previewLabelChanged));
+              unsupportedTrust && previewRefreshAction && previewRequested;
+            const shouldClear = unsupportedTrust && (closed || toDraft);
+            const shouldCleanup = executionTrust === 'same_repo' && (closed || toDraft);
             const cleanupReason = closed
               ? 'pr_closed'
-              : shouldCleanup
-                ? 'preview_label_removed'
+              : toDraft
+                ? 'pr_converted_to_draft'
                 : '';
             const shouldRecord = shouldSetUnsupported || shouldClear;
 

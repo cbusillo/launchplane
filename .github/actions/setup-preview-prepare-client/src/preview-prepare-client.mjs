@@ -1,6 +1,3 @@
-export const DEFAULT_PREVIEW_LABEL_NAME = "preview";
-export const PREVIEW_LABEL_NAME = DEFAULT_PREVIEW_LABEL_NAME;
-
 function normalizeRequiredText(value, label) {
   const normalized = String(value ?? "").trim();
   if (!normalized) {
@@ -33,33 +30,6 @@ function normalizeSha(sha) {
   return normalized;
 }
 
-function normalizePreviewLabelName(previewLabelName = DEFAULT_PREVIEW_LABEL_NAME) {
-  return normalizeRequiredText(previewLabelName, "Preview label").toLowerCase();
-}
-
-function labelName(label) {
-  if (typeof label === "string") {
-    return label;
-  }
-  return label?.name ?? "";
-}
-
-export function normalizeLabelNames(labels) {
-  return (labels ?? [])
-    .map(labelName)
-    .map((label) => String(label).trim().toLowerCase())
-    .filter(Boolean);
-}
-
-export function hasPreviewLabel(
-  labels,
-  previewLabelName = DEFAULT_PREVIEW_LABEL_NAME,
-) {
-  return normalizeLabelNames(labels).includes(
-    normalizePreviewLabelName(previewLabelName),
-  );
-}
-
 export function buildPreviewSlugFromPrNumber(prNumber) {
   return `pr-${parsePositiveInteger(prNumber, "PR number")}`;
 }
@@ -89,12 +59,8 @@ export function buildSameRepoPreviewPrepareOutputs(options = {}) {
   const event = options.event ?? {};
   const pullRequest = event.pull_request ?? {};
   const action = normalizeOptionalText(options.action ?? event.action);
-  const previewLabelName = normalizePreviewLabelName(options.previewLabelName);
-  const labels = options.labels ?? pullRequest.labels ?? [];
-  const actionLabelName = String(
-    options.actionLabelName ?? event.label?.name ?? "",
-  ).trim().toLowerCase();
-  const previewRequested = hasPreviewLabel(labels, previewLabelName);
+  // A preview follows the PR: an open PR that is ready for review has one.
+  const draft = (options.draft ?? pullRequest.draft) === true;
   const currentRepository = normalizeRepository(
     options.currentRepository ?? event.repository?.full_name,
   );
@@ -109,9 +75,8 @@ export function buildSameRepoPreviewPrepareOutputs(options = {}) {
 
   let mode = "noop";
   if (
-    (action === "labeled" && actionLabelName === previewLabelName) ||
-    (["opened", "reopened", "synchronize", "edited"].includes(action) &&
-      previewRequested)
+    !draft &&
+    ["opened", "reopened", "synchronize", "ready_for_review"].includes(action)
   ) {
     mode = previewSupported ? "refresh" : "unsupported";
   }

@@ -789,7 +789,7 @@ def _plan_preview_target(
     transport: BuildProvenanceTransport,
     pull_request_number: int,
 ) -> _PreviewDecision:
-    """Desired: a preview of the PR head's verified build while open and labeled."""
+    """Desired: a preview of the PR head's verified build while it is open and not a draft."""
     preview_context = profile.preview.context.strip()
     plan: dict[str, object] = {
         "target": "preview",
@@ -823,12 +823,12 @@ def _plan_preview_target(
     plan["head_sha"] = head_sha.lower()
     observed.update(
         head_sha=head_sha.lower(),
-        eligible=_preview_eligible(pull_request, profile.preview.enable_label),
+        eligible=_preview_eligible(pull_request),
     )
     if pull_request.get("state") != "open":
         return without_preview("pull_request_not_open")
-    if profile.preview.enable_label not in _labels(pull_request):
-        return without_preview("preview_label_missing")
+    if pull_request.get("draft"):
+        return without_preview("pull_request_draft")
     # The agent that opened the PR marks it for the Owner with a label.
     plan["owner_review_requested"] = profile.owner.review_label in _labels(pull_request)
     try:
@@ -895,7 +895,7 @@ def _run_preview_operation(
 
     def pre_mutation_guard() -> None:
         # Holding the reservation, just before the provider apply: a PR that closed,
-        # lost its label, or moved its head since the plan releases with no effect.
+        # became a draft, or moved its head since the plan releases with no effect.
         if decision.observed and _pull_request_moved(
             transport=transport,
             profile=profile,
@@ -1337,12 +1337,13 @@ def _pull_request_moved(
     )
     head_sha = str(_object(pull_request.get("head"), "pull request head").get("sha") or "")
     return head_sha.lower() != observed.get("head_sha") or _preview_eligible(
-        pull_request, profile.preview.enable_label
+        pull_request
     ) != observed.get("eligible")
 
 
-def _preview_eligible(pull_request: dict[str, object], enable_label: str) -> bool:
-    return pull_request.get("state") == "open" and enable_label in _labels(pull_request)
+def _preview_eligible(pull_request: dict[str, object]) -> bool:
+    """A preview follows the PR: an open, ready-for-review PR has one; labels play no part."""
+    return pull_request.get("state") == "open" and not pull_request.get("draft")
 
 
 def _labels(pull_request: dict[str, object]) -> set[str]:

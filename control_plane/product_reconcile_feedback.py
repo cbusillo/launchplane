@@ -204,7 +204,6 @@ def _preview_feedback(
         revision=revision,
         failure_summary=failure_summary,
         waiting_for=waiting_for,
-        preview_label=profile.preview.enable_label,
         owner_review_requested=owner_review in {"mentioned", "owner_not_set"},
         owner_login=profile.owner.github_login,
         owner_review_url=owner_review_url,

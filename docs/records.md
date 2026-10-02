@@ -1457,8 +1457,9 @@ records what it decided and did as `last_plan`:
   the request is `failed`, and its error ends with the last attempt's code and
   summary. A lane with another active operation leaves the
   request `pending` (`deferred: lane_busy`).
-- preview: `apply`, `destroy`, `wait` (open and labeled but no verified build
-  yet), or `none`. An apply or destroy issues the preview plan the inputs route
+- preview: `apply`, `destroy`, `wait` (open, not a draft, but no verified
+  build yet), or `none`. A draft, closed or merged PR wants no preview
+  (`pull_request_draft`, `pull_request_not_open`). An apply or destroy issues the preview plan the inputs route
   would and runs it through the durable preview operation under reservation
   scope `launchplane-reconcile:<product>`. Its key is the product, PR, verified
   build run and attempt (or `destroy`), and the preview record's current

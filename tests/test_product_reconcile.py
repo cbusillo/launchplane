@@ -113,7 +113,8 @@ class FakeGitHub:
         self.first_parents = {NEWEST: DEPLOYABLE, DEPLOYABLE: OLDER, OLDER: ""}
         self.pull_request: dict[str, object] = {
             "state": "open",
-            "labels": [{"name": LABEL}],
+            "draft": False,
+            "labels": [],
             "head": {"sha": PR_HEAD},
         }
         self.pull_request_reads = 0
@@ -1083,17 +1084,18 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.request("preview", 5)
         self.assertEqual(self.reconcile()["reason"], "already_serving")
 
-        self.github.pull_request["labels"] = []
+        self.github.pull_request["draft"] = True
         self.request("preview", 5)
         destroyed = self.reconcile()
 
         self.assertEqual(
-            (destroyed["action"], destroyed["preview_result_status"]), ("destroy", "pass")
+            (destroyed["action"], destroyed["reason"], destroyed["preview_result_status"]),
+            ("destroy", "pull_request_draft", "pass"),
         )
         self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
 
         # The same build asked for again after a destroy is a new operation, not a replay.
-        self.github.pull_request["labels"] = [{"name": LABEL}]
+        self.github.pull_request["draft"] = False
         self.request("preview", 5)
         self.assertEqual(self.reconcile()["action"], "apply")
         self.assertEqual(self.provider.applied, [("refresh", 5), ("destroy", 5), ("refresh", 5)])
@@ -1137,7 +1139,7 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
             with self.subTest(name):
                 self.github.runs.clear()
                 self.github.pull_request.update(
-                    {"state": "open", "labels": [{"name": LABEL}], **pull_request}
+                    {"state": "open", "draft": False, "labels": [], **pull_request}
                 )
                 if built:
                     self.github.add_run(50, PR_HEAD, event="pull_request")
@@ -1165,6 +1167,60 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(self.provider.applied, [])
         self.assertEqual(self.store.list_preview_records(), ())
 
+    def test_preview_follows_the_pull_request_state(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        transitions: tuple[tuple[str, dict[str, object], str, str], ...] = (
+            ("opened as a draft", {"draft": True}, "none", "pull_request_draft"),
+            ("ready for review", {"draft": False}, "apply", ""),
+            ("converted to draft", {"draft": True}, "destroy", "pull_request_draft"),
+            ("ready again", {"draft": False}, "apply", ""),
+            ("closed", {"state": "closed"}, "destroy", "pull_request_not_open"),
+            ("reopened", {"state": "open"}, "apply", ""),
+            ("merged", {"state": "closed", "merged": True}, "destroy", "pull_request_not_open"),
+        )
+        for name, change, action, reason in transitions:
+            with self.subTest(name):
+                self.github.pull_request.update(change)
+                self.request("preview", 5)
+
+                plan = self.reconcile()
+
+                self.assertEqual((plan["action"], plan.get("reason", "")), (action, reason))
+        self.assertEqual(
+            self.provider.applied,
+            [("refresh", 5), ("destroy", 5), ("refresh", 5), ("destroy", 5), ("refresh", 5)]
+            + [("destroy", 5)],
+        )
+        self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
+
+    def test_removing_any_label_destroys_nothing(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.github.pull_request["labels"] = [{"name": "preview"}, {"name": "owner-review"}]
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["action"], "apply")
+
+        self.github.pull_request["labels"] = []
+        self.request("preview", 5)
+        kept = self.reconcile()
+
+        self.assertEqual((kept["action"], kept["reason"]), ("none", "already_serving"))
+        self.assertEqual(self.provider.applied, [("refresh", 5)])
+        self.assertEqual(self.store.list_preview_records()[0].state, "active")
+
+    def test_a_pr_converted_to_draft_before_the_provider_change_is_reconciled_again(
+        self,
+    ) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        # Reads: the plan, the build verification, then the check just before applying.
+        self.github.pull_request_move = (2, {"draft": True})
+        self.request("preview", 5)
+
+        completed = self.run_once()
+
+        self.assertEqual(completed.state, "pending")
+        self.assertEqual(completed.last_plan["deferred"], "pull_request_moved")
+        self.assertEqual(self.provider.applied, [])
+
 
 class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
     def setUp(self) -> None:
@@ -1190,10 +1246,10 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.assertEqual(self.reconcile_preview()["action"], "apply")
         self.assertIn("preview is ready for PR #5", self.comment_body())
         self.assertIn("https://pr-5.example.test", self.comment_body())
-        self.assertIn(f"`{LABEL}` label", self.comment_body())
+        self.assertIn("Convert the PR to a draft", self.comment_body())
         self.assertEqual(self.reconcile_preview()["reason"], "already_serving")
 
-        self.github.pull_request["labels"] = []
+        self.github.pull_request["state"] = "closed"
         destroyed = self.reconcile_preview()
 
         self.assertIn("retired the preview for PR #5", self.comment_body())
@@ -1237,10 +1293,10 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
             LaunchplaneProductProfileRecord.model_validate(payload)
         )
         self.github.add_run(50, PR_HEAD, event="pull_request")
-        cases = (
-            (5, [LABEL, "owner-review"], self.public_origin, "mentioned"),
-            (6, [LABEL], self.public_origin, None),
-            (7, [LABEL, "owner-review"], "", "no_public_origin"),
+        cases: tuple[tuple[int, list[str], str, str | None], ...] = (
+            (5, ["owner-review"], self.public_origin, "mentioned"),
+            (6, [], self.public_origin, None),
+            (7, ["owner-review"], "", "no_public_origin"),
         )
         for number, labels, origin, owner_review in cases:
             with self.subTest(number=number):
@@ -1275,7 +1331,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.assertEqual(self.reconcile_preview()["action"], "apply")
         self.assertNotIn("@site-owner", self.comment_body())
 
-        self.github.pull_request["labels"] = [{"name": LABEL}, {"name": "owner-review"}]
+        self.github.pull_request["labels"] = [{"name": "owner-review"}]
         marked = self.reconcile_preview()
 
         self.assertEqual(marked["reason"], "already_serving")
