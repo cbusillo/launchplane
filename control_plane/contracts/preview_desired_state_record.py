@@ -18,13 +18,20 @@ class PreviewDesiredStateRecord(BaseModel):
     source: str
     discovered_at: str
     repository: str
-    label: str
     anchor_repo: str
     preview_slug_prefix: str = "pr-"
     status: PreviewDesiredStateStatus
     desired_count: int = Field(ge=0)
     desired_previews: tuple[PreviewLifecycleDesiredPreview, ...] = ()
     error_message: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_retired_label(cls, value: object) -> object:
+        # Records written before #2735 name the preview label they filtered by.
+        if isinstance(value, dict) and "label" in value:
+            return {key: item for key, item in value.items() if key != "label"}
+        return value
 
     @model_validator(mode="after")
     def _validate_record(self) -> "PreviewDesiredStateRecord":
@@ -40,8 +47,6 @@ class PreviewDesiredStateRecord(BaseModel):
             raise ValueError("preview desired state requires discovered_at")
         if not self.repository.strip():
             raise ValueError("preview desired state requires repository")
-        if not self.label.strip():
-            raise ValueError("preview desired state requires label")
         if not self.anchor_repo.strip():
             raise ValueError("preview desired state requires anchor_repo")
         if not self.preview_slug_prefix.strip():

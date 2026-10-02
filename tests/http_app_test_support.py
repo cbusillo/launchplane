@@ -4309,13 +4309,12 @@ async def _post_product_prelaunch_rebuild_policy(
     )
 
 
-def _preview_desired_state_payload(*, label: str = "preview") -> dict[str, object]:
+def _preview_desired_state_payload() -> dict[str, object]:
     return {
         "product": "verireel",
         "context": "verireel-testing",
         "source": "launchplane-preview-lifecycle",
         "repository": "every/verireel",
-        "label": label,
         "anchor_repo": "verireel",
     }
 

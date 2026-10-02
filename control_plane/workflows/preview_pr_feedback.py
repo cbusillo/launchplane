@@ -764,7 +764,6 @@ def _render_preview_pr_feedback_markdown(
     owner_login: str = "",
     owner_review_url: str = "",
     waiting_for: str = "",
-    preview_label: str = "preview",
 ) -> str:
     lines = [marker]
     if status == "pending":
@@ -882,9 +881,8 @@ def _render_preview_pr_feedback_markdown(
             [
                 "",
                 "Controls:",
-                f"- Push new commits while the `{preview_label}` label stays applied to refresh "
-                "this preview.",
-                f"- Remove the `{preview_label}` label or close the PR to destroy it.",
+                "- Push new commits to refresh this preview.",
+                "- Convert the PR to a draft, or close or merge it, to remove the preview.",
                 "- Preview inventory, lifecycle plans, and cleanup evidence are recorded in Launchplane.",
             ]
         )
@@ -949,7 +947,6 @@ def render_preview_pr_feedback_markdown(
     owner_login: str = "",
     owner_review_url: str = "",
     waiting_for: str = "",
-    preview_label: str = "preview",
 ) -> str:
     return _render_preview_pr_feedback_markdown(
         marker=marker,
@@ -966,7 +963,6 @@ def render_preview_pr_feedback_markdown(
         owner_login=owner_login,
         owner_review_url=owner_review_url,
         waiting_for=waiting_for,
-        preview_label=preview_label,
     )
 
 
