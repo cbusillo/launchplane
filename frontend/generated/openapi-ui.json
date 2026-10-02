@@ -7699,8 +7699,7 @@
             "enum": [
               "ordinary-agent-delivery-administration",
               "administrator-product-evidence-read",
-              "ordinary-agent-enrollment-requester",
-              "agent-operate-product-setup"
+              "ordinary-agent-enrollment-requester"
             ],
             "title": "Candidate Id",
             "type": "string"
@@ -7712,18 +7711,6 @@
             ],
             "title": "Intent",
             "type": "string"
-          },
-          "products": {
-            "default": [],
-            "description": "Product identifiers selected for agent operate access. Accepted only when adding agent-operate-product-setup; the server validates each one.",
-            "items": {
-              "maxLength": 128,
-              "minLength": 1,
-              "type": "string"
-            },
-            "maxItems": 100,
-            "title": "Products",
-            "type": "array"
           },
           "source_event_id": {
             "maxLength": 128,
@@ -21043,8 +21030,6 @@
               "Managed authorization policy review",
               "Review agent delivery administration",
               "Review administrator product evidence access",
-              "Review agent operate access",
-              "Review removing agent operate access",
               "Review client delivery access",
               "Review terminal client connection requests",
               "Review removing terminal client connection requests",
