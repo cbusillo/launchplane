@@ -684,7 +684,12 @@ Product config applies from a `local_operators` caller, which is how this set
 is used, also refuse (`local_operator_lane_scope_required`) a context that is
 not the named product's alone, and a context- or global-scoped secret written
 through an instance request: those would change what another product or
-another lane, such as production, resolves.
+another lane, such as production, resolves. Backup authority applies from a
+`local_operators` caller likewise refuse a submitted target revision the
+submitted policy doesn't use, or one another product's active backup policy
+uses; backup targets are global records, so revising one would change another
+product's backup. Referencing a shared target without revising it stays
+allowed.
 
 What it can reach on a live product: the testing lane's settings and secrets,
 the testing lane's new compose target, and production's backup policy. The

@@ -20,6 +20,7 @@ from control_plane.http_routes.support import (
 from control_plane.production_backup_authority import (
     ProductionBackupAuthorityConflictError,
     ProductionBackupAuthoritySequenceError,
+    ProductionBackupAuthorityStore,
     ProductionBackupAuthorityWriteEnvelope,
     ProductionBackupAuthorityWriteResult,
     plan_production_backup_authority_write,
@@ -31,7 +32,11 @@ from control_plane.production_backup_migration import (
     LegacyProductionBackupMigrationStore,
     build_legacy_production_backup_authority_envelope,
 )
-from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    LaunchplaneIdentity,
+    LocalOperatorIdentity,
+)
 from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -285,6 +290,17 @@ def _execute_write(
         return replay
     try:
         authority_store = require_production_backup_authority_store(record_store)
+        if isinstance(identity, LocalOperatorIdentity):
+            target_refusal = _local_operator_target_refusal(
+                store=authority_store, envelope=envelope
+            )
+            if target_refusal:
+                raise dependencies.http_error(
+                    status_code=403,
+                    trace_id=current_trace_id,
+                    code="local_operator_lane_scope_required",
+                    message=target_refusal,
+                )
         plan = plan_production_backup_authority_write(
             record_store=authority_store,
             envelope=envelope,
@@ -436,6 +452,30 @@ def _preflight_apply(
             message="Production backup authority apply requires reconciliation.",
         )
     return None
+
+
+def _local_operator_target_refusal(
+    *,
+    store: ProductionBackupAuthorityStore,
+    envelope: ProductionBackupAuthorityWriteEnvelope,
+) -> str:
+    """Keep the operator's agent's target revisions on its own policy.
+
+    Target records are global, so a revision submitted with one product's
+    policy would otherwise change what another product's policy resolves.
+    Referencing a shared target without revising it stays allowed.
+    """
+    policy = envelope.policy
+    revised = {target.target_id for target in envelope.targets}
+    if not revised <= set(policy.target_ids):
+        return "Every submitted target must be one this backup policy uses."
+    lane = (policy.product, policy.context, policy.instance)
+    for record in store.list_production_backup_policy_records():
+        if record.status != "active" or (record.product, record.context, record.instance) == lane:
+            continue
+        if revised & set(record.target_ids):
+            return "A submitted target is used by another product's backup policy."
+    return ""
 
 
 def _require_write_authorization(
