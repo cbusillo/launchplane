@@ -365,6 +365,9 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm --dir frontend install --frozen-lockfile
 
+      - name: Check role words
+        run: uv run python scripts/validate_role_words.py
+
       - name: Validate frontend
         run: pnpm --dir frontend validate
 
@@ -412,6 +415,9 @@ jobs:
 
       - name: Install frontend dependencies
         run: pnpm --dir frontend install --frozen-lockfile
+
+      - name: Check role words
+        run: uv run python scripts/validate_role_words.py
 
       - name: Validate frontend
         run: pnpm --dir frontend validate

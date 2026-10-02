@@ -17,7 +17,7 @@ appends conclusive no-effect evidence with exact open PR, head/tree, and
 base/tree observations; this evidence does not claim that GitHub rejected the
 request. Only then may Launchplane recompute L2 for a fresh admission.
 Contradictory or incomplete evidence remains `reconcile_required` and needs
-operator investigation. Candidate-ref cleanup failures are separate from
+admin investigation. Candidate-ref cleanup failures are separate from
 landing truth and may be retried without changing the outcome record.
 
 Use the controller phase when diagnosing a failed landing. An active
@@ -49,9 +49,9 @@ stderr and does not stop the service.
 
 ## Retired Approval Policies
 
-Change-impact and product-Owner policy endpoints are removed. Do not repair
+Change-impact and Client policy endpoints are removed. Do not repair
 retired policies to unblock delivery. Merge admission reads current Git and
-technical evidence; Owner approval belongs to the product review and release
+technical evidence; Client approval belongs to the product review and release
 checklist. Historical policy/audit readers retain old payloads without making
 approval decisions. See [retired impact records](change-impact-policy.md).
 
@@ -77,9 +77,9 @@ original idempotency key.
 Use `uv run launchplane --help` for the complete CLI surface. The current
 top-level groups are:
 
-Today this CLI is the local Launchplane operator/client surface around the
+Today this CLI is the local Launchplane admin/client surface around the
 service API. Shared or production mutations must prefer the deployed service API
-with GitHub OIDC or the operator UI that calls it. Local core-record write
+with GitHub OIDC or the Launchplane UI that calls it. Local core-record write
 commands are file-backed rehearsal helpers, not DB-backed shared-state mutation
 paths. If a live mutation still exists only as a local CLI command, stop and add
 or use a service API path instead of running the local command from an arbitrary
@@ -129,7 +129,7 @@ product's runtime action itself.
 
 Those commands are current implementation scaffolding. The Launchplane boundary
 is a long-running service with authenticated HTTP ingress. The CLI should remain
-a client of Launchplane's stable API contract or an explicit DB-backed operator
+a client of Launchplane's stable API contract or an explicit DB-backed admin
 tool, not a separate live-state authority.
 
 Provider-target data changes for shared or production lanes must use the
@@ -138,7 +138,7 @@ calls `POST /v1/provider-targets/operations` with GitHub OIDC and is authorized
 through DB-backed `provider_target.audit` and `provider_target.backfill` grants
 for product/context `launchplane`. Run it first in `audit` or
 `backfill-dry-run` mode, review the artifact, then run `backfill-apply` only
-with the exact confirmation phrase and an operator reason. Specific rollout
+with the exact confirmation phrase and an admin reason. Specific rollout
 lane sets and ordering belong in issue-backed plans and workflow inputs, not in
 checked-in docs.
 
@@ -244,7 +244,7 @@ returns only record IDs, revisions, lifecycle status, provider type, and
 destination kind. It never returns provider hosts, usernames, guest IDs,
 storage IDs, credentials, managed-secret values, or runtime-environment values.
 
-Operators submit exact revisioned target and policy records to
+Admins submit exact revisioned target and policy records to
 `POST /v1/production-backup-authority/apply`. Run `mode=dry_run`, review the
 canonical `authority_digest`, then submit the same payload with `mode=apply`,
 the reviewed digest, expected-current record IDs, and an `Idempotency-Key`.
@@ -258,7 +258,7 @@ that do not write new target revisions.
 
 The legacy migration route is
 `POST /v1/production-backup-authority/legacy-runtime-migration`. It requires an
-exact product/context/instance/action, operator-chosen stable target IDs, the
+exact product/context/instance/action, admin-chosen stable target IDs, the
 source runtime record's exact `updated_at`, review timestamps, evidence-age
 limits, source, and reason. Dry-run reads only the exact DB-backed instance
 runtime record and requires both snapshot and `vzdump` modes. Apply requires the
@@ -275,10 +275,10 @@ execution has moved.
 ## Mutation Reservation Recovery
 
 Reservation-backed service mutations use the PostgreSQL
-`launchplane_idempotency_records` table as a typed execution claim. Operators
+`launchplane_idempotency_records` table as a typed execution claim. Admins
 and reconcilers should interpret states as follows:
 
-- `running` with an unexpired lease means another owner is executing; do not
+- `running` with an unexpired lease means another lease holder is executing; do not
   bypass it or retry with a new key.
 - `completed` is terminal replay evidence. Retry the same route, caller scope,
   key, and request fingerprint to receive the original accepted response.
@@ -290,8 +290,8 @@ and reconcilers should interpret states as follows:
 Expired DB-only reservations without a reconciliation key may be reclaimed by
 the storage API with an incremented attempt. Provider-backed work must bind its
 stable provider operation key before effects; after that point lease expiry is a
-reconciliation event, not a retry signal. Stale owners cannot renew or complete
-another owner's lease or an earlier attempt owned by the same worker identity.
+reconciliation event, not a retry signal. Stale lease holders cannot renew or complete
+another holder's lease or an earlier attempt owned by the same worker identity.
 Lease timestamps and expiry decisions use the database clock rather than caller
 time. Do not repair reservation rows with direct SQL or an arbitrary checkout;
 shared/live recovery belongs in a typed Launchplane service endpoint or domain
@@ -336,13 +336,13 @@ outbox rows manually or clear provider markers to force a retry.
 
 Generic-web promotion workflow dispatches are queued by
 the automation route `POST /v1/drivers/generic-web/prod-promotion-workflow` or
-the operator route
+the admin route
 `POST /v1/products/{product}/environments/{environment}/promotion/workflow-dispatch`;
 the HTTP response shows `dispatch_status=pending` and includes
 `records.outbox_delivery_id`. The worker
 resolves the managed GitHub token from Launchplane runtime records, sends the
 dispatch, then marks the outbox delivery delivered when the corresponding run is
-observed. Operator clients read
+observed. Admin clients read
 `GET /v1/products/{product}/environments/{environment}/promotion/workflow-deliveries/{delivery_id}`
 for outbox and observed-run state; dispatch acceptance is not workflow
 completion. The delivery dedupe key includes a hashed transition identity: replay
@@ -353,7 +353,7 @@ The workflow input set includes `promotion_intent_id`, equal to the persisted
 outbox delivery ID. Product workflows must pass it to the raw live promotion
 route and use it as that request's `Idempotency-Key`; the service revalidates
 the current evidence and target against the intent before execution. Without an
-intent, a recorded Owner approval or operator override of the current release
+intent, a recorded Client approval or admin override of the current release
 checklist authorizes the live call, because that decision is already the human
 go-ahead for exactly that build. A release that needs no review does not count.
 The separate `generic_web_prod_promotion.execute_unreviewed` authorization action
@@ -363,7 +363,7 @@ GitHub workflow dispatch does not provide a provider idempotency token. Its
 worker therefore persists the observation window and an in-doubt marker before
 the POST and never automatically repeats the POST after that marker exists. A
 crash or network ambiguity between marker persistence and run observation stays
-`reconcile_required` with `workflow_dispatch_in_doubt`; operators must not clear
+`reconcile_required` with `workflow_dispatch_in_doubt`; admins must not clear
 the marker to force a resend.
 
 Public-ingress monitor GitHub issue notifications are also queued when the
@@ -491,7 +491,7 @@ mutation_in_progress`; a completed effect replays; a different request
 
 ### Generic-web deploy recovery dry-run/apply
 
-Legacy generic-web deploy recovery starts read-only. Operators call
+Legacy generic-web deploy recovery starts read-only. Admins call
 `POST /v1/admin/generic-web/deploy-recovery/dry-run` with the exact original
 `GenericWebDeployEnvelope` under `original_deploy`, the original
 `Idempotency-Key`, the product and instance, and a non-empty reason. The service
@@ -529,7 +529,7 @@ Product repositories that need an OIDC-authenticated inspection should use the
 Launchplane-owned
 `.github/actions/generic-web-deploy-recovery-dry-run` action. Its single request
 object accepts only the exact original deploy coordinates, optional
-`deploy_reference`, original GitHub Actions run ID and attempt, operator reason,
+`deploy_reference`, original GitHub Actions run ID and attempt, admin reason,
 optional `deploy_key_format`, and optional connector-only `launchplane_url`. The
 action strips the connector URL before constructing the service payload,
 reconstructs the original idempotency key and payload internally, calls only the
@@ -664,7 +664,7 @@ recovery workflow. It must be removed under `#2167` once DB-native policy
 administration can grant the dedicated read action to the exact workflow
 identity.
 
-Stage 2 apply is explicit and digest-gated. Operators call
+Stage 2 apply is explicit and digest-gated. Admins call
 `POST /v1/admin/generic-web/deploy-recovery/apply` with the same request body as
 the dry-run plus `expected_recovery_digest`. The service recomputes a fresh
 inspection and requires an exact digest match before it writes anything. The
@@ -700,14 +700,14 @@ provider payload data.
 
 The target communication model is:
 
-- Launchplane runs as a long-running service behind an operator-owned stable
+- Launchplane runs as a long-running service behind an admin-owned stable
   host.
 - Product workflows communicate with Launchplane over authenticated HTTP.
 - GitHub Actions OIDC is the default machine-to-machine trust boundary.
 - Launchplane authorizes requests from GitHub-issued identity claims such as repo,
   workflow, ref, environment, and event context.
 - Typed evidence payloads are the stable contract; CLI commands are service
-  clients, DB-backed operator tools, or explicit local-only rehearsal and
+  clients, DB-backed admin tools, or explicit local-only rehearsal and
   inspection helpers.
 
 Launchplane should eventually expose API ingress for at least:
@@ -738,7 +738,7 @@ The service needs an explicit minimal bootstrap policy input, but the repo no
 longer tracks the live policy. Product and workflow grants should be represented
 as DB-backed authz policy records. Omitting `--database-url` always fails closed,
 including loopback local development, rather than using file-backed JSON state
-as authority. The GitHub OIDC audience is explicit operator/process wiring;
+as authority. The GitHub OIDC audience is explicit admin/process wiring;
 production code must not default it to a live domain.
 
 Current implementation scope:
@@ -804,7 +804,7 @@ Apply atomically commits the active-policy compare-and-swap and completed
 `Idempotency-Key` replay evidence. Managed reconciliation is the sole policy
 write implementation currently available for every principal type. That is an
 implementation fact, not approval for GitHub to remain durable desired-policy
-authority. Follow `authorization-authority.md`; a new grant is an operator
+authority. Follow `authorization-authority.md`; a new grant is a Director
 decision.
 
 `POST /v1/authz-diagnostics/github-actions/evaluate` is a read-only diagnostic
@@ -830,12 +830,12 @@ DB-native administrator health read. The caller must be a GitHub administrator
 or local administrator with `authz_policy_health.read`. The route authorizes
 against the runtime policy, reloads the single active DB policy record, and
 authorizes again before returning immutable policy provenance, bounded health
-reason codes, managed-set rule counts, and reachable policy-administrator rule
+reason codes, managed-set rule counts, and reachable admin rule
 counts. It never returns managed rule IDs, rule hashes, selectors, actions, or
 principal identities. Missing or multiple active records fail closed, and the
 read does not authorize a policy write or production grant.
 
-`GET /v1/authz-diagnostics/activation-preflight/self` is the supported owner
+`GET /v1/authz-diagnostics/activation-preflight/self` is the supported Director
 activation self-check. A signed-in browser human calls it with the Launchplane
 session cookie; Authorization headers, bodies, query parameters, and
 caller-selected identities are rejected. The service verifies the cookie
@@ -880,7 +880,7 @@ and bounded membership categories. Do not place repository identities in URLs,
 logs, issue comments, or published evidence merely to use this route.
 
 The caller needs the separate `authz_repository_scope.read` action and must be
-an authenticated GitHub human, local operator, or local administrator. The
+an authenticated GitHub human, `local_operator`, or local administrator. The
 route performs runtime-policy preflight, reloads the single active DB policy,
 and reauthorizes before reading product, repository, and work-graph records.
 GitHub Actions and terminal agents cannot use the route; do not borrow a
@@ -917,23 +917,23 @@ The record never stores a principal identifier or token label, expires after 30
 days, and missing and expired traces share `authz_denial_not_found`. Persistence
 failure never weakens or replaces the original denial.
 
-Operators never mutate shared or production authz through direct DB commands or
+Admins never mutate shared or production authz through direct DB commands or
 a local CLI from an arbitrary checkout. The protected secret/workflow model
 below is transitional compatibility for already-existing managed sets, not the
 routine path for new grants. Do not create a managed set or modify production
 authorization merely to resolve another task's `authorization_denied` result.
-The owner-approved August 25, 2026 root-of-trust exception adds the temporary
+The Director-approved August 25, 2026 root-of-trust exception adds the temporary
 `privileged-operation-bootstrap` selection without a new GitHub secret. The
 protected wrapper derives the immutable repository-owner GitHub ID from the
 dispatch event and reads the existing terminal-agent subject and token label
 bootstrap variables. Its exact `operator.privileged-operation-bootstrap` set
-grants only terminal-agent policy proposal plus GitHub-owner policy
-read/cancel/approve/revoke. After the initial owner-approved attempt proved that
-the existing self-preflight authority was not an immutable-ID policy
-administrator rule, the owner explicitly approved adding
+grants only terminal-agent policy proposal plus repository-owner policy
+read/cancel/approve/revoke. After the initial Director-approved attempt proved that
+the existing self-preflight authority was not an immutable-ID admin
+rule, the Director explicitly approved adding
 `authz_policy_grant.write` to that same exact-ID rule. The set grants no secret
 operation action, execute action, summary read, product/runtime action, or
-workflow identity. Missing owner or terminal-agent selectors fail request
+workflow identity. Missing repository-owner or terminal-agent selectors fail request
 validation rather than widening a rule. Use dry-run and exact reviewed-digest
 apply, then remove the
 temporary selection after the DB-native policy-operation path removes its own
@@ -954,7 +954,7 @@ the active policy schema for their exact managed-set request. Against schema v3
 they can produce repeatable dry-run candidates while the shared reconciliation
 apply fence and storage fences continue to reject persistence.
 
-`LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON` currently carries the primary operator set;
+`LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON` currently carries the primary admin set;
 `LAUNCHPLANE_AUTHZ_POLICY_RECONCILE_MANAGED_SET_JSON` owns the exact immutable
 policy-admin worker rules for the standalone authz wrapper and must declare the
 `operator.authz-policy-reconcile` managed-set identity;
@@ -963,13 +963,13 @@ GitHub-human manager preview approval writer set and must declare the exact
 `operator.manager-preview-approval` managed-set identity;
 `LAUNCHPLANE_AUTHZ_OWNER_ACCEPTANCE_MANAGED_SET_JSON` is a retired compatibility
 name. The `operator.owner-acceptance` managed set accepts only an empty desired
-policy so existing grants can be removed. It cannot create or update Owner
+policy so existing grants can be removed. It cannot create or update Client
 review grants. The current `/ui/owner-review` path uses the product profile's
-Owner identity directly. Do not introduce new GitHub-secret/workflow grants;
+Client identity directly. Do not introduce new GitHub-secret/workflow grants;
 use the native reviewed policy path for any separately authorized contraction.
-See [owner-acceptance.md](owner-acceptance.md).
+See [Client acceptance](owner-acceptance.md).
 
-The manager-preview and Product Owner policy-admin grant sets are retained
+The manager-preview and Client policy-admin grant sets are retained
 runtime history, not active approval paths: their service evaluators and routes
 are removed. This code retirement creates no grant and performs no runtime
 contraction. Do not extend these sets or use them as delivery authority.
@@ -1003,7 +1003,7 @@ route-binding authority;
 `LAUNCHPLANE_AUTHZ_ODOO_ROUTE_BINDING_MANAGED_SET_JSON` owns the independent
 Odoo stable managed route-binding set.
 `LAUNCHPLANE_AUTHZ_PREVIEW_FEEDBACK_REMEDIATION_MANAGED_SET_JSON` owns the
-local-operator-only VeriReel preview-feedback remediation plan/apply grants; and
+`local_operator`-only VeriReel preview-feedback remediation plan/apply grants; and
 `LAUNCHPLANE_AUTHZ_ODOO_EXTERNAL_ROUTE_BINDING_MANAGED_SET_JSON` owns the
 testing-first external route-binding set.
 `LAUNCHPLANE_AUTHZ_ODOO_TESTING_INGRESS_ROUTE_MANAGED_SET_JSON` owns narrow
@@ -1014,11 +1014,11 @@ testing-only refresh controller and its exact-instance binding grants. The
 separate exact-instance testing read, plan, and apply grants used by the pinned
 Odoo target-replacement workers. The
 `LAUNCHPLANE_AUTHZ_ODOO_OPW_PREVIEW_FEEDBACK_MANAGED_SET_JSON` owns the isolated
-OPW preview feedback writer grant without requiring operators to read or replace
+OPW preview feedback writer grant without requiring admins to read or replace
 the primary managed-set secret. The
 `LAUNCHPLANE_AUTHZ_ODOO_OPW_PRODUCTION_ENROLLMENT_MANAGED_SET_JSON` owns the
 separate exact-instance OPW production inspection and enrollment grants so the
-operator can reconcile that lane without replacing another unreadable managed
+admin can reconcile that lane without replacing another unreadable managed
 set. `LAUNCHPLANE_AUTHZ_ODOO_PRODUCTION_ENROLLMENT_MANAGED_SET_JSON` owns
 additional exact-instance Odoo production inspection and enrollment grants
 without expanding the OPW-specific set or replacing another unreadable managed
@@ -1045,7 +1045,7 @@ currently authorized worker, apply the reviewed expansion, then advance the
 wrapper. The former temporary deploy selector for first-time policy-admin
 recovery no longer exists. Do not reintroduce it or represent image rollback as
 DB-policy recovery. A missing authorized administrator is an architecture
-blocker to report to the operator until a bounded, independently protected
+blocker to report to the Director until a bounded, independently protected
 DB-policy recovery contract is designed and reviewed.
 
 The reusable authz worker requires an exact expected managed-set identity from
@@ -1089,7 +1089,7 @@ still requires the protected human approval; diagnostics do not bypass or
 weaken that control.
 
 Managed-authz dry-runs also return `policy_safety_blockers` for candidates that
-would remove the last reachable policy administrator, remove the applying
+would remove the last reachable admin, remove the applying
 administrator, leave no reachable strict immutable-ID GitHub-human
 administrator, or fail the effective administrator quorum. Existing schema-v2
 policies without `administrator_quorum` use quorum `2`; changing that value is
@@ -1101,11 +1101,11 @@ evidence rather than dry-run transport errors. Apply remains fail-closed with
 the corresponding bounded error code and does not persist the candidate while
 any applicable policy-safety blocker remains. A satisfied quorum of `1` with
 exactly one reachable strict human is
-reported as `solo_administration_active` and remains an owner-visible attention
+reported as `solo_administration_active` and remains a Director-visible attention
 state.
 
 `Tracked Target Logs` and `Odoo Website Bootstrap Override` follow this same
-two-change rollout. Their dispatch files are thin operator entrypoints pinned to
+two-change rollout. Their dispatch files are thin admin entrypoints pinned to
 reviewed reusable workers at a full commit SHA; production authorization binds
 both the caller `workflow_ref` and immutable worker `job_workflow_ref`. The
 workers resolve the Launchplane service URL and OIDC audience only from protected
@@ -1118,7 +1118,7 @@ and fails unless the service confirms that typed bootstrap intent was persisted.
 `Product Retirement` uses the same worker-first sequence: land `Reusable
 Product Retirement` without changing the protected dispatch wrapper, then pin
 the wrapper to its merged full SHA in a separate change before authorizing or
-using that immutable worker for an operator action.
+using that immutable worker for an admin action.
 
 `Ingress Route Dry Run` and `Ingress Route Apply` accept an optional exact
 instance. When present, the service authorizes `ingress_route.plan` or
@@ -1149,7 +1149,7 @@ the worker is pinned to a reviewed immutable revision, and all authz runs share
 one non-canceling concurrency group. `Deploy Launchplane` has no authorization
 inputs or jobs and must not be used for policy bootstrap or recovery.
 
-Babysit protected operator workflows with the installed GitHub workflow helper
+Babysit protected admin workflows with the installed GitHub workflow helper
 instead of dispatching and then polling by workflow name:
 
 ```sh
@@ -1186,7 +1186,7 @@ Every `status=waiting` poll queries `pending_deployments` immediately and
 reports the environment, eligible reviewers, wait timer, and
 `current_user_can_approve`. Approval occurs only when the active human is
 eligible and the exact environment name was supplied with
-`--approve-environment`, which is the operator's explicit authorization for
+`--approve-environment`, which is the Director's explicit authorization for
 that protected action. A triggering-actor self-review denial or ineligible
 reviewer stops immediately with an actionable result. The run must also report
 the configured automation actor as its triggering actor. Before approval, the
@@ -1239,7 +1239,7 @@ commit SHA.
 Dispatch `mode=dry-run` first. Review the create, unchanged, refresh, blocked, or
 conflict outcome, source-record identities and versions, current/candidate
 digests, and redacted route authority. Apply requires a unique
-`idempotency_key`, an operator reason, and the exact confirmation
+`idempotency_key`, an admin reason, and the exact confirmation
 `APPLY LAUNCHPLANE ROUTE BINDING RECONCILE`. The service re-plans from current
 DB-backed records and compare-and-writes the full record; a concurrent change
 returns a conflict instead of overwriting newer authority.
@@ -1249,7 +1249,7 @@ Run reconciliation after any provider-target, tracked target, edge-endpoint, or
 ingress-audit authority change and on a cadence no slower than every 12 hours
 for active stable lanes. Calls made before half-life are unchanged no-ops; calls
 at or after half-life refresh evidence even when the underlying source versions
-are unchanged. A domain, target, ingress, TLS-owner, lifecycle, or operator-
+are unchanged. A domain, target, ingress, TLS-management, lifecycle, or admin-
 ownership difference is not a refresh and must be resolved through the owning
 authority workflow before retrying.
 
@@ -1305,7 +1305,7 @@ separate exact-instance `route_binding.external.apply` action and confirmation
 `APPLY EXTERNAL ROUTE BINDING RECONCILE`.
 
 After external apply, run `Public Ingress Monitor` and read product topology.
-The route binding is the recorded operator authority; it is not proof of proxy
+The route binding is the recorded admin authority; it is not proof of proxy
 configuration. Readiness requires a fresh successful public HTTP observation,
 an exact expected runtime-identity match, and fresh valid TLS evidence for every
 recorded domain. Public HTTP and TLS observations expire after two hours.
@@ -1317,7 +1317,7 @@ terminator remains an explicit accepted trust boundary.
 
 To move a lane from external to Launchplane-managed ingress, first dry-run and
 apply the external workflow with `desired_status=disabled`. That explicit CAS
-write relinquishes operator-owned authority. Create the managed provider route
+write relinquishes admin-owned authority. Create the managed provider route
 and terminal audit through the supported provider workflow, then run managed
 route-binding reconcile. Managed reconcile may replace a disabled external
 record, but it continues to reject active external ownership. The reverse
@@ -1337,7 +1337,7 @@ one candidate matching multiple desired managed identities (including identities
 being updated), rules with repository IDs, and non-GitHub principals fail closed
 or remain untouched. A retirement plan must also leave the applying identity
 authorized to administer policy under the candidate policy, so stale immutable
-IDs or workflow selectors cannot remove the final usable operator path. The
+IDs or workflow selectors cannot remove the final usable admin path. The
 redacted diff reports candidate and retirement counts plus rule hashes without
 returning selectors. The CLI remains only a thin service client for local/
 rehearsal use. Direct authz policy list/import DB commands are not supported.
@@ -1356,7 +1356,7 @@ The request file uses the same bounded exact-candidate JSON contract as `POST
 /v1/authz-diagnostics/repository-scope/read`. Standard output is the same
 redacted response shape; standard error states that provenance is derived from
 the configured PostgreSQL credentials. This command does not evaluate whether
-the operator is authorized by the active policy and must not be represented as
+the admin is authorized by the active policy and must not be represented as
 proof of policy-authorized HTTP access. It requires exactly one active policy
 record and performs no policy, secret, workflow, provider, runtime, deployment,
 session, denial, idempotency, outbox, or durable-operation write.
@@ -1394,10 +1394,10 @@ image rollout from silently expanding or replacing live authority.
 The former append-oriented authz maintenance bridge is retired. Do not add
 per-rule grant/removal endpoints, deploy-time grant catalogs, or workflow inputs
 that bypass the managed desired-state review/apply contract. Use managed-set
-reconciliation for GitHub Actions, GitHub human, terminal-agent, local-operator,
+reconciliation for GitHub Actions, GitHub human, terminal-agent, `local_operator`,
 and local-admin policy changes.
 
-When a GitHub Actions route fails closed and the operator needs to distinguish a
+When a GitHub Actions route fails closed and an admin needs to distinguish a
 caller, reusable-worker, event, product, context, target, or action mismatch,
 grant the caller the narrow `authz_diagnostic.evaluate` action through its
 existing managed set. The diagnostic route evaluates only that calling identity
@@ -1411,23 +1411,23 @@ The #1049 compatibility cleanup removed stale
 workflows. Do not reintroduce those broad rules; keep those workflows paired
 with narrow managed actions such as `merge_train.policy_import`.
 
-The operator-managed desired set owns workflow and local-operator authority for
+The admin-managed desired set owns workflow and `local_operator` authority for
 `Provider Target Operations`, product config, private health endpoints, and
 `Ingress Route Canary Apply`. Keep those rules explicitly scoped by product,
 context, instance, action, and immutable workflow identity as applicable. Use
 local-admin rules only for rare broader repair authority instead of widening
-routine local-operator access. Checked-in catalogs and deploy-time variables are
+routine `local_operator` access. Checked-in catalogs and deploy-time variables are
 not authority for these scopes.
 
 Managed reconciliation responses return only authz policy record metadata,
 rule counts, managed IDs and hashes, compact diffs, and redacted audit evidence;
-they do not echo workflow refs, human logins, owner-agent subjects, or the full
+they do not echo workflow refs, human logins, Director-agent subjects, or the full
 policy body.
 
 Lane health monitoring is Launchplane-owned synthetic monitoring for
 generic-web stable lanes, including drivers that inherit generic-web behavior.
 The `Public Ingress Monitor` workflow owns both the recurring schedule and
-manual operator reruns, so its GitHub OIDC identity stays scoped only to
+manual admin reruns, so its GitHub OIDC identity stays scoped only to
 `public_ingress_monitor.run_once`. Both paths call
 `POST /v1/products/public-ingress-monitor/run-once` through GitHub OIDC and are
 authorized in the Launchplane service context. Each lane declares a DB-backed
@@ -1495,7 +1495,7 @@ observation. The incident resolves with `monitoring_intent_changed`, not a false
 recovery. Observation, incident, and GitHub outbox rows are fenced by canonical
 fingerprints of the product profile and any private endpoint or route binding
 used by the target. The checks happen in one transaction, so an in-flight run
-discovered under old authority cannot reopen or resolve operator state after a
+discovered under old authority cannot reopen or resolve admin state after a
 record changes, even when its human timestamp is unchanged. Email and Discord
 delivery behavior and DB-backed notification policies are unchanged; do not
 disable destinations to perform an intent transition.
@@ -1511,7 +1511,7 @@ the active incident key and compare-checks both the incident state version and
 the full expected incident digest before committing observation, incident,
 event, reminder, and outbox rows together. Concurrent acknowledgement, silence,
 or monitor passes therefore re-plan against current state instead of overwriting
-operator state, opening a second incident, or losing evidence. Any supported
+admin state, opening a second incident, or losing evidence. Any supported
 non-monitor incident-state mutation must increment `state_version`.
 
 Notification policies carry a reminder interval from 15 minutes through seven
@@ -1527,7 +1527,7 @@ material change clears acknowledgement and is immediately eligible for delivery.
 A bounded silence preserves all observations/events but suppresses material
 updates and reminders until `silenced_until`; after expiry the next unresolved
 failure can emit the current reminder. Resolution is never silenced because
-GitHub issue sinks must be closed and other operators must see recovery. Public,
+GitHub issue sinks must be closed and other admins must see recovery. Public,
 private, and provider checks use the configured consecutive-pass recovery
 threshold; only the threshold-crossing pass creates the single recovery event.
 
@@ -1542,7 +1542,7 @@ the stable lane from its DB-backed product profile, and return `404` rather than
 revealing an incident owned by another lane. Treat GitHub issues, email, and
 Discord messages as delivery evidence only: do not infer recovery from a closed
 or missing sink, and do not clear outbox rows or destination state to force a
-new opening. The operator projection deliberately omits raw destination values,
+new opening. The admin projection deliberately omits raw destination values,
 policy identities, outbox payloads, provider operation details, target URLs,
 and provider error text.
 
@@ -1580,7 +1580,7 @@ The initial conservative thresholds are intentionally simple: a certificate is
 evidence becomes stale after 2 hours. The monitor workflow currently runs twice
 per hour, so the 2-hour freshness window tolerates one or two missed scheduled
 passes without treating old evidence as current for an entire workday, while the
-14-day expiry window gives operators enough time to review ownership and
+14-day expiry window gives admins enough time to review ownership and
 rotation before a certificate crosses into an outage condition.
 
 The product topology read model may use the newest fresh strict public health
@@ -1627,8 +1627,8 @@ came from, and the plan SHA-256, then apply with that SHA-256 and an `Idempotenc
 Use the manual Product Preview TLS workflow for a bounded change to an
 Odoo-driver product profile's preview certificate policy. Run `mode=dry-run`
 first with the target product, requested `none` or `letsencrypt` value, and an
-operator reason. The workflow requires a target-product-scoped
-`product_profile.preview_tls.apply` grant from operator-supplied authz config;
+admin reason. The workflow requires a target-product-scoped
+`product_profile.preview_tls.apply` grant from admin-supplied authz config;
 do not add product grants to checked-in workflow defaults. Review the artifact's
 current/requested values, profile timestamp, and plan SHA-256.
 Apply only by starting a second run with `mode=apply`, the same target/value/
@@ -1640,7 +1640,7 @@ direct DB, or direct provider mutation.
 Use the manual Product Health Monitoring workflow to create or update one
 stable-lane `public_http` check without replacing the product profile. Run
 `mode=dry-run` with the exact product/context/instance, check name, desired
-enabled state, runtime-identity requirement, and operator reason. The workflow
+enabled state, runtime-identity requirement, and admin reason. The workflow
 does not accept URLs, domains, provider targets, proxy details, or certificate
 references; Launchplane preserves or derives the URL from the current DB-backed
 lane. Enabling strict runtime identity requires an existing lane-owned HTTPS
@@ -1652,14 +1652,14 @@ atomically rejects stale or concurrent edits. Authority uses separate exact-
 instance `product_profile.health_monitoring.plan` and `.apply` actions supplied
 through the dedicated `product-health-monitoring` managed authz set. That set
 owns only the generic wrapper's exact immutable reusable-worker grant; real
-product, context, instance, check, and endpoint values remain explicit operator
+product, context, instance, check, and endpoint values remain explicit admin
 input and DB-backed Launchplane records.
 
 Use the manual Product Prelaunch Rebuild Policy workflow when an Odoo lane must
 authorize a reviewed destructive rebuild before stable target replacement. Run
 `mode=dry-run` first with the exact product/context/instance, enabled state,
 issue-backed approval URL, typed data source, target-replacement confirmation
-phrase, expected target proof, expected-domain JSON array, and operator reason.
+phrase, expected target proof, expected-domain JSON array, and admin reason.
 The workflow has no checked-in product, lane, target, domain, volume, or
 notification defaults. Review the current/requested policies, data authority,
 allowed rebuild sources, monitoring intent, complete-profile digest, and plan
@@ -1691,7 +1691,7 @@ Do not import or replace the active DB-backed authz policy directly. Once the
 service can start, policy changes use managed rule-set reconciliation and its
 reviewed plan/CAS boundary.
 
-When operators need to preview or apply an explicit emergency bootstrap policy to
+When admins need to preview or apply an explicit emergency bootstrap policy to
 the live Launchplane Dokploy target without editing any rendered host-side env
 file, use:
 
@@ -1756,12 +1756,12 @@ Dokploy-hosted.
   requires `retire <owner/name> <lane>`. The workflow writes service-backed
   lifecycle audit evidence through the existing exact OIDC-authorized path,
   serializes host mutation with runner-host hygiene, and uploads the local JSON
-  artifact for operator review.
+  artifact for admin review.
 - Deploy verification should probe Launchplane's live health endpoint, currently
   `GET /v1/health`, after the Dokploy update.
 - When rollout health fails, deploy automation should restore the previous
   digest automatically instead of requiring a manual Dokploy click path.
-- Keep a manual rollback path too, so operators can redeploy a known-good
+- Keep a manual rollback path too, so admins can redeploy a known-good
   digest even after a technically successful rollout.
 
 This posture is the current safety net while Launchplane still lacks a dedicated
@@ -1792,11 +1792,11 @@ Launchplane service route. If a failed rollout makes that route unable to accept
 its own rollback request, direct Dokploy rollback is available only through the
 manual break-glass inputs on the Deploy Launchplane workflow: provide the exact
 confirmation text, an immutable `@sha256` image reference from the configured
-Launchplane image repository, and an operator reason. The image is normally a
+Launchplane image repository, and an admin reason. The image is normally a
 previous Launchplane image; when no earlier image is compatible with
 Launchplane's database, it may be a fixed image built from `main` (see
 [Live Sites During A Launchplane Outage](#live-sites-during-a-launchplane-outage)).
-The job enforces only the repository and digest form; the operator confirms
+The job enforces only the repository and digest form; the admin confirms
 which image it is before dispatch. The job deploys the target named by the
 workflow's `LAUNCHPLANE_DOKPLOY_TARGET_TYPE` and `LAUNCHPLANE_DOKPLOY_TARGET_ID`
 variables without checking what it is, so those variables must identify
@@ -1817,7 +1817,7 @@ provider mutation remains reviewable after the emergency.
 
 Product onboarding manifests and runtime key-safety policies are DB-backed
 Launchplane records. Create or repair them through the Launchplane service API
-or operator UI with scoped authorization and operator evidence; do not load
+or Launchplane UI with scoped authorization and admin evidence; do not load
 product/runtime truth from checked-in catalogs.
 
 `LAUNCHPLANE_DEPLOY_HEALTH_URLS` must resolve from the runner that executes the
@@ -1830,7 +1830,7 @@ not inherit Launchplane self-deploy authority; use that workflow for DB-backed
 merge-train policy imports instead of direct DB writes from a local checkout.
 New reviewed merge-train policy imports go through
 `managed-merge-train-policy-import` privileged operations. Do not add a workflow
-secret/grant, local-operator grant, raw route proxy, or direct database fallback
+secret/grant, `local_operator` grant, raw route proxy, or direct database fallback
 to perform a policy import; activate only the exact
 `merge_train_policy_operation.*` managed rules through the existing DB-native
 managed-authz privileged-operation lifecycle.
@@ -1874,7 +1874,7 @@ DB-backed Launchplane records:
   for explicit local/bootstrap repair instead of editing repo-local target
   catalogs or ad-hoc DB rows. Routine shared/live target setup and
   provider-target authority changes should use the deployed service route or
-  operator workflow.
+  admin workflow.
 
 For a reviewed canonical key-ring install or rollback, manually dispatch
 `Deploy Launchplane` from the default branch with the exact immutable current
@@ -1891,8 +1891,8 @@ stale or ambiguous compensation, and the rollback marker proves that the
 replacement container restarted. Keep `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`
 present through the migration and rollback window, verify health/runtime and a
 new privileged re-encryption dry-run after restart, and stop before
-re-encryption apply unless the owner approves the exact new plan digest. If
-automatic compensation is rejected or fails, require manual operator follow-up
+re-encryption apply unless the Director approves the exact new plan digest. If
+automatic compensation is rejected or fails, require manual admin follow-up
 and a clean legacy-only dry-run baseline before proceeding.
 
 For an invalid tracked Dokploy target domain authority, use the `Dokploy Target
@@ -1902,7 +1902,7 @@ and the JSON projection of the current provider-target record as the compare
 expectation. The service reads provider evidence only; it does not create,
 update, or delete Dokploy domains. Run dry-run first. Apply is allowed only
 after the dry-run shows the intended domain-only projection and requires the
-normal setup confirmation, operator reason, and idempotency key. The repair
+normal setup confirmation, admin reason, and idempotency key. The repair
 preserves all target metadata except `domains`, `updated_at`, and
 `source_label`. The same atomic write advances only `updated_at` and
 `source_label` on the canonical provider-target projection so downstream
@@ -1936,11 +1936,11 @@ revision that matches the detected historical table set before applying later
 migrations. Empty databases still run the full migration chain from the first
 revision.
 
-The owner-control enrollment-provenance migration is intentionally fail-before-
-change. If any legacy owner-control channel session exists without a provenance
+The `owner-control` enrollment-provenance migration is intentionally fail-before-
+change. If any legacy `owner-control` channel session exists without a provenance
 row, upgrade stops before creating the new table; it never invents a claim or
 deploys a state in which challenge issuance silently trusts legacy enrollment.
-Reach an empty legacy-session set only through a separately reviewed operator
+Reach an empty legacy-session set only through a separately reviewed admin
 process, then retry migration. Downgrade likewise stops while provenance rows
 exist. Do not bypass either guard with direct SQL, a synthetic conformance key,
 or a temporary authorization grant.
@@ -1960,10 +1960,10 @@ Current derived-state behavior:
   driver writes the promotion record from the backup gate, deploy result,
   migration result, destination health check, and primitive testing-lane health
   status sent by the product workflow. The testing-verification route accepts
-  primitive migration, browser verification, and owner-route statuses and
+  primitive migration, browser verification, and Client-route statuses and
   updates the existing testing deployment record plus current inventory.
   VeriReel maintenance operations that need Dokploy authority, such as testing
-  migrations, preview owner-admin verification helpers, reset-testing, and
+  migrations, preview Client-admin verification helpers, reset-testing, and
   preview inventory, also flow through Launchplane driver routes instead of
   product-repo workflow secrets. Stable testing/prod base URLs and target
   identity are resolved from Launchplane's DB-backed target/runtime records
@@ -1992,7 +1992,7 @@ Current derived-state behavior:
   and refreshes prod inventory after a verified deploy. Product-specific
   drivers can wrap this base path with stricter backup, migration, rollout, or
   tenant checks instead of reimplementing the shared promotion record flow.
-- Operators should promote generic web products through the product-owned GitHub
+- Admins should promote generic web products through the product-owned GitHub
   workflow bridge. The UI reads product-owned promotion status, calls the
   product/environment direct dry-run route, then dispatches the matching
   product/environment workflow route. Launchplane derives artifact and source
@@ -2016,7 +2016,7 @@ Current derived-state behavior:
 ### Conventional generic-web onboarding
 
 Use the manual `Product Onboarding` workflow for a new generic-web product.
-Start with `mode=dry_run` when operator review of the exact plan is useful, or
+Start with `mode=dry_run` when admin review of the exact plan is useful, or
 use `mode=apply` for one dispatch that pauses at the protected
 `launchplane-authz-admin` environment before any writes. Provide product,
 repository, image repository, runtime port, health path, preview base URL, and a
@@ -2072,7 +2072,7 @@ return a typed blocked result rather than guessing a domain.
 
 - Promotions and deploys reference explicit artifact identifiers.
 - Missing control-plane config is a hard error, not a silent fallback.
-- Operator-local runtime records belong under `state/` or another explicit
+- Admin-local runtime records belong under `state/` or another explicit
   state directory outside git.
 - Artifact manifests handed off from build/export steps are persisted here
   before later workflows depend on them.
@@ -2129,8 +2129,8 @@ return a typed blocked result rather than guessing a domain.
 - The tracked Dokploy route catalog is only for stable remote lanes. If a pull
   request needs runtime state, Launchplane models that through preview records and
   preview generations instead of adding another long-lived route.
-- Operator read models compose inventory, deployment, promotion, and
-  backup-gate records instead of requiring operators to inspect raw JSON first.
+- Admin read models compose inventory, deployment, promotion, and
+  backup-gate records instead of requiring admins to inspect raw JSON first.
 - DB-backed schema changes must land as Alembic revisions. Keep revisions
   additive and rollback-aware so image rollback remains a valid recovery path.
 - Local CLI/file-backed compatibility paths are local-development, rehearsal, or
@@ -2185,7 +2185,7 @@ return a typed blocked result rather than guessing a domain.
   unknown; sent mail may have been auto-deleted. Reads return no bodies or
   credentials and never send or retry a message.
 - The manual Tracked Target Logs workflow calls that service route with GitHub
-  OIDC and uploads the redacted JSON result, so operators can inspect runtime or
+  OIDC and uploads the redacted JSON result, so admins can inspect runtime or
   deployment failures without local Dokploy credentials. Tenant contexts need a
   matching service-backed `target_logs.read` GitHub Actions grant; do not broaden
   this workflow to read all contexts by default. The workflow uploads the
@@ -2207,7 +2207,7 @@ return a typed blocked result rather than guessing a domain.
   records. It requires `--allow-direct-db-mutation`, rejects secret-shaped keys,
   and returns key metadata only, not plaintext values. Routine shared and
   production runtime config changes should use product-config dry-run/apply
-  through the deployed service route or operator UI.
+  through the deployed service route or Launchplane UI.
 - `product-config apply --dry-run --input-file <json>` remains a local planning
   helper for trusted product runtime config bundles. Direct local DB
   `--apply` is restricted after the service boundary and requires
@@ -2225,15 +2225,15 @@ return a typed blocked result rather than guessing a domain.
   does not discover invalid secret scopes or disallowed runtime secret bindings
   after writing earlier secrets.
 - `POST /v1/product-config/apply` exposes the same planner/writer through the
-  authenticated service API for operator UI use. Submit `mode: "dry-run"` to
+  authenticated service API for Launchplane UI use. Submit `mode: "dry-run"` to
   preview with `product_config.plan`, then `mode: "apply"` with
-  `product_config.apply` after review. Signed-in GitHub human operators can use
+  `product_config.apply` after review. Signed-in GitHub human admins can use
   this route when their session has the exact product/context/action grant.
-  Trusted owner terminals can also use the dedicated
+  Trusted Director terminals can also use the dedicated
   `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` from
   `~/.config/launchplane/local-operator.env` when exact DB-backed
-  `local_operators` policy rules grant the product/context/action. Owner-agent
-  requests must include a non-empty `reason`, and owner-agent apply is rejected
+  `local_operators` policy rules grant the product/context/action. Director-agent
+  requests must include a non-empty `reason`, and Director-agent apply is rejected
   until the service has recorded a matching dry-run. Terminal-agent read bearer
   credentials stay read-only and cannot apply product config. The service
   response is redacted and the route rejects nested runtime or secret targets
@@ -2277,7 +2277,7 @@ return a typed blocked result rather than guessing a domain.
   writes an app runtime environment (live-target runtime sync, ship and
   promotion, Odoo stable bootstrap and target replacement, backup restore, and
   Odoo, generic-web and VeriReel previews) refuses `GITHUB_TOKEN`, `GH_TOKEN`,
-  `DOKPLOY_TOKEN`, `DOKPLOY_HOST`, Launchplane's own service and operator
+  `DOKPLOY_TOKEN`, `DOKPLOY_HOST`, Launchplane's own service and admin
   tokens, and any value shaped like a GitHub token (`ghp_`, `gho_`, `ghs_`,
   `github_pat_` and similar). The error names the key and its source, never
   the value. The one exception is global- and context-scope records, where
@@ -2334,7 +2334,7 @@ return a typed blocked result rather than guessing a domain.
   keys without echoing plaintext values.
 - `environments resolve` reads the control-plane-owned runtime environment
   contract for a context and instance. Output redacts secret-shaped keys by
-  default; use `--include-secret-values` only in a trusted operator shell.
+  default; use `--include-secret-values` only in a trusted admin shell.
 - `POST /v1/live-target-runtime/apply` is the deployed service path for shared
   and production live changes. It resolves the DB-backed runtime environment
   and managed secret overlay for a tracked Dokploy target, compares it against
@@ -2342,7 +2342,7 @@ return a typed blocked result rather than guessing a domain.
   artifact manifest. It preserves unrelated live env keys, verifies persistence
   by key/count metadata only, and never prints plaintext env or secret values.
   Use `mode: "dry-run"` first, confirm the returned `changed_keys` are expected,
-  then use `mode: "apply"` through an authorized workflow or operator API
+  then use `mode: "apply"` through an authorized workflow or admin API
   caller. The `live-target-runtime.yml` workflow wraps this route with the
   shared Launchplane request action and uploads sanitized request/response
   artifacts.
@@ -2352,7 +2352,7 @@ return a typed blocked result rather than guessing a domain.
   local `./node_modules/.bin/prisma` binary. The production image intentionally
   omits global `npm` and `npx`, so promotion must not depend on either command.
 - Product repos and GitHub issues must not contain product secret values. Put
-  the JSON bundle on an operator-controlled machine or inside the hosted
+  the JSON bundle on an admin-controlled machine or inside the hosted
   Launchplane execution context, run `--dry-run` first, then run `--apply` only
   after the key/action summary matches the approved change.
 
@@ -2445,7 +2445,11 @@ context only, and `context_instance` has both context and instance.
   the web service while capturing, and writes the backup-gate record only after
   the exact schedule deployment emits nonce-, record-, and database-bound
   completion evidence with non-empty artifact sizes and SHA-256 values. A
-  provider `done` status without that bounded marker fails the gate. Directory
+  provider `done` status without that bounded marker fails the gate. A web
+  service stopped for capture must restart successfully and read back as
+  `running`; restart or final status-read failure makes the schedule fail. Recovery
+  on an earlier backup failure still attempts the restart and preserves that
+  original non-zero exit status. Directory
   preparation accepts only the dedicated `/volumes/data/backups/launchplane`
   tree and assigns only its exact backup-root/database/record path to the
   script-runner identity, so stale root-owned directories cannot make `pg_dump`
@@ -2457,7 +2461,7 @@ context only, and `context_instance` has both context and instance.
 - `odoo-overrides put-config-param --allow-direct-db-mutation` writes a typed
   Odoo `ir.config_parameter` override for a context and instance. This direct
   local DB path is explicit local/bootstrap repair only; routine shared/live
-  changes should use the trusted service route or operator workflow.
+  changes should use the trusted service route or admin workflow.
 - For shared/live targets, use the trusted `Odoo Config Parameter Override`
   workflow instead of local CLI writes. It calls
   `POST /v1/drivers/odoo/config-parameter-override` with GitHub Actions OIDC and
@@ -2512,7 +2516,7 @@ context only, and `context_instance` has both context and instance.
   declared. A production lane without Shopify settings sends no Shopify action,
   as before. The preview website-bootstrap payload does not carry this clear.
 - A non-production lane may hold an integration's settings only when a lane
-  allowance says why (owner decision on #2554: an allowlist, not a list of
+  allowance says why (Director decision on #2554: an allowlist, not a list of
   production keys). Allowances live on the lane's tracked target record as
   `policies.integration_allowances`, one per integration, each with a kind, a
   reason, optional evidence, who recorded it and when:
@@ -2585,7 +2589,7 @@ context only, and `context_instance` has both context and instance.
     restore removes the file too, because the restored database has not been
     checked. The web log says `web waits for the integration read-back to pass`
     while it waits; the next deploy's schedule releases it.
-- While site staff test on a product's testing lane, the site operator holds it
+- While site staff test on a product's testing lane, an admin holds it
   so a merge doesn't deploy mid-session; see
   [event-driven deploys](event-driven-deploys.md#staff-testing-hold). Read the
   hold with `GET /v1/product-config/testing-hold` (query `product`, `context`,
@@ -2711,9 +2715,9 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   routes should not be inserted into the local PyCharm or local container loop;
   use them only for remote stable lanes and promotion/deploy evidence.
 
-## Odoo Operator Release Panel
+## Odoo Admin Release Panel
 
-On an Odoo product's prod environment page, the signed-in policy administrator
+On an Odoo product's prod environment page, the signed-in admin
 releases from the Release panel instead of a site workflow. Only the person the
 active policy names as administrator (by immutable GitHub id) can queue or cancel
 a release here; no automated identity can promote or roll back a production site
@@ -2793,7 +2797,7 @@ workflow grant, after that.
   artifact differs from the lane's latest deployment. It writes rollback
   evidence with a `deployment:<record_id>` source marker and fails closed when
   no such deployment or its artifact manifest is missing. The prod environment
-  page shows that artifact before the operator confirms.
+  page shows that artifact before the admin confirms.
 - To choose another DB-backed artifact, pass it explicitly. The driver reads the
   artifact manifest directly from Launchplane records and writes rollback
   evidence with an `artifact:<artifact_id>` source marker.
@@ -2855,13 +2859,13 @@ v1 records.
 ## Live Sites During A Launchplane Outage
 
 While Launchplane is unavailable, no new code or artifact is deployed or
-promoted to a real live site. With the operator's approval, the operator may
+promoted to a real live site. With the Director's approval, an admin may
 roll a live site back to an artifact that previously passed in production, take
 it offline, disable its route, rotate a compromised secret, restore data, or
 repair DNS or TLS. None of these ships new code. There is no break-glass
 authority for forward live-site changes. Restore Launchplane first through
 [Launchplane Service Deploy Posture](#launchplane-service-deploy-posture). If no
-earlier Launchplane image is compatible with its database, the operator may
+earlier Launchplane image is compatible with its database, an admin may
 deploy a fixed Launchplane image built from `main` through the same reviewed
 break-glass job; this path only ever repairs Launchplane itself and never
 deploys a product site.
@@ -2950,7 +2954,7 @@ For live shared targets, prefer the trusted workflow
 `Odoo Target Replacement Plan`. It calls the deployed Launchplane service route
 `POST /v1/drivers/odoo/target-replacement-plan` with GitHub Actions OIDC so the
 service resolves DB-backed records and managed Dokploy secrets inside the normal
-runtime boundary. The local CLI form is for operator debugging from an already
+runtime boundary. The local CLI form is for admin debugging from an already
 trusted runtime with `LAUNCHPLANE_DATABASE_URL` configured.
 
 The reusable target-replacement plan and apply workers first read
@@ -2970,7 +2974,7 @@ repeats those checks before creating a durable operation. Both
 workers also carry the environment's current artifact as a separate expected
 snapshot; the plan route, apply enqueue path, and operation worker fail closed
 if that lane artifact changes. Candidate artifacts must use the product
-profile's recorded image repository. The dispatch wrappers are the operator
+profile's recorded image repository. The dispatch wrappers are the admin
 entrypoints and pin those reviewed reusable workers to a full commit SHA. When
 worker behavior changes, land and validate the reusable contracts first, then
 advance the wrapper pin in a separate reviewed change.
@@ -2983,14 +2987,14 @@ The plan and apply paths independently fence the current inventory artifact,
 and apply still requires passing post-deploy verification before inventory or
 release evidence advances.
 
-The operator UI can inspect that same readiness contract from the environment
+The Launchplane UI can inspect that same readiness contract from the environment
 `Actions` route without dispatching a workflow or invoking a descriptor route.
 It derives exact lane and artifact selectors from the product-environment read
 model, displays browser identity separately from immutable workflow identity,
 and treats remediation routes as non-executable metadata unless an explicit
 typed browser operation exists. Repository workflow metadata must keep the
 testing deploy worker plus the target-replacement dispatch and reusable workers
-discoverable so operators can follow reviewed workflow ownership instead of
+discoverable so admins can follow reviewed workflow ownership instead of
 falling back to an arbitrary checkout or local live-target command.
 
 The plan reads the product profile, Launchplane Dokploy target/id records,
@@ -3007,8 +3011,8 @@ do not add import flags to routine backup or restore. First run
 `Odoo Prod Retained Volume Backup Import Plan` with the exact product, production
 context and instance, current artifact, active database/data/log volumes, source
 database/data volumes, source database name, destination database name, expected
-database owner, fresh staging-clone volume, source compose project, and a new
-backup-record id. Every value is an operator request field checked against
+database-owning role, fresh staging-clone volume, source compose project, and a new
+backup-record id. Every value is an admin request field checked against
 DB-backed current authority or read-only provider evidence. The plan mounts the
 source volumes read-only, verifies their compose project and `odoo_db` /
 `odoo_data` roles, proves PostgreSQL major version 17, captures the exact
@@ -3105,7 +3109,7 @@ the exact backup record id, and database name before Launchplane accepts it. The
 route returns hashes, counts, sizes, per-check statuses, and a bounded failure
 code only. If an unexpected verifier exception occurs, the active bounded check
 is marked `fail`; manifest processing additionally reports a bounded path,
-read, validation, artifact-path, or artifact-metadata subphase code. Operators
+read, validation, artifact-path, or artifact-metadata subphase code. Admins
 can distinguish the manifest, hash, database archive, filestore archive, and
 staging-space phases without exposing provider paths or exception text.
 Filesystem metadata failures in the manifest phase map to the existing bounded
@@ -3186,7 +3190,7 @@ tuple evidence. It never reruns database restore, filestore staging,
 filestore activation, target volume/env update, or main deploy. Any missing or
 mismatched stored proof, active stable-lane operation, changed live volume
 authority, missing failed deployment identity, or second failed replay remains
-fail-closed and requires operator reconciliation rather than another automatic
+fail-closed and requires admin reconciliation rather than another automatic
 provider mutation. Any operation carrying prior result evidence is barred from
 the full restore path, even if a later stale-lease or malformed-record condition
 changes its attempt number. Replay target-read, parser, post-deploy, readiness,
@@ -3196,7 +3200,7 @@ code; raw provider response bodies and live env values are not persisted.
 If an attempt-2 replay lease expires, recovery moves the operation to
 `reconciliation_required`, clears the stale prior result envelope required by
 the reconciliation-state contract, and retains the reviewed plan, deployment
-record id, and ordered checkpoints for operator diagnosis.
+record id, and ordered checkpoints for admin diagnosis.
 
 Legacy backup-gate manifests created before manifest schema and hash fields were
 introduced remain verifiable: Launchplane validates their recorded identity,
@@ -3235,14 +3239,14 @@ returns immediately; the workflow polls
 `GET /v1/drivers/odoo/target-replacement/operations/{operation_id}` until the
 operation leaves `pending` or `running`, then uploads the final operation payload
 as the workflow artifact. `reconciliation_required` therefore stops polling and
-surfaces as a failed, operator-actionable workflow result instead of waiting for
+surfaces as a failed, admin-actionable workflow result instead of waiting for
 the poll timeout. `Idempotency-Key` is required: a repeated request with the same
 key from the same caller identity returns the existing operation, while a
 different key for the same product/context/instance is rejected while a
 `pending`, `running`, or `reconciliation_required` operation is active. Storage
 owns that active-lane reservation so the worker starts only after the lane is
 claimed; abandoned filesystem reservations recover after a bounded settle
-window if the owner or owner record never appears. The first apply surface is
+window if the reservation holder or its record never appears. The first apply surface is
 testing-only and keeps
 the existing compose
 target, explicit Odoo volume env keys, and expected hostnames; the operation
@@ -3257,7 +3261,7 @@ health/canonical/logo, and
 writes deployment plus inventory records. The explicit raw-compose routers keep
 the runtime reachable even when Dokploy stores the compose domain record
 separately from the raw source update. By default it deploys the artifact
-already recorded in current inventory. Operators may supply both `artifact_id`
+already recorded in current inventory. Admins may supply both `artifact_id`
 and `source_git_ref` to deploy
 a newly published stored artifact before it has become inventory; the service
 refuses mismatches against the stored artifact manifest. Do not manually delete
@@ -3267,7 +3271,7 @@ apply coverage first, then use the service-backed workflow.
 Before the worker's first provider mutation it reauthorizes the stored caller,
 exact target, and managed rule against the current active policy. Revoked or
 narrowed authority and legacy operations without provenance fail terminally
-without provider mutation. Operators may cancel pending replacement work with
+without provider mutation. Admins may cancel pending replacement work with
 `POST /v1/drivers/odoo/target-replacement/operations/{operation_id}/cancel` and
 a non-empty `reason`. Reconciliation-required work additionally requires a
 structured attestation with a provider inspection timestamp between the fence
@@ -3297,7 +3301,7 @@ state in Dokploy or a local checkout. The workflow calls
 `odoo_stable_bootstrap` policy to be enabled. That policy carries the destructive
 confirmation phrase, issue-backed approval URL, expected Dokploy target name,
 expected domain set, data source mode, and required verification checks. The
-approval issue is the operator signal to encode prelaunch/resettable policy; it
+approval issue is the Director's signal to encode prelaunch/resettable policy; it
 should close after the policy lands, while launch or cutover retirement belongs
 in a separate follow-up. The service proves the request, product lane, stored
 target record, and target domains before contacting Dokploy. The Dokploy runner
@@ -3323,10 +3327,10 @@ product/context/instance is rejected while a `pending`, `running`, or
 `reconciliation_required` operation is active. The operation record stores the
 request, status, phase,
 deployment-record linkage when known, final bootstrap result, and any terminal
-error message so operators can inspect progress after the original HTTP request
+error message so admins can inspect progress after the original HTTP request
 has ended.
 The worker reauthorizes the stored managed rule and exact lane after claim and
-immediately before the destructive Dokploy schedule. Operators may cancel only
+immediately before the destructive Dokploy schedule. Admins may cancel only
 pending work, or reconciliation-required work after inspecting the exact provider
 state, through
 `POST /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}/cancel`; the
@@ -3338,7 +3342,7 @@ request with `409` rather than claiming no external effect occurred. Unsafe leas
 expiry never frees the shared stable lane automatically: it clears the stale
 lease, records `operation_reconciliation_required`, and keeps all bootstrap,
 target-replacement, restore, and retained-volume-import claims blocked until the
-operator resolves that evidence.
+admin resolves that evidence.
 
 Pending VeriReel backup-gate work uses the equivalent endpoint
 `POST /v1/drivers/verireel/prod-backup-gate/operations/{operation_id}/cancel`.
@@ -3366,7 +3370,7 @@ returned URL with generation status and cleanup outcome.
 
 Launchplane now owns the preview lifecycle planning boundary. The scheduled
 Launchplane `Preview Lifecycle` workflow calls `POST /v1/previews/lifecycle-sweep`;
-it runs on the operator-configured `LAUNCHPLANE_RUNNER_LABEL` self-hosted lane
+it runs on the admin-configured `LAUNCHPLANE_RUNNER_LABEL` self-hosted lane
 instead of depending on hosted-runner capacity.
 The service derives the participating products from product profiles where
 `preview.enabled=true`, refreshes provider inventory, discovers desired preview
@@ -3381,7 +3385,7 @@ preview publish/provision/verify outcomes are known, then replace it with ready
 or failed feedback after the actual result. Product repos remain thin adapters
 for labels, artifact build facts, and product-specific health/config hints.
 
-Preview PR feedback delivery failures are operator-visible when a preview PR
+Preview PR feedback delivery failures are admin-visible when a preview PR
 feedback notification policy is configured. Missing context-scoped runtime
 GitHub credentials record `delivery_status="skipped"` on the feedback record and
 emit a `delivery_skipped` notification attempt; GitHub API failures record
@@ -3403,11 +3407,11 @@ product/repository/PR per request. Run `dry-run` first with a stable
 `Idempotency-Key`, inspect the observed marker ownership and planned action,
 then submit `apply` with the same key and the request contract's exact
 confirmation phrase. Stop if the product profile, PR URL, token actor, marker
-owner, or observation differs. An absent comment is reconciled as
+author, or observation differs. An absent comment is reconciled as
 `already_absent` with `mutated=false`; it is not rewritten as a deletion.
 
-The route uses the context-scoped preview `GITHUB_TOKEN`, accepts only local
-operator/admin identities with `preview_pr_feedback_remediation.plan` or
+The route uses the context-scoped preview `GITHUB_TOKEN`, accepts only
+`local_operator`/`local_admin` identities with `preview_pr_feedback_remediation.plan` or
 `.apply`, and never grants this mutation to preview workflow OIDC identities.
 Attach the remediation and companion feedback record ids to the governing issue.
 
@@ -3493,7 +3497,7 @@ The scheduled janitor backstop uses the same payload shape with
 separate from the pull-request cleanup workflow's idempotency key.
 
 Use `release-tuples export-catalog --state-dir <state>` to render those minted
-state records as catalog TOML when an operator is ready to review and
+state records as catalog TOML when an admin is ready to review and
 materialize a new tracked baseline.
 
 GitHub PR feedback uses one Launchplane-owned marker comment per PR. The
@@ -3526,7 +3530,7 @@ blocked instead of guessing source inputs.
 
 Use the protected **Product Retirement** workflow; never delete a Dokploy
 application directly. Run `mode=plan` with the exact product, profile-owned
-instance, tracked target SHA-256, stable operator idempotency key, reason, and
+instance, tracked target SHA-256, stable admin idempotency key, reason, and
 issue. Review the persisted plan record ID and `plan_sha256` in the redacted
 artifact and job summary. Run `mode=apply` with the same intent and idempotency
 key, the reviewed record ID/digest, and the exact confirmation shown by the
@@ -3578,7 +3582,7 @@ workflow_ref=cbusillo/launchplane/.github/workflows/detached-application-retirem
 job_workflow_ref=cbusillo/launchplane/.github/workflows/reusable-detached-application-retirement.yml@11d53d2840a6f1898785d7c8f1553c202caa3fbf
 ```
 
-The future operator sequence is plan then apply. Inputs are exact Dokploy
+The future admin sequence is plan then apply. Inputs are exact Dokploy
 project/environment/application names, the candidate target SHA-256, a sorted
 non-empty JSON array of every other accessible application target SHA-256 whose
 provider payload has the same exact project name, including duplicate physical
@@ -3609,7 +3613,7 @@ Managed authz routing is reserved through the
 phase creates or populates that secret or reconciles a live rule. Merge/deploy
 of code may continue, but do not configure a new caller/worker grant through the
 managed authz workflow. Registering the exact caller and worker is a grant, so
-ask the operator, then use the DB-native administration route and run the
+ask the Director, then use the DB-native administration route and run the
 reviewed plan and apply sequence. Never substitute a mutable ref, a checked-in target value, or a
 local CLI live-target fallback.
 
@@ -3645,7 +3649,7 @@ identity status, and diagnostic structured-event counts, not raw logs, worker
 identity digests, hostnames, or container config. Proof requires a fresh
 matching heartbeat whose internally hashed runtime hostname matches Dokploy's
 provider-observed Docker-assigned hostname and whose immutable image equals the
-provider-observed and operator-supplied image. The provider hostname must be a
+provider-observed and admin-supplied image. The provider hostname must be a
 hexadecimal prefix of the selected container ID; a custom hostname blocks proof.
 Missing, stale, future-dated, identity-mismatched, or image-mismatched
 heartbeats block activation. Other fresh worker rows are diagnostic and cannot
@@ -3687,7 +3691,7 @@ worker stop, revoke every canary rule and read the active policy back before
 continuing.
 
 Do not add a policy rule merely to exercise the routes. Any activation remains
-a separately owner-approved DB-native administration event by a GitHub human
+a separately Director-approved DB-native administration event by a GitHub human
 that already holds `authz_policy_grant.write`. If that authority does not exist,
 remain blocked under the authorization redesign; do not use a local-admin
 bearer, workflow, GitHub secret, or borrowed identity. Keep #2204 open until

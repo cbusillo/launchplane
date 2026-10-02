@@ -129,7 +129,7 @@ export function odooReleaseFailure(error: unknown): BrowserOperationFailure {
     return {
       ...failure,
       message:
-        "Launchplane could not record durable authority for your identity on this lane: it needs you to be the policy administrator, or to have exactly one managed rule for this action.",
+        "Launchplane could not record durable authority for your identity on this lane: it needs you to be an admin, or to have exactly one managed rule for this action.",
     };
   }
   if (failure.code === "authorization_denied") {

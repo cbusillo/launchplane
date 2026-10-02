@@ -5,7 +5,7 @@ title: Governance Evidence Projection
 `GET /v1/governance/projection` reads current machine readiness, immutable merge
 admission, landing outcomes, and advisory observations for a repository/PR/base
 branch. The requested base must match the live pull request. Repository policy
-or merge-train policy-target read authority controls access; the retired Owner
+or merge-train policy-target read authority controls access; the retired Client
 acceptance read grant is not required.
 
 The response authorizes no effect. `merge_readiness` is ephemeral and recomputed
@@ -15,9 +15,9 @@ latest recorded exact attempt, without granting current effect authority.
 or not-observed state. Admission and outcome targets are classified as current or
 historical against the live head/tree. GitHub observations are advisory only.
 
-Retired Owner acceptance and change-impact evaluation are absent from this read.
+Retired Client acceptance and change-impact evaluation are absent from this read.
 `owner_judgment` is nullable for transitional schema compatibility and current
-responses return null. Site Owner decisions use the product-review and release
+responses return null. Client decisions use the product-review and release
 checklist pages. Historical admission payloads remain unchanged.
 
 When no active landing lineage exists, readiness is `not_active`; missing current

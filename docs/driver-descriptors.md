@@ -5,7 +5,7 @@ title: Driver Descriptors
 ## Purpose
 
 Launchplane driver descriptors are the backend-owned contract for capability
-discovery, operator read models, and future GUI action rendering. They describe
+discovery, admin read models, and future GUI action rendering. They describe
 what a product driver can do without making the UI understand the runtime
 provider that currently executes the work.
 
@@ -20,7 +20,7 @@ descriptor route and handler registration drift.
   context, instance/lane, deployment, promotion, rollback, backup gate, preview,
   runtime setting, managed secret, and audit state.
 - Runtime-provider details belong behind backend adapters and evidence records.
-- Descriptors may point to existing Launchplane driver routes, but the operator
+- Descriptors may point to existing Launchplane driver routes, but the admin
   vocabulary should stay provider-neutral: deploy, promote, backup, rollback,
   refresh preview, destroy preview, apply settings.
 - Provider-specific fields stay in provider records or JSONB evidence until they
@@ -36,7 +36,7 @@ The descriptor contracts live in
 - `DriverCapabilityDescriptor`: grouped product capability such as stable
   promotion, artifact publish, preview lifecycle, or post-deploy settings.
 - `DriverActionDescriptor`: read-only action metadata, route path, method,
-  authorization action, operator visibility, scope, safety level, and records the
+  authorization action, admin visibility, scope, safety level, and records the
   action can write. Instance actions may also declare generic operational
   readiness requirements such as provider target, route binding, runtime
   environment, managed-secret bindings, artifact, deployment, and topology.
@@ -205,13 +205,13 @@ descriptor discovery and authz metadata intact while native FastAPI owns
 execution.
 
 The descriptor routes remain the automation and diagnostics contract. The
-operator UI does not execute `route_path` dynamically. Its generated write
+Launchplane UI does not execute `route_path` dynamically. Its generated write
 slice uses the product/environment promotion facade instead: promotion status,
 direct dry-run, workflow dispatch, and workflow-delivery status routes derive
 their target from the URL and DB-backed product profile. The facade requires
 generated runtime identity to agree with inventory artifact, source revision,
 lane, and deployment-record identity before it advertises execution.
-Operator identities cannot dispatch the raw workflow descriptor route; that
+Admin identities cannot dispatch the raw workflow descriptor route; that
 route remains automation/diagnostics-only so browser workflows cannot bypass
 the product facade's accepted dry-run and confirmation gates. Promotion status
 also requires digest-pinned artifacts, immutable source commits, fresh testing
@@ -362,7 +362,7 @@ backup gate and promotion mutation routes. The route resolves the promotable
 testing artifact and source ref from Launchplane release tuple and artifact
 records, then returns the deterministic backup-gate record ID for the caller's
 request ID. Tenant workflows should use that response instead of prompting an
-operator to enter artifact or source facts by hand.
+admin to enter artifact or source facts by hand.
 `POST /v1/drivers/odoo/prod-backup-verification` is a separate instance-scoped
 `safe_write` action with dedicated
 `odoo_prod_backup_verification.execute` authorization. It runs a manual
@@ -373,7 +373,7 @@ The preferred tenant-facing mutation route is
 `POST /v1/drivers/odoo/prod-promotion-run`, which keeps the full inputs,
 backup-gate, and promotion sequence inside Launchplane while returning each
 phase status and the written record IDs. The lower-level routes remain available
-for diagnostics and explicit operator workflows.
+for diagnostics and explicit admin workflows.
 The
 standard refresh/destroy routes use the generic-web preview request schema, live
 URL derivation, and record writer so Odoo PR previews land in the same
@@ -483,7 +483,7 @@ separately below.
 
 Stable instance names are unique within one product profile. If multiple
 profiles claim the same context/instance lane, route admission and context-view
-materialization fail closed instead of selecting one owner by ordering.
+materialization fail closed instead of selecting one profile by ordering.
 
 Preview lifecycle cleanup also follows the product profile's driver boundary.
 VeriReel-shaped products use the VeriReel cleanup executor, while products whose
@@ -532,7 +532,7 @@ provider concepts, as the future GUI-facing action surface.
 
 Descriptor actions are the runtime source of truth for native driver route
 method, primary authorization action, alternate authorization actions, and
-operator visibility. Native FastAPI handlers bind this metadata when the route
+admin visibility. Native FastAPI handlers bind this metadata when the route
 is registered and read authorization actions and scope from that binding
 instead of declaring route-local action strings. Instance-scoped handlers must
 resolve and submit every affected lane to the central authorization helper;
@@ -544,14 +544,14 @@ with distinct authorization checks, declare the non-primary checks in
 for dry-run requests and its primary action for apply requests. Some service
 callback routes, such as verification writeback routes, are declared with
 `operator_visible=false`; they remain in the driver route authorization map but
-are not surfaced as operator actions. Compatibility routes that should remain
+are not surfaced as admin actions. Compatibility routes that should remain
 callable but not advertised as current driver actions require an issue-backed
 bridge and removal condition; descriptors no longer carry a separate
 route-alias catalog.
 Future OpenFGA mapping should consume this same descriptor metadata. The
 `authz_action` and `alternate_authz_actions` fields can map driver dispatch to
 generic relation checks, but descriptors must never contain live tuple
-assignments, product/operator grants, provider targets, domains, or lane
+assignments, product/admin grants, provider targets, domains, or lane
 topology. OpenFGA does not make an advertised action executable by itself;
 backend handler registration, route dispatch, and fail-closed service
 authorization still have to agree.

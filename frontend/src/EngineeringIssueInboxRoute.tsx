@@ -133,7 +133,7 @@ function IssueInboxContent({ data }: { data: WorkGraphIssueInboxResponse }) {
 
       {!data.configured ? (
         <EngineeringEmpty
-          detail="Launchplane has no explicit issue-inbox repository inventory. It will not search owners or infer repositories."
+          detail="Launchplane has no explicit issue-inbox repository inventory. It will not search repository owners or infer repositories."
           icon={ShieldAlert}
           title="Issue inventory not configured"
         />

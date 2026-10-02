@@ -47,6 +47,7 @@
     "dependencyHealthContract": "docs/dependency-health-contract.md",
     "advisoryGovernanceChecks": "docs/advisory-governance-checks.md",
     "publicReadiness": "docs/public-readiness.md",
+    "roleWords": "docs/role-words.md",
     "style": ["docs/style/python.md", "docs/style/testing.md"],
     "policies": ["docs/policies/coding-standards.md"]
   },
@@ -62,7 +63,8 @@
     "lint": {
       "default": "uv run --extra dev ruff check .",
       "changedFiles": "uv run --extra dev ruff check {files}",
-      "odooOwnership": "uv run launchplane odoo-ownership check --workspace-root .."
+      "odooOwnership": "uv run launchplane odoo-ownership check --workspace-root ..",
+      "roleWords": "uv run python scripts/validate_role_words.py"
     },
     "format": {
       "check": "uv run --extra dev ruff format --check ."

@@ -1,17 +1,17 @@
 ---
-title: Owner-Control Channel Contract
+title: Admin Confirmation Channel Contract
 ---
 
-# Owner-Control Channel Contract
+# Admin Confirmation Channel Contract (`owner-control`)
 
-Launchplane publishes a public, versioned owner-control serialization for a
+Launchplane publishes a public, versioned `owner-control` serialization for a
 future trusted host confirmation channel. It lets a host render the exact
-server-authored review and return a challenge response without exposing owner
+server-authored review and return a challenge response without exposing admin
 authority to model tools, browser automation, shells, Code Bridge, MCP, or
 agent-controlled IPC.
 
-The historical owner-control name refers to trusted-host administrator
-confirmation. It is separate from site-Owner preview acceptance; site-Owner
+The historical `owner-control` name refers to trusted-host administrator
+confirmation. It is separate from Client preview acceptance; Client
 membership grants no privileged-operation approval or execution power.
 
 ## Canonical Contract
@@ -32,12 +32,12 @@ Pydantic contracts for:
 
 - `ServerReviewPayload`, the server-authored, display-ready review content;
 - `ApprovalRequest`, which binds operation and descriptor identity, request,
-  plan, evidence, pre-state, policy, immutable GitHub owner ID, review, nonce,
+  plan, evidence, pre-state, policy, immutable GitHub admin ID, review, nonce,
   issuance time, and expiry; and
 - `ChallengeResponse`, which embeds and digests the exact request, records an
   approved decision, channel binding digest, and bounded confirmation time;
 - `ChannelBindingRecord`, which binds one canonical channel-session interval,
-  immutable owner ID, and raw Ed25519 public key; and
+  immutable admin ID, and raw Ed25519 public key; and
 - `OwnerControlConfirmationEnvelope`, which carries the exact challenge,
   binding record, and an Ed25519 proof over the domain-separated signature
   payload.
@@ -62,7 +62,7 @@ positive range, `signature_algorithm: "ed25519"`, an Ed25519 public key as raw
 The signature is Ed25519 over its canonical UTF-8 JSON bytes. Signatures are
 raw 64-byte values encoded as unpadded base64url. The envelope repeats the
 algorithm, binds the response digest to the exact binding record, requires the
-owner ID to match, and requires request issuance, request expiry, and
+admin ID to match, and requires request issuance, request expiry, and
 confirmation time to remain inside the channel-session interval. Verification
 fails closed for malformed encodings, wrong keys, tampered payloads, and
 cross-session substitution.
@@ -89,11 +89,11 @@ operation ID, and bounded requested TTL. It locks the enrolled session, exact
 planned operation, active policy read, and active challenge guard in that order.
 The service derives every approval-request field, nonce, whole-second timestamps,
 and deterministic review payload from those locked records; callers cannot
-author request, evidence, policy, owner, review, or provenance fields.
+author request, evidence, policy, admin, review, or provenance fields.
 
 Issuance requires exactly one active schema-v2 policy, a live enrolled session,
 an unexpired `planned` operation, and one immutable GitHub-ID managed rule that
-allows the enrolled owner under the descriptor's existing approval action.
+allows the enrolled admin under the descriptor's existing approval action.
 Blocked managed-policy plans and unsupported evidence fail closed. Challenge
 expiry is the earliest of requested TTL, operation expiry, and session expiry.
 The review discloses only typed status, bounded counts, digests, and timestamps;
@@ -147,7 +147,7 @@ file is dual-published because no current repository or known client consumes
 the generated artifact.
 
 Descriptor coverage is inert serialization coverage, not adoption. The
-`ordinary-agent-delivery-activation` descriptor has no owner-control transport,
+`ordinary-agent-delivery-activation` descriptor has no `owner-control` transport,
 route, enrolled session, or challenge path. Its approval remains in the existing
 browser privileged-operation flow, and the shadow verifier continues to return
 `authorizes_execution: false`.
@@ -188,7 +188,7 @@ uv run --extra dev python -m unittest tests.test_owner_control_contract
 
 The vectors contain only synthetic identifiers, digests, nonces, timestamps,
 and generic review strings. They carry no tenant, product, repository, domain,
-operator, policy authority, session credential, or live endpoint data.
+admin, policy authority, session credential, or live endpoint data.
 
 ## Shadow-Verifier Storage
 
@@ -226,7 +226,7 @@ issued challenge if the bound session's provenance is missing.
 Challenge issuance remains an unrouted service-internal storage API. It accepts
 only the enrolled channel-session ID, planned operation ID, and bounded TTL,
 then derives the complete `ApprovalRequest` from the locked operation, active
-policy, enrolled owner, server-generated nonce, and database-clock bounds. The
+policy, enrolled admin, server-generated nonce, and database-clock bounds. The
 remaining transport and trusted-host corroboration boundary requires separate
 review before any route exists. Unknown challenge nonces create no durable
 state.
@@ -236,7 +236,7 @@ Every stored event and returned result has `verifier_mode: "shadow"` and
 action or grant, browser workflow, privileged-operation approval/execution
 coupling, worker, outbox, filesystem store, signing key, or channel-host
 implementation. Existing browser approval behavior remains unchanged until a
-separately reviewed runtime adoption change proves the trusted owner-control
+separately reviewed runtime adoption change proves the trusted `owner-control`
 path.
 
 `ChallengeResponse` represents successful confirmation only. Challenge expiry,

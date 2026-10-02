@@ -305,7 +305,7 @@ export function App() {
         theme={theme}
       >
         <p className="owner-review-note">
-          You are signed in as a product Owner. Open the review link you were sent to
+          You are signed in as a product's Client. Open the review link you were sent to
           review a release.
         </p>
       </OwnerReviewShell>
@@ -415,7 +415,7 @@ function SessionGate({
             <ShieldCheck aria-hidden="true" />
           )}
         </div>
-        <p className="eyebrow">{ownerSecrets ? "Credential setup" : ownerReview ? "Product review" : "Operator access"}</p>
+        <p className="eyebrow">{ownerSecrets ? "Credential setup" : ownerReview ? "Product review" : "Admin access"}</p>
         <h1 data-route-heading tabIndex={-1}>
           {checking
             ? "Verifying your session"
@@ -433,10 +433,10 @@ function SessionGate({
             : failed
               ? state.error
               : ownerSecrets
-                ? "Sign in as the product Owner to provide the requested credential."
+                ? "Sign in as the product's Client to provide the requested credential."
                 : ownerReview
                 ? "GitHub authentication protects this product review and returns you to the exact change."
-                : "GitHub authentication protects product evidence and operator actions."}
+                : "GitHub authentication protects product evidence and admin actions."}
         </p>
         {failed && state.traceId ? <code className="trace-id">{state.traceId}</code> : null}
         {failed ? (

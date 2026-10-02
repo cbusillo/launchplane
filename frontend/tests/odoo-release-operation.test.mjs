@@ -201,7 +201,7 @@ test("a backup authorization refusal stops the release before promote", async ()
   assert.equal(outcome.step, "backup");
   assert.equal(outcome.certainty, "definitive");
   assert.equal(outcome.failure.code, "authorization_provenance_unavailable");
-  assert.match(outcome.failure.message, /policy administrator, or to have exactly one managed rule/);
+  assert.match(outcome.failure.message, /an admin, or to have exactly one managed rule/);
   assert.ok(!calls.some(([name]) => name === "promote"));
 });
 

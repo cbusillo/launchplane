@@ -5,13 +5,13 @@ preview state, and promotion orchestration.
 
 ## Purpose
 
-- Own the Launchplane operator surface for durable deployment truth.
+- Own the Launchplane admin surface for durable deployment truth.
 - Own artifact, backup-gate, deployment, promotion, and inventory records
   outside the code and local-DX repos.
 - Own ship and promotion orchestration behind explicit control-plane
   contracts.
 - Keep product code and local DX in product repos, with only explicit artifact
-  and operator handoffs into this repo.
+  and admin handoffs into this repo.
 
 This repo's docs describe the implemented Launchplane contracts that exist
 today. Some drivers are intentionally product-specific because they are the
@@ -41,7 +41,7 @@ shape. The intended direction is:
 - Launchplane service ingress over authenticated HTTP.
 - GitHub Actions OIDC for workflow-to-Launchplane trust.
 - Launchplane-owned product drivers plus thin repo extensions.
-- CLI tools that act as local/operator clients of Launchplane contracts rather than
+- CLI tools that act as local/admin clients of Launchplane contracts rather than
   defining the contract themselves.
 
 The first implemented ingress slice now exists in this repo as a local Launchplane
@@ -49,7 +49,7 @@ service command with GitHub OIDC verification, DB-backed workflow policy records
 evidence ingress for deployments, promotions, and the full preview lifecycle.
 Shared-service core records can now be backed by Postgres with
 `LAUNCHPLANE_DATABASE_URL` or `uv run launchplane service serve --database-url ...`.
-The same service boundary now exposes authenticated operator read endpoints for
+The same service boundary now exposes authenticated admin read endpoints for
 deployment, promotion, inventory, preview, preview history, and recent
 context-scoped operations. Launchplane-managed secrets now use the same Postgres
 backend, with encrypted secret values stored in DB and bootstrap limited to
@@ -67,7 +67,7 @@ uv run --extra dev python -m unittest
 Frontend validation currently covers TypeScript and the production Vite build.
 Lint, formatting, and component tests are not introduced yet.
 
-When checking the served operator UI, use a browser or `GET /ui` request. Some
+When checking the served Launchplane UI, use a browser or `GET /ui` request. Some
 server paths may not answer `HEAD /ui` the same way as the app shell, so a
 failed `HEAD` probe is not enough evidence that the UI is unavailable.
 
@@ -77,7 +77,7 @@ target records, and Dokploy target-id records are DB-backed concerns;
 bootstrap stays in process env long enough to bring the service up and write
 the real records.
 
-Use product-config dry-run/apply through the deployed service route or operator
+Use product-config dry-run/apply through the deployed service route or Launchplane
 UI for routine shared and production runtime config changes. Raw
 `uv run launchplane environments put --scope ... --set KEY=VALUE --allow-direct-db-mutation`,
 `uv run launchplane environments unset --scope ... --key KEY --allow-direct-db-mutation`,
@@ -106,7 +106,7 @@ DB-backed target catalog without reading legacy TOML files. Use
 and `unset-shopify-protected-store-key --allow-direct-db-mutation` only for
 explicit local/bootstrap repair of Shopify protected-store-key policy carried by
 a tracked target record. Routine shared/live target setup and provider-target
-authority changes should use the deployed service route or operator workflow.
+authority changes should use the deployed service route or admin workflow.
 
 ## Service Container Deploy
 
@@ -118,7 +118,7 @@ similar long-running hosts:
 - `scripts/start-launchplane-service.sh`
 - `frontend/`
 
-The service image builds the Vite/React operator UI in a Node 22 stage, copies
+The service image builds the Vite/React Launchplane UI in a Node 22 stage, copies
 only the static bundle into the Python runtime image, and serves it at `/` and
 `/ui`. Built assets stay under `/ui/assets/...`; versioned API ingress remains
 under `/v1`.
@@ -134,7 +134,7 @@ reach DB-backed runtime authority:
 - `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`
 - `LAUNCHPLANE_POLICY_TOML`, `LAUNCHPLANE_POLICY_B64`, or `LAUNCHPLANE_POLICY_FILE`
 
-The browser operator UI uses GitHub OAuth when these additional inputs are set:
+The browser Launchplane UI uses GitHub OAuth when these additional inputs are set:
 
 - `LAUNCHPLANE_GITHUB_CLIENT_ID`
 - `LAUNCHPLANE_GITHUB_CLIENT_SECRET`
@@ -151,7 +151,7 @@ available for first-access recovery. Machine writes continue to use GitHub
 Actions OIDC bearer tokens. Hosted requests revalidate the active DB policy on
 every request; GitHub-derived human organization/team claims must be refreshed
 through OAuth at least every 24 hours, and new workflow grants bind both the
-repository name and GitHub's immutable repository and owner IDs.
+repository name and GitHub's immutable repository and repository-owner IDs.
 
 Launchplane now fails closed at startup when no explicit policy input is provided.
 The bootstrap policy input should be minimal; live product and workflow grants
@@ -163,12 +163,12 @@ from Launchplane-managed secrets only, and ship-mode overrides belong in
 runtime-environment records instead of process env.
 
 The intended Launchplane bring-up path is GitHub-driven deploy, not a manual
-laptop-side image swap. The current operator posture is:
+laptop-side image swap. The current admin posture is:
 
 - `CI` remains the separate test gate and must pass before Launchplane deploy
   automation replaces the live Dokploy app.
 - Launchplane currently targets a single Dokploy-hosted service instance unless
-  an operator configures additional service lanes.
+  an admin configures additional service lanes.
 - Deploys should update Dokploy by immutable image digest and capture the
   previously running digest before replacement.
 - Deploy automation should verify Launchplane health after rollout and immediately
@@ -233,7 +233,7 @@ when the target lacks a policy input, DB-backed target-id records, DB-backed
 runtime-environment records, or an existing `DOCKER_IMAGE_REFERENCE` rollback
 baseline.
 
-Operator UI data is record-backed evidence rather than an unlabeled live provider
+Launchplane UI data is record-backed evidence rather than an unlabeled live provider
 poll. Use the data freshness report to confirm visible surfaces carry provenance
 before launch or handoff:
 
@@ -257,12 +257,12 @@ document but cannot fully validate through the current Dokploy API surface:
   redeployed.
 
 Manual `workflow_dispatch` may also deploy an explicit prior image reference,
-which acts as the first operator rollback path.
+which acts as the first admin rollback path.
 
 ## Public Posture
 
 The repo is designed to be public source code. Runtime secrets, target IDs,
-operator catalogs, and product-specific authorization policy stay outside git in
+admin catalogs, and product-specific authorization policy stay outside git in
 Launchplane records, GitHub environment/secret settings, or private product
 repos. See [docs/public-readiness.md](docs/public-readiness.md).
 

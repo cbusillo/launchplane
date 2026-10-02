@@ -74,7 +74,7 @@ authz policy directly.
 Existing targets, production targets, compose targets, Odoo products, and
 non-generic drivers remain explicit advanced operations. Use `Dokploy Target
 Setup` for those cases. Use `Product Onboarding Manifest (Advanced)` only for
-an operator-owned manifest that cannot use the conventional path. Direct local
+an admin-owned manifest that cannot use the conventional path. Direct local
 CLI mutation remains break-glass bootstrap or repair behavior and requires
 `--allow-direct-db-mutation`; it is not an onboarding alternative.
 
@@ -85,15 +85,15 @@ rules. Expand with `include_ingress_operator=true` and the exact reviewed
 reusable-workflow SHA, perform the route dry-run/apply, then contract with the
 same SHA and `include_ingress_operator=false`. The planner copies the pinned
 ingress workflow identity from the active policy and fails closed when no single
-template exists; operators do not hand-author authz JSON or edit a per-product
+template exists; admins do not hand-author authz JSON or edit a per-product
 policy secret.
 
 When retiring a product after its repository has been archived or its onboarding
 GitHub App installation is gone, use `Generic Web Preview Authorization` with
 `operation=retire`. Repository input is optional assertion-only for retirement;
 Launchplane resolves immutable authority from the active product preview rules
-and cross-checks the product profile when available. Retirement cannot include
-the ingress operator and removes all target-product preview rules, including
+and cross-checks the product profile when available. Retirement cannot set
+`include_ingress_operator` and removes all target-product preview rules, including
 scoped ingress rules, without querying GitHub.
 
 The conventional product-repo caller files are
@@ -106,8 +106,8 @@ contract rather than an implicit fallback.
 
 Do not store these as product-repo Launchplane manifests. The repo may document
 the expected app runtime contract, but Launchplane records are the live source
-of lifecycle truth. Store operator manifests under Launchplane state or another
-operator-owned state location, not in product repos and not in git-tracked
+of lifecycle truth. Store admin manifests under Launchplane state or another
+admin-owned state location, not in product repos and not in git-tracked
 history when they contain site-specific runtime details.
 
 ## GitHub Actions Shape
@@ -208,10 +208,10 @@ Before treating the repo as Launchplane-ready:
   permissions cover the installation's repositories; train author allowlists are separate
   repository/base records. Apply existing authorization that covers this task
   and scope. Present any additional permission or repository-coverage grants
-  together for operator approval
+  together for Director approval
   under [DIRECTION.md](../DIRECTION.md#stop-boundaries), then use each system's
   supported change path. Author-policy changes use the
-  [managed policy import](merge-train-policy.md#operator-changes); check all
+  [managed policy import](merge-train-policy.md#admin-changes); check all
   targets for in-flight work because their records bind the full policy digest.
 - CI and pull-request dependency regression checks pass, and the current
   default-branch/artifact absolute health evidence is acceptable.

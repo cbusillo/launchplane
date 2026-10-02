@@ -582,7 +582,7 @@ function ProductIncidentOverview({
           </h2>
           <p>
             {incidents.length
-              ? "Launchplane material incident records require operator attention."
+              ? "Launchplane material incident records require admin attention."
               : evidenceIncomplete
                 ? "No open incident records were returned, but monitoring evidence is incomplete."
                 : "All incident-eligible health checks returned without an open incident record."}

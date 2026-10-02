@@ -70,7 +70,7 @@ export function EngineeringEveryCodeRoute({
     >
       <EngineeringBoundaryNote title="Bounded recent history">
         This view requests at most {SUMMARY_LIMIT} summaries from
-        <code> GET /v1/every-code/summary</code>. It is an operator snapshot, not
+        <code> GET /v1/every-code/summary</code>. It is an admin snapshot, not
         a complete audit export or a worker control surface.
       </EngineeringBoundaryNote>
       <EngineeringResourceGate

@@ -64,16 +64,16 @@ explicitly permits that condition.
 Reports also carry the typed observation counters used for evaluation, so audit
 records preserve free disk, Docker reclaimable bytes, runner work-directory
 bytes, Docker toolchain evidence, warm builders, and orphan BuildKit counts
-instead of relying only on raw operator notes. Executor-written reports also
+instead of relying only on raw admin notes. Executor-written reports also
 include read-only resource inventory for Docker images and volumes. The
 executor sorts each inventory deterministically, retains at most 128 rows, and
 records the total count plus a truncation flag. Image and volume sizes are
 nullable when Docker does not expose them; absence is not converted into
-measured zero. These inventory fields are evidence for operator review only;
+measured zero. These inventory fields are evidence for Director review only;
 aggregate reclaimable totals are not enough to approve destructive volume or
 image pruning.
 
-Docker toolchain evidence is preserved for operator review and runner-readiness
+Docker toolchain evidence is preserved for Director review and runner-readiness
 follow-up. The hygiene report records Docker Engine version, Docker CLI version,
 Docker Buildx CLI plugin version, plugin path/package/source, and BuildKit
 version when the read-only probe can observe them. Hygiene does not decide lane
@@ -97,7 +97,7 @@ The command prints `mode: report-only` with the normalized observation, policy,
 and report. It does not call Docker, inspect live services, contact GitHub, prune
 images, or restart runners.
 
-Operators can provide a policy JSON instead of CLI flags:
+Admins can provide a policy JSON instead of CLI flags:
 
 ```bash
 uv run launchplane work-graph runner-host-hygiene-report \
@@ -126,7 +126,7 @@ uv run launchplane work-graph runner-host-hygiene-apply-plan \
 The planner fails closed unless the host is approved, the action is enabled, the
 request carries explicit mutate intent, the pre-apply report is healthy, required
 warm builders are retained, and an audit record key is present. Passing
-`--mutate` records operator intent in the request so the boundary can be tested;
+`--mutate` records admin intent in the request so the boundary can be tested;
 this CLI still prints a dry-run JSON plan and does not invoke Docker, systemd,
 SSH, GitHub, or a host adapter.
 
@@ -137,7 +137,7 @@ write performed by this local command.
 Launchplane storage supports durable runner-host hygiene audit records keyed by
 `audit_record_key`. Shared-service storage promotes the key, host, action,
 status, and mutate intent into columns, while the full typed request, plan,
-pre/post reports, retained warm-builder evidence, and operator message remain in
+pre/post reports, retained warm-builder evidence, and admin message remain in
 the JSON payload. `POST /v1/evidence/runner-host-hygiene/audits` is native
 FastAPI evidence ingress for bearer-token callers. It accepts planned,
 completed, and failed audit records for product/context `launchplane/launchplane`
@@ -161,7 +161,7 @@ mutation is stricter still: accepted service delivery of the planned audit is
 required before the privileged helper can run. A pending or rejected planned
 record leaves that action blocked.
 
-Authorized operators and workflows can read the durable evidence through:
+Authorized admins and workflows can read the durable evidence through:
 
 - `GET /v1/evidence/runner-host-hygiene/audits` for a bounded summary list,
   filtered by optional host, action, and audit status
@@ -183,7 +183,7 @@ fixed 100-audit scan ceiling from the requested result limit.
 ## Approved Ops-Lane Executor
 
 The first live executor is `.github/workflows/runner-host-hygiene.yml`. It runs
-on a dedicated self-hosted ops lane selected by the operator-managed
+on a dedicated self-hosted ops lane selected by the admin-managed
 `LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE` repository variable,
 authenticates back to
 Launchplane with GitHub Actions OIDC, and executes on the runner host as the
@@ -200,7 +200,7 @@ Buildx builder, and each runtime-approved generated run cache. The workflow
 attempts every scheduled action even when an
 earlier action is blocked or fails, then fails the aggregate job after all
 per-action audits have been recorded. Default Docker cache uses an
-operator-configured LRU retained-space ceiling:
+admin-configured LRU retained-space ceiling:
 
 ```bash
 flock -n /tmp/launchplane-runner-host-hygiene.lock \
@@ -249,7 +249,7 @@ root-owned configured run-cache prefix and numeric GitHub Actions run id. Before
 the planned audit becomes mutation authority, Launchplane records apparent and
 allocated bytes, age buckets, last cleanup and growth evidence, two local
 open-handle observations per run, two `Runner.Worker` counts for the configured
-owner, and the source repository's live GitHub run state. Cleanup remains
+owning user, and the source repository's live GitHub run state. Cleanup remains
 blocked unless the exact run is completed, old enough, free of open handles,
 the owning user is idle in both samples, the class is above its high-water
 limit, and its cooldown has expired. The helper deletes only selected
@@ -271,7 +271,7 @@ registration. Sibling jobs and runner registrations remain visible. Missing
 identity, unauthorized APIs, incomplete pagination, manifest disagreement,
 stale timestamps, or a short or zero observation window blocks the apply plan.
 Generated run-cache actions do not use full-host evidence. Each policy-owned
-root instead records one `isolated_user` convergence with owner-process,
+root instead records one `isolated_user` convergence with owning-process,
 per-entry open-handle, and GitHub run-state evidence. `isolated_lane` remains a
 reserved contract value and is rejected by this executor until lane-scoped
 process evidence exists. Successful and blocking convergence is preserved in
@@ -338,7 +338,7 @@ roots, with read-only Actions and Administration permissions. Actions reads
 provide active workflow and job state, while Administration read is needed to
 list self-hosted runner registrations; GitHub adds Metadata read implicitly.
 The workflow derives the exact repository list from runtime inputs, rejects
-cross-owner scopes that cannot be represented by one installation token, and
+cross-repository-owner scopes that cannot be represented by one installation token, and
 mints a short-lived token through the commit-pinned official GitHub action. The
 App installation itself must contain exactly the runtime-derived repository
 set. The workflow validates that set through the installation API using only
@@ -387,10 +387,10 @@ evidence and the completion message rather than blocking the cleanup intended
 to remediate it. The CLI exits nonzero when a requested mutation is blocked,
 fails, or leaves audit delivery pending. It does not run `docker system prune`, `docker
 image prune -a`, generic `docker volume prune`, runner work-directory deletion,
-runner service restart, builder deletion, or automatic rollback. Operators
+runner service restart, builder deletion, or automatic rollback. The Director
 should use the captured image and volume inventory to decide any later
 phase-two cleanup lane.
-Runner work-directory evidence covers every operator-supplied root and records
+Runner work-directory evidence covers every admin-supplied root and records
 both apparent and allocated bytes per public root key; Docker reclaimable bytes
 are also split into images, containers, local volumes, and build cache while the
 existing aggregate remains backward-compatible. Docker totals and volume
@@ -436,7 +436,7 @@ Cmnd_Alias LAUNCHPLANE_RUNNER_HYGIENE_WORKDIR_USAGE = /usr/local/sbin/launchplan
 
 Install the snippet as root-owned mode `0440`, then validate the candidate and
 the complete policy with `visudo -cf`. The helper independently verifies the
-config directory and opened config file owner, group, mode, exact binding,
+config directory and opened config file owning user, group, mode, exact binding,
 canonical root path, same-filesystem traversal, and non-empty registration set.
 Its stdout contract is apparent bytes, allocated bytes, and a final
 optional `partial` status line; two lines therefore remain compatible with the
@@ -453,7 +453,7 @@ Generated run-cache inventory and cleanup use the separate root-owned helper
 `scripts/runner-host-hygiene-generated-run-cache.sh` in a reviewed merged
 revision. Its mode-`0600` config file is
 `/etc/launchplane/runner-host-hygiene-generated-caches`; each line binds the
-runtime public key and path to the expected owner, group, root mode, exact
+runtime public key and path to the expected owning user, group, root mode, exact
 top-level directory prefix, minimum age, high water, low water, and cooldown:
 
 ```text
@@ -482,7 +482,7 @@ helper independently revalidates the root-owned config and fixed retention
 policy, canonical root,
 owner/group/mode, top-level name shape, same-filesystem traversal,
 non-dereferencing handling of internal symlinks, fail-closed nested-mount
-detection, age floor, owner idle samples, and exact target open handles. It emits
+detection, age floor, owning-user idle samples, and exact target open handles. It emits
 only public keys, numeric run ids, counts, sizes, ages, and booleans. Deleting
 completed run-scoped generated data has no byte-for-byte rollback; recovery is
 regeneration in a later run, while the durable `action_started` envelope
@@ -491,7 +491,7 @@ prevents an uncertain action from being repeated automatically.
 The helper never follows internal symlinks during measurement, quarantine, or
 removal; only an exact canonical top-level directory can become a target. It
 fails closed when mount discovery is unavailable or incomplete. A
-post-quarantine owner-worker and open-handle check restores the exact entries
+post-quarantine owning-user worker and open-handle check restores the exact entries
 before aborting when work starts during the final race window; an ambiguous
 restore leaves the root-owned quarantine visible as partial evidence instead of
 deleting it. A
@@ -504,7 +504,7 @@ the accepted planned and terminal audit sequence.
 
 The executor excludes only its own ancestor `Runner.Worker` from the idle gate;
 any sibling worker still blocks a shared-host mutation. If a prior run stopped
-after the durable `action_started` marker, an operator may manually dispatch with
+after the durable `action_started` marker, an admin may manually dispatch with
 `resolve_action_started=true`. That path captures current post evidence and
 writes a terminal failed audit without repeating the privileged action.
 
@@ -593,7 +593,7 @@ service endpoint first.
 
 ## Adapter Boundary Planning
 
-Before a real host mutation adapter is implemented, operators can review the
+Before a real host mutation adapter is implemented, admins can review the
 privileged execution boundary against a ready apply plan:
 
 ```bash

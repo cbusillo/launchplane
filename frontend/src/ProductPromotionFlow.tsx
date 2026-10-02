@@ -490,7 +490,7 @@ function PromotionControl({
 
       <div className="promotion-form-grid">
         <label className="promotion-field promotion-field-wide">
-          <span>Operator reason</span>
+          <span>Admin reason</span>
           <textarea
             disabled={operationBusy || continuityLocked || acceptedDeliveryUnresolved}
             onChange={(event) => setReason(event.target.value)}

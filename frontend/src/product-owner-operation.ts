@@ -23,7 +23,7 @@ export function normalizeOwnerLoginInput(value: string): string {
 export function ownerLoginInputError(value: string): string {
   const login = normalizeOwnerLoginInput(value);
   if (!login) {
-    return "Enter the Owner's GitHub login.";
+    return "Enter the Client's GitHub login.";
   }
   if (!GITHUB_LOGIN_PATTERN.test(login)) {
     return "A GitHub login has only letters, numbers, and hyphens.";
@@ -33,7 +33,7 @@ export function ownerLoginInputError(value: string): string {
 
 export function productOwnerLabel(owner: ProductOwnerIdentity): string {
   if (!owner.githubId || !owner.githubLogin) {
-    return "No Owner set";
+    return "No Client set";
   }
   return `${owner.githubLogin} (id ${owner.githubId})`;
 }
@@ -71,11 +71,11 @@ export function productOwnerPlanFromResponse(
 export function productOwnerPlanSummary(plan: ProductOwnerPlan): string {
   if (!plan.changed) {
     return plan.after.githubId
-      ? `No change. The Owner is already ${productOwnerLabel(plan.after)}.`
-      : "No change. This product has no Owner.";
+      ? `No change. The Client is already ${productOwnerLabel(plan.after)}.`
+      : "No change. This product has no Client.";
   }
   if (!plan.after.githubId) {
-    return `Remove the Owner ${productOwnerLabel(plan.before)}.`;
+    return `Remove the Client ${productOwnerLabel(plan.before)}.`;
   }
-  return `Set the Owner to ${productOwnerLabel(plan.after)}.`;
+  return `Set the Client to ${productOwnerLabel(plan.after)}.`;
 }

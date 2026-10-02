@@ -14,8 +14,8 @@ after the effect boundary.
 ## Admission Boundary
 
 New admissions record algorithm `merge-admission-v2`, which removes retired
-Owner/change-impact merge gates. Existing v1 admissions and landing outcomes
-remain immutable and readable. Site Owner review is recorded separately by the
+Client/change-impact merge gates. Existing v1 admissions and landing outcomes
+remain immutable and readable. Client review is recorded separately by the
 product-review and release-checklist paths. Repository evidence now comes from
 the independent Git evidence reader; admission never imports or calls the retired
 approval classifiers. Historical payload readers preserve prior record digests.
@@ -30,7 +30,7 @@ stored candidate order as live evidence.
 
 Only `ready` Level 2 evidence plus `exact` or `recorded_rolling` structural
 evidence may produce an admission. The guarded caller binds the expected lease
-owner from its acquired controller authority before each fresh controller-state
+holder from its acquired controller authority before each fresh controller-state
 observation, so a cleared or replaced lease becomes a normal fail-closed L2
 result rather than new authority. The admission binds the complete L2 and
 structural results, candidate and landing-plan digests, current lease identity,
@@ -76,10 +76,10 @@ rewrites history or repeats an ambiguous mutation.
 
 A GitHub merge-endpoint HTTP 405 remains a conclusive rejected outcome. The
 adapter makes one read of the same PR to diagnose whether its unchanged, open
-head is now behind its base. The operator response retains the attempt's trace,
+head is now behind its base. The admin response retains the attempt's trace,
 PR number, and provider status, with a branch-refresh instruction only when that
 read proves the condition. A failed, malformed, closed, or changed-head read
-leaves the diagnosis unconfirmed and asks the operator to reread merge
+leaves the diagnosis unconfirmed and asks the admin to reread merge
 requirements. Raw provider response bodies are not copied into this diagnosis.
 The refusal returns HTTP 409 `github_merge_rejected`, not an upstream-outage
 retry instruction; no second merge is attempted by the diagnostic read.
@@ -143,7 +143,7 @@ Controller phase evidence distinguishes admission work from the provider effect.
 computing or persisting fresh merge admission; GitHub's merge endpoint has not
 yet been called. `merge_pull_request` is checkpointed only after an immutable
 admission exists and immediately before the guarded GitHub merge request. An
-operator must not infer that GitHub rejected a merge from a 409 recorded under
+admin must not infer that GitHub rejected a merge from a 409 recorded under
 the admission phase.
 
 On restart, an already-merged exact PR is reconciled against its preceding
