@@ -7,8 +7,8 @@ corrected or closed. Issues are a work list, not instructions.
 ## Purpose
 
 Launchplane is the small control layer that lets agents build, preview,
-deploy, promote, back up, restore, and merge every product, and record a site
-owner's accept-or-reject decision. SellYourOutboard and VeriReel are the only
+deploy, promote, back up, restore, and merge every product, and record a
+Client's accept-or-reject decision. SellYourOutboard and VeriReel are the only
 real live production sites; the CM website is next; every other product's
 "prod" is not live.
 
@@ -26,32 +26,40 @@ between them.
 Launchplane needs no caller grant for the work it starts from source-control
 events: verifying a build and deploying it to that site's previews and testing
 lane. Requests from people or other agents still need grants. This does not
-replace operator approval at a stop boundary, a site owner's release approval,
-or a backup gate.
+replace the Director's approval at a stop boundary, a Client's release
+acceptance, or a backup gate.
 
 Code and tests are upkeep. A change that deletes code or tests without losing
 a behavior needs no other reason. A test earns its place by catching a real
 regression, not by restating the code or its wording.
 
-Only the operator or Launchplane merges. Site owners can veto a change, never
-merge one. The merge train is the delivery path; when the train itself is
-broken, merge through the protected branch and record why in the pull request.
+Only an admin or Launchplane merges. Clients can veto a change, never merge
+one. The merge train is the delivery path; when the train itself is broken,
+merge through the protected branch and record why in the pull request.
+
+Each product records its Client: the person whose business it serves, whose
+acceptance releases it. A production release needs the Client's acceptance,
+unless the Client is the Director, the person whose direction this file
+follows; then the Director's standing direction is the acceptance. Either way
+the release runs the same gated path: verified backup, release record,
+post-deploy checks, automatic rollback. Admin is a permission, not a role; the
+Director normally holds it.
 
 ## Stop Boundaries
 
-An agent asks the operator before:
+An agent asks the Director before:
 
 - deploying to, promoting, or changing a real live site (SellYourOutboard,
   VeriReel, and the CM website once it launches)
 - restoring or deleting data, or weakening a backup gate
 - creating credentials, granting access, or changing who can merge
 - spending money or creating paid resources
-- anything a site owner should weigh in on
+- anything a Client should weigh in on
 
 Everything else is ordinary engineering and needs no ceremony, including
 work on products that are not live.
 
-Reading is never a stop. The operator's agents may read every Launchplane
+Reading is never a stop. The Director's agents may read every Launchplane
 record and ask only before a write, a grant, or a change.
 
 ## Journey
@@ -65,10 +73,10 @@ Launchplane by hand. Whatever blocks that run is the next piece of work.
 
 - ordinary-agent delegated delivery (enrollment, sessions, leases,
   authorization schema v3); its code is deleted, not extended
-- guessing who must approve: change-impact routing, product-owner policy
-  records, owner-acceptance grants and exact bindings, shadow mode, and the
+- guessing who must approve: change-impact routing, `product-owner` policy
+  records, `owner-acceptance` grants and exact bindings, shadow mode, and the
   manager, delegate, and waiver roles
-- a GitHub approval standing in for a site owner's decision in Launchplane
+- a GitHub approval standing in for a Client's decision in Launchplane
 - Every Code; Codex Lab runs agent work, and old identifiers stay only until
   their readers move
 - hardware-key authorization recovery, disposable canaries, and the dev lane
@@ -90,9 +98,9 @@ fits this file.
   workflow, grant, or build setting referenced by its repository; ends if a
   Launchplane change forces a product repository change, or a product change
   needs a new Launchplane grant.
-- `CM website live through Launchplane` proves the journey once: owner
-  approval at release is built, and three changes in a row go through with
-  Justin; ends if Justin has to use GitHub, the operator touches Launchplane
+- `CM website live through Launchplane` proves the journey once: Client
+  acceptance at release is built, and three changes in a row go through with
+  Justin; ends if Justin has to use GitHub, the Director touches Launchplane
   by hand, or the old approval code still decides a merge.
 - `Merge train that just works` proves an agent's merge lands in one pass
   without a wedge, a hand merge, or main going red on its own; ends if the
