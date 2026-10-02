@@ -2447,7 +2447,7 @@ context only, and `context_instance` has both context and instance.
   completion evidence with non-empty artifact sizes and SHA-256 values. A
   provider `done` status without that bounded marker fails the gate. A web
   service stopped for capture must restart successfully and read back as
-  `running`; restart or status-read failure makes the schedule fail. Recovery
+  `running`; restart or final status-read failure makes the schedule fail. Recovery
   on an earlier backup failure still attempts the restart and preserves that
   original non-zero exit status. Directory
   preparation accepts only the dedicated `/volumes/data/backups/launchplane`

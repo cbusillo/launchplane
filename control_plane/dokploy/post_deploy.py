@@ -2702,7 +2702,8 @@ start_web_container() {{
         return
     fi
     local current_status
-    current_status=$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}") || return 1
+    # Still attempt recovery if this first read fails; the final read must pass.
+    current_status=$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}" 2>/dev/null) || current_status=""
     if [ "${{current_status}}" != "running" ]; then
         echo "Starting web container ${{web_container_id}}"
         docker start "${{web_container_id}}" >/dev/null || return 1

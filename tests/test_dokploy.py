@@ -3611,7 +3611,10 @@ case "$1" in
         esac ;;
     inspect)
         if [ "${@: -1}" = web ]; then
-            if [ "$FAKE_RESTART" = inspect-fail ] && [ "$(cat "$FAKE_STATE")" != running ]; then
+            if [ "$FAKE_RESTART" = readback-fail ] && [ -f "$FAKE_STARTS" ]; then
+                exit 31
+            fi
+            if [ "$FAKE_RESTART" = initial-inspect-fail ] && [ "$(cat "$FAKE_STATE")" != running ]; then
                 exit 31
             fi
             cat "$FAKE_STATE"
@@ -3637,7 +3640,8 @@ esac
             ("running", 0, 0),
             ("start-fail", 0, 1),
             ("remains-stopped", 0, 1),
-            ("inspect-fail", 0, 1),
+            ("readback-fail", 0, 1),
+            ("initial-inspect-fail", 0, 0),
             ("running", 1, 23),
             ("start-fail", 1, 23),
         )
@@ -3666,15 +3670,12 @@ esac
                             "FAKE_BACKUP_FAIL": str(backup_fail),
                         },
                     )
-                    if expected_status == 1:
-                        self.assertNotEqual(completed.returncode, 0, completed.stdout)
-                    else:
-                        self.assertEqual(completed.returncode, expected_status, completed.stderr)
+                    self.assertEqual(completed.returncode, expected_status, completed.stderr)
                     self.assertEqual(
-                        state.read_text().strip(), "running" if restart == "running" else "exited"
+                        state.read_text().strip(),
+                        "exited" if restart in {"start-fail", "remains-stopped"} else "running",
                     )
-                    if restart != "inspect-fail":
-                        self.assertTrue(starts.exists(), "web recovery was never attempted")
+                    self.assertTrue(starts.exists(), "web recovery was never attempted")
 
     def test_run_compose_odoo_backup_gate_uses_manual_schedule_with_consistency_script(
         self,
