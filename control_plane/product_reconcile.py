@@ -187,6 +187,7 @@ TESTING_BUILD_RUN_PAGE_SIZE = 50
 TESTING_VERIFY_LIMIT = 3
 _ENDED_PREVIEW_STATES = frozenset({"destroyed", "teardown_pending"})
 OPEN_PULL_REQUEST_SWEEP_PAGES = 5
+_LEASE_LOST = "This worker no longer holds the reconcile request's lease; nothing more was changed."
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -1011,6 +1012,7 @@ def reconcile_preview_target(
     control_plane_root: Path | None,
     preview_hooks: PreviewProviderHooks,
     previous_plan: dict[str, object] | None = None,
+    lease_held: Callable[[], bool] = lambda: True,
 ) -> ReconcileOutcome:
     """Apply or destroy the PR's preview so it matches what the PR asks for now."""
     decision = _plan_preview_target(
@@ -1039,6 +1041,7 @@ def reconcile_preview_target(
             control_plane_root=control_plane_root,
             preview_hooks=preview_hooks,
             previous_plan=previous_plan or {},
+            lease_held=lease_held,
         )
     return _run_preview_operation(
         record_store=record_store,
@@ -1298,6 +1301,7 @@ def _run_generic_web_preview_operation(
     control_plane_root: Path,
     preview_hooks: PreviewProviderHooks,
     previous_plan: dict[str, object],
+    lease_held: Callable[[], bool],
 ) -> ReconcileOutcome:
     """Refresh or destroy the PR's generic-web preview in-process, as its routes do.
 
@@ -1353,6 +1357,8 @@ def _run_generic_web_preview_operation(
     ):
         plan["deferred"] = "pull_request_moved"
         return ReconcileOutcome(plan, deferred=True)
+    if not lease_held():
+        raise ProductReconcileError(_LEASE_LOST)
     try:
         if isinstance(verified, VerifiedGenericWebBuild):
             _records, result = preview_hooks.refresh_generic_web(
@@ -1421,6 +1427,9 @@ def _run_generic_web_preview_operation(
     if isinstance(verified, VerifiedGenericWebBuild):
         preview_url = str(result.get("preview_url") or "")
         plan["preview_url"] = preview_url
+        if not lease_held():
+            # Another worker owns this PR now; its refresh decides what serves.
+            raise ProductReconcileError(_LEASE_LOST)
         _record_generic_web_preview_serving(
             record_store=record_store,
             profile=profile,
@@ -1485,6 +1494,7 @@ def reconcile_product_request(
     control_plane_root: Path | None = None,
     preview_hooks: PreviewProviderHooks = PreviewProviderHooks(),
     testing_hooks: TestingProviderHooks = TestingProviderHooks(),
+    lease_held: Callable[[], bool] = lambda: True,
 ) -> ReconcileOutcome:
     try:
         profile = record_store.read_product_profile_record(request.product)
@@ -1508,6 +1518,7 @@ def reconcile_product_request(
     assert request.pull_request_number is not None
     return reconcile_preview_target(
         previous_plan=dict(request.last_plan),
+        lease_held=lease_held,
         record_store=record_store,
         profile=profile,
         repository_id=identity.repository_id,
@@ -1540,7 +1551,7 @@ def run_product_reconcile_once(
             target_key=request.target_key,
             lease_owner=lease_owner,
             lease_seconds=lease_seconds,
-        ):
+        ) as lease:
             outcome = reconcile_product_request(
                 record_store=record_store,
                 request=request,
@@ -1548,6 +1559,7 @@ def run_product_reconcile_once(
                 control_plane_root=control_plane_root,
                 preview_hooks=preview_hooks,
                 testing_hooks=testing_hooks,
+                lease_held=lease.held,
             )
     except Exception as error:
         _LOGGER.warning("Product reconcile of %s failed: %s", request.target_key, error)
@@ -1619,6 +1631,18 @@ class _LeaseHeartbeat:
     def __exit__(self, *_exc: object) -> None:
         self._stop.set()
         self._thread.join()
+
+    def held(self) -> bool:
+        """Renew now; False, failing closed, once the lease is lost or cannot be renewed."""
+        try:
+            return self._record_store.renew_product_reconcile_lease(
+                self._target_key, self._lease_owner, self._lease_seconds
+            )
+        except Exception as error:  # noqa: BLE001 - an unknown lease is not held
+            _LOGGER.warning(
+                "Product reconcile lease on %s could not be checked: %s", self._target_key, error
+            )
+            return False
 
     def _run(self) -> None:
         while not self._stop.wait(self._lease_seconds / 3):

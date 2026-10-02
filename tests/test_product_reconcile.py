@@ -1676,6 +1676,25 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
         self.assertEqual((completed.state, completed.last_error), ("done", ""))
         self.assertEqual(claims, [None])
 
+    def test_a_worker_that_lost_its_lease_records_nothing_more(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+
+        def lose_the_lease() -> None:
+            # The lease expired during the refresh and another worker claimed the PR.
+            self.store.renew_product_reconcile_lease(
+                "site:preview:5", "worker-a", 1, now="2026-01-01T00:00:00Z"
+            )
+            self.store.claim_next_product_reconcile_request("worker-b", 600)
+
+        self.driver.during_refresh = lose_the_lease
+        with self.assertRaises(ProductReconcileLeaseLostError):
+            self.run_once()
+
+        (preview,) = self.store.list_preview_records()
+        self.assertNotEqual(preview.state, "active")
+        self.assertEqual(self.driver.changes, [("refresh", 5)])
+
     def test_a_refresh_whose_verification_was_not_recorded_is_run_again(self) -> None:
         self.github.add_run(50, PR_HEAD, event="pull_request")
         self.request("preview", 5)
