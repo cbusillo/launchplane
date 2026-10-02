@@ -40,14 +40,14 @@ def render_preview_slug(
     return f"{preview_slug_prefix}{anchor_pr_number}"
 
 
-def list_github_open_ready_pull_requests(
+def list_github_open_pull_requests(
     *,
     owner: str,
     repo: str,
     token: str,
     max_pages: int = 10,
 ) -> tuple[GitHubPreviewPullRequest, ...]:
-    """Open pull requests that are not drafts: each one should have a preview."""
+    """Open pull requests, drafts included: each one should have a preview."""
     per_page = 100
     pull_requests: list[GitHubPreviewPullRequest] = []
     for page in range(1, max_pages + 1):
@@ -60,7 +60,7 @@ def list_github_open_ready_pull_requests(
                 f"GitHub pull request list for {owner}/{repo} must be a list."
             )
         for item in payload:
-            if not isinstance(item, dict) or item.get("draft"):
+            if not isinstance(item, dict):
                 continue
             number = item.get("number")
             head = item.get("head")
@@ -136,7 +136,7 @@ def discover_github_preview_desired_state(
             raise click.ClickException(
                 "Launchplane runtime records do not expose GITHUB_TOKEN for this context"
             )
-        pull_requests = list_github_open_ready_pull_requests(
+        pull_requests = list_github_open_pull_requests(
             owner=owner,
             repo=repo,
             token=github_token,

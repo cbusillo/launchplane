@@ -152,7 +152,7 @@ console.log(JSON.stringify({ fork, dependabot }));
         self.assertEqual(outputs["dependabot"]["mode"], "unsupported")
         self.assertEqual(outputs["dependabot"]["preview_supported"], "false")
 
-    def test_client_follows_draft_state_not_labels(self) -> None:
+    def test_client_ignores_draft_state_and_labels(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             client_path = Path(temporary_directory) / "preview-client.mjs"
             self.run_setup_action(
@@ -181,7 +181,7 @@ console.log(JSON.stringify(modes));
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
-            json.loads(result.stdout), {"draft": "noop", "ready": "refresh", "labeled": "noop"}
+            json.loads(result.stdout), {"draft": "refresh", "ready": "noop", "labeled": "noop"}
         )
 
     def test_client_fails_closed_when_actor_is_missing(self) -> None:

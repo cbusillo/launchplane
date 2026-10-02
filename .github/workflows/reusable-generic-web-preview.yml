@@ -129,13 +129,9 @@ jobs:
             const sameRepository = Boolean(repository) && repository === headRepository;
             const trustedPreview = sameRepository && author !== 'dependabot[bot]';
             const action = String(context.payload.action || '').trim().toLowerCase();
-            // A preview follows the PR: an open PR that is ready for review has one.
+            // A preview stays up until the PR closes or merges; drafts keep theirs.
             let operation = 'noop';
-            if (
-              trustedPreview &&
-              pullRequest.draft !== true &&
-              ['opened', 'reopened', 'synchronize', 'ready_for_review'].includes(action)
-            ) {
+            if (trustedPreview && ['opened', 'reopened', 'synchronize'].includes(action)) {
               operation = 'refresh';
             }
 

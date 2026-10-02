@@ -793,7 +793,7 @@ def _plan_preview_target(
     transport: BuildProvenanceTransport,
     pull_request_number: int,
 ) -> _PreviewDecision:
-    """Desired: a preview of the PR head's verified build while it is open and not a draft."""
+    """Desired: a preview of the PR head's verified build while the PR is open, draft or not."""
     preview_context = profile.preview.context.strip()
     plan: dict[str, object] = {
         "target": "preview",
@@ -831,8 +831,6 @@ def _plan_preview_target(
     )
     if pull_request.get("state") != "open":
         return without_preview("pull_request_not_open")
-    if pull_request.get("draft"):
-        return without_preview("pull_request_draft")
     # The agent that opened the PR marks it for the Owner with a label.
     plan["owner_review_requested"] = profile.owner.review_label in _labels(pull_request)
     try:
@@ -899,7 +897,7 @@ def _run_preview_operation(
 
     def pre_mutation_guard() -> None:
         # Holding the reservation, just before the provider apply: a PR that closed,
-        # became a draft, or moved its head since the plan releases with no effect.
+        # or moved its head since the plan releases with no effect.
         if decision.observed and _pull_request_moved(
             transport=transport,
             profile=profile,
@@ -1119,10 +1117,10 @@ def request_product_reconcile_sweep(
     now: str,
     transport_factory: TransportFactory = resolve_build_provenance_transport,
 ) -> tuple[str, ...]:
-    """Request every mapped product's testing target, live preview and ready PR.
+    """Request every mapped product's testing target, live preview and open PR.
 
-    A preview follows its pull request, so the sweep also lists each product's open
-    PRs: one whose ready event was missed still gets its preview within a sweep.
+    A preview stays up while its pull request is open, so the sweep also lists each
+    product's open PRs: one whose event was missed still gets its preview within a sweep.
     """
     targets: list[ProductReconcileTarget] = []
     inventory_records = record_store.list_repository_inventory_records()
@@ -1138,7 +1136,7 @@ def request_product_reconcile_sweep(
         preview_context = profile.preview.context.strip()
         if not preview_context:
             continue
-        for number in _open_ready_pull_requests(record_store, profile, transport_factory):
+        for number in _open_pull_requests(record_store, profile, transport_factory):
             targets.append(
                 ProductReconcileTarget(
                     product=profile.product, target_kind="preview", pull_request_number=number
@@ -1161,12 +1159,12 @@ def request_product_reconcile_sweep(
     return tuple(unique_targets)
 
 
-def _open_ready_pull_requests(
+def _open_pull_requests(
     record_store: ProductReconcileStore,
     profile: LaunchplaneProductProfileRecord,
     transport_factory: TransportFactory,
 ) -> tuple[int, ...]:
-    """The product's open, non-draft PRs; an unreadable list only skips this product."""
+    """The product's open PRs, drafts included; an unreadable list only skips this product."""
     if not profile.preview.enabled:
         return ()
     numbers: list[int] = []
@@ -1181,9 +1179,7 @@ def _open_ready_pull_requests(
             numbers.extend(
                 pull["number"]
                 for pull in pulls
-                if isinstance(pull, dict)
-                and isinstance(pull.get("number"), int)
-                and not pull.get("draft")
+                if isinstance(pull, dict) and isinstance(pull.get("number"), int)
             )
             if len(pulls) < 100:
                 break
@@ -1389,8 +1385,8 @@ def _pull_request_moved(
 
 
 def _preview_eligible(pull_request: dict[str, object]) -> bool:
-    """A preview follows the PR: an open, ready-for-review PR has one; labels play no part."""
-    return pull_request.get("state") == "open" and not pull_request.get("draft")
+    """A preview stays up until its PR closes or merges; drafts and labels play no part."""
+    return pull_request.get("state") == "open"
 
 
 def _labels(pull_request: dict[str, object]) -> set[str]:

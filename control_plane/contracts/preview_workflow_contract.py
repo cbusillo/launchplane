@@ -10,8 +10,6 @@ PreviewWorkflowPullRequestAction = Literal[
     "opened",
     "reopened",
     "synchronize",
-    "ready_for_review",
-    "converted_to_draft",
     "closed",
 ]
 PreviewWorkflowOperation = Literal[
@@ -21,9 +19,8 @@ PreviewWorkflowOperation = Literal[
     "ignore",
 ]
 PreviewWorkflowExecutionTrust = Literal["same_repo", "fork", "dependabot"]
-# A preview follows its pull request: an open PR that is ready for review has one.
-_PREVIEW_REFRESH_ACTIONS = frozenset({"opened", "reopened", "synchronize", "ready_for_review"})
-_PREVIEW_END_ACTIONS = frozenset({"closed", "converted_to_draft"})
+# A preview stays up until its pull request closes or merges; drafts keep theirs.
+_PREVIEW_REFRESH_ACTIONS = frozenset({"opened", "reopened", "synchronize"})
 
 
 class PreviewWorkflowEvent(BaseModel):
@@ -39,7 +36,6 @@ class PreviewWorkflowEvent(BaseModel):
     base_repository: str
     head_repository: str
     head_sha: str = ""
-    draft: bool = False
 
     @model_validator(mode="after")
     def _validate_event(self) -> "PreviewWorkflowEvent":
@@ -76,7 +72,7 @@ class PreviewWorkflowDecision(BaseModel):
 def decide_preview_workflow_operation(event: PreviewWorkflowEvent) -> PreviewWorkflowDecision:
     """Classify a thin product-repo preview trigger into the Launchplane contract.
 
-    Labels play no part: a preview exists while its PR is open and not a draft.
+    Labels and draft state play no part: a preview exists while its PR is open.
     """
 
     execution_trust = _execution_trust(event)
@@ -103,24 +99,16 @@ def decide_preview_workflow_operation(event: PreviewWorkflowEvent) -> PreviewWor
         )
 
     if event.event_name == "pull_request_target":
-        if execution_trust == "same_repo" and event.action in _PREVIEW_END_ACTIONS:
+        if execution_trust == "same_repo" and event.action == "closed":
             return PreviewWorkflowDecision(
                 operation="destroy",
-                reason=(
-                    "pull_request_closed"
-                    if event.action == "closed"
-                    else "pull_request_converted_to_draft"
-                ),
+                reason="pull_request_closed",
                 execution_trust=execution_trust,
                 launchplane_route_path="/v1/drivers/generic-web/preview-destroy",
                 feedback_status="destroyed",
                 launchplane_feedback_required=True,
             )
-        if (
-            execution_trust != "same_repo"
-            and not event.draft
-            and event.action in _PREVIEW_REFRESH_ACTIONS
-        ):
+        if execution_trust != "same_repo" and event.action in _PREVIEW_REFRESH_ACTIONS:
             return PreviewWorkflowDecision(
                 operation="unsupported_notice",
                 reason=f"preview_not_supported_for_{execution_trust}",
@@ -142,17 +130,10 @@ def decide_preview_workflow_operation(event: PreviewWorkflowEvent) -> PreviewWor
             execution_trust=execution_trust,
         )
 
-    if event.action in _PREVIEW_END_ACTIONS:
+    if event.action == "closed":
         return PreviewWorkflowDecision(
             operation="ignore",
             reason="pull_request_cleanup_runs_on_target",
-            execution_trust=execution_trust,
-        )
-
-    if event.draft:
-        return PreviewWorkflowDecision(
-            operation="ignore",
-            reason="pull_request_draft",
             execution_trust=execution_trust,
         )
 

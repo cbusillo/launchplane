@@ -91,8 +91,6 @@ jobs:
               throw new Error('pull_request payload is required.');
             }
 
-            // A preview follows the PR: open and ready for review means a preview.
-            const previewRequested = pullRequest.draft !== true;
             const headRepoFullName = String(pullRequest.head.repo?.full_name || '');
             const repositoryFullName = String(context.payload.repository?.full_name || '');
             const sameRepo =
@@ -112,21 +110,13 @@ jobs:
               executionTrust === 'dependabot' || executionTrust === 'fork';
             const action = String(context.payload.action || '').trim();
             const closed = action === 'closed';
-            const toDraft = action === 'converted_to_draft';
+            // A preview stays up until the PR closes or merges; drafts keep theirs.
             const previewRefreshAction =
-              action === 'opened' ||
-              action === 'reopened' ||
-              action === 'ready_for_review' ||
-              action === 'synchronize';
-            const shouldSetUnsupported =
-              unsupportedTrust && previewRefreshAction && previewRequested;
-            const shouldClear = unsupportedTrust && (closed || toDraft);
-            const shouldCleanup = executionTrust === 'same_repo' && (closed || toDraft);
-            const cleanupReason = closed
-              ? 'pr_closed'
-              : toDraft
-                ? 'pr_converted_to_draft'
-                : '';
+              action === 'opened' || action === 'reopened' || action === 'synchronize';
+            const shouldSetUnsupported = unsupportedTrust && previewRefreshAction;
+            const shouldClear = unsupportedTrust && closed;
+            const shouldCleanup = executionTrust === 'same_repo' && closed;
+            const cleanupReason = closed ? 'pr_closed' : '';
             const shouldRecord = shouldSetUnsupported || shouldClear;
 
             let status = 'cleared';

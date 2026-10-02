@@ -9,19 +9,19 @@ from control_plane.contracts.preview_inventory_scan_record import PreviewInvento
 from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
 from control_plane.workflows.preview_desired_state import (
     discover_github_preview_desired_state,
-    list_github_open_ready_pull_requests,
+    list_github_open_pull_requests,
 )
 
 
 class PreviewDesiredStateTests(unittest.TestCase):
-    def test_discovers_open_ready_pull_requests_as_desired_previews(self) -> None:
+    def test_discovers_open_pull_requests_as_desired_previews(self) -> None:
         with (
             patch(
                 "control_plane.workflows.preview_desired_state.resolve_launchplane_github_token",
                 return_value="token",
             ),
             patch(
-                "control_plane.workflows.preview_desired_state.list_github_open_ready_pull_requests",
+                "control_plane.workflows.preview_desired_state.list_github_open_pull_requests",
                 return_value=(
                     {
                         "number": 42,
@@ -71,7 +71,7 @@ class PreviewDesiredStateTests(unittest.TestCase):
         self.assertEqual(record.desired_count, 0)
         self.assertIn("GITHUB_TOKEN", record.error_message)
 
-    def test_lists_open_pull_requests_that_are_not_drafts_whatever_their_labels(self) -> None:
+    def test_lists_every_open_pull_request_draft_or_not_whatever_its_labels(self) -> None:
         page = [
             {
                 "number": 7,
@@ -92,9 +92,7 @@ class PreviewDesiredStateTests(unittest.TestCase):
             "control_plane.workflows.preview_desired_state.github_api_request",
             return_value=page,
         ) as request:
-            pulls = list_github_open_ready_pull_requests(
-                owner="every", repo="verireel", token="token"
-            )
+            pulls = list_github_open_pull_requests(owner="every", repo="verireel", token="token")
 
         self.assertEqual(
             pulls,
@@ -103,6 +101,11 @@ class PreviewDesiredStateTests(unittest.TestCase):
                     "number": 7,
                     "html_url": "https://github.com/every/verireel/pull/7",
                     "head_sha": "a" * 40,
+                },
+                {
+                    "number": 8,
+                    "html_url": "https://github.com/every/verireel/pull/8",
+                    "head_sha": "b" * 40,
                 },
             ),
         )
@@ -143,7 +146,7 @@ class PreviewDesiredStateTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(click.ClickException, "list is incomplete"),
         ):
-            list_github_open_ready_pull_requests(
+            list_github_open_pull_requests(
                 owner="every", repo="verireel", token="token", max_pages=1
             )
 

@@ -1090,18 +1090,18 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.request("preview", 5)
         self.assertEqual(self.reconcile()["reason"], "already_serving")
 
-        self.github.pull_request["draft"] = True
+        self.github.pull_request["state"] = "closed"
         self.request("preview", 5)
         destroyed = self.reconcile()
 
         self.assertEqual(
             (destroyed["action"], destroyed["reason"], destroyed["preview_result_status"]),
-            ("destroy", "pull_request_draft", "pass"),
+            ("destroy", "pull_request_not_open", "pass"),
         )
         self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
 
         # The same build asked for again after a destroy is a new operation, not a replay.
-        self.github.pull_request["draft"] = False
+        self.github.pull_request["state"] = "open"
         self.request("preview", 5)
         self.assertEqual(self.reconcile()["action"], "apply")
         self.assertEqual(self.provider.applied, [("refresh", 5), ("destroy", 5), ("refresh", 5)])
@@ -1175,13 +1175,13 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
 
     def test_preview_follows_the_pull_request_state(self) -> None:
         self.github.add_run(50, PR_HEAD, event="pull_request")
+        # A preview stays up until the PR closes or merges; a draft is not closed.
         transitions: tuple[tuple[str, dict[str, object], str, str], ...] = (
-            ("opened as a draft", {"draft": True}, "none", "pull_request_draft"),
-            ("ready for review", {"draft": False}, "apply", ""),
-            ("converted to draft", {"draft": True}, "destroy", "pull_request_draft"),
-            ("ready again", {"draft": False}, "apply", ""),
+            ("opened as a draft", {"draft": True}, "apply", ""),
+            ("ready for review", {"draft": False}, "none", "already_serving"),
+            ("converted to draft", {"draft": True}, "none", "already_serving"),
             ("closed", {"state": "closed"}, "destroy", "pull_request_not_open"),
-            ("reopened", {"state": "open"}, "apply", ""),
+            ("reopened as a draft", {"state": "open"}, "apply", ""),
             ("merged", {"state": "closed", "merged": True}, "destroy", "pull_request_not_open"),
         )
         for name, change, action, reason in transitions:
@@ -1193,9 +1193,7 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
 
                 self.assertEqual((plan["action"], plan.get("reason", "")), (action, reason))
         self.assertEqual(
-            self.provider.applied,
-            [("refresh", 5), ("destroy", 5), ("refresh", 5), ("destroy", 5), ("refresh", 5)]
-            + [("destroy", 5)],
+            self.provider.applied, [("refresh", 5), ("destroy", 5), ("refresh", 5), ("destroy", 5)]
         )
         self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
 
@@ -1213,12 +1211,10 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(self.provider.applied, [("refresh", 5)])
         self.assertEqual(self.store.list_preview_records()[0].state, "active")
 
-    def test_a_pr_converted_to_draft_before_the_provider_change_is_reconciled_again(
-        self,
-    ) -> None:
+    def test_a_pr_closed_before_the_provider_change_is_reconciled_again(self) -> None:
         self.github.add_run(50, PR_HEAD, event="pull_request")
         # Reads: the plan, the build verification, then the check just before applying.
-        self.github.pull_request_move = (2, {"draft": True})
+        self.github.pull_request_move = (2, {"state": "closed"})
         self.request("preview", 5)
 
         completed = self.run_once()
@@ -1252,7 +1248,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.assertEqual(self.reconcile_preview()["action"], "apply")
         self.assertIn("preview is ready for PR #5", self.comment_body())
         self.assertIn("https://pr-5.example.test", self.comment_body())
-        self.assertIn("Convert the PR to a draft", self.comment_body())
+        self.assertIn("Close or merge the PR to remove the preview.", self.comment_body())
         self.assertEqual(self.reconcile_preview()["reason"], "already_serving")
 
         self.github.pull_request["state"] = "closed"
@@ -1896,17 +1892,18 @@ class ProductReconcileSweepTests(ProductReconcileTestCase):
         )
         self.write_preview(number=5)
         self.write_preview(number=6, state="destroyed")
-        # PR 7 is ready with no preview yet (its ready event was missed); 8 is a draft.
+        # PRs 7 and 8 are open with no preview yet (their events were missed); 8 is a draft.
         self.github.open_pulls = [{"number": 7, "draft": False}, {"number": 8, "draft": True}]
 
         requested = request_product_reconcile_sweep(
             self.store, "2026-09-29T12:00:00Z", lambda _store, _profile: self.github
         )
 
-        self.assertEqual(set(requested), {"site:testing", "site:preview:5", "site:preview:7"})
+        expected = {"site:testing", "site:preview:5", "site:preview:7", "site:preview:8"}
+        self.assertEqual(set(requested), expected)
         self.assertEqual(
             {request.target_key for request in self.store.list_product_reconcile_requests()},
-            {"site:testing", "site:preview:5", "site:preview:7"},
+            expected,
         )
 
     def test_an_unreadable_pull_request_list_still_sweeps_the_rest(self) -> None:
