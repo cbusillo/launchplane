@@ -89,6 +89,7 @@ class GenericWebDeployProviderMutationAdapter:
         profile: LaunchplaneProductProfileRecord,
         lane: ProductLaneProfile,
         trace_id: str,
+        deploy_provider: GenericWebDeployProvider | None = None,
     ) -> None:
         self._control_plane_root = control_plane_root
         self._record_store = record_store
@@ -96,7 +97,9 @@ class GenericWebDeployProviderMutationAdapter:
         self._profile = profile
         self._lane = lane
         self._trace_id = trace_id
-        self._deploy_provider: GenericWebDeployProvider = default_generic_web_deploy_provider()
+        self._deploy_provider: GenericWebDeployProvider = (
+            deploy_provider or default_generic_web_deploy_provider()
+        )
         self._resolved_deploy_target: GenericWebResolvedDeployTarget | None = None
 
     @property

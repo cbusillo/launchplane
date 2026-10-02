@@ -85,6 +85,7 @@ from control_plane.generic_web_promotion_http import (
     execute_generic_web_prod_promotion_result,
     resolve_generic_web_promotion_destination_lane,
     resolve_generic_web_promotion_workflow_lane,
+    generic_web_promotion_outcome_is_settled,
     should_store_generic_web_promotion_idempotency,
     validate_generic_web_prod_promotion_lanes,
 )
@@ -297,7 +298,7 @@ class _GenericWebProdPromotionProviderMutationAdapter:
                 records=records.model_dump(mode="json"),
                 result=result.model_dump(mode="json"),
             ),
-            durable=should_store_generic_web_promotion_idempotency(result),
+            durable=generic_web_promotion_outcome_is_settled(result),
             provider_effect_performed=provider_effect_attempted,
         )
 

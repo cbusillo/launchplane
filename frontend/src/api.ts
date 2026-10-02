@@ -26,8 +26,6 @@ import type {
   InspectionSetupMetadata,
   ListHumanPrivilegedOperationsData,
   ListHumanPrivilegedOperationsResponse,
-  ListProductProfilesData,
-  ListProductProfilesResponse,
   MergeTrainControllerStatusResponse,
   MergeTrainPolicyTargetsResponse,
   OrdinaryAgentDeliveryActivationOptionsResponse,
@@ -576,18 +574,6 @@ export function applyProductEnvironmentConfig(
   );
 }
 
-export function listProductProfiles(
-  signal?: AbortSignal,
-): Promise<ListProductProfilesResponse> {
-  const request: ListProductProfilesData = { url: "/v1/product-profiles" };
-  return requestJson<ListProductProfilesResponse>(
-    request.url,
-    "GET",
-    undefined,
-    signal,
-  );
-}
-
 export function readProductProfile(
   product: string,
   signal?: AbortSignal,
@@ -865,14 +851,12 @@ export function prepareAuthorizationCandidate(
   intent: AuthorizationCandidateIntent,
   sourceEventId: string,
   signal?: AbortSignal,
-  products?: readonly string[],
 ): Promise<PrepareAuthorizationCandidateResponse> {
-  const body: PrepareAuthorizationCandidateData["body"] = {
+  const body = {
     candidate_id: candidateId,
     intent,
     source_event_id: sourceEventId,
-    ...(products === undefined ? {} : { products: [...products] }),
-  };
+  } satisfies PrepareAuthorizationCandidateData["body"];
   return requestJson<PrepareAuthorizationCandidateResponse>(
     BROWSER_WRITE_ROUTES.authorizationCandidatePrepare,
     "POST",

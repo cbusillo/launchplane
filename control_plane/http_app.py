@@ -371,7 +371,8 @@ from control_plane.merge_train_pr_feedback import (
 )
 from control_plane.merge_train_run_once import (
     MergeTrainRunOnceEnvelope,
-    execute_merge_train_run_once,
+    MergeTrainRunOnceResult,
+    execute_recorded_merge_train_run_once,
     require_merge_train_run_record_store,
 )
 from control_plane.merge_train_stack_collapse import (
@@ -760,7 +761,6 @@ from control_plane.service_auth import (
     LocalAdminIdentity,
     LocalOperatorIdentity,
     TerminalAgentIdentity,
-    configured_local_operator_identity,
     configured_terminal_agent_identity,
     TokenVerifier,
     agent_authz_audit,
@@ -5000,9 +5000,6 @@ def create_launchplane_fastapi_app(
         policy_reader=lambda: resolved_authz_policy_runtime.policy,
         policy_record_reader=lambda: read_active_authz_policy_record(get_record_store()),
         read_configured_terminal_identity=lambda: configured_terminal_agent_identity(
-            bearer_identity_config or BearerIdentityConfig()
-        ),
-        read_configured_local_operator_identity=lambda: configured_local_operator_identity(
             bearer_identity_config or BearerIdentityConfig()
         ),
     )
@@ -10862,21 +10859,10 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         try:
-            if controller_state_store is None:
-                run_once_result = execute_merge_train_run_once(
-                    request=merge_train_request,
-                    policy=policy_record.policy,
-                    policy_sha256=policy_record.policy_sha256,
-                    token=token,
-                    trace_id=trace_id,
-                    recorded_at=utc_now_timestamp(),
-                )
-                run_record_store.write_merge_train_run_record(run_once_result.run_record)
-                response = accepted_evidence_response(
-                    trace_id=trace_id,
-                    records=run_once_result.records,
-                    result=run_once_result.accepted_result,
-                )
+
+            def store_run_once_idempotency_before_release(
+                result: MergeTrainRunOnceResult,
+            ) -> None:
                 store_apply_idempotency(
                     record_store=record_store,
                     identity=identity,
@@ -10884,55 +10870,30 @@ def create_launchplane_fastapi_app(
                     idempotency_key=normalized_idempotency_key,
                     request_fingerprint_value=payload_fingerprint,
                     trace_id=trace_id,
-                    response=response,
+                    response=accepted_evidence_response(
+                        trace_id=trace_id,
+                        records=result.records,
+                        result=result.accepted_result,
+                    ),
                 )
-                return response
-            else:
-                with merge_train_controller_mutation_fence(
-                    record_store=controller_state_store,
-                    repository=merge_train_request.repository,
-                    base_branch=merge_train_request.base_branch,
-                    policy_key=repository_policy.policy_key,
-                    policy_sha256=policy_record.policy_sha256,
-                    trace_id=trace_id,
-                    active_action="legacy_run_once",
-                    active_phase="worker_step",
-                ) as lease:
 
-                    def checkpoint_legacy_mutation() -> None:
-                        lease.checkpoint(
-                            active_action="legacy_run_once",
-                            active_phase="worker_step_mutation",
-                            active_record_id="",
-                            active_pull_request_number=None,
-                            step_payload={},
-                        )
-
-                    run_once_result = execute_merge_train_run_once(
-                        request=merge_train_request,
-                        policy=policy_record.policy,
-                        policy_sha256=policy_record.policy_sha256,
-                        token=token,
-                        trace_id=trace_id,
-                        recorded_at=lease.record.updated_at,
-                        mutation_checkpoint=checkpoint_legacy_mutation,
-                    )
-                    run_record_store.write_merge_train_run_record(run_once_result.run_record)
-                    response = accepted_evidence_response(
-                        trace_id=trace_id,
-                        records=run_once_result.records,
-                        result=run_once_result.accepted_result,
-                    )
-                    store_apply_idempotency(
-                        record_store=record_store,
-                        identity=identity,
-                        route_path=_MERGE_TRAIN_RUN_ONCE_ROUTE,
-                        idempotency_key=normalized_idempotency_key,
-                        request_fingerprint_value=payload_fingerprint,
-                        trace_id=trace_id,
-                        response=response,
-                    )
-                    return response
+            run_once_result = execute_recorded_merge_train_run_once(
+                request=merge_train_request,
+                policy=policy_record.policy,
+                policy_sha256=policy_record.policy_sha256,
+                repository_policy=repository_policy,
+                token=token,
+                trace_id=trace_id,
+                recorded_at=utc_now_timestamp(),
+                run_record_store=run_record_store,
+                controller_state_store=controller_state_store,
+                before_release=store_run_once_idempotency_before_release,
+            )
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records=run_once_result.records,
+                result=run_once_result.accepted_result,
+            )
         except MergeTrainGitHubStaleHeadError as error:
             return merge_train_github_stale_state_response(trace_id=trace_id, error=error)
         except MergeTrainGitHubError as error:

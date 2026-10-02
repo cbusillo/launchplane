@@ -3,12 +3,19 @@ from typing import Callable, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane.contracts.merge_train_policy import MergeTrainPolicy
+from control_plane.contracts.merge_train_policy import (
+    MergeTrainPolicy,
+    MergeTrainRepositoryPolicy,
+)
 from control_plane.contracts.merge_train_run_record import (
     MergeTrainRunRecord,
     build_merge_train_run_record,
 )
 from control_plane.merge_train import build_merge_train_dry_run_result
+from control_plane.merge_train_controller_run_once import (
+    MergeTrainControllerStateRecordStore,
+    merge_train_controller_mutation_fence,
+)
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     GitHubMergeTrainSnapshotReader,
@@ -118,3 +125,71 @@ def execute_merge_train_run_once(
         records={"merge_train_run_id": run_record.run_id},
         run_record=run_record,
     )
+
+
+def execute_recorded_merge_train_run_once(
+    *,
+    request: MergeTrainRunOnceEnvelope,
+    policy: MergeTrainPolicy,
+    policy_sha256: str,
+    repository_policy: MergeTrainRepositoryPolicy,
+    token: str,
+    trace_id: str,
+    recorded_at: str,
+    run_record_store: MergeTrainRunRecordStore,
+    controller_state_store: MergeTrainControllerStateRecordStore | None,
+    before_release: Callable[[MergeTrainRunOnceResult], None] | None = None,
+) -> MergeTrainRunOnceResult:
+    """Run one Level 1 step and store its run record.
+
+    A mutating step holds the controller lease, so it never races a controller
+    pass on the same train.
+    """
+    if not request.mutate:
+        result = execute_merge_train_run_once(
+            request=request,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            token=token,
+            trace_id=trace_id,
+            recorded_at=recorded_at,
+        )
+        run_record_store.write_merge_train_run_record(result.run_record)
+        if before_release is not None:
+            before_release(result)
+        return result
+    if controller_state_store is None:
+        raise TypeError("a mutating merge train run-once requires controller state storage")
+    with merge_train_controller_mutation_fence(
+        record_store=controller_state_store,
+        repository=request.repository,
+        base_branch=request.base_branch,
+        policy_key=repository_policy.policy_key,
+        policy_sha256=policy_sha256,
+        trace_id=trace_id,
+        active_action="legacy_run_once",
+        active_phase="worker_step",
+    ) as lease:
+
+        def checkpoint_legacy_mutation() -> None:
+            lease.checkpoint(
+                active_action="legacy_run_once",
+                active_phase="worker_step_mutation",
+                active_record_id="",
+                active_pull_request_number=None,
+                step_payload={},
+            )
+
+        result = execute_merge_train_run_once(
+            request=request,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            token=token,
+            trace_id=trace_id,
+            recorded_at=lease.record.updated_at,
+            mutation_checkpoint=checkpoint_legacy_mutation,
+        )
+        run_record_store.write_merge_train_run_record(result.run_record)
+        if before_release is not None:
+            before_release(result)
+        return result

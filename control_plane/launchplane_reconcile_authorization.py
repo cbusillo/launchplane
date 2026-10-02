@@ -4,11 +4,14 @@ Launchplane needs no caller grant to verify a build and deploy it to that
 product's testing lane and PR previews (DIRECTION.md). The reconciler is the only
 code that builds this grant. It is stored only on the testing lane's stable target
 replacement, which the worker re-checks before running; no HTTP route builds or
-accepts it, and every other worker path refuses it. A preview runs in-process,
-so the reconciler checks its destination directly instead.
+accepts it, and every other worker path refuses it. A preview and a generic-web
+testing deploy run in-process, so the reconciler checks their destination
+directly instead.
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 from control_plane.contracts.durable_operation_authorization import (
     LAUNCHPLANE_RECONCILE_SUBJECT,
@@ -17,6 +20,7 @@ from control_plane.contracts.durable_operation_authorization import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.odoo_product_driver_http import product_profile_uses_odoo_driver
+from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
 from control_plane.product_repository_identity import (
     ProductRepositoryIdentityRefusal,
     resolve_product_repository_identity,
@@ -66,7 +70,9 @@ def launchplane_reconcile_authorization_allows(
         or authorization.instances != (TESTING_INSTANCE,)
     ):
         return False
-    profile = _reconcilable_profile(record_store, authorization.product)
+    profile = _reconcilable_profile(
+        record_store, authorization.product, uses_driver=product_profile_uses_odoo_driver
+    )
     return profile is not None and any(
         lane.instance.strip().lower() == TESTING_INSTANCE
         and lane.context.strip().lower() == authorization.context
@@ -78,7 +84,9 @@ def launchplane_reconcile_preview_destination_allowed(
     *, record_store: object, product: str, context: str, preview_slug: str
 ) -> bool:
     """A reconcile may change only the product's own previews, in its preview context."""
-    profile = _reconcilable_profile(record_store, product.strip())
+    profile = _reconcilable_profile(
+        record_store, product.strip(), uses_driver=product_profile_uses_odoo_driver
+    )
     slug = preview_slug.strip().lower()
     return (
         profile is not None
@@ -89,8 +97,36 @@ def launchplane_reconcile_preview_destination_allowed(
     )
 
 
+def reconciles_as_generic_web(profile: LaunchplaneProductProfileRecord) -> bool:
+    """A generic-web product; Odoo's driver is built on generic-web but deploys its own way."""
+    return product_profile_uses_generic_web_base(profile) and not (
+        product_profile_uses_odoo_driver(profile)
+    )
+
+
+def launchplane_reconcile_generic_web_testing_allowed(
+    *, record_store: object, product: str, context: str, instance: str
+) -> bool:
+    """A reconcile may deploy only a generic-web product's own testing lane, never prod."""
+    profile = _reconcilable_profile(
+        record_store, product.strip(), uses_driver=reconciles_as_generic_web
+    )
+    return (
+        profile is not None
+        and instance.strip().lower() == TESTING_INSTANCE
+        and any(
+            lane.instance.strip().lower() == TESTING_INSTANCE
+            and lane.context.strip().lower() == context.strip().lower()
+            for lane in profile.lanes
+        )
+    )
+
+
 def _reconcilable_profile(
-    record_store: object, product: str
+    record_store: object,
+    product: str,
+    *,
+    uses_driver: Callable[[LaunchplaneProductProfileRecord], bool],
 ) -> LaunchplaneProductProfileRecord | None:
     read_profile = getattr(record_store, "read_product_profile_record", None)
     if not callable(read_profile):
@@ -102,7 +138,7 @@ def _reconcilable_profile(
     if (
         not isinstance(profile, LaunchplaneProductProfileRecord)
         or not profile.is_active
-        or not product_profile_uses_odoo_driver(profile)
+        or not uses_driver(profile)
     ):
         return None
     try:
