@@ -1203,6 +1203,37 @@ _AUTH_LOGOUT_ROUTE = "/auth/logout"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 
 
+def _local_operator_product_config_scope_refusal(
+    *,
+    record_store: object,
+    product_config_request: ProductConfigApplyEnvelope,
+) -> str:
+    """Keep the operator's agent on the named product's own lane.
+
+    A context-scoped secret written through an instance request also changes
+    what other lanes resolve, and a context reassigned to another product would
+    otherwise follow a grant that names the old product.
+    """
+    context = product_config_request.context
+    if context:
+        try:
+            owners = product_context_owners(record_store)
+        except TypeError:
+            return "Product profile records are unavailable to confirm the context's product."
+        if not is_exclusive_product_lane_context(
+            context=context, product=product_config_request.product, owners=owners
+        ):
+            return "The context must belong to the named product only."
+    if product_config_request.instance and any(
+        (secret.scope or "").strip() not in {"", "context_instance"}
+        for secret in product_config_request.secrets
+    ):
+        return (
+            "An instance request from the operator's agent can only write that instance's secrets."
+        )
+    return ""
+
+
 def _lane_setup_context_owner(*, record_store: object, context: str) -> str:
     """The one product that owns ``context`` exclusively and canonically, or ''."""
     owners = product_context_owners(record_store)
@@ -14665,6 +14696,18 @@ def create_launchplane_fastapi_app(
                     " product/context."
                 ),
             )
+        if isinstance(identity, LocalOperatorIdentity):
+            scope_refusal = _local_operator_product_config_scope_refusal(
+                record_store=record_store,
+                product_config_request=product_config_request,
+            )
+            if scope_refusal:
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="local_operator_lane_scope_required",
+                    message=scope_refusal,
+                )
         if operator_identity and not product_config_request.reason:
             raise _launchplane_http_error(
                 status_code=400,

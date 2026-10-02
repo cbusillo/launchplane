@@ -680,6 +680,12 @@ The set deliberately leaves out:
   context, creates only that lane's compose in a new provider project and
   environment, and can't adopt, re-point, replace or prune a target.
 
+Product config applies from a `local_operators` caller, which is how this set
+is used, also refuse (`local_operator_lane_scope_required`) a context that is
+not the named product's alone, and a context- or global-scoped secret written
+through an instance request: those would change what another product or
+another lane, such as production, resolves.
+
 What it can reach on a live product: the testing lane's settings and secrets,
 the testing lane's new compose target, and production's backup policy. The
 backup policy is the gate promotions rely on, so every apply is dry-run first
