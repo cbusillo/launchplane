@@ -3805,6 +3805,102 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             "closed",
         )
 
+    async def _run_controller_after_collapse(
+        self, *, root_update: dict[str, object], mutate: bool
+    ) -> tuple[dict[str, Any], list[int]]:
+        """Run the controller once against a collapsed root waiting for its checks.
+
+        GitHub has closed the merged child, and an independent ready pull
+        request is queued behind the root.
+        """
+        branch_updates: list[int] = []
+
+        class CollapsedRootReader(_FakeCollapsedRootStackedMergeTrainSnapshotReader):
+            def read_merge_train_snapshot(
+                self, *, repository: str, base_branch: str
+            ) -> MergeTrainDryRunSnapshot:
+                snapshot = super().read_merge_train_snapshot(
+                    repository=repository, base_branch=base_branch
+                )
+                root = snapshot.pull_requests[0]
+                independent = root.model_copy(
+                    update={
+                        "number": 3,
+                        "url": f"https://github.com/{repository}/pull/3",
+                        "created_at": "2026-05-08T12:00:00Z",
+                        "head_sha": "head-independent",
+                        "head_ref": "feature/independent",
+                    }
+                )
+                return snapshot.model_copy(
+                    update={"pull_requests": (root.model_copy(update=root_update), independent)}
+                )
+
+        class BranchUpdatingClient(_FakeMergeTrainGitHubClient):
+            def update_pull_request_branch(
+                self, *, repository: str, pull_request_number: int, expected_head_sha: str
+            ) -> None:
+                branch_updates.append(pull_request_number)
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            _seed_executed_merge_train_stack_collapse_plan_record(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    CollapsedRootReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    BranchUpdatingClient,
+                ),
+            ):
+                response = await _post_merge_train_controller_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": mutate,
+                    },
+                )
+        self.assertEqual(response.status_code, 202)
+        return response.json()["result"], branch_updates
+
+    async def test_refreshes_a_behind_base_collapsed_root_instead_of_waiting(self) -> None:
+        dry_run, _ = await self._run_controller_after_collapse(
+            root_update={"branch_update_required": True}, mutate=False
+        )
+        mutated, branch_updates = await self._run_controller_after_collapse(
+            root_update={"branch_update_required": True}, mutate=True
+        )
+
+        self.assertEqual(dry_run["controller_action"], "update_branch")
+        self.assertEqual(dry_run["dry_run_result"]["queue_order"], [1, 3])
+        self.assertEqual(mutated["controller_action"], "update_branch")
+        self.assertEqual(branch_updates, [1])
+
+    async def test_unlabelled_collapsed_root_lets_the_queue_proceed(self) -> None:
+        result, branch_updates = await self._run_controller_after_collapse(
+            root_update={"labels": (), "label_actors": ()}, mutate=True
+        )
+
+        self.assertEqual(result["controller_action"], "plan_candidate")
+        self.assertEqual(
+            [entry["pull_request_number"] for entry in result["candidate"]["entries"]], [3]
+        )
+        self.assertEqual(branch_updates, [])
+
     async def test_cleanup_failure_after_landing_is_reported_without_rollback(self) -> None:
         _CleanupFailingMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls = 0
         with (
