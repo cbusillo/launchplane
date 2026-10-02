@@ -3924,6 +3924,11 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             ) -> None:
                 refreshed["value"] = True
 
+            def branch_contains_commit(
+                self, *, repository: str, branch_ref: str, commit_sha: str
+            ) -> bool:
+                return (branch_ref, commit_sha) == ("refreshed-root-head", "stack-merge-2-into-1")
+
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),

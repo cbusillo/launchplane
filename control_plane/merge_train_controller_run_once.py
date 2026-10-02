@@ -895,13 +895,15 @@ def _stack_collapse_record_landed_after_root_refresh(
 
     The refresh moves the root's head past the plan's collapsed head, so the
     exact-head match above fails. The plan still applies when its root merged in
-    this landing and the base branch now contains the collapsed head: the
-    children's commits reached the base with the root.
+    this landing from a head that descends from the collapsed head: the
+    children's commits landed with the root, whatever the merge method.
     """
-    merged_roots = {
-        entry.pull_request_number for entry in landing_plan.entries if entry.status == "merged"
+    merged_root_heads = {
+        entry.pull_request_number: entry.expected_head_sha
+        for entry in landing_plan.entries
+        if entry.status == "merged"
     }
-    contained: dict[str, bool] = {}
+    contained: dict[tuple[str, str], bool] = {}
     landed_records: list[MergeTrainStackCollapsePlanRecord] = []
     for record in record_store.list_merge_train_stack_collapse_plan_records(
         repository=repository,
@@ -913,15 +915,18 @@ def _stack_collapse_record_landed_after_root_refresh(
             record.plan.status in {"waiting_for_root_checks", "ready_for_train"}
             and record.plan.policy_key == landing_plan.policy_key
             and record.plan.policy_sha256 == policy_sha256 == landing_plan.policy_sha256
-            and record.plan.root_pull_request_number in merged_roots
+            and record.plan.root_pull_request_number in merged_root_heads
         ):
             continue
-        collapsed_head_sha = stack_collapse_expected_root_head_sha(record.plan)
-        if collapsed_head_sha not in contained:
-            contained[collapsed_head_sha] = github_client.branch_contains_commit(
-                repository=repository, branch_ref=base_branch, commit_sha=collapsed_head_sha
+        lineage = (
+            stack_collapse_expected_root_head_sha(record.plan),
+            merged_root_heads[record.plan.root_pull_request_number],
+        )
+        if lineage not in contained:
+            contained[lineage] = github_client.branch_contains_commit(
+                repository=repository, branch_ref=lineage[1], commit_sha=lineage[0]
             )
-        if contained[collapsed_head_sha]:
+        if contained[lineage]:
             landed_records.append(record)
     return latest_merge_train_stack_collapse_progress_record(tuple(landed_records))
 
