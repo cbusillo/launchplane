@@ -2618,32 +2618,36 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   persisted to the Dokploy compose target environment before the web container
   is redeployed, and the same payload is passed to the Odoo data-workflow
   runner for post-deploy maintenance.
-- Odoo stable target replacement projects resolved runtime values and retained
-  provider settings onto the product profile's exact lane configuration keys,
-  alongside the driver's addon-path, module-installation, override, and runtime
-  identity fields. Secret keys required by a typed instance-override payload are
-  also application inputs. Worker credentials that share a context are not
-  application settings. Undeclared shared-context keys and malformed provider
-  fragments are discarded during replacement so an earlier failed write cannot
-  keep worker credentials in the application target. Declare application settings
-  in the product profile before using them; a lane with no declared runtime keys
-  is refused. Before any provider write, replacement refuses missing required
-  compose inputs or override secrets, undeclared existing compose options, and
-  undeclared provider-only environment settings, preventing silent loss of
-  application configuration. Read-only replacement planning checks compose
-  declarations against both live key names and DB-backed runtime/target records.
-  Upstream-restore plans also require declarations for upstream source settings
-  and any configured local filestore path or `OPENUPGRADE_*` options, so filtering
-  cannot silently disable a requested migration. Planning also checks the
-  non-secret upstream source values with the post-deploy validator and reports
-  invalid deploy-phase overrides without echoing record values. Planning does
-  not decrypt managed secrets or prove their values: execution rechecks
-  declarations, required compose/upstream values, secret safety, and provider-only
-  entries before its first
-  provider write. Discarded provider entries are counted without recording
-  potentially sensitive malformed key names. Product-scoped runtime sync uses
-  the same key selection for incoming values but merges into the provider env;
-  replacement rebuilds it and removes unknown entries.
+- Odoo stable target replacement delivers the site's own environment, as
+  live-target runtime sync does: the site's context and lane records, its
+  tracked target settings and the managed secrets stored for it (secrets shared
+  across the site reach only testing and prod). Global values, other sites'
+  values and worker credentials (their own `launchplane_worker` store) never
+  reach it. Products do not declare settings to deploy; a profile declaration
+  still names a provider value the replacement keeps, and declared managed
+  secrets must be present. The driver adds its addon-path,
+  module-installation, override and runtime identity fields; secret keys
+  required by a typed instance-override payload are also application inputs.
+  Every managed secret the deploy carries, declared or not, passes runtime key
+  safety, so on a testing lane a production integration secret shared across
+  the site is refused before any provider write. Before any provider write,
+  replacement also refuses missing required compose inputs or override
+  secrets, a value the provider env text cannot carry intact (such as a
+  multiline value), and provider-only environment settings that no Launchplane
+  record for the site holds, preventing silent loss of configuration; record
+  such a setting for the site or retire it. Read-only replacement planning
+  names those provider-only keys (`provider_keys_unrecorded`) and lists the key
+  names it would deliver (`delivered_runtime_keys`), reading record and secret
+  binding names without decrypting any secret. Upstream-restore plans still
+  require profile declarations for upstream source settings and any configured
+  local filestore path or `OPENUPGRADE_*` options, and check the non-secret
+  upstream source values with the post-deploy validator. Planning reports
+  invalid deploy-phase overrides without echoing record values. Execution
+  rechecks the site environment, required compose/upstream values, secret
+  safety and provider-only entries before its first provider write. Discarded
+  malformed provider fragments are counted without recording their parsed
+  names. Live-target runtime sync merges into the provider env; replacement
+  rebuilds it and removes unknown entries.
 - Odoo stable target replacement also merges the required Launchplane-managed
   operational modules into `ODOO_INSTALL_MODULES` before redeploying the web
   container. Artifact inputs or base images make addon files available, but the

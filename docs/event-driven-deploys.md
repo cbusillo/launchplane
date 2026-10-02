@@ -116,8 +116,8 @@ need not read the deploy operation, whose status read needs the grant that
 starts a deploy. The summary is structured: the code's fixed description, step
 statuses, validated key names and attempt, with no provider text (see
 [records](records.md#reconciler)). Text fields are cut at 400 characters,
-except the summary, which keeps up to 1,500 so a long list of undeclared keys
-comes back whole.
+except the summary, which keeps up to 1,500 so a long key list comes back
+whole.
 
 ## Pull request feedback
 

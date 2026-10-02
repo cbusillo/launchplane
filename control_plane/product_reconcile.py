@@ -608,7 +608,10 @@ PLAN_BLOCKER_DESCRIPTIONS: dict[str, str] = {
     ),
     "domains_missing": "The current target has no domains to carry over.",
     "runtime_keys_undeclared": (
-        "The lane configures settings its product profile does not declare."
+        "The lane's upstream-restore settings are not declared in its product profile."
+    ),
+    "provider_keys_unrecorded": (
+        "The current target has settings that no Launchplane record for the site holds."
     ),
     "upstream_restore_environment_invalid": (
         "The lane's upstream-restore settings are missing or invalid."

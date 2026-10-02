@@ -59,6 +59,8 @@ from control_plane.product_review_status import owner_review_reference_url
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy, MergeTrainPolicyRecord
 from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.product_reconcile import (
+    PLAN_BLOCKER_DESCRIPTIONS,
+    TESTING_FAILURE_DESCRIPTIONS,
     PreviewProviderHooks,
     ProductReconcileError,
     request_product_reconcile_sweep,
@@ -896,7 +898,7 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
                 self.assertEqual(plan["last_failed_error_summary"], summary)
                 operation_id = cast(str, plan["queued_operation_id"])
 
-    def test_an_undeclared_keys_failure_names_the_keys_without_message_text(self) -> None:
+    def test_a_key_list_failure_names_the_keys_without_message_text(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
         self.request()
         operation_id = cast(str, self.reconcile()["queued_operation_id"])
@@ -907,8 +909,8 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
                     "status": "fail",
                     "phase": "failed",
                     "finished_at": "2026-09-30T12:00:00Z",
-                    "error_code": "plan_not_ready.runtime_keys_undeclared",
-                    "error_message": "Undeclared ODOO_WEB_HOST_PORT on 203.0.113.42.",
+                    "error_code": "plan_not_ready.provider_keys_unrecorded",
+                    "error_message": "Unrecorded ODOO_WEB_HOST_PORT on 203.0.113.42.",
                     # Stored unvalidated here; the read drops what is not a key name.
                     "error_detail_keys": ("ODOO_WEB_HOST_PORT", "203.0.113.42", "ODOO_DB_NAME"),
                 }
@@ -918,11 +920,11 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
 
         plan = self.reconcile()
 
-        self.assertEqual(plan["last_failed_error_code"], "plan_not_ready.runtime_keys_undeclared")
+        self.assertEqual(plan["last_failed_error_code"], "plan_not_ready.provider_keys_unrecorded")
         self.assertEqual(
             plan["last_failed_error_summary"],
-            "The replacement plan was blocked before the deploy started. Blocker: "
-            "The lane configures settings its product profile does not declare. "
+            f"{TESTING_FAILURE_DESCRIPTIONS['plan_not_ready']} Blocker: "
+            f"{PLAN_BLOCKER_DESCRIPTIONS['provider_keys_unrecorded']} "
             "Keys: ODOO_DB_NAME, ODOO_WEB_HOST_PORT.",
         )
         self.assertNotIn("203.0.113.42", cast(str, plan["last_failed_error_summary"]))
