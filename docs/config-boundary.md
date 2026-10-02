@@ -21,7 +21,7 @@ Launchplane's long-term config model is:
   authz and target files are not repo authority
 - checked-in code or config must not act as authority for real product, tenant,
   repository, branch, domain, lane, provider-target, runtime-environment, authz,
-  operator, or mutable product/runtime configuration
+  admin, or mutable product/runtime configuration
 - local files under `~/.config/launchplane/` are not Launchplane config
   authority and should be archived or deleted when found
 - the service never silently falls back across multiple live authorities
@@ -38,7 +38,7 @@ it can reach, trust, or decrypt DB-backed state.
 
 This category is only for Launchplane's own startup/root-of-trust wiring. It is
 not a general exception for product, tenant, repository, lane, provider,
-workflow, or operator configuration.
+workflow, or admin configuration.
 
 Launchplane-owned self-management workflows may carry the fixed
 `product="launchplane"` value only when the paired service route itself rejects
@@ -46,7 +46,7 @@ other products and authorizes the request against Launchplane's own product and
 service context. This exception does not apply to product-repo workflows,
 reusable workflow defaults, or routes that accept product-owned runtime targets.
 
-Ingress route workflows may forward operator-supplied product, context, domain,
+Ingress route workflows may forward admin-supplied product, context, domain,
 and edge-endpoint intent to Launchplane. They must not carry fixed canary target
 topology or GitHub-variable-backed product/context authority in workflow code.
 
@@ -54,24 +54,24 @@ topology or GitHub-variable-backed product/context authority in workflow code.
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Database connectivity                     | `LAUNCHPLANE_DATABASE_URL`                                                                                                                                                      | Bootstrap env                    | Required before Launchplane can read DB-backed config.                                                                                                                                                                                                                                                                                |
 | Secret decryption root/key-ring bootstrap | `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` or future platform-secret references                                                                                                        | Bootstrap env or platform secret | Minimal root-of-trust needed to decrypt DB-backed managed-secret versions before the secret store is usable. It may identify active and historical decryption roots by non-secret key id, but must not become product/runtime secret authority, provider credential fallback, or checked-in key catalog.                              |
-| Authz bootstrap                           | `LAUNCHPLANE_POLICY_TOML`, `LAUNCHPLANE_POLICY_B64`, `LAUNCHPLANE_POLICY_FILE`                                                                                                  | Minimal bootstrap env/file       | Root of trust for first start and DB policy repair only. Live product/workflow grants are DB-backed authz policy records. Existing name-only rules remain readable until managed reconciliation adopts or retires them, but every desired GitHub Actions managed rule must include immutable repository and owner IDs.                |
-| Bootstrap admin emails                    | `LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS`                                                                                                                                            | Bootstrap env                    | First-start GitHub human admin recovery only, before a DB-backed `github_humans` rule exists. Not a production identity authority and not a place for product, tenant, lane, provider, or operator assignment lists.                                                                                                                  |
-| Future OIDC identity provider wiring      | OIDC issuer or discovery endpoint, expected audience, Launchplane client id, client secret or managed platform secret reference, session-signing root                           | Bootstrap env or platform secret | Boundary shape only for a future Keycloak or comparable OIDC slice. Required so Launchplane can validate provider tokens before DB-backed records are reachable. Live realms, users, groups, service clients beyond Launchplane's own client wiring, grants, OpenFGA tuples, and operator memberships are not bootstrap authority.    |
+| Authz bootstrap                           | `LAUNCHPLANE_POLICY_TOML`, `LAUNCHPLANE_POLICY_B64`, `LAUNCHPLANE_POLICY_FILE`                                                                                                  | Minimal bootstrap env/file       | Root of trust for first start and DB policy repair only. Live product/workflow grants are DB-backed authz policy records. Existing name-only rules remain readable until managed reconciliation adopts or retires them, but every desired GitHub Actions managed rule must include immutable repository and repository owner IDs.     |
+| Bootstrap admin emails                    | `LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS`                                                                                                                                            | Bootstrap env                    | First-start GitHub human admin recovery only, before a DB-backed `github_humans` rule exists. Not a production identity authority and not a place for product, tenant, lane, provider, or admin assignment lists.                                                                                                                     |
+| Future OIDC identity provider wiring      | OIDC issuer or discovery endpoint, expected audience, Launchplane client id, client secret or managed platform secret reference, session-signing root                           | Bootstrap env or platform secret | Boundary shape only for a future Keycloak or comparable OIDC slice. Required so Launchplane can validate provider tokens before DB-backed records are reachable. Live realms, users, groups, service clients beyond Launchplane's own client wiring, grants, OpenFGA tuples, and admin memberships are not bootstrap authority.       |
 | Launchplane self image ref                | `DOCKER_IMAGE_REFERENCE`                                                                                                                                                        | Service target env               | Needed for Launchplane self-deploy and rollback posture.                                                                                                                                                                                                                                                                              |
-| Process wiring                            | `LAUNCHPLANE_SERVICE_HOST`, `LAUNCHPLANE_SERVICE_PORT`, `LAUNCHPLANE_SERVICE_AUDIENCE`, `LAUNCHPLANE_STATE_DIR`, `LAUNCHPLANE_APP_ROOT`, `LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK`, `LAUNCHPLANE_ORDINARY_AGENT_WORKER_REPLICAS` | Service target env               | Runtime/process wiring, not product config. `LAUNCHPLANE_STATE_DIR` is a non-authoritative runtime directory; service persistence still requires `LAUNCHPLANE_DATABASE_URL`. The external compose network value is operator-owned provider wiring for Launchplane's own deployed services and must not encode product/lane authority. The ordinary-worker count is constrained to a reviewed absent, zero, or one topology change. |
+| Process wiring                            | `LAUNCHPLANE_SERVICE_HOST`, `LAUNCHPLANE_SERVICE_PORT`, `LAUNCHPLANE_SERVICE_AUDIENCE`, `LAUNCHPLANE_STATE_DIR`, `LAUNCHPLANE_APP_ROOT`, `LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK`, `LAUNCHPLANE_ORDINARY_AGENT_WORKER_REPLICAS` | Service target env               | Runtime/process wiring, not product config. `LAUNCHPLANE_STATE_DIR` is a non-authoritative runtime directory; service persistence still requires `LAUNCHPLANE_DATABASE_URL`. The external compose network value is admin-owned provider wiring for Launchplane's own deployed services and must not encode product/lane authority. The ordinary-worker count is constrained to a reviewed absent, zero, or one topology change.    |
 | Every Code webhook ingress secret         | `LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET`                                                                                                                                  | Bootstrap env or platform secret | Required before unauthenticated GitHub webhook ingress can trust the request body. Store it outside repository config.                                                                                                                                                                                                                |
 | Manager-preview webhook ingress secret    | `LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET`                                                                                                                             | Bootstrap env or platform secret | Required before the manager-preview GitHub webhook route can trust comment and pull-request lifecycle deliveries. Keep it route-specific, configure the matching GitHub webhook outside repository config, and never reuse the Every Code webhook secret.                                                                             |
 | Every Code worker bearer token            | `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN`                                                                                                                                           | Bootstrap env or platform secret | Shared by the Launchplane service and local worker to authorize worker read/claim/status routes. Store it outside repository config.                                                                                                                                                                                                  |
 | Engineering review worker identity        | `LAUNCHPLANE_ENGINEERING_REVIEW_WORKER_RUNTIME_ID`, `LAUNCHPLANE_ENGINEERING_REVIEW_WORKER_HOST`                                                                                | Service target env               | Server-owned identity bound to the Every Code worker token for engineering-review list/claim/start/fail routes. Worker requests cannot select or override these values; they must match the active DB-backed review authority.                                                                                                        |
 | Every Code claim-comment GitHub identity  | `LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN`, optional `LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR`                                                                                           | Bootstrap env or platform secret | Used only by the local Every Code worker when it posts the public claim comment on a GitHub issue. The worker verifies the token actor before posting and fails closed instead of falling back to active local `gh` credentials.                                                                                                      |
 | Terminal-agent read bearer token          | `LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN`, `LAUNCHPLANE_TERMINAL_AGENT_SUBJECT`, `LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL`                                                         | Bootstrap env or platform secret | Shared by the Launchplane service and a trusted local terminal agent for redacted `GET` context reads and, after a separately reviewed managed-policy installation, inert ordinary-agent enrollment proposals. Store it outside repository config and keep it distinct from Every Code worker credentials.                                                                                                                               |
-| Local-operator write bearer token         | `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN`, `LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT`, `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL`                                                              | Bootstrap env or platform secret | Shared by the Launchplane service and trusted local owner automation for routine reason-bearing operator mutations. Exact authority is DB-backed by `local_operators` authz policy rules. Store it outside repository config and keep it distinct from read-only terminal-agent credentials.                                          |
-| Local-admin write bearer token            | `LAUNCHPLANE_LOCAL_ADMIN_TOKEN`, `LAUNCHPLANE_LOCAL_ADMIN_SUBJECT`, `LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL`                                                                       | Bootstrap env or platform secret | Shared by the Launchplane service and trusted local owner automation for rare privileged mutations. Exact authority is DB-backed by `local_admins` authz policy rules; the token alone does not grant blanket access. Store it outside repository config and load it only for deliberate escalation.                                  |
+| `local_operator` write bearer token       | `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN`, `LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT`, `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL`                                                              | Bootstrap env or platform secret | Shared by the Launchplane service and trusted local Director automation for routine reason-bearing admin mutations. Exact authority is DB-backed by `local_operators` authz policy rules. Store it outside repository config and keep it distinct from read-only terminal-agent credentials.                                          |
+| Local-admin write bearer token            | `LAUNCHPLANE_LOCAL_ADMIN_TOKEN`, `LAUNCHPLANE_LOCAL_ADMIN_SUBJECT`, `LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL`                                                                       | Bootstrap env or platform secret | Shared by the Launchplane service and trusted local Director automation for rare privileged mutations. Exact authority is DB-backed by `local_admins` authz policy rules; the token alone does not grant blanket access. Store it outside repository config and load it only for deliberate escalation.                               |
 
 The Every Code and manager-preview rows above describe current compatibility
-wiring. They do not make either name the target client or Owner-decision model.
+wiring. They do not make either name the target client or Client-decision model.
 Issue `#2240` replaces the target path with client-neutral delegated sessions and
-trusted Launchplane Owner acceptance while preserving current bootstrap facts
+trusted Launchplane Client acceptance while preserving current bootstrap facts
 until migration and rollback coverage are proved.
 
 The Launchplane self-deploy workflow has a manual `omit_every_code_env`
@@ -80,9 +80,9 @@ accept the Every Code env keys. Leave it unset for normal deploys so the service
 and worker keep the shared token/webhook secret in sync.
 
 The manual `omit_terminal_agent_env` compatibility input omits terminal-agent
-read credentials. Owner-agent write credentials use the separate
+read credentials. Director-agent write credentials use the separate
 `omit_owner_agent_env` compatibility input. Leave both unset for normal deploys
-after the service accepts terminal-agent, local-operator, and local-admin keys.
+after the service accepts terminal-agent, `local_operator`, and local-admin keys.
 
 The manual `omit_npmplus_env` compatibility input removes NPMplus service env
 keys from the deployed Launchplane target instead of only skipping new writes.
@@ -107,7 +107,7 @@ real destination authority.
 ### DB Authoritative
 
 These values are live mutable control-plane config and should resolve from
-Launchplane records/secrets instead of repo files or operator-local env.
+Launchplane records/secrets instead of repo files or admin-local env.
 
 | Class                                                    | Current surface                                                                                                                                                                                                   | Final authority                                 | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -116,7 +116,7 @@ Launchplane records/secrets instead of repo files or operator-local env.
 | Work graph GitHub source configuration                   | Transitional `LAUNCHPLANE_WORK_GRAPH_PROJECT_*` and `LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_*` service env                                                                                                            | DB-backed Launchplane work-graph source records | Project identity, repository inventory, source enablement, and read limits are mutable operational configuration, not bootstrap. Issue #2193 owns migration and retirement of the transitional env authority. GitHub credentials remain managed/platform secrets.                                                                                                                                                                     |
 
 The tenant-admission row describes current runtime authority. The reconciled
-target retires manager-preview admission in favor of narrow Owner acceptance plus
+target retires manager-preview admission in favor of narrow Client acceptance plus
 separately authorized Launchplane delivery; it must not be read as already live.
 
 | Class                                      | Current surface(s)                                                                         | Final authority                                                                                               | Notes                                                                                                                                                                                                                                                       |
@@ -124,13 +124,13 @@ separately authorized Launchplane delivery; it must not be read as already live.
 | Dokploy credentials                        | Launchplane managed secrets (`DOKPLOY_HOST`, `DOKPLOY_TOKEN`)                              | Launchplane managed secrets                                                                                   | Fail closed when the shared store does not have both bindings.                                                                                                                                                                                              |
 | Dokploy edge upstream endpoints            | `launchplane_edge_endpoints`                                                               | DB-backed Launchplane edge endpoint records                                                                   | Server identity is human-readable, but provider upstreams passed to NPMplus must be stored IP addresses. Product repos and ad hoc workflow inputs are not durable topology authority.                                                                       |
 | Ingress canary routes                      | `launchplane_ingress_canary_routes`                                                        | DB-backed Launchplane ingress canary route records                                                            | Stores canary domain, expected provider host id, certificate id, and edge endpoint key. Workflows select a canary key and do not pass route topology.                                                                                                       |
-| Environment route bindings                 | `launchplane_route_bindings`                                                               | DB-backed Launchplane route binding records                                                                   | Joins a product/context/instance to desired domains, runtime target summary, ingress termination, and TLS owner. Provider-specific host ids, certificate ids, target ids, edge IPs, and provider payloads are evidence only, not neutral authority.         |
+| Environment route bindings                 | `launchplane_route_bindings`                                                               | DB-backed Launchplane route binding records                                                                   | Joins a product/context/instance to desired domains, runtime target summary, ingress termination, and the party that manages TLS. Provider-specific host ids, certificate ids, target ids, edge IPs, and provider payloads are evidence only, not neutral authority. |
 | Private health endpoint URLs               | `launchplane_private_health_endpoints`                                                     | DB-backed Launchplane private health endpoint records                                                         | Product profiles declare private monitoring intent by check name and optional endpoint key; mutable private URLs live in Launchplane runtime records, not repos or workflow defaults.                                                                       |
 | Runtime environment values                 | Runtime-environment records                                                                | Launchplane runtime-environment records                                                                       | Includes shared, context, and instance-scoped values.                                                                                                                                                                                                       |
 | Secret-shaped runtime keys                 | Managed runtime secrets overlay                                                            | Launchplane managed secrets                                                                                   | Includes `*_PASSWORD`, `*_TOKEN`, `*_SECRET`, `*_KEY`. Secret versions carry non-secret key-id and rotation metadata in Launchplane records, not service-host env or repo files.                                                                            |
 | Runtime key-safety policy                  | `launchplane_runtime_key_safety_policies`                                                  | Launchplane runtime key-safety policy records                                                                 | Classifies managed secret binding keys by runtime class and scope. Requests carry metadata only and cannot replace secret values.                                                                                                                           |
-| Relationship authorization tuples/grants   | DB-backed authz policy records; future OpenFGA tuple store if adopted                      | Launchplane records during migration, then authorization provider state plus Launchplane audit/import records | Checked-in model files may define generic relation schemas and validators only. Real tuples, grants, products, repos, branches, domains, lanes, provider targets, operators, clients, groups, and assignments are never repo or workflow-default authority. |
-| Ship mode overrides                        | `DOKPLOY_SHIP_MODE`, `DOKPLOY_SHIP_MODE_<CTX>_<INSTANCE>`                                  | Launchplane runtime-environment records                                                                       | Mutable operator behavior, not bootstrap.                                                                                                                                                                                                                   |
+| Relationship authorization tuples/grants   | DB-backed authz policy records; future OpenFGA tuple store if adopted                      | Launchplane records during migration, then authorization provider state plus Launchplane audit/import records | Checked-in model files may define generic relation schemas and validators only. Real tuples, grants, products, repos, branches, domains, lanes, provider targets, admins, clients, groups, and assignments are never repo or workflow-default authority.    |
+| Ship mode overrides                        | `DOKPLOY_SHIP_MODE`, `DOKPLOY_SHIP_MODE_<CTX>_<INSTANCE>`                                  | Launchplane runtime-environment records                                                                       | Mutable operational behavior, not bootstrap.                                                                                                                                                                                                                |
 | Preview routing/config                     | `LAUNCHPLANE_PREVIEW_BASE_URL`                                                             | Launchplane runtime-environment records                                                                       | Shared control-plane-owned runtime value.                                                                                                                                                                                                                   |
 | GitHub workflow runtime integration values | `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET`                                                    | Launchplane runtime-environment records and managed secrets                                                   | Current docs already classify these as DB-backed target state.                                                                                                                                                                                              |
 | Product/tenant runtime env                 | Odoo runtime values, tenant-specific env keys                                              | Launchplane runtime-environment records and managed secrets                                                   | Includes shared and per-instance overlays.                                                                                                                                                                                                                  |
@@ -153,8 +153,8 @@ These stay in git, but not as live mutable runtime authority.
 Checked-in workflows and repo metadata may route to Launchplane, run quality
 gates, and document examples. They must not define the real product catalog,
 repo catalog, lane topology, target inventory, domain inventory, authz grants,
-operator identities, or mutable runtime values used by production behavior.
-Product-repo deploy workflows may forward operator-owned GitHub variables and
+admin identities, or mutable runtime values used by production behavior.
+Product-repo deploy workflows may forward admin-owned GitHub variables and
 fresh image build outputs into Launchplane request payloads, but fixed image
 references, provider targets, domains, and secret values remain outside the
 checked-in workflow authority boundary.
@@ -167,7 +167,7 @@ records or bootstrap env.
 
 | Class                                        | Final location                                    | Notes                                                                |
 | -------------------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------- |
-| Legacy operator env file                     | `~/.config/launchplane/dokploy.env`               | Not a supported Launchplane input.                                   |
+| Legacy admin env file                        | `~/.config/launchplane/dokploy.env`               | Not a supported Launchplane input.                                   |
 | Legacy runtime environments file             | `~/.config/launchplane/runtime-environments.toml` | Not a supported Launchplane input.                                   |
 | Legacy local policy copies after replacement | `~/.config/launchplane/...`                       | Not a supported Launchplane input once bootstrap policy is replaced. |
 
@@ -249,7 +249,7 @@ authority or supported import compatibility.
 - Moving real values from Python into checked-in TOML, JSON, YAML, workflow
   defaults, or repo metadata does not satisfy this boundary; it only moves the
   violation. Use Launchplane records, managed secrets, or explicit
-  operator-supplied input instead.
+  admin-supplied input instead.
 
 ## Inspection
 
@@ -293,7 +293,7 @@ existed at the merge base remain in the report as
 gate. If the gate cannot resolve `origin/main` or `main` and has no dirty files
 to compare against `HEAD`, it fails closed instead of returning an empty green
 report. Allowed docs, tests, schema examples, Launchplane self-bootstrap wiring,
-operator-supplied inputs, and thin connector mechanics keep explicit allow
+admin-supplied inputs, and thin connector mechanics keep explicit allow
 reasons and do not fail the default gate. The `product-repo` profile also
 rejects test fixtures that carry Launchplane lifecycle authority such as authz,
 runtime-environment, provider target, target-id, managed-secret, route-batch, or
@@ -302,7 +302,7 @@ reintroduced
 Launchplane-owned authz, route, provider-target, domain, runtime-environment,
 managed-secret, topology, or workflow-default fixtures before merge.
 
-When operators need to inspect or mutate tracked Dokploy target records, use the
+When admins need to inspect or mutate tracked Dokploy target records, use the
 DB-backed Launchplane CLI surface rather than editing any repo-local file:
 
 ```bash
@@ -319,9 +319,9 @@ The mutation commands in that family edit the shared
 `launchplane_dokploy_targets` and provider-target record sets directly, so they
 require `--allow-direct-db-mutation` and are explicit local/bootstrap repair
 only. Routine shared/live target setup should use the deployed service route or
-operator workflow.
+admin workflow.
 Product retirement does not add checked-in product or provider authority. The
-workflow accepts operator-supplied product, instance, target digest, reason,
+workflow accepts admin-supplied product, instance, target digest, reason,
 issue, reviewed plan, and idempotency values; the service resolves all real
 context, provider target, runtime, and secret authority from DB-backed records.
 Authorization managed-set secrets are transitional desired input routed through

@@ -56,7 +56,7 @@ splitting or test deletion.
 
 ## Product Decision
 
-Launchplane is a product operations control plane. The primary operator job is
+Launchplane is a product operations control plane. The primary admin job is
 to understand one product's testing, production, previews, configuration,
 health, and next safe action without understanding provider plumbing.
 
@@ -66,7 +66,7 @@ Authentication, API transport, formatting, trust-state primitives, and theme
 tokens may survive only where they fit the product model. Handwritten API
 contracts do not survive as authority.
 
-See [operator-experience.md](operator-experience.md) for the accepted journeys,
+See [`operator-experience.md`](operator-experience.md) for the accepted journeys,
 information architecture, action taxonomy, diagnostics boundary, empty states,
 and responsive requirements.
 
@@ -161,7 +161,7 @@ remain valuable. Real PostgreSQL proof is owned by `#1687`.
 
 ### Modularity
 
-`#1048` remains the focused modularity owner. It is intentionally blocked by the
+`#1048` remains the focused modularity issue. It is intentionally blocked by the
 mutation and persistence audits. The first safe extraction should follow stable
 contract boundaries: generated OpenAPI read contracts, read-only route-family
 registration, shared response/schema helpers, then one audited domain/provider
@@ -195,7 +195,7 @@ brief, topology projection, and generated read contracts are ready.
    modularity extraction (`#1048`).
 6. Build and browser-review the clean-slate UI (`#1702`–`#1705`, `#1701`).
 7. Complete root-key rotation and immutable action pinning (`#1683`, `#1686`),
-   re-run the security, production-parity, and operator-journey reviews, and
+   re-run the security, production-parity, and admin-journey reviews, and
    close `#1672` only when every confirmed finding is fixed or explicitly
    accepted with durable rationale.
 

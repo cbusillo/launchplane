@@ -747,7 +747,7 @@ function TlsEvidence({
             "Not recorded"
           }
         />
-        <EvidenceFact label="TLS owner" value={humanize(recordedTls.owner)} />
+        <EvidenceFact label="TLS managed by" value={humanize(recordedTls.owner)} />
         <EvidenceFact label="Terminator" value={humanize(recordedTls.terminator)} />
       </dl>
       {tlsDomains.length ? (

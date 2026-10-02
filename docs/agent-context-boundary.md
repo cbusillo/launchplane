@@ -14,7 +14,7 @@ request next.
 
 The checked `contracts/agent-operator-contract.json` artifact is the
 machine-readable operation, workflow, lifecycle, and safety projection for
-external agent tooling. See [agent-operator-contract.md](agent-operator-contract.md)
+external agent tooling. See [`agent-operator-contract.md`](agent-operator-contract.md)
 for generation, normalization, freshness, and ownership rules. The artifact is
 routing and safety evidence only; it never becomes live runtime authority.
 
@@ -49,7 +49,7 @@ Agent context callers are identified as compact agent consumers:
   route after an exact managed policy installation. Policy still scopes products,
   contexts, and read actions; enrollment authority creates no credential,
   session, activation, or worker start.
-- `owner_local_agent`: trusted local operator using
+- `owner_local_agent`: trusted local admin using
   `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` from
   `~/.config/launchplane/local-operator.env`. This identity is limited by exact
   DB-backed `local_operators` authz policy rules and must include a reason for
@@ -57,7 +57,7 @@ Agent context callers are identified as compact agent consumers:
   recorded matching dry-run.
 - `owner_local_agent`: trusted local admin using `LAUNCHPLANE_LOCAL_ADMIN_TOKEN`.
   This identity is limited by exact DB-backed `local_admins` authz policy rules
-  and is reserved for deliberate escalation, not routine owner-agent writes.
+  and is reserved for deliberate escalation, not routine Director-agent writes.
 - `limited_remote_user`: authenticated GitHub human with read-only role. This
   profile fails closed to read and safe-write action families even if a policy
   rule is accidentally broad.
@@ -82,7 +82,7 @@ It aggregates existing read models into named sections:
 - Every Code summary
 - preview readiness
 - exact tenant admission evaluation when the caller supplies the complete
-  product, context, numeric repository and owner IDs, repository, pull-request
+  product, context, numeric repository and repository owner IDs, repository, pull-request
   number, head SHA, and base branch
 
 Each section reports `available`, `unauthorized`, or `unavailable`. The endpoint
@@ -92,7 +92,7 @@ read models' redaction, freshness, and provenance fields.
 The optional `tenant_admission` section reports exact pull-request facts,
 repository classification, GitHub mergeability, and required technical-check
 readiness. Retired manager, waiver, and maintenance admission paths no longer
-qualify a merge; current results have empty paths and human actions. Site Owner
+qualify a merge; current results have empty paths and human actions. Client
 decisions use the separate product-review and release-checklist flows. Incomplete
 candidate queries fail rather than falling back to repository-name or file
 heuristics. Section-level authorization or provider failure leaves the other
@@ -146,8 +146,8 @@ to submit manually copied pull-request IDs, policy hashes, or routine reasons,
 or trigger another policy proposal/apply cycle for each internal route.
 
 Execution still revalidates scope, expiry, revocation, technical evidence,
-Owner acceptance when product experience changes, idempotency, and effect
-fences. The delegation cannot mint broader authority or manufacture Owner
+Client acceptance when product experience changes, idempotency, and effect
+fences. The delegation cannot mint broader authority or manufacture Client
 acceptance. This delegated design is retired (see `DIRECTION.md`); the current
 intent and route-specific checks above remain authoritative.
 
@@ -159,7 +159,7 @@ webhook delivery ids, issue bodies, or prompt text. Managed secret evidence is
 metadata-only: binding keys, runtime destinations, policy ids/digests, and safe
 finding codes.
 
-Child-process failures that reach durable records, API responses, or operator
+Child-process failures that reach durable records, API responses, or admin
 output must use a stable error code, a correlation id, and a bounded redacted
 detail. Do not persist or log raw child-process stdout or stderr; logs may retain
 only the safe error code, correlation id, and exit status needed for diagnosis.
@@ -172,7 +172,7 @@ carry compact evidence with source links and trust/freshness states such as
 
 ## Operations
 
-- Use the deployed Launchplane service API or operator UI for shared and
+- Use the deployed Launchplane service API or Launchplane UI for shared and
   production live mutations.
 - Keep service-host environment values bootstrap-only unless a specific doc
   says otherwise.

@@ -1,9 +1,9 @@
 # Feedback continuation contract
 
 Issue [#2328](https://github.com/cbusillo/launchplane/issues/2328) owns the approved
-feedback continuation plan. The Owner selected implementation with a supported
-operator recovery path required before production enablement. Enabling it in
-production needs new grants, which are an operator decision, and its separate
+feedback continuation plan. The Director selected implementation with a supported
+admin recovery path required before production enablement. Enabling it in
+production needs new grants, which are a Director decision, and its separate
 rollout approvals.
 
 ## Implemented foundation
@@ -53,7 +53,7 @@ embed the current request-action policy provenance and immutable canonical
 PR-open observation. Transactional minting validates acceptance against the
 locked terminal request, including lifecycle, fence, state, host and retained PR.
 Operation evidence identifies a fresh lifecycle,
-execution fence, lease owner and launch nonce. SQL persistence checks the linked
+execution fence, lease holder and launch nonce. SQL persistence checks the linked
 records and rejects changed replays. It does not perform the positive lifecycle
 transition in this foundation slice.
 
@@ -85,7 +85,7 @@ The foundation does not complete feedback resume. Remaining service work include
 canonical managed API ingestion, revision disposition/ordering, explicit closure
 observation, transactional resume allocation, monotonic fences and a
 separate crash-recovery budget, versioned callbacks, gate registration/release,
-receipt authentication, cancellation and evidence-bound operator recovery.
+receipt authentication, cancellation and evidence-bound admin recovery.
 
 Legacy feedback has no verified authority; it cannot be converted by inferring
 IDs from names. New resume-owned rows must be excluded from the legacy pending
@@ -95,7 +95,7 @@ budget forward even when it rotates a lifecycle ID; only a deliberate new
 continuation resets that budget.
 
 Production acceptance requires the complete service/worker protocol, a supported
-audited operator recovery path, and an actual session-side exact-handoff receipt
+audited admin recovery path, and an actual session-side exact-handoff receipt
 capability. Unknown requests must be resolvable through reviewed service-owned
 evidence and authority; no direct DB edit or force-launch is a supported escape.
 Service contracts must deploy before compatible workers, with exact DB grants

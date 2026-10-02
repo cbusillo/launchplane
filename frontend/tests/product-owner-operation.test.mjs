@@ -47,8 +47,8 @@ test("the preview shows the resolved login and id the server returned", () => {
     },
   });
   assert.ok(plan);
-  assert.equal(productOwnerLabel(plan.before), "No Owner set");
-  assert.equal(productOwnerPlanSummary(plan), "Set the Owner to Site-Owner (id 4242).");
+  assert.equal(productOwnerLabel(plan.before), "No Client set");
+  assert.equal(productOwnerPlanSummary(plan), "Set the Client to Site-Owner (id 4242).");
 });
 
 test("clearing and unchanged previews read plainly, and an unreadable result is refused", () => {
@@ -60,10 +60,10 @@ test("clearing and unchanged previews read plainly, and an unreadable result is 
   const unchanged = productOwnerPlanFromResponse({
     result: { changed: false, owner_before: owner, owner_after: owner },
   });
-  assert.equal(productOwnerPlanSummary(cleared), "Remove the Owner Site-Owner (id 4242).");
+  assert.equal(productOwnerPlanSummary(cleared), "Remove the Client Site-Owner (id 4242).");
   assert.equal(
     productOwnerPlanSummary(unchanged),
-    "No change. The Owner is already Site-Owner (id 4242).",
+    "No change. The Client is already Site-Owner (id 4242).",
   );
   assert.equal(productOwnerPlanFromResponse({ result: null }), null);
   assert.equal(productOwnerPlanFromResponse({ result: { status: "ok" } }), null);

@@ -103,7 +103,7 @@ export function AppShell({
           </span>
           <span>
             <strong>Launchplane</strong>
-            <small>Operator control plane</small>
+            <small>Control plane</small>
           </span>
         </AppLink>
 
@@ -183,7 +183,7 @@ export function AppShell({
           </span>
           <span>
             <strong>{identity.name || identity.login}</strong>
-            <small>{identity.role === "admin" ? "Administrator" : "Read-only operator"}</small>
+            <small>{identity.role === "admin" ? "Administrator" : "Read-only"}</small>
           </span>
         </div>
       </aside>
@@ -270,14 +270,14 @@ export function AppShell({
               )}
             </button>
             <details className="account-menu">
-              <summary aria-label="Open operator account menu">
+              <summary aria-label="Open account menu">
                 <CircleUserRound size={18} aria-hidden="true" />
                 <span>{identity.login}</span>
               </summary>
               <div className="account-popover">
                 <strong>{identity.name || identity.login}</strong>
-                <span>{identity.email || "GitHub-authenticated operator"}</span>
-                <span>{identity.role === "admin" ? "Administrator" : "Read-only operator"}</span>
+                <span>{identity.email || "GitHub-authenticated user"}</span>
+                <span>{identity.role === "admin" ? "Administrator" : "Read-only"}</span>
                 <button disabled={signingOut} onClick={onLogout} type="button">
                   <LogOut size={15} aria-hidden="true" />
                   {signingOut ? "Signing out…" : "Sign out"}

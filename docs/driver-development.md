@@ -7,7 +7,7 @@ title: Driver Development
 Launchplane drivers are the backend-owned boundary for product lifecycle
 behavior. A driver declares what a product can do, validates requests, executes
 or delegates provider work, writes durable records, and exposes read models for
-operators and future UI actions.
+admins and future UI actions.
 
 Drivers exist to move lifecycle knowledge out of product repos, not to rename
 product-specific hard-coding inside Launchplane. The common contract is:
@@ -95,7 +95,7 @@ Generic-web deploy resolves and executes runtime targets through a deploy
 provider adapter. The default adapter is Dokploy, but generic-web orchestration
 must depend on the adapter protocol rather than importing provider clients
 directly. Deployment records must carry the adapter's provider identity,
-provider target reference, and delegated executor so operator evidence stays
+provider target reference, and delegated executor so admin evidence stays
 accurate when a future deploy provider is introduced.
 
 `control_plane/http_routes/generic_web.py` owns the Generic Web FastAPI edge and
@@ -106,7 +106,7 @@ modules; do not add Generic Web route logic back to `http_app.py`.
 
 ## Capability Design
 
-Use capability names to describe operator-visible behavior, not implementation
+Use capability names to describe admin-visible behavior, not implementation
 mechanics. Prefer names like these:
 
 - `stable_deploy`
@@ -122,7 +122,7 @@ mechanics. Prefer names like these:
 
 Provider details such as Dokploy application IDs, endpoint mode, registry
 credentials, or deployment job IDs belong behind adapters and evidence records.
-Expose them in read models only when operators need them to decide or repair
+Expose them in read models only when admins need them to decide or repair
 state.
 
 ## Route Design
@@ -180,7 +180,7 @@ Provider adapters may land before a full driver route when the first useful
 slice is proving an external control-plane boundary. Keep these adapters small,
 typed, and tested with mocked provider calls. Do not read secrets from ad hoc
 local files inside the adapter; callers must pass credentials from Launchplane
-managed secret or operator configuration boundaries.
+managed secret or admin configuration boundaries.
 
 The NPMplus adapter in `control_plane/npmplus.py` is the first ingress-provider
 slice. It models session-cookie authentication, proxy-host payloads, and the
@@ -196,18 +196,18 @@ provider mutation authorization. The service resolves an ingress provider
 adapter for route execution; the default provider is NPMplus. The default
 provider adapter constructs its client from environment keys named
 `LAUNCHPLANE_NPMPLUS_BASE_URL`, `LAUNCHPLANE_NPMPLUS_IDENTITY`, and
-`LAUNCHPLANE_NPMPLUS_SECRET`; do not commit real values or local operator
+`LAUNCHPLANE_NPMPLUS_SECRET`; do not commit real values or local admin
 overrides.
 Ingress audit records must persist the adapter's provider identity explicitly;
-do not rely on a provider-specific model default for operator evidence.
+do not rely on a provider-specific model default for admin evidence.
 
 Dokploy-backed ingress routes should use a DB-backed edge endpoint record instead
 of passing raw upstream topology through product workflows. The endpoint record
-uses a human-friendly `endpoint_key` and `server_name` for operator review, but
+uses a human-friendly `endpoint_key` and `server_name` for admin review, but
 the `upstream_host` stored for NPMplus must be an IP address. The service
 resolves `route.edge_endpoint_key` into `forward_scheme`, `forward_host`, and
 `forward_port` before calling NPMplus, and fails closed when the endpoint is
-missing or disabled. Raw `forward_host` remains an explicit operator override;
+missing or disabled. Raw `forward_host` remains an explicit admin override;
 it is not product-repo-owned topology authority.
 
 The matching CLI entrypoint is service-mediated:
@@ -246,7 +246,7 @@ Use `--identity-access-send-basic-auth` only with `--identity-access-provider au
 The legacy `--auth-request` flag remains available for provider compatibility,
 but mixing it with a conflicting identity/access provider fails closed.
 
-Operators can also use the `Ingress Route Dry Run` GitHub workflow for a
+Admins can also use the `Ingress Route Dry Run` GitHub workflow for a
 service-mediated canary plan through GitHub OIDC. The workflow accepts the
 product, context, domain, upstream target, existing certificate id or `new` for
 provider-managed issuance, expected
@@ -257,7 +257,7 @@ and an explicit mutation path. The typed identity/access inputs build the same
 `identity_access` route binding as the CLI and fail closed if they conflict with
 legacy `npmplus_auth_request` values in route options.
 
-The `Ingress Route Apply` workflow is the generic operator mutation path for
+The `Ingress Route Apply` workflow is the generic admin mutation path for
 reviewed routes. It accepts `product`, `context`, a compact `route_json` desired
 state, an explicit idempotency key, and a confirmation phrase. It defaults to an
 update-only guard, but `expected_host_id` is optional for ordinary domain-matched
@@ -318,7 +318,7 @@ categories make identity/access drift visible without storing provider topology
 or secret values in the public contract. Keep this workflow canary-scoped until
 broader route ownership and approval UX are explicit.
 
-Operators with `ingress_route.plan` for the target product/context can inspect
+Admins with `ingress_route.plan` for the target product/context can inspect
 those audit records through the native FastAPI service reads. List records with
 `GET /v1/ingress/route-audits/records?product=launchplane&context=example-prod`
 and optional `status`, `mode`, `provider_host_id`, `trace_id`,
@@ -336,7 +336,7 @@ temporary storage because records may include private route or provider details.
 Keep private provider identifiers and live topology in private infra docs;
 public Launchplane workflow inputs and artifacts should stay limited to
 sanitized record ids, trace ids, statuses, operation counts, and
-operator-selected filters.
+admin-selected filters.
 
 ## Product Repo Boundary
 

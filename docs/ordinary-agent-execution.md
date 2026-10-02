@@ -44,7 +44,7 @@ The older `proposed_ordinary_agent_v1` evidence models and their pure eligibilit
 result remain inert fixture contracts. They do not authenticate a caller or
 perform an effect. The generic authorization evaluator still ignores ordinary
 rules; the dedicated gateway and joined lifecycle checks enforce them. Existing
-human, workflow and operator identities retain their established behavior. The
+human, workflow and admin identities retain their established behavior. The
 new terminal enrollment proposer checks one current managed capability directly
 under schema v2/v3 rather than coercing v3 through a v2-only generic helper.
 
@@ -73,7 +73,7 @@ accepts either an explicit schema-v2-to-v3 proposal or, after a future migration
 an ordinary schema-v3-to-v3 reconcile. It recomputes the stored proposal and full
 candidate digests, derives one ordinary-agent rule and target, and records the
 installed schema and compiled handler/version support. The browser never asks the
-operator to search for or type policy, inventory, activation, rule, digest,
+admin to search for or type policy, inventory, activation, rule, digest,
 issue, or pull-request IDs, and it derives the bounded audit reason from the
 selected intent.
 The server-authored review names the project and branch, delivery expiry and
@@ -247,7 +247,7 @@ for a byte-identical replay, and conflicting same-ID results must never overwrit
 history. A public projection must
 redact policy provenance and collapse foreign/nonexistent target distinctions
 through an authorized self-read path. It does not reserve budget, authenticate a caller, check CI, consume
-Owner acceptance, or perform provider operations.
+Client acceptance, or perform provider operations.
 
 Recovery evidence distinguishes completed effects, partial completion, known
 budget exhaustion and unresolved provider outcomes. Unknown outcomes retain their observed reservations or fences and cannot claim
@@ -384,10 +384,10 @@ permission, App, installation and expiry evidence only; they never contain the
 private key or installation-token value.
 
 Enrollment can separately bind the exact current repository-inventory identity
-and inspect the configured App installation, immutable owner account and closed
+and inspect the configured App installation, immutable repository owner account and closed
 permission ceiling without minting a token. The inventory record supplies the
 repository ID and name; the App-JWT provider read proves the installation at that
-repository path and the same numeric owner. The resulting non-secret evidence
+repository path and the same numeric repository owner. The resulting non-secret evidence
 feeds the later atomic enrollment candidate builder, and provider reads complete
 before any enrollment write transaction begins. At effect time, the downscoped
 token response must still return the exact repository ID and name before the token
@@ -497,7 +497,7 @@ principals, while future admission still checks current policy, session, lease,
 and effect scope. There is no positive authentication cache. Legacy marker-only
 rows have no issuer provenance and cannot authenticate; authorized rotation or
 principal revocation remains available. The reserved ordinary prefix is rejected
-before all legacy terminal/operator/administrator token comparisons.
+before all legacy terminal/admin-bearer/administrator token comparisons.
 
 Issuance encrypts through the existing managed-secret key ring before taking DB
 locks. Enrollment idempotency commits the reviewed intent, including receiver
@@ -535,7 +535,7 @@ trace ID, suppressing SQL parameters and PostgreSQL failing-row detail.
 
 These source primitives and transaction proofs now have dedicated client and
 browser adapters. Installed private client support, ordinary effect/admission
-integration, and exact-scope live qualification remain separate prerequisites. Owner acceptance remains tied
+integration, and exact-scope live qualification remain separate prerequisites. Client acceptance remains tied
 to a PR preview and never requires reading code.
 
 
@@ -640,7 +640,7 @@ key is rejected. No client must compute a hash or search for an operation.
 
 `POST /v1/agent/ordinary-agent-enrollments/{operation_id}/claim` accepts the
 receiver capability in the Authorization header using the Bearer scheme. This
-route does not run legacy terminal, operator, human-cookie, or Actions identity
+route does not run legacy terminal, admin bearer, human-cookie, or Actions identity
 resolution. It accepts no JSON body or query input. A missing, malformed, or
 unavailable delivery uses a generic denial; errors never echo the submitted
 capability or a keyring/persistence exception. A successful response contains
@@ -658,7 +658,7 @@ recomputing the canonical operation ID or replaying a proposal with a new proof.
 Only a private client adapter may consume that response. The exported agent
 contract marks its sole supported surface as `private_agent_client` and requires
 private response custody evidence. It is not an LLM-visible generic tool result,
-operator UI response, or public agent context. The client must save the credential
+Launchplane UI response, or public agent context. The client must save the credential
 privately before reporting redacted readiness, reject authorization redirects,
 and reuse the same operation/receiver proof for delivery retries. Request logging,
 tracing, ingress rate limits, installed private client support and qualification
@@ -693,7 +693,7 @@ from verified setup facts rather than asking the administrator to type them.
 
 `POST /v1/agent/ordinary-agent-enrollments` accepts the compiled
 `ordinary-agent-enrollment` request from an authenticated terminal client with
-one current managed `ordinary_agent_enrollment.propose` capability. Operator or
+one current managed `ordinary_agent_enrollment.propose` capability. Admin bearer or
 administrator credentials do not substitute for that client identity. The
 request contains setup selectors and absolute lifetimes, never administrator,
 approval or provider-proof fields. It returns only its own public operation view
@@ -914,7 +914,7 @@ history, and genuine containment followed by the next landing and later cleanup.
 NORMAL uses non-strict required checks and truthful ancestry after the first
 landing. It changes no live protection and does not prove the real strict
 multiple-PR journey, which can require head refresh and readmission. Live
-installation access, runtime activation and engineering/owner-preview delivery
+installation access, runtime activation and engineering/Client-preview delivery
 remain separate qualification gates.
 
 Concrete controller snapshot and candidate-check readers query exact repository,
@@ -1129,7 +1129,7 @@ the service worker and does not activate delivery.
 For a proven `no_op_already_contained` candidate step, the ordinary landing
 executor uses one charged preparation and custody lease to read fresh evidence.
 It retains the actual PR lifecycle, including a closed or merged PR whose only
-queue ineligibility is that lifecycle. Current Owner, engineering, technical,
+queue ineligibility is that lifecycle. Current Client, engineering, technical,
 policy and controller gates still apply. The executor arms a one-use progress
 route, then invokes the existing controller checkpoint. The route builds the
 admission after that checkpoint renews its lease and commits the admission,

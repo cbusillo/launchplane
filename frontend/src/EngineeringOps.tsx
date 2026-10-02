@@ -117,7 +117,7 @@ export function EngineeringOpsRoute({
 function EngineeringOpsHub() {
   return (
     <EngineeringRouteFrame
-      description="Platform delivery evidence is separated from product health so operators can investigate queues, automation, and repository control without obscuring live products."
+      description="Platform delivery evidence is separated from product health so admins can investigate queues, automation, and repository control without obscuring live products."
       icon={Wrench}
       title="Platform delivery systems"
       view="hub"

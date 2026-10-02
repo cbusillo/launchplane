@@ -113,7 +113,7 @@ Each stable lane also needs DB-backed Dokploy target records:
 
 - `DokployTargetRecord` keyed by `context` plus `instance`
 - `target_type="application"`
-- `target_name` or `project_name` matching the operator-owned Dokploy route
+- `target_name` or `project_name` matching the admin-owned Dokploy route
 - `deploy_timeout_seconds` when the service needs a longer rollout window
 - `healthcheck_*` fields when Dokploy should independently monitor the service
 - `env` only for non-secret provider settings that Launchplane owns
@@ -129,7 +129,7 @@ Launchplane. Provider application creation for application targets is available 
 by default; with local `--apply --allow-direct-db-mutation`, it can create or
 reuse the Dokploy project and environment, create the application, and
 immediately persist the matching target records. Routine shared/live target
-setup should use the deployed service route or operator workflow instead. It
+setup should use the deployed service route or admin workflow instead. It
 still leaves runtime env, managed secrets, volumes, ports, and health behavior
 as explicit setup rather than inferred provider state.
 
@@ -296,7 +296,7 @@ Generic-web deploy records post-deploy evidence as `skipped` by default. A
 driver that inherits from generic-web can provide a product post-deploy
 extension for work that must happen after the provider deployment succeeds. That
 extension writes terminal post-deploy evidence without changing the underlying
-deploy status, so operators can distinguish "image deploy failed" from "image
+deploy status, so admins can distinguish "image deploy failed" from "image
 deploy passed but product maintenance failed".
 
 Odoo profiles that execute generic-web deploy or rollback apply use this
@@ -334,7 +334,7 @@ Required planner input:
 - destination `instance`, usually `prod`
 - `rollback_deployment_record_id`, pointing at the previous good deployment
   record for that same context and instance
-- optional `backup_record_id` when the product/operator requires backup-gate
+- optional `backup_record_id` when the product/admin requires backup-gate
   evidence before stable recovery
 
 The planner fails closed when the rollback target is missing, belongs to a
@@ -347,7 +347,7 @@ The produced `GenericWebRollbackPlanRecord` stores the selected immutable
 artifact identity, source git ref, planned generic-web deploy payload, backup
 gate evidence, target health evidence, blockers, and summary. A later explicit
 apply path can consume the ready plan and call the normal generic-web deploy
-route, but operators must not roll back by clicking Dokploy to a mutable tag or
+route, but admins must not roll back by clicking Dokploy to a mutable tag or
 changing product-repo workflow state. The durable rollback source remains the
 Launchplane deployment record and its immutable image digest.
 
@@ -364,7 +364,7 @@ host-managed deployment:
 - runtime port: `8787` when the bridge or health service is enabled
 - health path: a stable path such as `/health` or `/v1/health`
 - persistent volume: one Dokploy-mounted state/config path documented in the
-  product repo and represented by the operator-owned target configuration
+  product repo and represented by the admin-owned target configuration
 - secrets: Discord tokens and other credentials managed through Launchplane
   secret bindings, never passed in workflow payloads
 - deploy input: immutable image reference, preferably

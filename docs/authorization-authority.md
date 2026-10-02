@@ -11,12 +11,12 @@ reviewed requests, but they do not grant Launchplane permission by themselves.
 
 ## Who Can Do What
 
-- People sign in with GitHub and hold the `admin` or `read_only` role. Site
-  Owners hold the narrow `owner` role for their own site's decisions.
-- The [policy administrator](#the-policy-administrator) may do anything.
+- People sign in with GitHub and hold the `admin` or `read_only` role. Clients
+  hold the narrow `owner` role for their own site's decisions.
+- The [admin](#the-admin) may do anything.
 - Machine identities (workflows, agents, tokens, workers) hold only their
   enumerated grants.
-- Granting access is a stop boundary: an agent asks the operator before creating
+- Granting access is a stop boundary: an agent asks the Director before creating
   credentials, granting access, or changing who can merge (see
   [DIRECTION.md](../DIRECTION.md#stop-boundaries)). Do not create, edit,
   retarget, or dispatch a workflow, secret, or local helper to make a denied
@@ -29,29 +29,29 @@ actions. Structural immutable-ID human matching and exact authenticated worker
 matching produce policy provenance only; they create no grant, live route or
 execution authority. The webhook-specific human predicate does not synthesize a
 browser identity or expand browser role permissions. New live grants and worker
-enablement remain an operator decision and need their rollout approvals.
+enablement remain a Director decision and need their rollout approvals.
 
-Owner-control channel-session, issued-challenge, and shadow-verification event
+`owner-control` channel-session, issued-challenge, and shadow-verification event
 records are inert verification evidence, not authorization policy or grants.
 They define no HTTP action, route, managed set, workflow, secret, or production
 access path; every result persists `authority_state = 'inert'` and
 `authorizes_execution = false`. Adding these records does not make a
 self-asserted key, binding, or challenge authoritative.
-Service-only challenge derivation may fail closed unless the enrolled immutable
-GitHub owner ID has exactly one ID-only managed rule for the descriptor's
+Service-only challenge derivation may fail closed unless the enrolled admin's immutable
+GitHub ID has exactly one ID-only managed rule for the descriptor's
 existing approval action. That read does not define a new action, grant access,
 or authorize approval or execution; rules that also depend on mutable login,
 organization, team, or role selectors are intentionally insufficient without a
 live authenticated human identity.
 
 Administrator-enrollment records are likewise inert evidence only. They may
-record an owner-created, 30-minute opaque challenge and a later server-derived
-candidate GitHub identity that proved control, but they do not create a policy
-administrator, grant a policy action, change a managed set, or make any route
+record a Director-created, 30-minute opaque challenge and a later server-derived
+candidate GitHub identity that proved control, but they do not create an
+admin, grant a policy action, change a managed set, or make any route
 or workflow available. Every record is fixed to no authority. A future bridge
-may compile a final enrolled record into an owner-gated DB-native policy change
+may compile a final enrolled record into a Director-gated DB-native policy change
 only after separate design, review, apply, and read-back work, and installing it
-is an operator decision. Landing enrollment storage does not approve or
+is a Director decision. Landing enrollment storage does not approve or
 implement that bridge.
 
 Repository inventory follows the same authority boundary. Its
@@ -86,13 +86,13 @@ part of the effective administration chain. Do not interpret the workflow's
 existence, its protected environment, or its listing in repository metadata as
 approval to use GitHub for routine permission administration.
 
-## The Policy Administrator
+## The Admin
 
 One kind of rule already carries the power to change every grant: a
 `github_humans` rule named by immutable GitHub id with the `admin` role and
 `authz_policy_grant.write` on `launchplane`/`launchplane`, with no login,
 organization, team, or instance selector. A signed-in person matched by such a
-rule is the policy administrator, and the runtime allows them every action.
+rule is the admin, and the runtime allows them every action.
 Enumerating actions for that person added ceremony without adding protection,
 because they could already approve any change to their own grants.
 
@@ -102,7 +102,7 @@ definition of administrator. It does not widen anything else:
 - a rule that merely carries the `admin` role (for example the product-evidence
   read set, which lists one read action) stays exactly as narrow as it is
   written;
-- `read_only` people, site Owners, and every machine identity (workflows,
+- `read_only` people, Clients, and every machine identity (workflows,
   agents, tokens) are still limited to their enumerated grants;
 - the schema-version and instance-scope checks still apply to the administrator;
 - approval and worker reauthorization of privileged operations still require the
@@ -113,10 +113,10 @@ definition of administrator. It does not widen anything else:
 Treat `authorization_denied` as an authority result, not a credential-selection
 hint. Record the denied action, scope, and trace ID, then:
 
-- **A refused read** means the operator's agent is missing its standing read
+- **A refused read** means the Director's agent is missing its standing read
   grant. Reading is never a stop boundary, so report the missing grant to the
-  operator as a bug and continue with work that does not depend on it.
-- **A refused write, grant, or change** is a stop boundary. Ask the operator
+  Director as a bug and continue with work that does not depend on it.
+- **A refused write, grant, or change** is a stop boundary. Ask the Director
   once for that specific grant or change and continue with work that does not
   depend on it.
 
@@ -132,7 +132,7 @@ The reconciled target in
 For an ordinary engineering session, one small DB-backed capability set should
 authorize the coherent delegated job and its necessary diagnostic reads;
 session issuance and request narrowing should derive from that existing scope
-instead of requiring a new proposal/apply ceremony for every route. Site Owner
+instead of requiring a new proposal/apply ceremony for every route. Client
 acceptance remains product-decision evidence consumed by an independently
 authorized delivery request and never grants merge, deploy, configuration,
 secret, or policy-administration power.
@@ -206,7 +206,7 @@ The first DB-native read-only slice keeps those capabilities separate:
 The next read-only administration slice adds `authz_policy_health.read` for an
 authenticated GitHub administrator or local administrator. It reads the exact
 active DB policy record and returns only immutable policy provenance, bounded
-health reason codes, managed-set rule counts, and policy-administrator rule
+health reason codes, managed-set rule counts, and admin rule
 counts. Managed summaries may identify a managed set but never expose managed
 rule IDs, rule hashes, selectors, actions, repositories, workflows, logins,
 GitHub IDs, subjects, token labels, or raw policy payloads. "Reachable
@@ -280,7 +280,7 @@ apply POST routes, accepts only a bounded reason, the reviewed dry-run digest on
 apply, and an `Idempotency-Key`, and derives the immutable GitHub ID exclusively
 from the authenticated Launchplane session. Both routes require strict
 same-origin fetch metadata and a single-use CSRF token. Bearer, workflow,
-terminal-agent, local-operator, and local-admin identities fail before policy
+terminal-agent, `local_operators`, and local-admin identities fail before policy
 evaluation.
 
 The bridge does not trust the session role or mutable login, organization, or
@@ -291,7 +291,7 @@ code-compiled managed set contains one GitHub-human rule for that same immutable
 ID and exactly `authz_policy_operation.propose`,
 `authz_policy_operation.read`, `authz_policy_operation.approve`,
 `authz_policy_operation.revoke`, and `authz_policy_operation.cancel`. It cannot
-create workflow, terminal-agent, local-operator, local-admin, wildcard,
+create workflow, terminal-agent, `local_operators`, local-admin, wildcard,
 provider, deployment, or unrelated authority.
 
 The companion recovery routes remain hidden from public OpenAPI like the
@@ -321,7 +321,7 @@ policy read-back. The written record uses the distinct
 is active, both activation routes return the terminal
 `authz_policy_operation_activation_retired` result; an occupied but non-exact
 set fails as a conflict. This state-derived retirement is not total-lockout
-recovery, a recurring break-glass path, or operator-configured authority. The
+recovery, a recurring break-glass path, or admin-configured authority. The
 routes remain hidden from the general OpenAPI surface so the bridge can be
 deleted after production activation evidence is preserved.
 
@@ -359,7 +359,7 @@ separate human-reader permission. `POST
 caller-known repository candidates so an authorization audit can reconcile its
 GitHub/planning evidence with DB-backed Launchplane scope without granting the
 broad active-policy or work-graph reads. The permission is available only to
-authenticated GitHub humans, local operators, and local administrators;
+authenticated GitHub humans, `local_operators`, and local administrators;
 GitHub Actions and terminal-agent identities remain ineligible even when a rule
 mentions the action.
 
@@ -391,18 +391,18 @@ ambiguous. Landing this route grants no production access and authorizes no
 policy, workflow, secret, provider, runtime, deployment, or durable-operation
 change.
 
-For host-local audit recovery when the operator does not hold the HTTP action,
+For host-local audit recovery when the admin does not hold the HTTP action,
 `launchplane authz-policies repository-scope-evidence` accepts the same bounded
 exact-candidate request JSON and reads the same redacted response directly from
 the configured PostgreSQL record store. This command derives evidence from the
-operator's DB credentials; it does not evaluate the operator against the active
-policy and is not proof that the operator is policy-authorized. It requires
+admin's DB credentials; it does not evaluate the admin against the active
+policy and is not proof that the admin is policy-authorized. It requires
 exactly one active policy record, fails closed on missing or ambiguous active
 state, and performs no policy, secret, workflow, provider, runtime, deployment,
 session, denial, idempotency, outbox, or durable-operation write.
 
 Landing these read contracts does not authorize their production grants.
-Production policy changes are an operator decision made through the supported
+Production policy changes are a Director decision made through the supported
 DB-native administration route; total-lockout recovery remains explicitly
 deferred.
 
@@ -442,9 +442,9 @@ ID-only human rule with the explicit `admin` role, literal
 `authz_policy_grant.write` action, and exact `launchplane` product/context
 selectors; roles-empty rules, mutable login, organization, team, or instance
 selectors, action-empty or wildcard actions, wildcard selectors, workflow,
-terminal, operator, and local-admin rules cannot satisfy the strict human
+terminal, `local_operators`, and local-admin rules cannot satisfy the strict human
 administrator predicate. Any future break-glass design
-must be separately approved by the owner before implementation, use an
+must be separately approved by the Director before implementation, use an
 independent credential and approval boundary, bind the expected active policy
 digest, make the smallest recoverable change, append audit evidence, and
 require normalization through the ordinary
@@ -469,14 +469,14 @@ Merge-train policy imports use a dedicated privileged-operation action family:
 `merge_train_policy_operation.propose`, `.read`, `.cancel`, `.approve`, and
 `.revoke`, plus the read-only terminal-agent projection action
 `privileged_merge_train_policy_operation_summary.read`. Existing
-`authz_policy_operation.*`, workflow, local-operator, local-admin, or raw
+`authz_policy_operation.*`, workflow, `local_operators`, local-admin, or raw
 `merge_train.policy_import` grants do not authorize this lifecycle. Activation
 of those exact actions remains a DB-native managed-authz privileged operation
-with fresh owner authentication, review, CAS, idempotency, and read-back.
+with fresh admin authentication, review, CAS, idempotency, and read-back.
 
 The browser-human identity dependency is separate from the existing browser
 mutation dependency that permits bearer identities to pass through. Bearer,
-workflow, terminal-agent, local-operator, and local-admin identities are
+workflow, terminal-agent, `local_operators`, and local-admin identities are
 rejected before human-route policy evaluation. The agent summary route is a
 separate action and projection and never authorizes approval or execution; keep
 `privileged_operation_summary.read` ungranted during the canary.
@@ -528,7 +528,7 @@ predecessor stays unchanged. Recovery follows the append-only event bound to the
 setup or revoke operation, so later legitimate transitions do not erase the
 original result. Scope history and current-row uniqueness use the immutable
 repository ID, branch, managed set, and managed rule; the repository name remains
-display context and a rename cannot create a second current intent. The operator
+display context and a rename cannot create a second current intent. The Launchplane
 UI offers server-resolved targets and server-clock expiry choices from one hour
 through 30 days without requiring typed record IDs, digests, issue IDs, or
 free-form reasons. The planner rejects any setup expiry beyond 30 days.
@@ -545,7 +545,7 @@ parser/storage/write-handler support. `policy_v3_write_supported` reports the
 presence of this mediated typed handler and is not itself authority or a raw
 write bypass. Qualification and guarded-worker support remain separate.
 
-Activation remains a separately owner-approved DB-native administration event;
+Activation remains a separately Director-approved DB-native administration event;
 it is not authorized by landing code. Keep #2204 open until actual migration,
 rollback, read-back, and soak evidence exists, and keep #2177 open until its
 handoff criteria are complete.
@@ -588,7 +588,7 @@ setup still writes only a qualification-only intent. They do not authorize the
 separate ordinary-agent policy, provider, or worker changes. The pilot is
 retired, so do not install this set; only its removal remains supported. This
 composer is a constrained input path for an existing
-policy administrator, not a replacement bootstrap or total-lockout recovery.
+admin, not a replacement bootstrap or total-lockout recovery.
 
 ### Preparing Administrator Product Evidence Access
 
@@ -608,7 +608,7 @@ explicit all-instances selector with an empty context selector so it can read
 the stored context of each environment. Neither rule adds another action or
 principal.
 Other agents, other humans, writes, separate secret reads, provider operations,
-Owner acceptance, merge/deploy, and delivery activation receive no authority
+Client acceptance, merge/deploy, and delivery activation receive no authority
 from this candidate.
 
 Preparation creates only a standard `managed-authz-policy-set` plan for review.
@@ -629,7 +629,7 @@ future projects, and the standing duration. The installed access would remain
 until a separately governed removal; the plan's **Approve by** deadline does
 not expire it. Concrete administrator confirmation, current-policy checks,
 worker execution, CAS, and read-back still govern installation. Installing it is a
-grant, so it is an operator decision.
+grant, so it is a Director decision.
 Source delivery alone adds no access.
 
 The review keeps the access scope, duration, and approval blockers visible.
@@ -646,9 +646,9 @@ reads use their existing authorization after any approved installation.
 
 The Access policy workbench can prepare the closed
 `agent-operate-product-setup` candidate (launchplane#2467). It is the standing
-"operate" role for the operator's agent: ordinary setup writes on non-live
+"operate" role for the Director's agent: ordinary setup writes on non-live
 products, starting with `product_profile.expected_config.apply` so the agent can
-declare expected settings. Release approval, deploys, secrets, Owner
+declare expected settings. Release approval, deploys, secrets, Client
 acceptance, and live products are out of scope; nothing in this set satisfies
 release review.
 
@@ -663,8 +663,8 @@ recorded `live`, an empty selection is refused, and the list is deduplicated and
 sorted. Products are never hard-coded.
 
 The live boundary is also enforced when the access is used, not only at
-preparation. `POST /v1/product-profiles/expected-config/apply` refuses a local
-operator caller, in both dry-run and apply modes, when the target product's
+preparation. `POST /v1/product-profiles/expected-config/apply` refuses a
+`local_operators` caller, in both dry-run and apply modes, when the target product's
 profile records `production_use: live`, with the fixed code
 `live_product_requires_operator`. A product approved while non-live and later
 recorded `live` is therefore not writable through this rule, even though the
@@ -672,10 +672,10 @@ rule still names it. Workflow and local-admin callers of that route are
 unchanged.
 
 The principal is never supplied by the browser. The server uses the service's
-configured local-operator identity (`LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT` and
-`LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL`, active only when the local-operator
+configured `local_operator` identity (`LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT` and
+`LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL`, active only when the `local_operator`
 token is configured). That is the only identity the service authenticates as a
-local operator, so it is the identity the operator's agent uses for its standing
+`local_operator`, so it is the identity the Director's agent uses for its standing
 reads; reading it avoids guessing from existing policy rules. Add refuses
 (`authorization_candidate_principal_unavailable`) when no identity is configured
 or either value contains a glob character. The plan binds the reviewed subject
@@ -691,7 +691,7 @@ principal collection, with more than one rule, or with any other shape is a
 conflict that preparation does not adopt or repair. Replay recognizes only the
 exact shape, the configured identity, and the same normalized product list.
 The review uses the agent-operate wording only when the rule binds the
-service's configured local-operator identity (and, for removal, only when an
+service's configured `local_operator` identity (and, for removal, only when an
 identity is configured); a same-shape proposal for any other subject or token
 label gets the generic managed-policy review.
 
@@ -700,7 +700,7 @@ configured identity. Review names the selected products and states that the
 access is standing until a separately governed removal. Preparation creates a
 plan for review and changes nothing until approval, current-policy checks,
 worker execution, CAS, and read-back install it. Installing it is a grant, so it
-is an operator decision.
+is a Director decision.
 
 ### Inspecting Pilot Preparation Inputs
 
@@ -745,7 +745,7 @@ exact inspection integration's configured managed-secret record and private-key
 binding metadata. It accepts no caller-selected context, key, integration, or
 secret. This is an input projection for the existing immutable administrator's
 proposal task; it adds no permission or descriptor and does not authorize
-generic `secret.list` access for operators or agents.
+generic `secret.list` access for admins or agents.
 
 The projection distinguishes a missing runtime record, an unreadable record,
 a missing or malformed App-ID value, missing binding metadata, and ambiguous
@@ -809,7 +809,7 @@ That history does not describe the deployed Phase 2 worker flow.
 ## Existing-identity policy version compatibility
 
 Authorization policy readers support schemas 2 and 3 for existing human,
-workflow, and terminal-agent identities. Owner-control challenge derivation,
+workflow, and terminal-agent identities. `owner-control` challenge derivation,
 authorization diagnostics, and feedback actor/worker resolution preserve the
 same immutable identity, scope, role, current policy, expiry, and revocation
 checks across these versions. This does not register an ordinary-agent identity

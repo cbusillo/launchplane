@@ -26,10 +26,10 @@ Treat this file as the launch checklist for each engineering session in
   or another explicit state directory, not in git-tracked history. Shared
   runtime truth is DB-backed.
 - Do not store real product, tenant, repository, branch, domain, lane,
-  provider-target, runtime-environment, authz, operator, or other mutable
+  provider-target, runtime-environment, authz, admin, or other mutable
   runtime configuration as authority in production code or checked-in config
   files. Code owns schemas, validators, generic behavior, and fail-closed
-  defaults; Launchplane records or operator-supplied input own real identities
+  defaults; Launchplane records or admin-supplied input own real identities
   and values.
 - The only runtime configuration exception for checked-in or process-level
   config is Launchplane's own minimal bootstrap/root-of-trust wiring required
@@ -39,9 +39,9 @@ Treat this file as the launch checklist for each engineering session in
 
 - The merge train is the delivery path. The ordinary-agent delegated-delivery
   design is retired; do not extend `ordinary_agent_*` code or its docs.
-- Read `docs/owner-acceptance.md` as the target direction for narrow site Owner
+- Read `docs/owner-acceptance.md` as the target direction for narrow Client
   visibility, acceptance, and feedback; it is not current runtime authority and
-  Owner decisions grant no operational power.
+  Client decisions grant no operational power.
 - Keep Launchplane merge/delivery provider-neutral. GitHub is the current source-
   control adapter and Dokploy is the current application deployment provider.
 
@@ -52,16 +52,16 @@ Treat this file as the launch checklist for each engineering session in
   repos.
 - Keep cross-repo boundaries explicit; do not move release ownership back into
   tenant, shared-addon, or local-DX repos.
-- Never commit secrets or operator-local overrides.
+- Never commit secrets or admin-local overrides.
 - Prefer Launchplane-owned runtime-environment records and managed secret
   records over ad hoc service-host env for product/runtime configuration.
-- Use the deployed Launchplane service API or the operator UI for shared and
+- Use the deployed Launchplane service API or the Launchplane UI for shared and
   production live mutations. Do not use local CLI live-target commands from an
   arbitrary checkout as a fallback; use a supported service capability or
   record the exact missing service/activation prerequisite.
 - Treat service-host env as bootstrap-only unless a repo doc explicitly calls
   out a narrower scoped bootstrap or rehearsal exception.
-- Do not hard-code real tenant, product, repository, branch, domain, or operator
+- Do not hard-code real tenant, product, repository, branch, domain, or admin
   values into production defaults, fallback behavior, or checked-in catalogs;
   see the coding standards for the docs/tests boundary.
 - Do not replace code hard-coding with checked-in config hard-coding. A real
@@ -70,14 +70,14 @@ Treat this file as the launch checklist for each engineering session in
   Launchplane self-bootstrap exception above.
 - Update docs in the same change when behavior or ownership changes.
 - Fix root causes, not symptoms; avoid workaround-only flows unless the
-  operator explicitly asks for a time-boxed mitigation.
+  Director explicitly asks for a time-boxed mitigation.
 - Do not propose, add, or apply new GitHub-secret/workflow-managed
   authorization grants; granting access is a stop boundary. On
   `authorization_denied`, name the exact denied action and follow
   `docs/authorization-authority.md#denial-handling`: a refused read is a missing
   standing read grant to report, and a refused write, grant, or change means
-  asking the operator once. Continue with work that does not depend on it.
-- Dispatch and watch protected GitHub operator workflows only through the
+  asking the Director once. Continue with work that does not depend on it.
+- Dispatch and watch protected GitHub admin workflows only through the
   installed `github_workflow_babysit.py` helper. Do not use raw
   `gh workflow run`, `gh run watch`, or a generic run waiter for those jobs;
   the helper preserves split identities and surfaces environment waits.

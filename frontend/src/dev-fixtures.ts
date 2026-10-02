@@ -70,7 +70,7 @@ export const fixtureIdentity: GitHubHumanIdentityResponse = {
   provider: "github",
   login: "operator-demo",
   github_id: 1001,
-  name: "Demo Operator",
+  name: "Demo Admin",
   email: "operator@example.invalid",
   organizations: ["example-operations"],
   teams: ["platform"],
@@ -1302,7 +1302,7 @@ export async function applyProductOwnerForFixture(
 ): Promise<AcceptedEvidenceResponse> {
   assertFixtureAvailable(fixture);
   if (signal?.aborted) {
-    throw new DOMException("Product owner fixture request cancelled.", "AbortError");
+    throw new DOMException("Product Client fixture request cancelled.", "AbortError");
   }
   const before = productOwnerForFixture(fixture, product);
   const login = (payload.github_login ?? "").trim();
@@ -1459,7 +1459,7 @@ export function workGraphForFixture(fixture: DataFixtureMode): {
               recommendation: "quick_win",
               safeToStart: true,
               state: "ready",
-              title: "Finish the operator evidence route",
+              title: "Finish the admin evidence route",
             }),
             engineeringWorkGraphItem({
               evidenceState: "recorded",
@@ -1523,7 +1523,7 @@ export function issueInboxForFixture(
       project_status: projectConfigured ? ("present" as const) : ("unconfigured" as const),
       repository: "example/control-plane",
       state: "open",
-      title: "Finish the operator evidence route",
+      title: "Finish the admin evidence route",
       updated_at: OBSERVED_AT,
       url: "https://example.invalid/example/control-plane/issues/308",
     },
@@ -1589,7 +1589,7 @@ export function everyCodeForFixture(
               issueNumber: 308,
               state: "running",
               summaryStatus: "active",
-              title: "Finish the operator evidence route",
+              title: "Finish the admin evidence route",
             }),
             engineeringEveryCodeSummary({
               freshness: "recorded",
@@ -1717,7 +1717,7 @@ export function mergeTrainStatusForFixture(
         controller_candidate_record_id: "fixture-candidate-record",
         controller_landing_plan_record_id: "",
         controller_reason: reconciliationRequired
-          ? "Stored controller evidence requires operator reconciliation."
+          ? "Stored controller evidence requires admin reconciliation."
           : "Candidate checks remain pending.",
         controller_stack_collapse_plan_record_id: "",
         detail: reconciliationRequired
@@ -1821,7 +1821,7 @@ export function mergeTrainStatusForFixture(
             mergeable: "mergeable",
             pull_request_number: 418,
             required_checks_status: "pending",
-            title: "Finish the operator evidence route",
+            title: "Finish the admin evidence route",
             url: "https://example.invalid/example/control-plane/pull/418",
           },
           {
@@ -2005,7 +2005,7 @@ function engineeringWorkGraphSnapshot(): WorkGraphSnapshotResponse {
     snapshot: {
       generated_at: OBSERVED_AT,
       issues: [
-        engineeringIssueSnapshot(308, "Finish the operator evidence route", "Now"),
+        engineeringIssueSnapshot(308, "Finish the admin evidence route", "Now"),
         engineeringIssueSnapshot(311, "Split controller orchestration boundaries", "Next"),
         engineeringIssueSnapshot(319, "Refresh external check evidence", "Waiting"),
       ],
@@ -2831,9 +2831,9 @@ export function productReviewForFixture(
   const previewUrl =
     ["missing-preview", "pending-without-preview"].includes(scenario) ? "" : "https://site.preview.example.invalid/";
   const cannotDecideReason = !ownerSet
-    ? "No Owner set for this product"
+    ? "No Client set for this product"
     : !viewerIsOwner
-      ? "You are not this product's Owner."
+      ? "You are not this product's Client."
       : !previewUrl
         ? "No preview is ready for this pull request yet."
         : "";
@@ -3184,13 +3184,13 @@ function assertEngineeringFixtureAvailable(fixture: DataFixtureMode): void {
   }
 }
 export function releaseReviewForFixture(mode: string): import("./generated/openapi.ts").ReleaseReviewResponse {
-  const additionalChanges = mode === "missing" ? ["Shared website components changed outside this repository's checklist. Operator review is required."] : [];
+  const additionalChanges = mode === "missing" ? ["Shared website components changed outside this repository's checklist. Admin review is required."] : [];
   const response: import("./generated/openapi.ts").ReleaseReviewResponse = {
     trace_id: "fixture-release-review", product: "example-site", display_name: "Example site",
     owner_github_login: "site-owner", viewer_is_owner: mode !== "operator", can_override: mode === "operator",
     review: {
       required: true, approved: false, checklist_digest: "a".repeat(64), latest_decision: null, unavailable_reason: null,
-      blockers: additionalChanges.length ? additionalChanges : ["Owner approval of this release is required."],
+      blockers: additionalChanges.length ? additionalChanges : ["Client approval of this release is required."],
       checklist: {
         product: "example-site", repository: "example/site", owner_github_id: "9001",
         testing_url: "https://testing.example.invalid",
@@ -3199,8 +3199,10 @@ export function releaseReviewForFixture(mode: string): import("./generated/opena
         untracked_commits: [],
         additional_changes: additionalChanges,
         items: [{ pull_request_number: 42, title: "Make the repair options easier to find", url: "https://github.com/example/site/pull/42", head_sha: "c".repeat(40), merge_commit: "b".repeat(40), owner_test_notes: "Open Services and confirm each repair option has a clear price.\nOn a phone, confirm the booking button is visible.", already_reviewed: true },
+          // role-words: legacy marker that product pull requests write.
           { pull_request_number: 44, title: "Bump the app-dependencies group", url: "https://github.com/example/site/pull/44", head_sha: "d".repeat(40), merge_commit: "b".repeat(40), owner_test_notes: "Nothing for the owner to test. Automated dependency update, covered by CI.", already_reviewed: false },
           { pull_request_number: 45, title: "Tighten the repair price layout", url: "https://github.com/example/site/pull/45", head_sha: "e".repeat(40), merge_commit: "b".repeat(40), owner_test_notes: "Open Services and confirm each repair option has a clear price.\nOn a phone, confirm the booking button is visible.", already_reviewed: false },
+          // role-words: legacy marker that product pull requests write.
           { pull_request_number: 46, title: "Speed up CI", url: "https://github.com/example/site/pull/46", head_sha: "f".repeat(40), merge_commit: "b".repeat(40), owner_test_notes: "Nothing for the owner to test. CI only.", already_reviewed: false }],
       },
     },
@@ -3222,7 +3224,7 @@ export function releaseDecisionForFixture(
   return { ...response, review: {
     ...response.review,
     approved: published && decision !== "changes_requested",
-    blockers: !published ? ["The release record could not be published."] : decision === "changes_requested" ? ["The Owner requested changes."] : [],
+    blockers: !published ? ["The release record could not be published."] : decision === "changes_requested" ? ["The Client requested changes."] : [],
     latest_decision: {
       record_id: "fixture-release-decision", product: response.product,
       checklist_digest: response.review.checklist_digest, checklist, decision, reason,

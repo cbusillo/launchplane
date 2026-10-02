@@ -15,9 +15,9 @@ Detailed route descriptions below document current or staged implementation
 contracts; they are not proof of current deployment or authorization. The
 reconciled target is tracked in issue `#2240`: one scoped delegated-engineering
 capability including diagnostic reads, equal Codex CLI and Codex Lab
-clients, narrow Owner review without operational authority, and provider-neutral
+clients, narrow Client review without operational authority, and provider-neutral
 Launchplane merge/delivery orchestration. Its ordinary-agent delegated-delivery
-part is retired (see `DIRECTION.md`); the rest stays inactive until the operator
+part is retired (see `DIRECTION.md`); the rest stays inactive until the Director
 approves its grants.
 
 It exists to keep new cross-product work aligned with Launchplane's target form:
@@ -27,7 +27,7 @@ It exists to keep new cross-product work aligned with Launchplane's target form:
 - Launchplane-owned drivers
 - thin repo extensions
 
-The repo-local CLI is an operator/client surface around this boundary. Local
+The repo-local CLI is an admin/client surface around this boundary. Local
 file-backed state is allowed only for development, tests, explicitly scoped
 record backfill, local rehearsal, and emergency inspection; it is not a
 production persistence fallback or product/runtime config authority.
@@ -213,7 +213,7 @@ governed expectation, custody and currentness contract.
     expected-current digest, provenance label, reason, and confirmation. The
     service derives public HTTPS domains and provider placement from DB-backed
     product-profile and provider-target records, requires a strict public
-    runtime-identity check, and records an operator-owned external edge with
+    runtime-identity check, and records an admin-owned external edge with
     external TLS ownership. It does not call or claim internal evidence from an
     external proxy. Apply reuses the same atomic PostgreSQL CAS/idempotency
     boundary as managed reconciliation. Setting `desired_status = "disabled"`
@@ -237,7 +237,7 @@ governed expectation, custody and currentness contract.
     route authority over them.
 - native FastAPI Dokploy target inspect read:
   - `GET /v1/dokploy-targets/inspect`, requiring `dokploy_target.inspect` for
-    the Launchplane service context or local-operator `driver.read` for the
+    the Launchplane service context or `local_operator` `driver.read` for the
     requested tracked context/instance, and returning redacted provider
     identity evidence only
 - native FastAPI deployment, promotion, preview, inventory, operations, and
@@ -320,15 +320,15 @@ governed expectation, custody and currentness contract.
     exact-lane reviewed Odoo prelaunch-rebuild policy planning, profile
     compare-and-write, and apply-only atomic idempotency enforcement)
   - `POST /v1/product-profiles/{product}/owner` (native FastAPI for bearer-token
-    and signed-in operator callers, server-side GitHub login resolution, profile
+    and signed-in admin callers, server-side GitHub login resolution, profile
     compare-and-write, and apply-only atomic idempotency enforcement)
   - `POST /v1/product-profiles/preview-tls/apply` (native FastAPI for
-    Launchplane-operator workflow callers, DB-backed dry-run/apply planning,
+    Launchplane admin workflow callers, DB-backed dry-run/apply planning,
     reviewed-plan continuity, and apply-only idempotency enforcement)
 - product config write route:
   - `POST /v1/product-config/apply` (native FastAPI for GitHub Actions OIDC,
-    signed-in GitHub human sessions, and local-operator bearer callers, with
-    DB-backed storage, redacted planning/apply behavior, local-operator dry-run
+    signed-in GitHub human sessions, and `local_operator` bearer callers, with
+    DB-backed storage, redacted planning/apply behavior, `local_operator` dry-run
     continuity, and optional `Idempotency-Key` replay/conflict handling)
 - runtime key-safety policy route:
   - `POST /v1/runtime-key-safety/policies/apply` (native FastAPI for
@@ -348,7 +348,7 @@ governed expectation, custody and currentness contract.
     replay/conflict handling, and repeatable audits/dry-runs)
 - public ingress notification policy route:
   - `POST /v1/public-ingress/notification-policies/apply` (native FastAPI for
-    bearer-token callers, DB-backed storage, local-operator reason enforcement,
+    bearer-token callers, DB-backed storage, `local_operator` reason enforcement,
     and optional `Idempotency-Key` replay/conflict handling)
 - authz policy administration routes:
   - `GET /v1/authz-policies/active`
@@ -366,7 +366,7 @@ governed expectation, custody and currentness contract.
     write contract and requires immutable numeric `repository_id` and
     `repository_owner_id` selectors for GitHub Actions rules.)
   - The two bounded administration GET routes accept an eligible GitHub or
-    local administrator or a local operator with runtime and fresh active-DB
+    local administrator or a `local_operator` caller with runtime and fresh active-DB
     authorization for `authz_policy_administration.read`, strict same-origin Fetch
     Metadata and CSRF proof for browser sessions, PostgreSQL record storage, and
     exactly one active policy. Same-origin GETs may omit `Origin`; the service
@@ -375,12 +375,12 @@ governed expectation, custody and currentness contract.
     are `no-store`, nonrenewing, nonpersisting reads and expose no raw policy,
     raw audit, principal identity, selector, managed-rule identity, proposal,
     export, rollback, or mutation surface.
-  - Local operators can also read the existing `/active` summary with
+  - `local_operator` callers can also read the existing `/active` summary with
     `authz_policy_administration.read`; its existing policy-writer access and
     browser-session behavior remain supported. This older summary includes
     managed-set IDs, managed-rule IDs, and rule hashes, unlike the two bounded
     administration GETs above. It does not return raw rule selectors or secret
-    values. Read grants do not authorize policy reconciliation, Owner decisions,
+    values. Read grants do not authorize policy reconciliation, Client decisions,
     or provider changes.
 
 - Every Code local automation work-request routes:
@@ -401,7 +401,7 @@ governed expectation, custody and currentness contract.
   - `GET /v1/previews/pr-feedback/notification-attempts` (native FastAPI for
     bearer-token and human-session callers)
   - `POST /v1/every-code/notification-policies/apply` (native FastAPI for
-    bearer-token callers, DB-backed storage, local-operator reason enforcement,
+    bearer-token callers, DB-backed storage, `local_operator` reason enforcement,
     and optional `Idempotency-Key` replay/conflict handling)
   - `POST /v1/every-code/github-webhook` (native FastAPI,
     unauthenticated GitHub HMAC verification, signed-event skip semantics,
@@ -453,13 +453,13 @@ governed expectation, custody and currentness contract.
     `preview_pr_feedback.write` or matching lifecycle authorization,
     preview PR feedback write-capable storage, optional `Idempotency-Key` replay/conflict
     handling, and preview PR feedback notification delivery attempts)
-  - `POST /v1/previews/pr-feedback/remediation` (local-operator/admin bearer
+  - `POST /v1/previews/pr-feedback/remediation` (`local_operator`/`local_admin` bearer
     identities only, distinct plan/apply authorization, exact product/context/
     repository/PR binding, durable dry-run evidence, reviewed-state continuity,
     idempotent apply, and Launchplane-owned marker plus author verification)
   - `POST /v1/previews/pr-feedback/notification-policies/apply` (native FastAPI
     for bearer-token callers, DB-backed storage, explicit product/context scope,
-    local-operator reason enforcement, and optional `Idempotency-Key`
+    `local_operator` reason enforcement, and optional `Idempotency-Key`
     replay/conflict handling)
 
 No GitHub Actions identity is authorized through the remediation route. An
@@ -516,7 +516,7 @@ records `already_absent` without claiming a GitHub mutation.
   - `POST /v1/drivers/odoo/prod-backup-gate` (native FastAPI)
   - `POST /v1/drivers/odoo/prod-promotion-inputs` (native FastAPI)
   - `POST /v1/drivers/odoo/prod-promotion-run` (native FastAPI)
-  - `POST /v1/drivers/odoo/prod-promotion` (native FastAPI retained operator route)
+  - `POST /v1/drivers/odoo/prod-promotion` (native FastAPI retained admin route)
   - `POST /v1/drivers/odoo/prod-rollback` (native FastAPI)
   - `POST /v1/drivers/verireel/testing-deploy` (native FastAPI)
   - `POST /v1/drivers/verireel/testing-verification` (native FastAPI)
@@ -542,7 +542,7 @@ New or changed service route families must preserve the completed HTTP boundary:
   response schema reference, and declared error-envelope responses. Keep tests
   focused; do not snapshot the whole OpenAPI document.
 - Public-safe examples are fake and generic. They must not contain real product,
-  tenant, repository, branch, lane, domain, provider target, operator, authz,
+  tenant, repository, branch, lane, domain, provider target, admin, authz,
   route, health-check, or runtime-environment authority.
 - Request hardening is named for the route family: JSON content-type behavior,
   maximum body-size behavior, validation failures, authentication failures,
@@ -602,7 +602,7 @@ remain only for UI view models and explicit normalization.
 The same canonical export also feeds the narrower checked
 `contracts/agent-operator-contract.json` artifact. Run
 `uv run launchplane service export-agent-contract --output contracts/agent-operator-contract.json`
-to project only the explicit agent/operator allow-list plus the semantic
+to project only the explicit agent/admin allow-list plus the semantic
 lifecycle, deploy, reconciliation, workflow, and governance overlay. The
 artifact carries a semantic digest and non-gating source revision. The existing
 `pnpm --dir frontend check:openapi-drift` gate regenerates it in a temporary
@@ -627,7 +627,7 @@ controller-status read models directly. Work-graph ranking is the only
 Engineering Ops POST in the generated browser write contract; it is stateless
 and accepts the current generated snapshot. Issue reconciliation remains
 read-only in the browser: the UI explains the native GitHub Actions OIDC or
-trusted owner-agent write identity boundary and renders no Dry Run or Apply
+trusted Director-agent write identity boundary and renders no Dry Run or Apply
 button. Merge-train UI is also status-only: target selection comes exclusively
 from `GET /v1/work-graph/merge-train/policy-targets`, while controller and
 legacy worker POST routes are never derived from data or invoked dynamically.
@@ -682,7 +682,7 @@ of forcing a logout.
 
 Cancellation before the mutation request is dispatched ends that local attempt.
 Cancellation or a network failure after dispatch has an uncertain result: the
-operator UI may retry only with the same route, request fingerprint, and
+Launchplane UI may retry only with the same route, request fingerprint, and
 idempotency key so the service can replay or reconcile the original operation.
 It must not generate a replacement key merely because the browser stopped
 waiting.
@@ -703,10 +703,10 @@ The cookie-capable mutation inventory is intentionally limited to:
 
 Every other authenticated mutation route intentionally rejects session-cookie
 authentication and continues to require its existing GitHub Actions OIDC,
-local-operator/admin bearer, Every Code worker, or webhook boundary. A valid
+`local_operator`/`local_admin` bearer, Every Code worker, or webhook boundary. A valid
 `Authorization: Bearer` identity on the existing mixed-identity routes above
 also bypasses browser origin, fetch-metadata, and CSRF checks exactly as before;
-a cookie does not weaken or replace bearer verification. The operator UI exposes only the separately
+a cookie does not weaken or replace bearer verification. The Launchplane UI exposes only the separately
 generated UI write slice; this inventory is a server-side cookie-capable surface
 list, not a promise of UI controls for every route. In particular, GitHub issue
 inbox reconciliation is displayed as unavailable because it remains a GitHub
@@ -728,7 +728,7 @@ accepts GitHub Actions OIDC callers and authenticated admin human sessions and
 requires `authz_policy_grant.write`. Managed-rule-set reconciliation is the
 only durable write/reload boundary for every principal type. Responses return
 record metadata, rule counts, compact diffs, and redacted audit metadata rather
-than echoing workflow refs, human logins, owner-agent subjects, or the full
+than echoing workflow refs, human logins, Director-agent subjects, or the full
 policy body.
 
 Managed rule-set reconciliation is the durable authz write contract. A stable
@@ -772,17 +772,17 @@ reusable-workflow identity.
 
 `GET /v1/authz-diagnostics/active-policy/health` is a separate read-only
 support contract. It requires a GitHub administrator, local administrator, or
-local operator with `authz_policy_health.read`, reloads the exact active DB
+`local_operator` caller with `authz_policy_health.read`, reloads the exact active DB
 policy after preflight authorization, and reauthorizes against that record. The
 response contains active-record identity, revision, digest, schema version,
 bounded health reason codes, at most 100 lexically ordered managed-set summaries
-with rule and principal-type counts, and policy-administrator rule counts. It
+with rule and principal-type counts, and admin rule counts. It
 does not expose managed rule IDs, rule hashes, selectors, actions, repositories,
 workflows, or principal identifiers. Missing active state returns `503`, and
 multiple active records return `409`; the service never falls back to cached
 policy state for the response.
 
-Local operators with `authz_policy_effective_access.read` can likewise evaluate
+`local_operator` callers with `authz_policy_effective_access.read` can likewise evaluate
 one explicit principal through `POST /v1/authz-diagnostics/effective-access/evaluate`.
 Both the runtime policy and fresh active DB policy must allow the read. The
 evaluation reports a decision without impersonating that principal or granting
@@ -832,7 +832,7 @@ browser session. A completed same-key replay remains available after activation.
 Otherwise, once the exact managed set is active, both routes return `410` with
 `authz_policy_operation_activation_retired`; an occupied but non-exact set
 returns `409`. The routes are omitted from general OpenAPI generation and are
-not an operator-configured feature, total-lockout recovery path, recurring
+not an admin-configured feature, total-lockout recovery path, recurring
 break-glass mechanism, or general policy editor.
 
 `POST /v1/authz-diagnostics/candidate-policy/preview` is a separate
@@ -853,7 +853,7 @@ runtime, secret, durable-operation, or other persistence write.
 `POST /v1/authz-diagnostics/repository-scope/read` is the independently
 grantable DB-backed repository-scope audit read. It requires
 `authz_repository_scope.read` and accepts at most 100 exact caller-known
-repository candidates. GitHub humans, local operators, and local administrators
+repository candidates. GitHub humans, `local_operator` callers, and local administrators
 may use the permission; GitHub Actions and terminal-agent identities are
 ineligible. The route authorizes against runtime policy before reading route
 state, reloads exactly one active DB policy, and authorizes again against that
@@ -914,12 +914,12 @@ Reviewed exact-instance external-route and product-health-monitoring workflow
 rules require the same immutable reusable-workflow identity even for non-prod
 instances, and those actions cannot be authorized by schema-v1 policy.
 
-The service also serves the built operator UI shell at `/`, with `/ui` retained
+The service also serves the built Launchplane UI shell at `/`, with `/ui` retained
 as a route alias. This route family is native FastAPI. Built assets live under
 `/ui/assets/...`, while `/ui/*` falls back to the app shell so the frontend can
 own client-side routes. Versioned API ingress remains under `/v1`.
 
-Validate the operator UI shell with browser navigation or `GET /ui`. Do not use
+Validate the Launchplane UI shell with browser navigation or `GET /ui`. Do not use
 `HEAD /ui` as the only availability check, because static app-shell fallback
 behavior can differ between request methods.
 
@@ -1014,7 +1014,7 @@ scoped review credential is decrypted or returned.
 
 The local worker uses a separate GitHub token for public claim comments. Provide
 `LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN` on the worker host, and set
-`LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR` when the operator expects a specific
+`LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR` when the Director expects a specific
 automation account. Before creating the `<!-- every-code-claim -->` issue
 comment, the worker resolves `gh api user --jq .login` with that token and
 blocks the work request if the actor does not match. Claim comments never fall
@@ -1026,7 +1026,7 @@ bearer credential, not the browser OAuth session cookie and not
 `LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN` on the service and provide the same
 secret to the trusted local terminal agent out of band. Configure
 `LAUNCHPLANE_TERMINAL_AGENT_SUBJECT` and
-`LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL` to identify the local owner subject and
+`LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL` to identify the local Director subject and
 token label used by `terminal_agents` authz policy rules; both identity values
 are required whenever the bearer token is configured. The service accepts this
 identity on redacted `GET` routes and the inert ordinary-agent enrollment
@@ -1038,24 +1038,24 @@ agent can access, such as `product_environment.read` for product environment and
 config-status diagnostics. Enrollment proposal authority creates no principal,
 credential, session, grant, activation, or worker start on its own.
 
-Trusted owner terminals that need to make Launchplane-owned operator mutations
-without a browser session can use separate owner-agent bearer credentials.
+Trusted Director terminals that need to make Launchplane-owned admin mutations
+without a browser session can use separate Director-agent bearer credentials.
 Configure `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` on the service and provide the same
 secret to trusted local agents through
 `~/.config/launchplane/local-operator.env`. Configure
 `LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT` and
 `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL` to identify the actor in audit and
 idempotency records; both identity values are required whenever the bearer token
-is configured. Routine owner-operator authority is DB-backed by `local_operators`
+is configured. Routine admin authority is DB-backed by `local_operators`
 authz policy rules, scoped by subject, token label, product, context, and action.
 
-Rare owner-admin operations use `LAUNCHPLANE_LOCAL_ADMIN_TOKEN` with configured
+Rare `local_admin` operations use `LAUNCHPLANE_LOCAL_ADMIN_TOKEN` with configured
 `LAUNCHPLANE_LOCAL_ADMIN_SUBJECT` and `LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL`.
 Both identity values are required whenever the bearer token is configured. Those
 credentials are also DB-backed by exact `local_admins` authz policy rules; the
-token alone does not grant blanket access. Owner-agent write requests must
+token alone does not grant blanket access. Director-agent write requests must
 include a non-empty `reason`; product-config apply is also rejected until the
-service has recorded a matching owner-agent dry-run for the same payload. These
+service has recorded a matching Director-agent dry-run for the same payload. These
 requests still use Launchplane records, redacted responses, runtime key-safety
 policy, and managed secret storage. Terminal-agent credentials remain read-only.
 
@@ -1102,7 +1102,7 @@ already applied or ignored feedback returns `409 feedback_already_final`.
 `POST /v1/work-graph/rank` ranks a caller-supplied work graph snapshot and
 returns the queue payload under `result.queue`. The route requires the
 `work_graph.rank` action for product/context `launchplane`, accepts GitHub
-Actions OIDC and GitHub human-session callers, rejects owner-agent bearer tokens
+Actions OIDC and GitHub human-session callers, rejects Director-agent bearer tokens
 at the identity boundary even if a policy grant is too broad, performs no
 storage writes, and does not make Launchplane authoritative for copied GitHub or
 Code Plans state.
@@ -1111,7 +1111,7 @@ Code Plans state.
 issue inbox into Code Plans Project state. `dry_run` mode requires
 `work_graph.rank`; `apply` requires `work_graph.issue_inbox.reconcile`. The
 route uses the native FastAPI write identity boundary for GitHub Actions OIDC
-and trusted owner-agent write credentials, then returns reconcile evidence under
+and trusted Director-agent write credentials, then returns reconcile evidence under
 `result.reconcile`.
 
 `POST /v1/work-graph/merge-train/run-once` executes one policy-backed Level 1
@@ -1139,7 +1139,7 @@ transition summaries instead of writing ad hoc comments from scheduler scripts.
 `GET /v1/work-graph/merge-train/policy-targets` is a native FastAPI route that
 returns the authorized repository/base-branch targets from the active DB-backed
 merge-train policy. It performs no GitHub reads or mutations and is the source
-of truth for operator UI target selection and scheduled runner intent; callers
+of truth for Launchplane UI target selection and scheduled runner intent; callers
 should not infer merge-train targets from product inventory, work-graph
 awareness items, or repository variables.
 
@@ -1151,14 +1151,14 @@ Schedulers use this route to pace calls into `run-once`; execution still re-read
 GitHub before any dry-run or mutation.
 
 `GET /v1/work-graph/merge-train/controller/status` is a native FastAPI route that
-returns the operator read model for the same repository/base branch. It uses the
+returns the admin read model for the same repository/base branch. It uses the
 same authorization as the policy route, performs no GitHub reads, and composes
 stored scheduler admission, latest Level 1 run history, active batch candidates,
 landing plans, and stack-collapse plans. Only records that match the active
 repository policy key and digest can drive the advertised controller action;
-stale records stay visible with a stale reason. Operators can use this route to
+stale records stay visible with a stale reason. Admins can use this route to
 see the current controller action, durable record ids, PR numbers, candidate
-SHA/check state, compact entry counts, lease owner, active phase, lease and
+SHA/check state, compact entry counts, lease holder, active phase, lease and
 heartbeat age, and reconciliation state without invoking a worker mutation.
 
 Its default-empty `reconciliation_diagnostics` list explains stored evidence
@@ -1174,11 +1174,11 @@ contract is described in [merge-train-policy.md](merge-train-policy.md).
 
 This diagnostic stays within the existing repository `service_authz` boundary
 for controller execution and reconciliation errors. It does not grant access
-to the broader Owner or engineering governance facets. It reads persisted
+to the broader Client or engineering governance facets. It reads persisted
 records only, with no provider requests, record mutation, fence release or
 change in authority.
 
-`POST /v1/work-graph/merge-train/controller/run-once` is the operator-facing
+`POST /v1/work-graph/merge-train/controller/run-once` is the admin-facing
 one-action controller for the full batch train. Request payloads name
 `repository`, `base_branch`, and optional `mutate`; the route uses the same
 policy, authorization, and GitHub token boundary as the lower-level merge-train
@@ -1204,8 +1204,8 @@ writing records or mutating GitHub. Mutation calls reuse the same persisted
 candidate, stack-collapse, and landing-plan records as the phase-specific
 routes, acquire one storage-clocked repository/base lease, checkpoint before
 every GitHub mutation, and reject stale policy digests before advancing stored
-records. Expired owners cannot checkpoint or release after a successor acquires
-the fence. Restarted owners adopt exact candidate-ref, stack-merge, PR-merge,
+records. Expired lease holders cannot checkpoint or release after a successor acquires
+the fence. Restarted lease holders adopt exact candidate-ref, stack-merge, PR-merge,
 cleanup, and stack-child disposition evidence or remain
 `reconcile_required`; active/expired lease conflicts return explicit HTTP 409
 errors rather than becoming generic worker failures. The
@@ -1367,7 +1367,7 @@ creation and guarded PR-native landing, and writes
 path for merge train policy records. It requires database storage and
 `merge_train.policy_import` on product/context `launchplane`, accepts `dry_run`
 and `apply`, and writes the supplied typed record only in apply mode. GitHub
-Actions OIDC callers, signed-in GitHub human sessions, and local operator/admin
+Actions OIDC callers, signed-in GitHub human sessions, and `local_operator`/`local_admin`
 bearer callers may use the route when policy grants the action; terminal-agent
 credentials remain read-only. Apply requests preserve `Idempotency-Key`
 replay/conflict handling when callers provide a key; dry-runs remain stateless
@@ -1376,7 +1376,7 @@ than direct DB CLI writes from an arbitrary checkout.
 
 ## Host Assumption
 
-- Launchplane runs behind an operator-owned HTTPS host.
+- Launchplane runs behind a Director-owned HTTPS host.
 - Launchplane exposes versioned API ingress under `/v1`.
 - Launchplane returns JSON for both success and failure cases.
 
@@ -1399,10 +1399,10 @@ Human browser callers authenticate with GitHub OAuth. Launchplane owns the
 browser session after OAuth callback and sets an `HttpOnly`, `SameSite=Lax`
 session cookie signed with `LAUNCHPLANE_SESSION_SECRET`. Sessions are backed by
 the Launchplane database when `LAUNCHPLANE_DATABASE_URL` is configured. GitHub
-access tokens stay server-side and are not exposed to the React operator UI.
+access tokens stay server-side and are not exposed to the React Launchplane UI.
 Hosted requests reload the current DB policy before authorization and re-evaluate
 the session role. OAuth organization/team claims expire for authorization after
-24 hours; the session is revoked and the operator must sign in again to refresh
+24 hours; the session is revoked and the user must sign in again to refresh
 those mutable GitHub claims.
 
 Every non-health `/v1` operation documents the refresh boundary: `503` means the
@@ -1411,7 +1411,7 @@ ambiguous active-policy state. These responses occur before route-specific
 authorization or handler execution.
 
 Local terminal agents should use the dedicated terminal-agent read bearer token
-when they only need redacted Launchplane context from a trusted operator shell.
+when they only need redacted Launchplane context from a trusted admin shell.
 This avoids copying browser session cookies into terminal processes and keeps
 agent credentials independent from GitHub Actions OIDC and Every Code worker
 automation.
@@ -1427,9 +1427,9 @@ authorization checks and audit records consume them:
   session cookies.
 - `terminal_agent`: read-only trusted terminal agents authenticated by the
   dedicated terminal-agent bearer token.
-- `local_operator`: reason-bearing owner automation authenticated by the
-  dedicated local-operator bearer token.
-- `local_admin`: rare privileged owner automation authenticated by the dedicated
+- `local_operator`: reason-bearing admin automation authenticated by the
+  dedicated `local_operator` bearer token.
+- `local_admin`: rare privileged admin automation authenticated by the dedicated
   local-admin bearer token.
 
 A future Keycloak slice may add OIDC human and service-client subject types.
@@ -1437,7 +1437,7 @@ Those subjects would be trusted only after issuer, audience, signature, expiry,
 and client expectations validate. Keycloak would provide identity and session or
 token facts only; product, context, lane, provider, authz, and runtime authority
 would still come from Launchplane records, OpenFGA tuples if adopted, managed
-secrets, provider state, or explicit scoped operator input.
+secrets, provider state, or explicit scoped admin input.
 
 For future OpenFGA checks, Launchplane should pass normalized facts rather than
 raw tokens. Caller facts include `subject_type`, stable `subject_id`, `issuer`,
@@ -1636,18 +1636,18 @@ authorize read endpoints. A POST route accepts a browser session only through
 the CSRF-checked browser-mutation dependency (same-origin fetch metadata plus a
 single-use CSRF token); `tests/test_http_app_browser_mutation.py` pins that
 route inventory. Every other POST route stays bearer-only: GitHub Actions OIDC
-or the local operator/admin tokens.
+or the `local_operator`/`local_admin` tokens.
 
 The Odoo release routes `POST /v1/drivers/odoo/prod-promotion-run` and
 `POST /v1/drivers/odoo/prod-rollback`, and the `POST /v1/production-backup-gates`
-enqueue and cancel routes, accept a signed-in session this way so the operator
+enqueue and cancel routes, accept a signed-in session this way so an admin
 can release from the product's prod environment page. They keep accepting the
 bearer and OIDC callers the CM website's workflows use only until those
 workflows and their grant are deleted, and refuse terminal-agent tokens. While
 they run, they hold the Odoo lane against queued operations and refuse with
 `lane_busy` when one already holds it (see [records](records.md)). A
 durable backup needs exactly one managed rule for the caller, or the caller is
-the signed-in policy administrator, which records a `policy_administrator`
+the signed-in admin, which records a `policy_administrator`
 grant the worker re-checks against the active policy.
 
 The queued release routes `POST /v1/odoo-prod-promotions` and
@@ -1665,7 +1665,7 @@ subject model before diagnostics or downstream intent contracts consume them:
   read bearer token. These subjects are always read-only context consumers and
   cannot use POST routes, product mutations, authz policy changes, destructive
   cleanup, or secret-backed actions even if a policy rule is too broad.
-- `local_operator`: trusted owner terminal agents authenticated by the dedicated
+- `local_operator`: trusted Director terminal agents authenticated by the dedicated
   write bearer token. These subjects can use only product-config plan/apply from
   a trusted shell with a required reason and matching dry-run before apply. They
   cannot call other mutation, destructive, production, secret-backed
@@ -1675,7 +1675,7 @@ subject model before diagnostics or downstream intent contracts consume them:
   are `limited_remote_user` consumers: even if a rule is accidentally broad,
   Launchplane only allows read and safe-write action families for them, scoped by
   the exact repo/product/context/action rule. Admin humans are `human_admin`
-  consumers and are approval-capable for future operator-mediated intent flows,
+  consumers and are approval-capable for future admin-mediated intent flows,
   but direct mutation routes still require their own CSRF/audit design before
   broad browser writes are allowed.
 
@@ -1725,7 +1725,7 @@ version ids, encryption key ids, counts, and finding codes. Plaintext resolution
 is allowed only for an authorized service-side operation that immediately uses
 the value, such as rendering a provider payload or preparing a worker runtime
 environment after authz and runtime key-safety checks pass. A future trusted
-operator reveal path must be separate, reasoned, scoped, audited, and denied by
+admin reveal path must be separate, reasoned, scoped, audited, and denied by
 default.
 
 Every plaintext resolution or reveal attempt writes redacted audit evidence.
@@ -1743,7 +1743,7 @@ Future OpenFGA checks consume the normalized subject facts described above plus
 Launchplane resource facts. They should map existing service actions to generic
 relations without storing real tuple assignments in this repo:
 
-- provider inspect: `dokploy_target.inspect` (or local-operator `driver.read`
+- provider inspect: `dokploy_target.inspect` (or `local_operator` `driver.read`
   for a tracked context/instance) and provider-target audit/read
   actions check inspect permission on a provider-neutral target resource.
 - private health apply/read: `private_health_endpoint.apply` and
@@ -1775,7 +1775,7 @@ matching `github_humans` rule exists. The GitHub OAuth client requests
 ## First API Surface
 
 The first Launchplane service surface should focus on evidence ingress and record
-writes, not on every possible operator action.
+writes, not on every possible admin action.
 
 ### Evidence ingress endpoints
 
@@ -1942,17 +1942,17 @@ unbinds or deletes. Dry-run returns the same redacted summary without writing. A
 `source` fields; callers must use the live-target-runtime workflow afterward to
 sync live provider environment. The route does not accept secret plaintext,
 runtime values, or checked-in product catalogs, and workflow authority for real
-products must be granted through operator-supplied authz input.
+products must be granted through admin-supplied authz input.
 
-Owner apply names or clears the product's site Owner and changes only the
+Client apply names or clears the product's Client and changes only the
 profile `owner`, `updated_at`, and `source` fields. It requires
 `product_profile.write` for the path product in the Launchplane service context
-and accepts operator bearer tokens, GitHub Actions OIDC, and signed-in operator
+and accepts admin bearer tokens, GitHub Actions OIDC, and signed-in admin
 sessions under the browser-mutation protections. The caller supplies a GitHub
 login (or `clear: true`) and a reason; Launchplane resolves the canonical login
 and immutable numeric id through `GET /users/{login}` with its managed GitHub
 read credential and rejects unknown logins and non-`User` accounts. Dry-run
-returns the resolved identity and the before/after Owner without writing; apply
+returns the resolved identity and the before/after Client without writing; apply
 requires an `Idempotency-Key` and uses profile compare-and-write, so a profile
 that changed during the request is rejected as `stale` instead of overwritten.
 
@@ -2026,9 +2026,9 @@ reservation before the profile write and commits the profile plus `completed`
 replay evidence together, even when the requested value is already current.
 Concurrent same-key requests cannot both write; matching requests replay the
 committed response and changed fingerprints fail with
-`409 idempotency_key_reused`. The operator workflow
+`409 idempotency_key_reused`. The admin workflow
 receives the real target product as dispatch input, and its product-specific
-authz rule comes from operator-managed desired state reconciled through the
+authz rule comes from admin-managed desired state reconciled through the
 service rather than checked-in runtime authority.
 
 Public ingress notification policy writes use
@@ -2036,11 +2036,11 @@ Public ingress notification policy writes use
 `mode: "dry-run"` or `mode: "apply"` and a complete
 `PublicIngressNotificationPolicyRecord`. Apply requires
 `public_ingress_notification_policy.apply`, DB-backed Launchplane storage, and
-an idempotency key when a caller wants retry-safe service semantics. Local
-operator calls must include a non-empty reason. Policies store routing intent and
+an idempotency key when a caller wants retry-safe service semantics. `local_operator`
+calls must include a non-empty reason. Policies store routing intent and
 managed secret record ids only, plus a reminder interval bounded from 15 minutes
 through seven days. Existing policies migrate to the generic six-hour cadence.
-Discord webhook URLs, SMTP credentials, and operator destination values must not
+Discord webhook URLs, SMTP credentials, and admin destination values must not
 be encoded in text-file defaults or source. Dry-run and apply summaries return
 the effective reminder interval without returning secret material.
 
@@ -2058,9 +2058,9 @@ Every Code notification policy writes use
 `mode: "dry-run"` or `mode: "apply"` and a complete
 `EveryCodeNotificationPolicyRecord`. Apply requires
 `every_code_notification_policy.apply`, DB-backed Launchplane storage, and an
-idempotency key when a caller wants retry-safe service semantics. Local operator
+idempotency key when a caller wants retry-safe service semantics. `local_operator`
 calls must include a non-empty reason. Policies store repository-scoped routing
-intent and managed secret record ids only; Discord webhook URLs and operator
+intent and managed secret record ids only; Discord webhook URLs and admin
 destination values must stay in managed secrets, not source or text-file
 defaults. When a worker status update transitions a work request to `blocked`,
 Launchplane persists the blocked request first, then attempts configured Every
@@ -2073,14 +2073,14 @@ carries `mode: "dry-run"` or `mode: "apply"` and a complete
 `PreviewPrFeedbackNotificationPolicyRecord`. Apply requires
 `preview_pr_feedback_notification_policy.apply`, DB-backed Launchplane storage,
 explicit product and context scope, and an idempotency key when a caller wants
-retry-safe service semantics. Local operator calls must include a non-empty
+retry-safe service semantics. `local_operator` calls must include a non-empty
 reason. Policies store product/context/repository-scoped routing intent and
-managed secret record ids only; Discord webhook URLs and operator destination
+managed secret record ids only; Discord webhook URLs and admin destination
 values must stay in managed secrets, not source or checked-in workflow defaults.
 When `/v1/previews/pr-feedback` records skipped or failed PR comment delivery,
 Launchplane attempts configured preview PR feedback notifications and records
 delivered or failed attempts under
-`launchplane_preview_pr_feedback_notification_attempts`; operators can read
+`launchplane_preview_pr_feedback_notification_attempts`; admins can read
 those attempts with `GET /v1/previews/pr-feedback/notification-attempts`.
 
 Edge endpoint writes use `POST /v1/edge-endpoints/apply`. The request carries
@@ -2107,9 +2107,9 @@ Product config writes use `POST /v1/product-config/apply`. The request carries
 runtime values, and write-only managed secret values. Dry-run requires the
 `product_config.plan` action; apply requires `product_config.apply`. The route
 accepts GitHub Actions OIDC callers, signed-in GitHub human sessions, and the
-dedicated local-operator bearer credential, but terminal-agent read bearer
+dedicated `local_operator` bearer credential, but terminal-agent read bearer
 credentials remain read-only and cannot execute the mutation. Signed-in humans
-and local operator/admin identities require a non-empty `reason`; their apply
+and `local_operator`/`local_admin` identities require a non-empty `reason`; their apply
 requests also require an `Idempotency-Key` and a previously recorded matching
 dry-run. Matching uses the normalized target, runtime input, and managed-secret
 input after unifying legacy aliases and defaults, while excluding mode, reason,
@@ -2121,7 +2121,7 @@ replayable.
 The signed-in browser uses the narrower product-owned operation
 `POST /v1/products/{product}/environments/{environment}/config/apply`, which is
 the only product-config operation in the generated UI write allowlist. It
-accepts signed-in GitHub human and configured local operator/admin identities;
+accepts signed-in GitHub human and configured `local_operator`/`local_admin` identities;
 GitHub Actions automation continues to use the generic route. Its body contains
 mode, reason, exact apply confirmation, runtime settings, or managed secrets;
 runtime and secret inputs cannot be combined in one browser request.
@@ -2189,10 +2189,10 @@ shared or production authority.
 
 The product-config apply route supports exactly one secret value source today:
 write-only plaintext supplied inside the HTTPS request by an approval-capable
-operator surface. The value is accepted only for the duration of request
+admin surface. The value is accepted only for the duration of request
 processing, is written into Launchplane managed-secret storage on apply, and is
-never returned. This source is appropriate for the signed-in operator UI and for
-explicit local-owner operator automation that already holds private credentials
+never returned. This source is appropriate for the signed-in Launchplane UI and for
+explicit local admin automation that already holds private credentials
 outside the repository.
 
 Helpers and agents must not ask for, echo, persist, or pass plaintext secret
@@ -2205,9 +2205,9 @@ helper output. For helper-driven product-config work, use this sequence instead:
 2. Report only the returned status, reason code, record id, binding keys,
    runtime key-safety finding codes, trace id, and next action.
 3. Hand off any new or changed plaintext secret value entry to the signed-in
-   operator UI or to explicitly configured local-owner operator automation.
+   Launchplane UI or to explicitly configured local admin automation.
 4. Call `POST /v1/product-config/apply` only when the caller has a safe private
-   value source and explicit operator intent; dry-run before apply.
+   value source and explicit Director intent; dry-run before apply.
 
 The service does not currently support committed secret references, provider env
 lookups, stdin/stdout secret transport, arbitrary secret IDs supplied by an
@@ -2248,11 +2248,11 @@ internals, or private hostnames.
 Common failure classes are stable enough for helper summaries:
 
 - `authentication_required`: no valid OIDC token, browser session, or allowed
-  local-operator bearer credential.
+  `local_operator` bearer credential.
 - `authorization_denied`: caller lacks `product_config.plan`,
   `product_config.apply`, or the product/context grant.
-- `reason_required`: local-operator calls omitted a concrete reason.
-- `matching_dry_run_required`: local-operator apply did not match a prior
+- `reason_required`: `local_operator` calls omitted a concrete reason.
+- `matching_dry_run_required`: `local_operator` apply did not match a prior
   recorded dry-run request.
 - `secret_configuration_required`: trusted Launchplane runtime cannot write
   managed secrets.
@@ -2288,7 +2288,7 @@ dry-run digest, and requires that exact digest plus the provider-resolved target
 id for apply. The resulting bundle includes the product profile, one testing
 lane, Dokploy-backed target records, target-id records, preview policy, and any
 declared runtime-environment or disabled managed-secret binding placeholders.
-The conventional generic-web contract requires an operator-supplied root
+The conventional generic-web contract requires an admin-supplied root
 preview base URL and writes it as the context-scoped
 `LAUNCHPLANE_PREVIEW_BASE_URL` runtime-environment record. The reviewed digest
 binds that mutable runtime value; no real domain becomes checked-in authority.
@@ -2300,7 +2300,7 @@ manifest writes require `product_onboarding.apply`, all for product/context
 `provider_target*` summaries.
 
 The manual `Product Onboarding` workflow is the supported conventional caller.
-It resolves numeric GitHub repository and owner ids with a narrowly scoped
+It resolves numeric GitHub repository and repository owner ids with a narrowly scoped
 GitHub App token, plans `create-application` through
 `POST /v1/dokploy-targets/setup`, plans the product bundle, and requests a
 complete generic-web preview authz reconciliation plan from
@@ -2339,11 +2339,11 @@ raw policy, expose policy selectors/rule bodies, admit workflow or bearer
 callers, or mutate a historical policy revision.
 
 The advanced
-`Product Onboarding Manifest (Advanced)` workflow preserves operator-supplied
+`Product Onboarding Manifest (Advanced)` workflow preserves admin-supplied
 manifest support for non-conventional products. Manifests must use neutral
 `provider_targets`; obsolete `dokploy_targets` input is rejected. Product
 records are never loaded from checked-in catalogs or product repos.
-The manual `Generic Web Preview Authorization` workflow is the operator surface
+The manual `Generic Web Preview Authorization` workflow is the admin surface
 for reviewed onboarding, expand/contract rotations, and product-rule retirement
 through this same planner and writer contract.
 
@@ -2351,7 +2351,7 @@ For `onboard`, `expand`, and `contract`, that workflow retains its live GitHub
 App repository metadata resolution. For `retire`, it mints no repository-scoped
 App token and makes no GitHub API request: the service derives one immutable
 repository authority from the current target product's
-`operator.generic-web-preview` rules. Launchplane-owned ingress-operator rules
+`operator.generic-web-preview` rules. Launchplane-owned `ingress-operator` rules
 are excluded only from that identity derivation and are still removed with every
 other target-product rule. A matching product profile is cross-checked when it
 exists; legacy name-only rules require that profile to supply both immutable
@@ -2382,7 +2382,7 @@ Launchplane-owned self-deploy workflow, requires
 `launchplane`, and preserves optional `Idempotency-Key` replay/conflict
 behavior for retry-safe deploy requests. Runtime target identity, image
 references, OAuth environment changes, and provider credentials remain
-operator-supplied runtime inputs or managed secrets rather than checked-in
+admin-supplied runtime inputs or managed secrets rather than checked-in
 authority.
 
 Dokploy target setup uses the native FastAPI
@@ -2392,7 +2392,7 @@ while immediately writing the matching Dokploy target, target-id, and
 provider-target records. Dry-run accepts the narrow `dokploy_target.plan`
 action or the backwards-compatible broader `dokploy_target.setup` action;
 apply always requires `dokploy_target.setup`, all for product/context
-`launchplane`. Apply requires exact confirmation, an operator reason, and an
+`launchplane`. Apply requires exact confirmation, an admin reason, and an
 idempotency key. Apply
 requests keep the `Idempotency-Key` replay/conflict contract; dry-runs remain
 repeatable and are not stored as idempotency responses. The manual
@@ -2432,13 +2432,13 @@ Dokploy through Launchplane-managed secrets, and returns a redacted identity
 summary only: target ids, names, project/environment/server identity, domain
 summaries, source metadata, and environment key names/counts. It must not return
 raw provider payloads or environment values. The manual `Dokploy Target Inspect`
-workflow is the supported shared and production caller when operators need
-provider evidence without mutating Dokploy or Launchplane records. A local
-operator may also use its existing `driver.read` grant for product `launchplane`
+workflow is the supported shared and production caller when admins need
+provider evidence without mutating Dokploy or Launchplane records. A
+`local_operator` caller may also use its existing `driver.read` grant for product `launchplane`
 and the requested tracked context and instance. A descriptor-discovery grant
 for context `launchplane` does not authorize tenant inspection. Explicit
 `target_type`/`target_id` requests and other caller types still require
-`dokploy_target.inspect`. This connects the standing operator read bundle to
+`dokploy_target.inspect`. This connects the standing `local_operator` read bundle to
 bounded provider evidence without a new grant; response redaction and write
 permissions are unchanged.
 
@@ -2468,7 +2468,7 @@ reported kind while every recognized provider-error line is counted. Missing or
 ambiguous containers, invalid image identity, and provider failures fail closed.
 The manual workflow treats a requested runtime proof as failed unless the
 service is running, its immutable configured image exactly matches the
-operator-supplied expected image, and a fresh heartbeat matches the same
+admin-supplied expected image, and a fresh heartbeat matches the same
 provider-observed container identity and image. Heartbeat timestamps more
 than 60 seconds in the future fail closed; freshness is bounded to four poll
 intervals with a 120-second floor and 900-second ceiling. Missing, stale,
@@ -2515,7 +2515,7 @@ environment keys and runtime managed-secret binding keys for the selected lane,
 preserves unrelated live env, verifies persistence by key metadata, and can
 explicitly trigger a deploy when requested.
 
-Live target runtime applies are service-boundary work. Operators and agents must
+Live target runtime applies are service-boundary work. Admins and agents must
 not run local CLI live-target mutation commands from arbitrary checkouts to make
 shared or production changes, because the local process may lack DB-backed
 tracked target authority or use stale bootstrap context. Use the deployed
@@ -2554,8 +2554,8 @@ provider-target authority when an explicit row is missing.
 Generic web prod promotion uses native FastAPI. Trusted automation can exercise
 the descriptor routes `POST /v1/drivers/generic-web/prod-promotion` and
 `POST /v1/drivers/generic-web/prod-promotion-workflow`; direct browser calls to
-the raw promotion route remain dry-run only, and operator identities are
-rejected on the raw workflow-dispatch route. The generated operator UI instead
+the raw promotion route remain dry-run only, and admin identities are
+rejected on the raw workflow-dispatch route. The generated Launchplane UI instead
 uses product/environment routes for promotion status, direct dry-run, workflow
 dispatch, and workflow-delivery status. Those routes derive product, context,
 testing/prod lanes, immutable artifact, source revision, provider target,
@@ -2643,7 +2643,7 @@ original teardown request. Lifecycle cleanup can dispatch to
 this generic path only after a passing plan and a matching stored preview record
 are present. The descriptor routes remain discoverable.
 
-### Operator read endpoints
+### Admin read endpoints
 
 - `GET /v1/products` (native FastAPI for bearer-token and human-session
   callers)
@@ -2739,8 +2739,8 @@ are present. The descriptor routes remain discoverable.
 - `GET /v1/previews/pr-feedback/notification-attempts` (native FastAPI for
   bearer-token and human-session callers)
 
-These operator reads use the same Launchplane authn/authz boundary as evidence
-ingress. The intent is to give operators a minimal typed read surface for the
+These admin reads use the same Launchplane authn/authz boundary as evidence
+ingress. The intent is to give admins a minimal typed read surface for the
 current Launchplane record nouns without forcing them to infer state from
 workflow logs or host-local files. Secret status reads return metadata only:
 Launchplane does not expose plaintext secret retrieval through the service
@@ -2780,7 +2780,7 @@ product/context before storage access and require product/context for list reads
 and product/context/instance for the singleton read. Responses are redacted read
 models: provider-specific host ids, certificate ids, target ids, edge addresses,
 provider payload evidence, and certificate references remain stored evidence
-and are omitted from the ordinary operator/API read contract. Each read includes
+and are omitted from the ordinary admin/API read contract. Each read includes
 an opaque SHA-256 over the complete stored record so a caller can prove which
 redacted authority it inspected without receiving hidden provider evidence. The
 reconcile route checks `route_binding.read` for dry-run and `route_binding.apply`
@@ -2791,7 +2791,7 @@ evidence resolves exactly one binding for the requested tuple. A successful
 re-evaluation attests that source-record set for 24 hours. Reconcile is a no-op
 while more than 12 hours remain, refreshes service/backfill-owned evidence at
 half-life or when source versions change, and reports an explicit conflict if
-provider target, domains, ingress, TLS ownership, lifecycle status, operator
+provider target, domains, ingress, TLS ownership, lifecycle status, admin
 ownership, or the expected-current digest differs.
 
 Product/site reads use action `product_environment.read`. They are native
@@ -2829,21 +2829,21 @@ still evaluated independently.
 
 `GET /v1/products/{product}/environments` returns the product's stable
 environment summaries from DB-backed Launchplane records. It is the collection
-form of the per-product read model and is intended for operator and UI
+form of the per-product read model and is intended for admin and UI
 navigation before loading a single environment detail page. It uses the same
 redaction rules as the product overview: environment summaries include context,
 URLs, action availability, trust state, provenance, and the topology projection,
 but not runtime values, secret material, or provider-only topology. Typed
 warnings make domain, placement, ingress, ownership, TLS, and freshness
 divergence explicit. A hostname-mismatch read includes the public name,
-recorded terminator/owner, bounded presented certificate names, failure code,
+recorded terminator/managing party, bounded presented certificate names, failure code,
 incident linkage, and a likely cause without requiring provider database access.
 Open incident summaries additionally expose severity, notification state,
 material fingerprint digest, latest material event kind/time, and aggregate next
 and last reminder times. Acknowledgement or silence never changes the health or
 topology status; those fields describe delivery state only. Suppressed reminder
 state does not expose a next-reminder timestamp until delivery is active again.
-Raw private endpoint URLs, destination credentials, operator identities, and
+Raw private endpoint URLs, destination credentials, admin identities, and
 notification payloads remain outside the product read model.
 
 `GET /v1/products/{product}/environments/{environment}/config-status` is a
@@ -2922,7 +2922,7 @@ reservation, so target-record changes cannot redirect an accepted intent and
 concurrent uses of the same intent cannot both reach the provider. Completed
 requests remain replayable before current evidence is revalidated. Raw live
 automation without an intent is denied unless the current release checklist has
-a recorded approval (Owner acceptance or operator override; a release that needs
+a recorded approval (Client acceptance or admin override; a release that needs
 no review does not count) or policy explicitly grants
 `generic_web_prod_promotion.execute_unreviewed` in addition to the normal
 execute action. That grant bypasses product review, not mutation safety: every
@@ -2971,7 +2971,7 @@ These use the same authn/authz boundary as evidence ingress:
 - `POST /v1/drivers/odoo/target-replacement-plan` (native FastAPI)
 - `POST /v1/drivers/odoo/target-replacement-apply` (native FastAPI)
 - `POST /v1/drivers/odoo/prod-backup-gate` (native FastAPI)
-- `POST /v1/drivers/odoo/prod-promotion` (native FastAPI retained operator route)
+- `POST /v1/drivers/odoo/prod-promotion` (native FastAPI retained admin route)
 - `POST /v1/drivers/odoo/prod-rollback` (native FastAPI)
 - `POST /v1/drivers/generic-web/prod-promotion` (native FastAPI)
 - `POST /v1/drivers/generic-web/prod-rollback-plan` (native FastAPI)
@@ -3154,7 +3154,7 @@ runtime refresh, inventory, and teardown. VeriReel still owns image
 build/publish, browser verification, and the follow-up preview evidence write.
 Browser verification uses the preview URL returned by the driver plus
 allow-listed app maintenance actions keyed by preview slug when it needs remote
-owner-admin setup/cleanup.
+admin setup/cleanup.
 When a VeriReel preview-refresh request is syntactically valid but Launchplane
 cannot complete preflight because preview URL, runtime key-safety, managed
 secret, Dokploy target, or template `DATABASE_URL` configuration is incomplete,
@@ -3223,7 +3223,7 @@ of the same key for a different payload on the same route.
 
 Reservation-backed mutations strengthen that completed-response contract by
 claiming `(scope, route, key)` before effects. The reservation records a typed
-owner, lease, attempt, state, optional provider reconciliation key, and eventual
+lease holder, lease, attempt, state, optional provider reconciliation key, and eventual
 response. A matching active request reports that execution is already in
 progress. An expired reservation without an external operation key may be
 reclaimed; an expired reservation with a bound operation key becomes
@@ -3319,7 +3319,7 @@ The route is owned by native FastAPI; its descriptor remains discoverable, the
 native route owns execution.
 
 `POST /v1/odoo-prod-promotions` queues the same promotion run as a durable
-operation for the operator's release panel. It requires the signed-in policy
+operation for the admin release panel. It requires the signed-in policy
 administrator and an `Idempotency-Key`, refuses with `promotion_not_ready` when
 inputs, release approval, or the verified infrastructure backup are missing, and
 otherwise captures a `policy_administrator` authorization on the prod instance
@@ -3346,13 +3346,13 @@ policy/evidence, resolves the promotable testing artifact, captures the logical
 prod backup gate, executes the testing-to-prod promotion, and returns the phase
 statuses and written record IDs. The lower-level inputs,
 backup-gate, and promotion routes remain available for diagnostics and explicit
-operator workflows, but product repos should not own the chain.
+admin workflows, but product repos should not own the chain.
 The route is owned by native FastAPI and preserves request-context authorization,
 reusable Launchplane workflow identity matching, optional `Idempotency-Key`
 replay/conflict behavior, and no-cache retry behavior for blocked or failed
 driver results. Its descriptor remains discoverable. The older
 `POST /v1/drivers/odoo/prod-promotion` compatibility route is also native
-FastAPI for explicit operator workflows and diagnostics, but product repos
+FastAPI for explicit admin workflows and diagnostics, but product repos
 should prefer the thin `prod-promotion-run` path.
 Both routes enforce the same infrastructure policy and retain the logical backup
 requirement. The direct route takes `promotion.infrastructure_backup_record_id`
@@ -3398,8 +3398,8 @@ or blanket bot status.
 - `POST /v1/tenant-admission/trusted-maintenance-policies/apply`:
   Accepts a strict envelope (`schema_version`, `mode: dry_run|apply`,
   `expected_current_record_id`, `expected_current_policy_digest`, `record`). The
-  route is browser-GitHub-human-only and rejects terminal agents, local
-  operators/admin bearers, GitHub Actions, Every Code workers, bearer-only
+  route is browser-GitHub-human-only and rejects terminal agents,
+  `local_operator`/`local_admin` bearers, GitHub Actions, Every Code workers, bearer-only
   callers, and other non-human identities. It requires
   `trusted_maintenance_policy.write` authorization against the submitted
   product/context and an explicit `AuthorizationTarget(scope="context")`.
@@ -3417,15 +3417,15 @@ or blanket bot status.
   64 KiB limit is enforced before FastAPI/Pydantic parsing.
 
 `GET /v1/work-graph/tenant-admission/evaluation` exposes one read-only exact-PR
-operator/agent evaluation. Its query extends the complete candidate binding
+admin/agent evaluation. Its query extends the complete candidate binding
 with the exact base branch and optional merge method. It requires
 `tenant_admission.read`, resolves the managed GitHub credential, and reuses the
 controller's `mutate=false` path, so it verifies current numeric repository and
-owner identity, head, base, open/merged state, draft/mergeability, admission,
+repository owner identity, head, base, open/merged state, draft/mergeability, admission,
 and live required-check policy without acquiring a controller lease or writing
 GitHub/provider state. Mergeable tenant UI PRs report required technical-check
 readiness. Engineering returns `not_applicable`; current results for both kinds
-have no human actions. Owner decisions use product review and the release
+have no human actions. Client decisions use product review and the release
 checklist, separately from these machine checks.
 
 `GET /v1/work-graph/tenant-admission/status` exposes the public-safe unified
@@ -3434,7 +3434,7 @@ product, context, numeric repository ID, numeric repository-owner ID,
 `OWNER/REPO`, pull-request number, and exact head SHA. The route requires
 `tenant_admission.read` authorization for the submitted product/context and a
 context-scoped authorization target. It reads the current DB-backed classification
-and matches repository, numeric owner, product, and context identity. Engineering
+and matches repository, numeric repository owner, product, and context identity. Engineering
 returns its normal-flow category; a matching tenant UI classification returns
 `eligible`. Missing, ambiguous, or drifted classification remains unavailable or
 stale. The status alone grants no merge authority; the controller still reads
@@ -3457,7 +3457,7 @@ requires `tenant_admission.reconcile` authorization for the candidate
 product/context, and is covered by the exact-length JSON body guard at 64 KiB.
 Before evaluation it resolves the managed GitHub credential and re-fetches the
 PR, requiring the PR to remain open and its numeric base repository, numeric
-owner, full name, and head SHA to equal the submitted candidate. Drift returns
+repository owner, full name, and head SHA to equal the submitted candidate. Drift returns
 HTTP 409; indeterminate GitHub facts or delivery return retryable HTTP 503.
 Launchplane then recomputes the read model and idempotently writes the classic
 `tenant-admission` status to the exact head. Matching state, description, and
@@ -3473,7 +3473,7 @@ guard at 64 KiB. An explicitly authorized terminal agent may invoke this route.
 The controller independently rechecks classification, exact source-control facts,
 and technical evidence before every merge effect. This is a dedicated privileged
 controller action: its context-scoped
-grant intentionally authorizes a central controller or operator whose source
+grant intentionally authorizes a central controller or admin whose source
 repository need not equal the target tenant repository. The submitted target
 still gains no authority from the caller and must independently satisfy exact
 GitHub identity, DB admission, mergeability, and required-check policy.
@@ -3482,7 +3482,7 @@ The controller is tenant-only. An `engineering` classification returns
 `not_applicable` without a merge call. For `tenant_ui`, the current classification
 must be `eligible` before the technical gates may permit a merge.
 Launchplane re-fetches the open PR and requires exact numeric base repository
-ID, numeric owner ID, full repository name, same-repository head, requested base
+ID, numeric repository owner ID, full repository name, same-repository head, requested base
 branch, and head SHA. It then evaluates technical commit statuses and check runs
 on that exact head against the target branch's live GitHub required-status-check
 policy while excluding only the `tenant-admission` and
@@ -3843,24 +3843,24 @@ The first explicit drivers should be:
 
 Repo-specific variation should stay thin and declarative where possible.
 
-## Product Owner Authority API
+## Client Authority API
 
-The product Owner API is an additive policy-administration and read-model
+The Client authority API is an additive policy-administration and read-model
 surface. Policy, requirement, and preferred-routing revisions are written
 through separate endpoints and separate authz actions. Their write actions are
 classified as `policy_admin`; an invocation grant authorizes the API call but
-never satisfies an Owner requirement.
+never satisfies a Client requirement.
 
 Authority evaluation derives human identity only from immutable provider subject
 identity. It does not consume global-admin, bootstrap-admin, manager,
-delegation, repository-permission, or routing state as Owner authority. This retired policy surface does not decide current Owner review or merge readiness;
+delegation, repository-permission, or routing state as Client authority. This retired policy surface does not decide current Client review or merge readiness;
 its separate deletion remains pending.
 
 See `docs/product-owner-policy.md` for routes and persisted record contracts.
 
 ## Product Review API
 
-The small Owner review path from `DIRECTION.md` and issue `#2446`. It is
+The small Client review path from `DIRECTION.md` and issue `#2446`. It is
 independent of the retired exact-binding machinery and reads none of its records.
 
 `GET /v1/product-review?repository=<owner/repo>&pull_request=<n>` returns the
@@ -3874,11 +3874,11 @@ links without making their acceptance apply to the currently served preview.
 Decisions include `feedback_url`, empty until GitHub comment delivery is confirmed.
 `feedback_requested` is true for new submissions and explicit delivery requests;
 it defaults to false on older records, which are not automatically published.
-The caller must be the browser-authenticated GitHub Owner or an authenticated
+The caller must be the browser-authenticated GitHub Client or an authenticated
 identity allowed `product_profile.read` for that product in the Launchplane
-context. A scoped operator or agent can inspect the preview and latest decision;
+context. A scoped admin or agent can inspect the preview and latest decision;
 it receives `viewer_is_owner=false` and `can_decide=false`. Reading never grants
-the ability to record an Owner decision.
+the ability to record a Client decision.
 
 `POST /v1/product-review/decisions` takes `{repository, pull_request, decision,
 reason}` with `decision` of `accepted` or `changes_requested` (reason required)
@@ -3888,34 +3888,34 @@ path (session cookie, same-origin fetch metadata, single-use CSRF token); bearer
 and agent identities are rejected. Authorization is one comparison: the
 session's immutable GitHub id equals `owner.github_id` on the product profile
 whose `repository` matches. No grant, policy record, or change-impact evaluation
-is involved. A product without an Owner returns `409 product_owner_not_set`
-("No Owner set for this product"); no serving preview returns
+is involved. A product without a Client returns `409 product_owner_not_set`
+(`"No Owner set for this product"`); no serving preview returns
 `409 product_review_preview_unavailable`. Everyone else gets one closed
 `403 product_review_unavailable` that does not reveal whether the product or
 pull request exists. Repeating the latest identical decision for the same served
 preview reuses its record and retries pending feedback publication. A decision
-merges and deploys nothing. See [Owner feedback delivery](owner-acceptance.md).
+merges and deploys nothing. See [Client feedback delivery](owner-acceptance.md).
 
 `POST /v1/product-review/feedback/retry` takes `{repository, pull_request,
-decision_id}` using the same Owner browser mutation identity and CSRF boundary.
+decision_id}` using the same Client browser mutation identity and CSRF boundary.
 It requires a saved decision on that visible PR (404 otherwise), reconciles pending
 feedback (explicitly enabling publication of that record if it predates delivery),
 and returns that selected decision and its delivery receipt. It needs
-no serving preview and records no new decision. Operators and bearer identities
-cannot use this Owner action. A still-empty receipt means delivery remains pending;
+no serving preview and records no new decision. Admins and bearer identities
+cannot use this Client action. A still-empty receipt means delivery remains pending;
 the saved decision is unchanged. Historical review links also provide a link back
 to the latest review.
 An older record without a valid reviewed commit or identifier returns
 `409 product_review_feedback_unavailable` without changing its publication flag;
-the Owner can open the latest review and record a new decision.
+the Client can open the latest review and record a new decision.
 
-## Retired Owner Acceptance API
+## Retired Client Acceptance API
 
 The `/v1/owner-acceptance/*` routes and old engineering workbench are removed.
 Historical stored events remain readable through the record stores and retain
-all original identities and digests. No event writer or old Owner evaluator
+all original identities and digests. No event writer or old Client evaluator
 participates in the current product-review or release-checklist flow. See
-[owner-acceptance.md](owner-acceptance.md) for the storage compatibility boundary.
+[`owner-acceptance.md`](owner-acceptance.md) for the storage compatibility boundary.
 
 `GET /v1/governance/projection` accepts only repository, pull request number,
 and base branch scope. It requires the repository policy's service authorization
@@ -3945,13 +3945,13 @@ require trusted same-component dependency evidence. Missing extension records,
 stale heads, incomplete provider evidence, and provider failures cannot fall
 back to caller input and therefore fail closed.
 
-The response is the authoritative Owner-impact classification with exact policy
+The response is the authoritative Client-impact classification with exact policy
 revision/digest and repository/PR/head/tree binding. See
 `docs/change-impact-policy.md` for the policy, evidence, and persistence contracts.
 
 ## Out Of Scope For This First Slice
 
-- full human/operator auth design
+- full human/admin auth design
 - multi-tenant billing or quota models
 - generalized plugin marketplace design
 - replacing file-backed storage immediately
@@ -4068,7 +4068,7 @@ database write, and explicitly authorize no approval or execution. The
 projection contains closed server-authored operation meaning, blocker/change/
 blast-radius/rollback facets, digest identities, expiry posture, and a
 deterministically ordered activity stream. It excludes request bodies,
-operator-authored reasons, principals, selectors, target keys, challenge
+admin-authored reasons, principals, selectors, target keys, challenge
 material, tokens, secrets, and private topology. The existing authorized plan
 detail route remains the one-level-deeper raw evidence response and retains its
 existing lifecycle behavior.

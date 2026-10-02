@@ -156,7 +156,7 @@ export function EngineeringTenantAdmissionRoute({
     >
       <EngineeringBoundaryNote title="Technical merge checks">
         Tenant merges use the current repository classification, required checks,
-        mergeability, and exact commit identity. Site Owners review previews and
+        mergeability, and exact commit identity. Clients review previews and
         release checklists in the product review flow. This page is read-only.
       </EngineeringBoundaryNote>
 
@@ -235,10 +235,10 @@ function TenantAdmissionLookupForm({
           onChange={(value) => updateLookup("repositoryId", value)}
         />
         <LookupField
-          label="Owner ID"
+          label="Repository owner ID"
           value={lookup.repositoryOwnerId}
           inputMode="numeric"
-          placeholder="Numeric GitHub owner ID"
+          placeholder="Numeric GitHub repository owner ID"
           onChange={(value) => updateLookup("repositoryOwnerId", value)}
         />
         <LookupField
@@ -401,7 +401,7 @@ function TenantAdmissionEvaluation({
             rows={[
               ["Repository", evaluation.candidate.repository],
               ["Repository ID", evaluation.candidate.repository_id],
-              ["Owner ID", evaluation.candidate.repository_owner_id],
+              ["Repository owner ID", evaluation.candidate.repository_owner_id],
               ["Pull request", `#${evaluation.candidate.pull_request_number}`],
               ["Head SHA", evaluation.candidate.head_sha],
               ["Base", `${evaluation.base_branch} @ ${evaluation.pull_request_facts.base_sha}`],
@@ -634,7 +634,7 @@ function validateLookup(lookup: TenantAdmissionLookup): string {
     return "Every exact candidate field is required.";
   }
   if (!/^\d+$/.test(lookup.repositoryId) || !/^\d+$/.test(lookup.repositoryOwnerId)) {
-    return "Repository and owner IDs must be positive numeric GitHub IDs.";
+    return "Repository IDs and repository owner IDs must be positive numeric GitHub IDs.";
   }
   if (!/^\d+$/.test(lookup.pullRequestNumber) || Number(lookup.pullRequestNumber) < 1) {
     return "Pull request must be a positive number.";

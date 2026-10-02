@@ -36,7 +36,7 @@ function SecretRequests({ product, environment, fixtureMode }: { product: string
       <p className="eyebrow">Credential setup</p>
       <h1 data-route-heading tabIndex={-1}>{request?.display_name || "Provide requested credentials"}</h1>
       {request ? <p>{request.environment} environment</p> : null}
-      <p>Your submission is stored securely for the operator to apply to this product.</p>
+      <p>Your submission is stored securely for an admin to apply to this product.</p>
     </div>
     {error ? <p role="alert">{error}</p> : !request ? <p role="status">Loading credential request…</p> : !request.fields.length ? <p>No credentials are requested here.</p> : request.fields.map(field => (
       <SecretInput key={field.request_revision} field={field} request={request} onSaved={setRequest} fixtureMode={fixtureMode} />
@@ -87,8 +87,8 @@ function SecretInput({ field, request, onSaved, fixtureMode }: { field: OwnerSec
         <input ref={input} type="password" autoComplete="new-password" maxLength={65536} disabled={busy} aria-label={field.label} />
       </label>
       <button className="button button-primary" type="submit" disabled={busy}>{busy ? "Saving…" : field.submitted_at ? "Replace credential" : "Save credential"}</button>
-    </> : <p>Only this product’s named Owner can submit the requested credential.</p>}
-    {saved ? <p role="status">Credential received. The operator can now apply it.</p> : null}
+    </> : <p>Only this product’s named Client can submit the requested credential.</p>}
+    {saved ? <p role="status">Credential received. An admin can now apply it.</p> : null}
     {error ? <p role="alert">{error}</p> : null}
   </form>;
 }

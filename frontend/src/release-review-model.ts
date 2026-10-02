@@ -1,5 +1,6 @@
 import type { ReleaseReviewItem } from "./generated/openapi.ts";
 
+// role-words: legacy marker that product pull requests write and Launchplane parses.
 export const NOTHING_TO_TEST = "Nothing for the owner to test";
 
 export type ReleaseCheck = { notes: string; items: ReleaseReviewItem[] };
