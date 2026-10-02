@@ -179,6 +179,9 @@ RECONCILE_SOURCE = "launchplane-reconcile"
 TESTING_DEPLOY_MAX_FAILED_ATTEMPTS = 3
 TESTING_DEPLOY_MAX_ATTEMPT_CHAIN = 20
 PREVIEW_APPLY_TIMEOUT_SECONDS = 600
+# A generic-web refresh waits for the deploy and then for health, each up to this
+# long, inside the request's lease.
+GENERIC_WEB_PREVIEW_TIMEOUT_SECONDS = 300
 TESTING_BUILD_RUN_PAGE_SIZE = 50
 TESTING_VERIFY_LIMIT = 3
 _ENDED_PREVIEW_STATES = frozenset({"destroyed", "teardown_pending"})
@@ -1359,7 +1362,7 @@ def _run_generic_web_preview_operation(
                         anchor_head_sha=verified.manifest.source_commit,
                         image_reference=verified.image_reference,
                         source=RECONCILE_SOURCE,
-                        timeout_seconds=PREVIEW_APPLY_TIMEOUT_SECONDS,
+                        timeout_seconds=GENERIC_WEB_PREVIEW_TIMEOUT_SECONDS,
                     ),
                 ),
                 profile=profile,
@@ -1376,7 +1379,7 @@ def _run_generic_web_preview_operation(
                         preview_slug=preview_slug,
                         anchor_pr_number=pull_request_number,
                         destroy_reason="pull_request_not_open",
-                        timeout_seconds=PREVIEW_APPLY_TIMEOUT_SECONDS,
+                        timeout_seconds=GENERIC_WEB_PREVIEW_TIMEOUT_SECONDS,
                     ),
                 ),
                 profile=profile,
@@ -1463,7 +1466,7 @@ def _record_generic_web_preview_serving(
                 verification_status="pass",
                 verified_at=verified_at,
                 checked_urls=(preview_url,) if preview_url else (),
-                timeout_seconds=PREVIEW_APPLY_TIMEOUT_SECONDS,
+                timeout_seconds=GENERIC_WEB_PREVIEW_TIMEOUT_SECONDS,
             ),
         ),
     )
