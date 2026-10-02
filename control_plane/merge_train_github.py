@@ -205,6 +205,13 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             repository=repository, base_branch=base_branch
         )
 
+    def read_pull_request_snapshot(
+        self, *, repository: str, pull_request_number: int
+    ) -> MergeTrainPullRequestSnapshot:
+        return GitHubMergeTrainSnapshotReader(transport=self.transport).read_pull_request_snapshot(
+            repository=repository, pull_request_number=pull_request_number
+        )
+
     def observe_historical_batch_completion(
         self,
         *,
@@ -1880,6 +1887,15 @@ class GitHubMergeTrainSnapshotReader:
             base_branch=normalized_base_branch,
             base_sha=base_sha,
             pull_requests=pull_requests,
+        )
+
+    def read_pull_request_snapshot(
+        self, *, repository: str, pull_request_number: int
+    ) -> MergeTrainPullRequestSnapshot:
+        return self._pull_request_snapshot(
+            repository=repository,
+            repository_path=_repository_path(repository),
+            pull_request={"number": pull_request_number},
         )
 
     def _base_branch_sha(self, *, repository_path: str, base_branch: str) -> str:

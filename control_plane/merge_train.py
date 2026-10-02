@@ -1,4 +1,4 @@
-from typing import Literal, Protocol
+from typing import Callable, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
 
@@ -36,6 +36,12 @@ class MergeTrainMergeClient(Protocol):
         head_sha: str,
         merge_method: MergeTrainMergeMethod,
     ) -> str: ...
+
+
+class MergeTrainPullRequestReader(Protocol):
+    def read_pull_request_snapshot(
+        self, *, repository: str, pull_request_number: int
+    ) -> "MergeTrainPullRequestSnapshot": ...
 
 
 class MergeTrainSnapshotReader(Protocol):
@@ -269,8 +275,14 @@ def build_merge_train_dry_run_result(
 
 
 def discover_merge_train_stack(
-    *, snapshot: MergeTrainDryRunSnapshot, root_pull_request_number: int
+    *,
+    policy: MergeTrainPolicy,
+    snapshot: MergeTrainDryRunSnapshot,
+    root_pull_request_number: int,
 ) -> MergeTrainStackDiscoveryResult:
+    repository_policy = policy.find_repository_policy(
+        repository=snapshot.repository, base_branch=snapshot.base_branch
+    )
     pull_requests_by_number = {
         pull_request.number: pull_request for pull_request in snapshot.pull_requests
     }
@@ -319,7 +331,11 @@ def discover_merge_train_stack(
                 ),
             )
         child = children[0]
-        child_reasons = _stack_pull_request_reasons(snapshot=snapshot, pull_request=child)
+        child_reasons = _stack_pull_request_reasons(
+            snapshot=snapshot, pull_request=child
+        ) or merge_train_stack_child_readiness_reasons(
+            repository_policy=repository_policy, pull_request=child
+        )
         if child_reasons:
             return _unsupported_stack_result(
                 snapshot=snapshot,
@@ -604,6 +620,36 @@ def _stack_pull_request_reasons(
     if pull_request.head_ref == pull_request.base_ref:
         reasons.append(f"pull request #{pull_request.number} has identical head and base refs")
     return tuple(reasons)
+
+
+def merge_train_stack_child_readiness_reasons(
+    *,
+    repository_policy: MergeTrainRepositoryPolicy,
+    pull_request: MergeTrainPullRequestSnapshot,
+) -> tuple[str, ...]:
+    # Collapsing merges the child into the root, so the child must be ready to land on its own.
+    queue_entry = _build_queue_entry(repository_policy, pull_request)
+    return tuple(
+        f"stacked pull request #{pull_request.number} is not ready for the train: {reason}"
+        for reason in queue_entry.ineligible_reasons
+    )
+
+
+def merge_train_stack_child_readiness_check(
+    *,
+    reader: MergeTrainPullRequestReader,
+    repository: str,
+    repository_policy: MergeTrainRepositoryPolicy,
+) -> Callable[[int], tuple[str, ...]]:
+    def readiness_reasons(pull_request_number: int) -> tuple[str, ...]:
+        return merge_train_stack_child_readiness_reasons(
+            repository_policy=repository_policy,
+            pull_request=reader.read_pull_request_snapshot(
+                repository=repository, pull_request_number=pull_request_number
+            ),
+        )
+
+    return readiness_reasons
 
 
 def _unsupported_stack_result(

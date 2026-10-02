@@ -9,6 +9,7 @@ from control_plane.contracts.merge_train_effect import (
     StackChildMergeEffect,
 )
 from control_plane.contracts.merge_train_stack_collapse import (
+    MergeTrainStackChildNotReadyError,
     MergeTrainStackCollapsePlan,
     build_merge_train_stack_collapse_id,
     build_merge_train_stack_collapse_plan,
@@ -21,6 +22,14 @@ from control_plane.merge_train import (
     MergeTrainPullRequestSnapshot,
     discover_merge_train_stack,
 )
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy
+
+
+_EXAMPLE_POLICY = build_test_merge_train_policy(repository="example/merge-train-repo")
+
+
+def _all_children_ready(pull_request_number: int) -> tuple[str, ...]:
+    return ()
 
 
 class MergeTrainStackCollapseContractTests(unittest.TestCase):
@@ -45,6 +54,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
 
     def test_plan_uses_root_ready_to_merge_intent_and_leaf_to_root_mutations(self) -> None:
         discovery_result = discover_merge_train_stack(
+            policy=_EXAMPLE_POLICY,
             snapshot=MergeTrainDryRunSnapshot(
                 repository="example/merge-train-repo",
                 base_branch="main",
@@ -81,6 +91,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
 
     def test_plan_requires_a_ready_stack_discovery_result(self) -> None:
         discovery_result = discover_merge_train_stack(
+            policy=_EXAMPLE_POLICY,
             snapshot=MergeTrainDryRunSnapshot(
                 repository="example/merge-train-repo",
                 base_branch="main",
@@ -100,6 +111,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
     def test_plan_record_id_is_deterministic(self) -> None:
         plan = build_merge_train_stack_collapse_plan(
             discovery_result=discover_merge_train_stack(
+                policy=_EXAMPLE_POLICY,
                 snapshot=MergeTrainDryRunSnapshot(
                     repository="example/merge-train-repo",
                     base_branch="main",
@@ -133,6 +145,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
     def test_plan_record_id_canonicalizes_equivalent_utc_timestamps(self) -> None:
         plan = build_merge_train_stack_collapse_plan(
             discovery_result=discover_merge_train_stack(
+                policy=_EXAMPLE_POLICY,
                 snapshot=MergeTrainDryRunSnapshot(
                     repository="example/merge-train-repo",
                     base_branch="main",
@@ -173,6 +186,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
         executed_plan = execute_merge_train_stack_collapse_plan(
             plan=plan,
             branch_client=branch_client,
+            child_readiness_reasons=_all_children_ready,
             updated_at="2026-05-14T13:45:00Z",
         )
 
@@ -226,6 +240,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
         executed_plan = execute_merge_train_stack_collapse_plan(
             plan=plan,
             branch_client=branch_client,
+            child_readiness_reasons=_all_children_ready,
             effect_executor=executor,
             updated_at="2026-05-14T13:45:00Z",
         )
@@ -255,6 +270,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             execute_merge_train_stack_collapse_plan(
                 plan=unsafe_plan,
                 branch_client=branch_client,
+                child_readiness_reasons=_all_children_ready,
                 updated_at="2026-05-14T13:45:00Z",
             )
 
@@ -280,6 +296,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             branch_client=_RecordingStackCollapseBranchClient(
                 merge_commit_shas=("merge-32-31", "merge-31-30")
             ),
+            child_readiness_reasons=_all_children_ready,
             updated_at="2026-05-14T13:45:00Z",
         )
         plan_payload = executed_plan.model_dump(mode="json")
@@ -304,6 +321,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             execute_merge_train_stack_collapse_plan(
                 plan=plan,
                 branch_client=branch_client,
+                child_readiness_reasons=_all_children_ready,
                 updated_at="2026-05-14T13:45:00Z",
                 checkpoint=checkpoints.append,
             )
@@ -319,10 +337,16 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             observed_merge_commit_shas=("merge-32-31", ""),
             merge_commit_shas=("merge-31-30",),
         )
+        readiness_reads: list[int] = []
+
+        def record_readiness(pull_request_number: int) -> tuple[str, ...]:
+            readiness_reads.append(pull_request_number)
+            return ()
 
         executed_plan = execute_merge_train_stack_collapse_plan(
             plan=_collapse_plan(),
             branch_client=branch_client,
+            child_readiness_reasons=record_readiness,
             updated_at="2026-05-14T13:45:00Z",
         )
 
@@ -332,6 +356,41 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             ["merge-32-31", "merge-31-30"],
         )
         self.assertEqual(len(branch_client.requests), 1)
+        # The already merged child is adopted, not re-read: GitHub closed it as merged.
+        self.assertEqual(readiness_reads, [31])
+
+    def test_execute_plan_stops_before_merging_a_child_held_mid_collapse(self) -> None:
+        plan = _collapse_plan()
+        branch_client = _RecordingStackCollapseBranchClient(
+            merge_commit_shas=("merge-32-31", "merge-31-30")
+        )
+        checkpoints: list[MergeTrainStackCollapsePlan] = []
+
+        def middle_held(pull_request_number: int) -> tuple[str, ...]:
+            if pull_request_number == 31:
+                return ("stacked pull request #31 is not ready for the train: draft pull request",)
+            return ()
+
+        with self.assertRaises(MergeTrainStackChildNotReadyError) as raised:
+            execute_merge_train_stack_collapse_plan(
+                plan=plan,
+                branch_client=branch_client,
+                child_readiness_reasons=middle_held,
+                updated_at="2026-05-14T13:45:00Z",
+                checkpoint=checkpoints.append,
+            )
+
+        self.assertEqual(
+            raised.exception.reasons,
+            ("stacked pull request #31 is not ready for the train: draft pull request",),
+        )
+        self.assertEqual(
+            [request["child_pull_request_number"] for request in branch_client.requests], [32]
+        )
+        self.assertEqual(
+            [mutation.status for mutation in checkpoints[-1].mutations],
+            ["mutated", "planned"],
+        )
 
     def test_reconcile_children_after_root_landing_comments_labels_and_closes(self) -> None:
         plan = execute_merge_train_stack_collapse_plan(
@@ -339,6 +398,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             branch_client=_RecordingStackCollapseBranchClient(
                 merge_commit_shas=("merge-32-31", "merge-31-30")
             ),
+            child_readiness_reasons=_all_children_ready,
             updated_at="2026-05-14T13:45:00Z",
         )
         disposition_client = _RecordingStackChildDispositionClient()
@@ -378,6 +438,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             branch_client=_RecordingStackCollapseBranchClient(
                 merge_commit_shas=("merge-32-31", "merge-31-30")
             ),
+            child_readiness_reasons=_all_children_ready,
             updated_at="2026-05-14T13:45:00Z",
         )
         disposition_client = _RecordingStackChildDispositionClient()
@@ -419,6 +480,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             branch_client=_RecordingStackCollapseBranchClient(
                 merge_commit_shas=("merge-32-31", "merge-31-30")
             ),
+            child_readiness_reasons=_all_children_ready,
             updated_at="2026-05-14T13:45:00Z",
         )
         disposition_client = _RecordingStackChildDispositionClient(
@@ -483,6 +545,7 @@ def _pull_request(
 def _collapse_plan() -> MergeTrainStackCollapsePlan:
     return build_merge_train_stack_collapse_plan(
         discovery_result=discover_merge_train_stack(
+            policy=_EXAMPLE_POLICY,
             snapshot=MergeTrainDryRunSnapshot(
                 repository="example/merge-train-repo",
                 base_branch="main",
