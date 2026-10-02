@@ -1,7 +1,9 @@
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone, tzinfo
 from email.message import Message
 import io
 import json
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -587,6 +589,35 @@ class ProductReconcileStoreTests(ProductReconcileTestCase):
         self.assertEqual((reclaimed.lease_owner, reclaimed.attempt), ("worker-b", 2))
         with self.assertRaises(ProductReconcileLeaseLostError):
             self.store.complete_product_reconcile_request("site:testing", "worker-a", "done", {})
+
+    def test_a_renewed_lease_is_not_reclaimed_and_only_its_holder_renews_it(self) -> None:
+        self.request()
+        self.store.claim_next_product_reconcile_request("worker-a", 60, now="2026-09-29T12:00:00Z")
+
+        self.assertTrue(
+            self.store.renew_product_reconcile_lease(
+                "site:testing", "worker-a", 60, now="2026-09-29T12:00:50Z"
+            )
+        )
+        self.assertFalse(
+            self.store.renew_product_reconcile_lease(
+                "site:testing", "worker-b", 60, now="2026-09-29T12:00:55Z"
+            )
+        )
+        self.assertIsNone(
+            self.store.claim_next_product_reconcile_request(
+                "worker-b", 60, now="2026-09-29T12:01:30Z"
+            )
+        )
+        reclaimed = self.store.claim_next_product_reconcile_request(
+            "worker-b", 60, now="2026-09-29T12:02:00Z"
+        )
+        assert reclaimed is not None
+        self.assertFalse(
+            self.store.renew_product_reconcile_lease(
+                "site:testing", "worker-a", 60, now="2026-09-29T12:02:10Z"
+            )
+        )
 
     def test_request_during_run_returns_it_to_pending_with_the_plan(self) -> None:
         self.request()
@@ -1442,6 +1473,7 @@ class FakeGenericWebPreviewDriver:
     def __init__(self, test: unittest.TestCase) -> None:
         self.changes: list[tuple[str, int]] = []
         self.refresh_status = "pass"
+        self.during_refresh: Callable[[], None] = lambda: None
         for name, fake in (
             ("execute_generic_web_preview_refresh", self.refresh),
             ("execute_generic_web_preview_destroy", self.destroy),
@@ -1458,6 +1490,7 @@ class FakeGenericWebPreviewDriver:
         **_kwargs: object,
     ) -> GenericWebPreviewRefreshResult:
         assert request.anchor_pr_number is not None
+        self.during_refresh()
         self.changes.append(("refresh", request.anchor_pr_number))
         return GenericWebPreviewRefreshResult(
             refresh_status=cast(Literal["pass", "blocked", "fail"], self.refresh_status),
@@ -1616,6 +1649,32 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
 
         self.assertEqual((restored["action"], restored["preview_result_status"]), ("apply", "pass"))
         self.assertEqual(self.driver.changes, [("refresh", 5)] * 3)
+
+    def test_a_refresh_longer_than_the_lease_keeps_it(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        claims: list[object] = []
+
+        def outlast_the_lease() -> None:
+            # Another worker tries to claim the PR while the refresh outlasts the lease.
+            time.sleep(3)
+            claims.append(self.store.claim_next_product_reconcile_request("worker-b", 2))
+
+        self.driver.during_refresh = outlast_the_lease
+        completed = run_product_reconcile_once(
+            record_store=self.store,
+            lease_owner="worker-a",
+            lease_seconds=2,
+            transport_factory=lambda _store, _profile: self.github,
+            control_plane_root=self.root,
+            preview_hooks=self.provider.hooks(),
+            feedback_token=lambda _store, _profile: "feedback-token",
+            public_origin=lambda: self.public_origin,
+        )
+
+        assert completed is not None
+        self.assertEqual((completed.state, completed.last_error), ("done", ""))
+        self.assertEqual(claims, [None])
 
     def test_a_refresh_whose_verification_was_not_recorded_is_run_again(self) -> None:
         self.github.add_run(50, PR_HEAD, event="pull_request")

@@ -18,6 +18,7 @@ import json
 import logging
 import re
 from pathlib import Path
+from threading import Event, Thread
 from typing import Literal, Protocol, cast
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
@@ -172,8 +173,8 @@ from control_plane.workflows.odoo_preview_runtime import (
 )
 
 PRODUCT_RECONCILE_SWEEP_SECONDS = 30 * 60
-# Long enough for a preview apply that waits for its deploy; a crashed worker's
-# request is reclaimed after this, well inside one sweep.
+# A running reconcile renews its lease every third of it, so a long preview apply
+# keeps it; a crashed worker's request is reclaimed after this, well inside one sweep.
 PRODUCT_RECONCILE_LEASE_SECONDS = 20 * 60
 RECONCILE_SOURCE = "launchplane-reconcile"
 TESTING_DEPLOY_MAX_FAILED_ATTEMPTS = 3
@@ -206,6 +207,10 @@ class ProductReconcileStore(Protocol):
         plan: dict[str, object],
         error: str = "",
     ) -> ProductReconcileRequestRecord: ...
+
+    def renew_product_reconcile_lease(
+        self, target_key: str, lease_owner: str, lease_seconds: int
+    ) -> bool: ...
 
     def request_product_reconcile(
         self, target: ProductReconcileTarget, requested_at: str
@@ -1530,14 +1535,20 @@ def run_product_reconcile_once(
     if request is None:
         return None
     try:
-        outcome = reconcile_product_request(
+        with _LeaseHeartbeat(
             record_store=record_store,
-            request=request,
-            transport_factory=transport_factory,
-            control_plane_root=control_plane_root,
-            preview_hooks=preview_hooks,
-            testing_hooks=testing_hooks,
-        )
+            target_key=request.target_key,
+            lease_owner=lease_owner,
+            lease_seconds=lease_seconds,
+        ):
+            outcome = reconcile_product_request(
+                record_store=record_store,
+                request=request,
+                transport_factory=transport_factory,
+                control_plane_root=control_plane_root,
+                preview_hooks=preview_hooks,
+                testing_hooks=testing_hooks,
+            )
     except Exception as error:
         _LOGGER.warning("Product reconcile of %s failed: %s", request.target_key, error)
         outcome = ReconcileOutcome({"target": request.target_kind}, error=_error_text(error))
@@ -1574,6 +1585,53 @@ def run_product_reconcile_once(
     return record_store.complete_product_reconcile_request(
         request.target_key, lease_owner, "done", plan
     )
+
+
+class _LeaseHeartbeat:
+    """Renew a claimed request's lease while its reconcile runs.
+
+    A preview refresh can take longer than one lease; without renewal another
+    worker could claim the same PR and change its preview at the same time. A
+    worker that stops also stops renewing, so its request is reclaimed.
+    """
+
+    def __init__(
+        self,
+        *,
+        record_store: ProductReconcileStore,
+        target_key: str,
+        lease_owner: str,
+        lease_seconds: int,
+    ) -> None:
+        self._record_store = record_store
+        self._target_key = target_key
+        self._lease_owner = lease_owner
+        self._lease_seconds = lease_seconds
+        self._stop = Event()
+        self._thread = Thread(
+            target=self._run, name=f"product-reconcile-lease:{target_key}", daemon=True
+        )
+
+    def __enter__(self) -> "_LeaseHeartbeat":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        self._thread.join()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._lease_seconds / 3):
+            try:
+                if not self._record_store.renew_product_reconcile_lease(
+                    self._target_key, self._lease_owner, self._lease_seconds
+                ):
+                    _LOGGER.warning("Product reconcile lease on %s was lost.", self._target_key)
+                    return
+            except Exception as error:  # noqa: BLE001 - the next beat tries again
+                _LOGGER.warning(
+                    "Product reconcile lease on %s was not renewed: %s", self._target_key, error
+                )
 
 
 def reconcile_reservation_scope(product: str) -> str:

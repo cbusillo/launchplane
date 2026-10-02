@@ -126,7 +126,9 @@ reservation. The webhook request never waits on a deploy.
     (`purpose` `preview`), and the refresh or destroy runs in-process as the
     generic-web preview refresh and destroy routes do, driver extensions
     (VeriReel) included. The lease on the PR's reconcile request makes it the
-    only writer; a refresh that crashed is planned and run again, as a re-run
+    only writer; the worker renews that lease every third of its length while
+    the reconcile runs, so a refresh longer than one lease keeps it, and a
+    worker that stops loses it; a refresh that crashed is planned and run again, as a re-run
     of the product's old preview workflow was. The refresh waits until the
     preview's health endpoint reports the expected build, and the reconcile
     then records that as the generation's verification, so the preview serves
