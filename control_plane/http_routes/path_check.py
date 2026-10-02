@@ -17,7 +17,13 @@ from control_plane.product_path_check import (
     read_path_check_inputs,
 )
 from control_plane.release_review import current_release_review
-from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
+from control_plane.durable_operation_authorization import read_active_authz_policy_record
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    GitHubHumanIdentity,
+    LaunchplaneIdentity,
+)
+from control_plane.storage.postgres import PostgresRecordStore
 
 PRODUCT_PATH_CHECK_ROUTE = "/v1/products/{product}/path-check"
 
@@ -84,11 +90,19 @@ def register_product_path_check_read_routes(
                 target=AuthorizationTarget(scope="instance", instances=instances),
             )
 
+        def caller_is_policy_administrator() -> bool:
+            # A failed policy read raises, and read_path_check_inputs makes it unknown.
+            policy = read_active_authz_policy_record(cast(PostgresRecordStore, record_store)).policy
+            return isinstance(identity, GitHubHumanIdentity) and policy.names_administrator(
+                identity
+            )
+
         inputs = read_path_check_inputs(
             path=path,
             profile=profile,
             record_store=record_store,
             action_allowed=action_allowed,
+            caller_is_policy_administrator=caller_is_policy_administrator,
             read_release_review=lambda: current_release_review(
                 control_plane_root=dependencies.control_plane_root,
                 record_store=record_store,

@@ -8,11 +8,18 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.production_backup_authority import (
     ProductionBackupAuthorityReadModel,
 )
+from control_plane.contracts.promotion_record import (
+    ArtifactIdentityReference,
+    DeploymentEvidence,
+    PromotionRecord,
+    RecordFailure,
+)
 from control_plane.contracts.release_review import ReleaseReviewStatus
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.product_path_check import (
     PathCheckInputs,
     Unread,
+    _latest_promotion,
     build_product_path_check,
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy, LocalOperatorPolicyRule
@@ -38,6 +45,21 @@ def _backup(state: str) -> ProductionBackupAuthorityReadModel:
             "summary": "Fixed summary.",
             "generated_at": "2026-10-02T00:00:00Z",
         }
+    )
+
+
+def _promotion(record_id: str) -> PromotionRecord:
+    return PromotionRecord(
+        record_id=record_id,
+        artifact_identity=ArtifactIdentityReference(artifact_id="artifact-example-1"),
+        context="example-site",
+        from_instance="testing",
+        to_instance="prod",
+        deploy=DeploymentEvidence(
+            target_name="example-site-prod",
+            target_type="application",
+            deploy_mode="dokploy-application-api",
+        ),
     )
 
 
@@ -158,6 +180,61 @@ class ProductPathCheckTests(unittest.TestCase):
                 "testing_deploy": ("clear", "already_deployed", "none"),
             },
         )
+
+    def test_odoo_promotion_names_the_signed_in_administrator(self) -> None:
+        check = build_product_path_check(
+            product="example-site",
+            path="promote",
+            inputs=PathCheckInputs(
+                profile=_profile(),
+                promotion_action="odoo_prod_promotion_run.execute",
+                promotion_needs_administrator=True,
+                promotion_allowed=False,
+                release_review=ReleaseReviewStatus(required=False, approved=True),
+                backup_authority=_backup("ready"),
+            ),
+        )
+
+        self.assertEqual(
+            _steps(check)["promotion_grant"],
+            ("blocked", "promotion_needs_signed_in_administrator", "owner_approval"),
+        )
+
+    def test_previous_failure_text_comes_from_its_code_never_the_record(self) -> None:
+        for code, expected_code in (
+            ("destination_deploy_failed", "destination_deploy_failed"),
+            ("imported_failure", "previous_promotion_failed"),
+        ):
+            with self.subTest(code=code):
+                promotion = _promotion("promotion-20261002T000000Z-a").model_copy(
+                    update={
+                        "failure": RecordFailure(
+                            code=code, description="Provider at 10.1.2.3 refused."
+                        )
+                    }
+                )
+                check = build_product_path_check(
+                    product="example-site",
+                    path="promote",
+                    inputs=PathCheckInputs(profile=_profile(), latest_promotion=promotion),
+                )
+
+                step = check.steps[-1]
+                self.assertEqual(step.code, expected_code)
+                self.assertNotIn("10.1.2.3", step.description)
+
+    def test_latest_promotion_is_the_newest_record_not_the_last_deployed(self) -> None:
+        older_success = _promotion("promotion-20261001T000000Z-a")
+        newer_failure = _promotion("promotion-20261002T000000Z-b")
+
+        class _Store:
+            def list_promotion_records(self, **_kwargs: object) -> tuple[PromotionRecord, ...]:
+                # Storage orders by deploy times; a source-health failure has none.
+                return (older_success, newer_failure)
+
+        prod_lane = next(lane for lane in _profile().lanes if lane.instance == "prod")
+
+        self.assertIs(_latest_promotion(_Store(), prod_lane), newer_failure)
 
     def test_retired_product_is_blocked(self) -> None:
         payload = _generic_site_profile_payload()

@@ -26,7 +26,10 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.production_backup_authority import (
     ProductionBackupAuthorityReadModel,
 )
-from control_plane.contracts.promotion_record import PromotionRecord
+from control_plane.contracts.promotion_record import (
+    PROMOTION_FAILURE_DESCRIPTIONS,
+    PromotionRecord,
+)
 from control_plane.contracts.release_review import ReleaseReviewStatus
 from control_plane.contracts.odoo_prod_promotion_operation import ODOO_PROD_PROMOTION_RUN_ACTION
 from control_plane.operation_status_read import safe_operation_error_code
@@ -89,6 +92,8 @@ class PathCheckInputs:
     testing_reconcile_plan: dict[str, object] | None | Unread = None
     promotion_allowed: bool | Unread = False
     promotion_action: str = ""
+    # An Odoo prod release is queued only by the signed-in policy administrator.
+    promotion_needs_administrator: bool = False
     release_review: ReleaseReviewStatus | Unread | None = None
     backup_authority: ProductionBackupAuthorityReadModel | Unread | None = None
     latest_promotion: PromotionRecord | None | Unread = None
@@ -255,6 +260,14 @@ def _promotion_grant_step(inputs: PathCheckInputs) -> PathCheckStep:
             "caller_may_promote",
             "The caller may start this product's promotion.",
         )
+    if inputs.promotion_needs_administrator:
+        return _step(
+            "promotion_grant",
+            "blocked",
+            "promotion_needs_signed_in_administrator",
+            "Only the signed-in policy administrator can queue this product's prod release.",
+            "owner_approval",
+        )
     return _step(
         "promotion_grant",
         "blocked",
@@ -325,11 +338,14 @@ def _previous_promotion_step(latest: PromotionRecord | None | Unread) -> PathChe
     if latest is None:
         return _step(step_id, "clear", "no_previous_promotion", "No earlier promotion is recorded.")
     if latest.failure is not None:
+        # The description comes from the code, never from the stored text.
+        code = latest.failure.code
+        description = PROMOTION_FAILURE_DESCRIPTIONS.get(code)
         return _step(
             step_id,
             "clear",
-            latest.failure.code,
-            f"The last promotion failed: {latest.failure.description}",
+            code if description else "previous_promotion_failed",
+            f"The last promotion failed: {description or 'Launchplane does not describe its code.'}",
             record_ids=(latest.record_id,),
         )
     return _step(
@@ -392,6 +408,7 @@ def read_path_check_inputs(
     profile: LaunchplaneProductProfileRecord,
     record_store: object,
     action_allowed: ActionAllowed,
+    caller_is_policy_administrator: Callable[[], bool],
     read_release_review: Callable[[], ReleaseReviewStatus],
     generated_at: str,
 ) -> PathCheckInputs:
@@ -427,11 +444,16 @@ def read_path_check_inputs(
     return PathCheckInputs(
         profile=profile,
         promotion_action=promotion_action,
+        promotion_needs_administrator=odoo,
         promotion_allowed=cast(
             bool | Unread,
             _read(
                 "authorization_unread",
-                lambda: action_allowed(promotion_action, prod_lane.context, instances),
+                # The queued Odoo release checks the signed-in policy administrator,
+                # not an action grant; generic-web checks the dispatch action.
+                caller_is_policy_administrator
+                if odoo
+                else lambda: action_allowed(promotion_action, prod_lane.context, instances),
             ),
         ),
         release_review=cast(
@@ -473,13 +495,18 @@ def _testing_reconcile_plan(
 def _latest_promotion(
     record_store: object, prod_lane: ProductLaneProfile
 ) -> PromotionRecord | None:
+    # Storage orders by deploy times, which a source-health failure never sets;
+    # the record id starts with its creation time, so the newest id is the latest.
     records = cast(_PromotionRecordLister, record_store).list_promotion_records(
         context_name=prod_lane.context,
         from_instance_name="testing",
         to_instance_name="prod",
-        limit=1,
+        limit=_RECENT_PROMOTIONS,
     )
-    return records[0] if records else None
+    return max(records, key=lambda record: record.record_id, default=None)
+
+
+_RECENT_PROMOTIONS = 50
 
 
 class _PromotionRecordLister(Protocol):
