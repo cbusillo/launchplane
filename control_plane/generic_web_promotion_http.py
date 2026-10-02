@@ -87,6 +87,9 @@ class GenericWebProdPromotionRecords(BaseModel):
     release_status: str = ""
     release_tag: str = ""
     release_url: str = ""
+    rollback_status: str = ""
+    rollback_target_deployment_record_id: str = ""
+    rollback_deployment_record_id: str = ""
     dry_run: str = ""
 
 
@@ -112,6 +115,9 @@ class GenericWebProdPromotionResponseResult(BaseModel):
     release_status: Literal["pending", "pass", "fail", "skipped"] = "skipped"
     release_tag: str = ""
     release_url: str = ""
+    rollback_status: Literal["pending", "pass", "fail", "skipped"] = "skipped"
+    rollback_target_deployment_record_id: str = ""
+    rollback_deployment_record_id: str = ""
     target_name: str = ""
     target_id: str = ""
     target_category: Literal[
@@ -410,6 +416,9 @@ def _prod_promotion_records(driver_result: dict[str, object]) -> dict[str, objec
         "release_status",
         "release_tag",
         "release_url",
+        "rollback_status",
+        "rollback_target_deployment_record_id",
+        "rollback_deployment_record_id",
         "dry_run",
     )
     return {key: str(driver_result[key]) for key in keys if key in driver_result}

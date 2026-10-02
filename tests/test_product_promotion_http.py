@@ -15,7 +15,7 @@ from control_plane.contracts.deploy_target import DeployedTargetReference, Provi
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
 )
-from control_plane.contracts.deployment_record import ResolvedTargetEvidence
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
@@ -1683,12 +1683,33 @@ class FastApiProductPromotionTests(unittest.IsolatedAsyncioTestCase):
                 updated_at=now,
             )
         )
-        store.write_environment_inventory(
-            _inventory(
-                instance="prod",
-                artifact_id=PROD_ARTIFACT,
-                source_git_ref=PROD_SOURCE_REF,
-                updated_at=now,
+        prod_inventory = _inventory(
+            instance="prod",
+            artifact_id=PROD_ARTIFACT,
+            source_git_ref=PROD_SOURCE_REF,
+            updated_at=now,
+        )
+        store.write_environment_inventory(prod_inventory)
+        # The deployment production runs is the promotion's rollback target.
+        store.write_deployment_record(
+            DeploymentRecord(
+                record_id=prod_inventory.deployment_record_id,
+                artifact_identity=prod_inventory.artifact_identity,
+                context=prod_inventory.context,
+                instance=prod_inventory.instance,
+                source_git_ref=prod_inventory.source_git_ref,
+                resolved_target=ResolvedTargetEvidence(
+                    target_type="application", target_id="app-prod", target_name="atlas-prod"
+                ),
+                runtime_identity=prod_inventory.runtime_identity.model_copy(
+                    update={
+                        "image_reference": f"ghcr.io/example/atlas-commerce:sha-{PROD_SOURCE_REF}"
+                    }
+                )
+                if prod_inventory.runtime_identity is not None
+                else None,
+                deploy=prod_inventory.deploy,
+                destination_health=prod_inventory.destination_health,
             )
         )
         store.write_provider_target_record(

@@ -308,6 +308,26 @@ Promotion uses the same artifact identity and target records. When health URLs
 exist, Launchplane verifies the source and destination lane health around the
 deployment and writes promotion evidence.
 
+A live generic-web promotion rolls production back on its own. Before it
+changes production, it plans a rollback to the deployment record that
+production's inventory names. If that deployment cannot be restored (it is
+missing, not digest-pinned, or an application target without an immutable
+deploy reference), the promotion and its dry run are refused before any change.
+When there is no earlier production deployment, or production was already
+failing its health check, the promotion goes ahead and records why no rollback
+is possible. If the destination deploy fails after it touched the provider, or
+the destination health or runtime-identity check fails, the same server-side
+request redeploys the planned artifact. It then verifies health against that
+deployment's runtime identity and restores production's inventory and release
+lineage. The rollback runs inside the promotion's provider operation, so a
+cancelled caller or a lost response cannot skip it. The promotion record's
+`rollback` evidence names the failure, the `target_deployment_record_id`
+production returned to, and the rollback's own `deployment_record_id`;
+`rollback_health` holds its health check. The promotion response repeats them
+as `rollback_status`, `rollback_target_deployment_record_id`, and
+`rollback_deployment_record_id`. A deploy that raises instead of returning a
+result is in doubt, not failed. Recover it through generic-web deploy recovery.
+
 Rollback begins with a Launchplane-owned rollback plan. The generic-web planner
 is exposed through `POST /v1/drivers/generic-web/prod-rollback-plan` as a
 safe-write contract: it reads the product profile, destination lane, a
