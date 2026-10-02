@@ -35,6 +35,7 @@ class ProductConfigRuntimeInput(BaseModel):
     instance: str | None = None
     env: dict[str, ScalarValue] = Field(default_factory=dict)
     retired_provider_keys: tuple[str, ...] | None = None
+    adopt_provider_keys: tuple[str, ...] | None = None
 
 
 class ProductConfigSecretInput(BaseModel):
@@ -184,6 +185,21 @@ class ProductConfigSecretResult(BaseModel):
     )
 
 
+class ProductConfigProviderKeyAdoptionResult(BaseModel):
+    """One key named for adoption and what the service decided; never its value."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    disposition: Literal[
+        "adopted",
+        "template_default",
+        "already_recorded",
+        "refused_credential",
+        "missing",
+    ]
+
+
 class ProductConfigApplySummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -235,6 +251,9 @@ class ProductConfigApplyResult(BaseModel):
     runtime_environment: ProductConfigRuntimeEnvironmentResult
     runtime_key_safety: ProductConfigRuntimeKeySafetyResult
     secrets: list[ProductConfigSecretResult]
+    provider_key_adoption: list[ProductConfigProviderKeyAdoptionResult] = Field(
+        default_factory=list
+    )
     summary: ProductConfigApplySummary
     next_actions: list[ProductConfigLiveTargetRuntimeNextAction] = Field(default_factory=list)
 
@@ -296,6 +315,13 @@ class ProductConfigApplyEnvelope(BaseModel):
         if not self.product:
             raise ValueError("Product config apply requires product.")
         return self
+
+    def adopts_provider_keys(self) -> bool:
+        return any(
+            isinstance(runtime_input, ProductConfigRuntimeInput)
+            and runtime_input.adopt_provider_keys is not None
+            for runtime_input in (self.runtime_env, self.runtime_environment)
+        )
 
     def product_config_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {

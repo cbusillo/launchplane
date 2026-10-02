@@ -49,6 +49,7 @@ from control_plane.dokploy_target_setup_http import (
 )
 from control_plane import product_config as control_plane_product_config
 from control_plane import product_config_service as control_plane_product_config_service
+from control_plane.provider_key_adoption import LaneProviderEnv
 from control_plane import product_health_monitoring as control_plane_product_health_monitoring
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
 from control_plane import product_owner_setting as control_plane_product_owner_setting
@@ -14731,7 +14732,22 @@ def create_launchplane_fastapi_app(
                 code="matching_dry_run_required",
                 message="Operator product-config apply requires a prior matching dry-run.",
             )
+        lane_provider_env_reader: control_plane_product_config.LaneProviderEnvReader | None = None
         try:
+            if product_config_request.adopts_provider_keys() and product_config_request.instance:
+                # The service reads the provider values itself; they never reach the caller.
+                lane_provider_env = await asyncio.to_thread(
+                    control_plane_product_config_service.read_lane_provider_env,
+                    record_store=database_store,
+                    control_plane_root=resolved_control_plane_root,
+                    product=product_config_request.product,
+                    context_name=product_config_request.context,
+                    instance_name=product_config_request.instance,
+                )
+
+                def lane_provider_env_reader() -> LaneProviderEnv:
+                    return lane_provider_env
+
             planned_driver_result, authority_bundle = (
                 control_plane_product_config.plan_product_config_authority_bundle(
                     record_store=database_store,
@@ -14739,6 +14755,7 @@ def create_launchplane_fastapi_app(
                     mode=product_config_request.mode,
                     actor=launchplane_identity_actor(identity),
                     source_label=product_config_request.source_label,
+                    lane_provider_env_reader=lane_provider_env_reader,
                 )
             )
         except control_plane_product_config.ProductConfigError as error:

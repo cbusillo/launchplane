@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import cast
+from pathlib import Path
+from typing import Protocol, cast
 
 import click
 
 from control_plane import product_config as control_plane_product_config
+from control_plane import provider_key_adoption
 from control_plane import secrets as control_plane_secrets
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import source as dokploy_source
+from control_plane.dokploy.compose import odoo_compose_template_defaults
 from control_plane.contracts.product_environment_read_model import (
     ProductConfigWritePrerequisites,
 )
@@ -129,6 +136,67 @@ def _runtime_key_safety_ready(
     return evaluation.status == "pass"
 
 
+class LaneProviderEnvStore(Protocol):
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
+
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord: ...
+
+    def read_dokploy_target_id_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetIdRecord: ...
+
+
+def read_lane_provider_env(
+    *,
+    record_store: LaneProviderEnvStore,
+    control_plane_root: Path,
+    product: str,
+    context_name: str,
+    instance_name: str,
+) -> provider_key_adoption.LaneProviderEnv:
+    """The lane's current provider env, read by the service for provider key adoption.
+
+    The values stay inside the service; only the adoption plan's key names and
+    dispositions leave it.
+    """
+    unavailable = control_plane_product_config.ProductConfigError(
+        "Launchplane could not read the lane's provider env.",
+        code="provider_env_unavailable",
+    )
+    try:
+        profile = record_store.read_product_profile_record(product)
+        if not any(
+            lane.context == context_name and lane.instance == instance_name
+            for lane in profile.lanes
+        ):
+            raise unavailable
+        target_record = record_store.read_dokploy_target_record(
+            context_name=context_name, instance_name=instance_name
+        )
+        target_id_record = record_store.read_dokploy_target_id_record(
+            context_name=context_name, instance_name=instance_name
+        )
+        host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
+        target_payload = dokploy_api.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type=target_record.target_type,
+            target_id=target_id_record.target_id,
+        )
+    except (FileNotFoundError, click.ClickException) as error:
+        raise unavailable from error
+    env = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+    # Only the Odoo compose template is Launchplane's own; other targets supply no defaults.
+    template_defaults = (
+        odoo_compose_template_defaults()
+        if profile.driver_id == "odoo" and target_record.target_type == "compose"
+        else {}
+    )
+    return provider_key_adoption.LaneProviderEnv(env=env, template_defaults=template_defaults)
+
+
 def apply_product_config_service_request(
     *,
     record_store: ProductConfigStore,
@@ -175,6 +243,14 @@ def product_config_service_error(
         error_message = "Launchplane runtime key-safety policy is unavailable."
     if error_code == "runtime_key_safety_failed":
         error_message = "Product config runtime key-safety gate failed."
+    if error_code == "provider_env_unavailable":
+        status_code = 503
+        error_message = "Launchplane could not read the lane's provider env."
+    if error_code == "provider_key_adoption_refused":
+        error_message = (
+            "Provider key adoption names keys that are missing on the provider or look like "
+            "credentials; review a fresh dry run."
+        )
     return ProductConfigServiceError(
         status_code=status_code,
         code=error_code,
