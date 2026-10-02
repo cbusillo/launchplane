@@ -1145,6 +1145,55 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.assertEqual((repeated["action"], repeated["reason"]), ("none", "already_deployed"))
         self.assertEqual(len(self.deploys.runtime_identities), 1)
 
+    def test_testing_rolled_back_to_the_same_older_image_is_deployed_again(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        self.reconcile()
+        deployed = self.store.read_environment_inventory(context_name="cm", instance_name="testing")
+        assert deployed.runtime_identity is not None
+        older = f"{IMAGE_REPOSITORY}@{_digest(OLDER)}"
+        # An admin rolls testing back; the rollback records a deployment of its own.
+        self.store.write_environment_inventory(
+            deployed.model_copy(
+                update={
+                    "deployment_record_id": "deployment-rollback",
+                    "runtime_identity": deployed.runtime_identity.model_copy(
+                        update={"artifact_id": older, "image_reference": older}
+                    ),
+                }
+            )
+        )
+        self.request()
+
+        redeployed = self.reconcile()
+
+        self.assertEqual((redeployed["action"], redeployed["deploy_status"]), ("deploy", "pass"))
+        self.assertEqual(len(self.deploys.runtime_identities), 2)
+        self.assertTrue(
+            cast(str, redeployed["deploy_idempotency_key"]).endswith(":from-deployment-rollback")
+        )
+
+    def test_a_refused_deploy_keeps_provider_text_out_of_the_error(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.comments.merged[DEPLOYABLE] = 12
+
+        self.request()
+
+        with patch.object(
+            self.deploys,
+            "resolve_deploy_target",
+            side_effect=click.ClickException("target site-testing-app (id target-123) on host-7"),
+        ):
+            completed = self.run_once()
+
+        self.assertEqual(completed.state, "failed")
+        self.assertIn("refused before any provider change", completed.last_error)
+        (comment,) = self.comments.on(12)
+        for text in (completed.last_error, cast(str, comment["body"])):
+            self.assertNotIn("host-7", text)
+            self.assertNotIn("target-123", text)
+        self.assertEqual(self.deploys.runtime_identities, [])
+
     def test_a_deploy_with_an_unknown_outcome_is_not_run_again(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
         self.deploys.deploy_error = click.ClickException("provider timed out at host-7")

@@ -83,17 +83,19 @@ reservation. The webhook request never waits on a deploy.
     process, through the generic-web deploy route's durable provider
     operation, under reservation scope `launchplane-reconcile:<product>`.
     Nothing goes to the artifact store; the deploy records the image as the
-    lane's runtime identity. Its key is the desired digest plus the digest
-    testing ran when the deploy was decided, so a repeated reconcile replays a
-    recorded result instead of deploying again, and a lane changed since (a
-    rollback or an admin deploy) gets the desired image again. A deploy whose
+    lane's runtime identity. Its key is the desired digest plus the deployment
+    record testing ran when the deploy was decided, so a repeated reconcile
+    replays a recorded result instead of deploying again. Every deploy and
+    rollback records a new deployment, so a lane changed since (even back to the
+    same older image) gets the desired image again. A replayed success whose
+    image testing does not run fails the reconcile instead of being announced. A deploy whose
     provider outcome is unknown stays reserved for generic-web deploy recovery
     and fails the reconcile until it settles; one that failed with a recorded
     result is not retried until a newer build or the lane changes. A refusal
     before any provider change (a missing target, say) is tried again at the
     next event or sweep. The plan records `deploy_operation_status`,
     `deploy_status`, `post_deploy_status` and `deployment_record_id`, never the
-    driver's message. A product on any other driver is held with
+    driver's message; a refusal's reason goes to the worker log only. A product on any other driver is held with
     `no_reconcile_deploy_for_driver`.
   - If the lane is busy, the reconcile stays pending and runs again after it.
   - While the testing lane is held for staff testing, the reconcile records

@@ -570,9 +570,10 @@ def _deploy_generic_web_testing(
             source_git_ref=desired.manifest.source_commit,
         ),
     )
-    # What testing ran when this deploy was decided is part of its key: a testing
-    # lane changed since (a rollback, an admin deploy) gets the desired image again.
-    starting_point = str(plan.get("current_image_digest") or "") or "none"
+    # The deployment testing ran when this deploy was decided is part of its key:
+    # every deploy and rollback records a new one, so a lane changed since gets the
+    # desired image again instead of a replay of an earlier success.
+    starting_point = _current_testing_deployment_id(record_store=record_store, lane=lane) or "none"
     idempotency_key = (
         f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:{TESTING_INSTANCE}:"
         f"{desired.manifest.image.digest}:from-{starting_point}"
@@ -599,11 +600,42 @@ def _deploy_generic_web_testing(
             ),
         )
     except (FileNotFoundError, ValueError, click.ClickException) as error:
-        # Refused before any provider change; the next event or sweep tries again.
-        message = error.format_message() if isinstance(error, click.ClickException) else error
+        # Refused before any provider change; the next event or sweep tries again. The
+        # message can name provider targets, so it goes to the worker log only.
+        _LOGGER.warning("Generic-web testing deploy of %s refused: %s", profile.product, error)
         plan["deploy_operation_status"] = "refused"
-        return ReconcileOutcome(plan, error=f"The testing deploy was refused: {message}")
-    return _generic_web_testing_outcome(plan=plan, result=result)
+        return ReconcileOutcome(
+            plan,
+            error=(
+                "The testing deploy was refused before any provider change "
+                f"({type(error).__name__}); the worker log has the reason."
+            ),
+        )
+    outcome = _generic_web_testing_outcome(plan=plan, result=result)
+    if outcome.error or outcome.deferred:
+        return outcome
+    current_artifact_id, current_digest = _current_testing_release(
+        record_store=record_store, profile=profile, lane=lane
+    )
+    if desired.manifest.image.digest.lower() != current_digest:
+        # A recorded success whose image testing does not run: never announce it as running.
+        return ReconcileOutcome(
+            plan, error="The testing deploy passed, but the testing lane does not run its image."
+        )
+    plan.update(current_artifact_id=current_artifact_id, current_image_digest=current_digest)
+    return outcome
+
+
+def _current_testing_deployment_id(
+    *, record_store: ProductReconcileStore, lane: ProductLaneProfile
+) -> str:
+    try:
+        inventory = record_store.read_environment_inventory(
+            context_name=lane.context, instance_name=TESTING_INSTANCE
+        )
+    except FileNotFoundError:
+        return ""
+    return inventory.deployment_record_id
 
 
 def _generic_web_testing_outcome(
