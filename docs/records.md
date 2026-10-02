@@ -1451,7 +1451,7 @@ records what it decided and did as `last_plan`:
   the `plan_not_ready` description plus that blocker's from
   `PLAN_BLOCKER_DESCRIPTIONS`; an unknown code gets a generic one),
   `Keys: A, B.` when the operation's `error_detail_keys` names the env keys a
-  key-list blocker is about (`runtime_keys_undeclared`,
+  key-list blocker is about (`runtime_keys_undeclared`, `provider_keys_unrecorded`,
   `volume_env_keys_missing`, `volume_authority_drift`: the plan's
   `blocker_keys`, names matching `^[A-Z][A-Z0-9_]{0,63}$` only, at most 32,
   never values), the result's step statuses, and the worker attempt. After three failed
