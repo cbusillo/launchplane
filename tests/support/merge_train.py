@@ -28,6 +28,7 @@ from control_plane.contracts.merge_train_stack_collapse import (
     execute_merge_train_stack_collapse_plan,
 )
 from control_plane.merge_train import (
+    MergeTrainLabelActor,
     MergeTrainCheckStatus,
     MergeTrainDryRunSnapshot,
     MergeTrainPullRequestSnapshot,
@@ -555,6 +556,7 @@ class _FakeMergeTrainSnapshotReader:
                     title="Ready PR",
                     created_at="2026-05-08T10:00:00Z",
                     labels=("ready-to-merge",),
+                    label_actors=labeled_by(("ready-to-merge",)),
                     actor_role="repo_admin",
                     head_sha="head-1",
                     head_ref="feature/root",
@@ -586,6 +588,7 @@ class _FakeExpandedMergeTrainSnapshotReader(_FakeMergeTrainSnapshotReader):
                         title="Validation fix",
                         created_at="2026-05-08T10:05:00Z",
                         labels=("ready-to-merge",),
+                        label_actors=labeled_by(("ready-to-merge",)),
                         actor_role="repo_admin",
                         head_sha="head-2",
                         head_ref="feature/validation-fix",
@@ -634,6 +637,7 @@ class _FakeStackedMergeTrainSnapshotReader:
                     title="Root PR",
                     created_at="2026-05-08T10:00:00Z",
                     labels=("ready-to-merge",),
+                    label_actors=labeled_by(("ready-to-merge",)),
                     actor_role="repo_admin",
                     head_sha=self._root_head_sha(),
                     head_ref="feature/root",
@@ -650,6 +654,7 @@ class _FakeStackedMergeTrainSnapshotReader:
                     title="Stacked child PR",
                     created_at="2026-05-08T11:00:00Z",
                     labels=("ready-to-merge",),
+                    label_actors=labeled_by(("ready-to-merge",)),
                     actor_role="repo_admin",
                     head_sha="head-child",
                     head_ref="feature/child",
@@ -785,6 +790,7 @@ def _merge_train_run_record(
                 title="Ready PR",
                 created_at="2026-05-08T10:00:00Z",
                 labels=("ready-to-merge",),
+                label_actors=labeled_by(("ready-to-merge",)),
                 actor_role="repo_admin",
                 head_sha="head-1",
                 base_ref="main",
@@ -1003,3 +1009,15 @@ def _seed_admitted_merge_train_stack_collapse_candidate(
     )
     store.write_merge_train_batch_candidate_record(candidate_record)
     return candidate_record
+
+
+def labeled_by(
+    labels: tuple[str, ...], role: str = "repo_admin", *, actor_id: int = 1001
+) -> tuple[MergeTrainLabelActor, ...]:
+    """Record an actor with ``role`` as having applied each of ``labels``."""
+    return tuple(
+        MergeTrainLabelActor(
+            label=label, actor_id=actor_id, actor_login=f"labeler-{actor_id}", actor_role=role
+        )
+        for label in labels
+    )

@@ -239,6 +239,7 @@ from control_plane.trusted_maintenance import (
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
+from tests.support.merge_train import labeled_by
 from tests.support.artifact_manifests import artifact_manifest_v2
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1238,6 +1239,7 @@ def _merge_train_run_record(*, recorded_at: str = "2026-05-09T02:05:00Z") -> Mer
                 title="Ready merge train PR",
                 created_at="2026-05-09T01:00:00Z",
                 labels=("ready-to-merge",),
+                label_actors=labeled_by(("ready-to-merge",)),
                 actor_role="repo_admin",
                 head_sha="head-42",
                 base_ref="main",

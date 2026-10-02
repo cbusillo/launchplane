@@ -23,6 +23,7 @@ from control_plane.merge_train import (
     discover_merge_train_stack,
 )
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
+from tests.support.merge_train import labeled_by
 
 
 _EXAMPLE_POLICY = build_test_merge_train_policy(repository="example/merge-train-repo")
@@ -530,6 +531,7 @@ def _pull_request(
         title=f"Pull request {number}",
         created_at=f"2026-05-14T13:{number % 60:02d}:00Z",
         labels=("ready-to-merge",),
+        label_actors=labeled_by(("ready-to-merge",)),
         actor_role="repo_admin",
         head_sha=f"head-{number}",
         head_ref=head_ref,

@@ -173,9 +173,7 @@ def _preview_validation_queue_url(*, issue_author: str) -> str:
 
 
 def _merge_queue_url(*, merge_owner: str) -> str:
-    return _github_pulls_url(
-        f"is:open is:pr assignee:{merge_owner} label:{EVERY_CODE_READY_TO_MERGE_LABEL}"
-    )
+    return _github_pulls_url(f"is:open is:pr assignee:{merge_owner}")
 
 
 def _render_preview_checklist(record: EveryCodeWorkRequestRecord) -> list[str]:
@@ -690,13 +688,8 @@ def handle_every_code_preview_validation_comment(
         label=EVERY_CODE_PREVIEW_CHANGES_REQUESTED_LABEL,
         token=token,
     )
-    _github_add_labels(
-        owner=owner,
-        repo=repo,
-        issue_number=pr_number,
-        labels=[EVERY_CODE_READY_TO_MERGE_LABEL],
-        token=token,
-    )
+    # The source issue author may be a Client, and a Client never enqueues a
+    # merge: the owner reviews the assigned pull request and applies the label.
     merge_owner = _github_repository_user_owner_login(owner=owner, repo=repo, token=token)
     if merge_owner:
         _github_assign_user(
