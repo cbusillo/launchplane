@@ -2432,8 +2432,12 @@ product and context `launchplane`, the route accepts the lane-scoped
 `dokploy_target.lane_setup` action for `create-compose` only. It is checked on
 product `launchplane` with the request's own context and instance, so a grant
 names exactly one lane. It covers dry-run and apply of creating that lane's
-compose; it never authorizes `adopt`, domain reconcile or prune, or domain
-authority repair, which could bind a lane to another lane's provider target.
+compose, and only when the request carries no
+`expected_current_provider_target` (so it can't replace an existing binding) and
+the context is lowercase, not `launchplane`, and used by exactly one product's
+lanes or historical contexts. It never authorizes `adopt`, domain reconcile or
+prune, or domain authority repair, which could bind a lane to another lane's
+provider target.
 
 Dokploy target inspect uses the native FastAPI
 `GET /v1/dokploy-targets/inspect` route. The route is a read-only proof surface

@@ -16,6 +16,7 @@ from control_plane.authz_candidate_preparation import (
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
     TERMINAL_ENROLLMENT_POLICY_MANAGED_SET_ID,
     administrator_product_evidence_read_state,
+    agent_product_setup_grants_match_records,
     agent_product_setup_products,
     agent_product_setup_request_grants,
     agent_product_setup_state,
@@ -785,10 +786,12 @@ def _setup_profile(
     product: str,
     contexts: tuple[tuple[str, str], ...] | None = None,
     production_use: str = "live",
+    historical: tuple[str, ...] = (),
 ) -> LaunchplaneProductProfileRecord:
     lanes = contexts if contexts is not None else (("prod", product),)
     return LaunchplaneProductProfileRecord.model_validate(
         {
+            "historical_contexts": list(historical),
             "product": product,
             "production_use": production_use,
             "display_name": product.title(),
@@ -810,6 +813,12 @@ class _ProductProfileStore:
         _setup_profile("example-split", (("testing", "split-a"), ("prod", "split-b"))),
         _setup_profile("example-laneless", ()),
         _setup_profile("example-service", (("prod", "launchplane"),)),
+        _setup_profile("example-upper", (("prod", "Launchplane"),)),
+        _setup_profile("example-mixed", (("prod", "Mixed-Case"),)),
+        _setup_profile("example-shared-a", (("prod", "shared-ctx"),)),
+        _setup_profile("example-shared-b", (("prod", "shared-ctx"),)),
+        _setup_profile("example-history", (("prod", "history-ctx"),)),
+        _setup_profile("example-heir", (("prod", "heir-ctx"),), historical=("history-ctx",)),
     )
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
@@ -817,6 +826,9 @@ class _ProductProfileStore:
             if profile.product == product:
                 return profile
         raise FileNotFoundError(product)
+
+    def list_product_profile_records(self) -> tuple[LaunchplaneProductProfileRecord, ...]:
+        return self.profiles
 
 
 _OPERATOR = LocalOperatorIdentity(subject="operator-agent", token_label="operator-agent-token")
@@ -957,6 +969,7 @@ class AgentProductSetupCandidateCompilerTests(unittest.TestCase):
                 intent="add",
                 products=("example-shop", "example-docs"),
                 configured_local_operator_identity=_OPERATOR,
+                record_store=_ProductProfileStore(),
             )
         )
         self.assertFalse(
@@ -967,6 +980,7 @@ class AgentProductSetupCandidateCompilerTests(unittest.TestCase):
                 intent="add",
                 products=("example-shop",),
                 configured_local_operator_identity=_OPERATOR,
+                record_store=_ProductProfileStore(),
             )
         )
 
@@ -984,6 +998,10 @@ class AgentProductSetupCandidateCompilerTests(unittest.TestCase):
             (("example-split",), "candidate_product_unavailable"),
             (("example-laneless",), "candidate_product_unavailable"),
             (("example-service",), "candidate_product_unavailable"),
+            (("example-upper",), "candidate_product_unavailable"),
+            (("example-mixed",), "candidate_product_unavailable"),
+            (("example-shared-a",), "candidate_product_unavailable"),
+            (("example-history",), "candidate_product_unavailable"),
         ):
             with self.subTest(products=products):
                 with self.assertRaises(AuthorizationCandidatePreparationError) as raised:
@@ -1041,6 +1059,7 @@ class AgentProductSetupCandidateCompilerTests(unittest.TestCase):
                 github_id=123,
                 intent="add",
                 configured_local_operator_identity=_OPERATOR,
+                record_store=_ProductProfileStore(),
             )
         )
 
@@ -1132,3 +1151,43 @@ class AgentProductSetupCandidateCompilerTests(unittest.TestCase):
                 except ValueError:
                     continue
                 self.assertIsNone(agent_product_setup_request_grants(request, intent="add"))
+
+    def test_record_check_rejects_a_context_that_is_not_the_products_own(self) -> None:
+        store = _ProductProfileStore()
+        _state, candidate = self._compile(_setup_policy(), products=("example-shop",))
+        assert candidate is not None
+        grants = agent_product_setup_request_grants(candidate, intent="add")
+        assert grants is not None
+        self.assertTrue(agent_product_setup_grants_match_records(record_store=store, grants=grants))
+        swapped = _setup_policy(*_setup_rules("example-shop", "docs-ctx"))
+        swapped_request = ManagedAuthzPolicySetProposalInput(
+            managed_set_id=AGENT_PRODUCT_SETUP_MANAGED_SET_ID,
+            desired_policy=LaunchplaneAuthzPolicy(
+                schema_version=2,
+                local_operators=tuple(
+                    rule
+                    for rule in swapped.local_operators
+                    if rule.managed_set_id == AGENT_PRODUCT_SETUP_MANAGED_SET_ID
+                ),
+            ),
+            schema_migration="reject",
+            administrator_quorum_change=None,
+            reason="test",
+            related_issue="#2766",
+        )
+        swapped_grants = agent_product_setup_request_grants(swapped_request, intent="add")
+        assert swapped_grants is not None
+        self.assertFalse(
+            agent_product_setup_grants_match_records(record_store=store, grants=swapped_grants)
+        )
+        self.assertFalse(
+            authorization_candidate_request_matches(
+                candidate_id="agent-product-setup",
+                request=swapped_request,
+                github_id=123,
+                intent="add",
+                products=("example-shop",),
+                configured_local_operator_identity=_OPERATOR,
+                record_store=store,
+            )
+        )

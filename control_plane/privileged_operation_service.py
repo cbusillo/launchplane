@@ -348,6 +348,8 @@ def _build_privileged_operation_semantic_review(
     events: tuple[PrivilegedOperationEventRecord, ...] = (),
     generated_at: datetime | None = None,
     configured_local_operator_identity: LocalOperatorIdentity | None = None,
+    product_setup_grants_verified: Callable[[tuple[tuple[str, str, str, str], ...]], bool]
+    | None = None,
 ) -> PrivilegedOperationSemanticReview:
     observed_at = (generated_at or _utc_now()).astimezone(timezone.utc)
     try:
@@ -544,10 +546,15 @@ def _build_privileged_operation_semantic_review(
             if operator is not None
             else None
         )
-        is_agent_product_setup = bool(setup_grants) and (
+        # The wording also claims each rule stays on its product's own lanes, so
+        # it needs the product records to confirm every grant's context.
+        is_agent_product_setup = (
             operator is not None
+            and bool(setup_grants)
             and setup_grants is not None
             and setup_grants[0][2:] == (operator.subject, operator.token_label)
+            and product_setup_grants_verified is not None
+            and product_setup_grants_verified(setup_grants)
         )
         is_agent_product_setup_removal = (
             operator is not None
@@ -980,6 +987,8 @@ def privileged_operation_semantic_review(
     events: tuple[PrivilegedOperationEventRecord, ...] = (),
     generated_at: datetime | None = None,
     configured_local_operator_identity: LocalOperatorIdentity | None = None,
+    product_setup_grants_verified: Callable[[tuple[tuple[str, str, str, str], ...]], bool]
+    | None = None,
 ) -> PrivilegedOperationSemanticReview:
     try:
         return _build_privileged_operation_semantic_review(
@@ -987,6 +996,7 @@ def privileged_operation_semantic_review(
             events=events,
             generated_at=generated_at,
             configured_local_operator_identity=configured_local_operator_identity,
+            product_setup_grants_verified=product_setup_grants_verified,
         )
     except ValidationError as error:
         raise PrivilegedOperationSemanticReviewError(

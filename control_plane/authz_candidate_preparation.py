@@ -945,6 +945,55 @@ def agent_product_setup_products(policy: LaunchplaneAuthzPolicy) -> tuple[str, .
     return tuple(grant[0] for grant in grants) if state == "present" else ()
 
 
+def product_context_owners(record_store: object) -> dict[str, frozenset[str]]:
+    """Map each lane or historical context, case-folded, to the products using it."""
+    lister = getattr(record_store, "list_product_profile_records", None)
+    if not callable(lister):
+        raise TypeError("Agent product setup requires product profile storage.")
+    owners: dict[str, set[str]] = {}
+    for record in lister():
+        profile = (
+            record
+            if isinstance(record, LaunchplaneProductProfileRecord)
+            else LaunchplaneProductProfileRecord.model_validate(record)
+        )
+        contexts = {lane.context for lane in profile.lanes} | set(profile.historical_contexts)
+        for context in contexts:
+            if context.strip():
+                owners.setdefault(context.strip().lower(), set()).add(profile.product)
+    return {context: frozenset(products) for context, products in owners.items()}
+
+
+def is_exclusive_product_lane_context(
+    *, context: str, product: str, owners: dict[str, frozenset[str]]
+) -> bool:
+    """True when ``context`` is canonical, not Launchplane's, and only ``product`` uses it."""
+    return (
+        _is_exact_terminal_selector(context)
+        and context == context.strip().lower()
+        and context != LAUNCHPLANE_SERVICE_CONTEXT
+        and owners.get(context) == frozenset((product,))
+    )
+
+
+def agent_product_setup_grants_match_records(
+    *,
+    record_store: object,
+    grants: tuple[_AgentProductSetupGrant, ...],
+) -> bool:
+    """Check that every grant's context is its product's own, exclusively."""
+    try:
+        owners = product_context_owners(record_store)
+        selected = _require_agent_product_setup_lanes(
+            record_store=record_store,
+            products=tuple(grant[0] for grant in grants),
+            owners=owners,
+        )
+    except (TypeError, AuthorizationCandidatePreparationError):
+        return False
+    return selected == tuple((grant[0], grant[1]) for grant in grants)
+
+
 def normalize_agent_product_setup_products(products: tuple[str, ...]) -> tuple[str, ...]:
     """Dedupe and sort a browser product selection without trusting its order."""
     return tuple(sorted({product.strip() for product in products if product.strip()}))
@@ -954,8 +1003,9 @@ def _require_agent_product_setup_lanes(
     *,
     record_store: object,
     products: tuple[str, ...],
+    owners: dict[str, frozenset[str]] | None = None,
 ) -> tuple[tuple[str, str], ...]:
-    """Return each selected product with its one lane context, or refuse."""
+    """Return each selected product with its own exclusive lane context, or refuse."""
     normalized = normalize_agent_product_setup_products(products)
     if not normalized:
         raise AuthorizationCandidatePreparationError(
@@ -975,6 +1025,8 @@ def _require_agent_product_setup_lanes(
     reader = getattr(record_store, "read_product_profile_record", None)
     if not callable(reader):
         raise TypeError("Agent product setup preparation requires product profile storage.")
+    if owners is None:
+        owners = product_context_owners(record_store)
     selected: list[tuple[str, str]] = []
     for product in normalized:
         try:
@@ -991,14 +1043,12 @@ def _require_agent_product_setup_lanes(
         )
         contexts = {lane.context.strip() for lane in profile.lanes if lane.context.strip()}
         context = next(iter(contexts)) if len(contexts) == 1 else ""
-        if (
-            profile.product != product
-            or not _is_exact_terminal_selector(context)
-            or context == LAUNCHPLANE_SERVICE_CONTEXT
+        if profile.product != product or not is_exclusive_product_lane_context(
+            context=context, product=product, owners=owners
         ):
             raise AuthorizationCandidatePreparationError(
                 "candidate_product_unavailable",
-                "A selected product needs a profile whose lanes share one product context.",
+                "A selected product needs one lowercase lane context that no other product uses.",
             )
         selected.append((product, context))
     return tuple(selected)
@@ -1183,6 +1233,7 @@ def authorization_candidate_request_matches(
     intent: AuthorizationCandidateIntent,
     products: tuple[str, ...] = (),
     configured_local_operator_identity: LocalOperatorIdentity | None = None,
+    record_store: object = None,
 ) -> bool:
     if candidate_id == AGENT_PRODUCT_SETUP_CANDIDATE_ID:
         grants = agent_product_setup_request_grants(request, intent=intent)
@@ -1199,6 +1250,7 @@ def authorization_candidate_request_matches(
             )
             and tuple(grant[0] for grant in grants)
             == normalize_agent_product_setup_products(products)
+            and agent_product_setup_grants_match_records(record_store=record_store, grants=grants)
         )
     if candidate_id == ORDINARY_AGENT_DELIVERY_ADMINISTRATION_CANDIDATE_ID:
         recognized = is_ordinary_agent_delivery_administration_request(request)

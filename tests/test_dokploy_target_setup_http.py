@@ -7,6 +7,10 @@ from typing import Any, cast
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductImageProfile,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 import tests.test_service as service_tests
 from tests.support.auth import _StubVerifier, _identity
@@ -190,20 +194,36 @@ class DokployTargetSetupHttpTests(unittest.TestCase):
             "server_id": "server-synthetic",
             "domains": ["synthetic-testing.invalid"],
         }
-        for overrides, expected_status in (
-            ({}, 202),
-            ({"instance": "prod"}, 403),
-            ({"context": "other-context"}, 403),
-            ({"operation": "adopt", "target_id": "compose-production"}, 403),
+        replacement = {
+            "expected_current_provider_target": {
+                "provider_id": "dokploy",
+                "target_id": "compose-existing",
+                "display_name": "synthetic-testing",
+            }
+        }
+        for overrides, owners, expected_status in (
+            ({}, ("synthetic-product",), 202),
+            ({"instance": "prod"}, ("synthetic-product",), 403),
+            ({"context": "other-context"}, ("synthetic-product",), 403),
+            (
+                {"operation": "adopt", "target_id": "compose-production"},
+                ("synthetic-product",),
+                403,
+            ),
+            (replacement, ("synthetic-product",), 403),
+            ({}, ("synthetic-product", "other-product"), 403),
+            ({}, (), 403),
         ):
-            with self.subTest(overrides=overrides):
-                status_code, payload = self._invoke_with_lane_setup_grant({**create, **overrides})
+            with self.subTest(overrides=overrides, owners=owners):
+                status_code, payload = self._invoke_with_lane_setup_grant(
+                    {**create, **overrides}, owners=owners
+                )
                 self.assertEqual(status_code, expected_status, payload)
                 if expected_status == 403:
                     self.assertEqual(payload["error"]["code"], "authorization_denied")
 
     def _invoke_with_lane_setup_grant(
-        self, request: dict[str, object]
+        self, request: dict[str, object], *, owners: tuple[str, ...]
     ) -> tuple[int, dict[str, Any]]:
         temporary_directory = TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
@@ -211,6 +231,21 @@ class DokployTargetSetupHttpTests(unittest.TestCase):
         database_url = _sqlite_database_url(root / "launchplane.sqlite3")
         store = PostgresRecordStore(database_url=database_url)
         store.ensure_schema()
+        for product in owners:
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(
+                    {
+                        "product": product,
+                        "display_name": product,
+                        "repository": f"synthetic-owner/{product}",
+                        "driver_id": "generic-web",
+                        "image": ProductImageProfile().model_dump(mode="json"),
+                        "lanes": [{"instance": "prod", "context": "synthetic-context"}],
+                        "updated_at": "2026-10-02T00:00:00Z",
+                        "source": "test:lane-setup",
+                    }
+                )
+            )
         store.close()
         workflow_ref = (
             "synthetic-owner/synthetic-repo/.github/workflows/"

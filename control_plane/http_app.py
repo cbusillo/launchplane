@@ -43,6 +43,10 @@ from control_plane import authz_policy_recovery as control_plane_authz_policy_re
 from control_plane import authz_diagnostics as control_plane_authz_diagnostics
 from control_plane import authz_repository_scope as control_plane_authz_repository_scope
 from control_plane import ingress_route_scope as control_plane_ingress_route_scope
+from control_plane.authz_candidate_preparation import (
+    is_exclusive_product_lane_context,
+    product_context_owners,
+)
 from control_plane.authz_scope import DOKPLOY_TARGET_LANE_SETUP_ACTION
 from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
@@ -1197,6 +1201,17 @@ _AUTH_GITHUB_LOGIN_ROUTE = "/auth/github/login"
 _AUTH_GITHUB_CALLBACK_ROUTE = "/auth/github/callback"
 _AUTH_LOGOUT_ROUTE = "/auth/logout"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
+
+
+def _is_exclusive_lane_setup_context(*, record_store: object, context: str) -> bool:
+    """True when exactly one product uses ``context`` and it is canonical."""
+    owners = product_context_owners(record_store)
+    products = owners.get(context.strip().lower(), frozenset())
+    return len(products) == 1 and is_exclusive_product_lane_context(
+        context=context, product=next(iter(products)), owners=owners
+    )
+
+
 _AGENT_WRITE_INTENT_EVALUATE_ROUTE = "/v1/agent/write-intents/evaluate"
 _EVERY_CODE_WORK_REQUEST_RERUN_ROUTE = "/v1/every-code/work-requests/rerun"
 _EVERY_CODE_WORK_REQUEST_HEARTBEAT_ROUTE = "/v1/every-code/work-requests/heartbeat"
@@ -23203,8 +23218,9 @@ def create_launchplane_fastapi_app(
             record_store=record_store,
             trace_id=trace_id,
         )
-        # A lane-scoped grant may only create that lane's compose: adopting or
-        # re-pointing could bind the lane to another lane's provider target.
+        # A lane-scoped grant may only create a new compose for its own lane:
+        # adopting, re-pointing or replacing could bind the lane to another
+        # lane's provider target. Its context must belong to one product only.
         can_setup_target = resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action="dokploy_target.setup",
@@ -23212,13 +23228,16 @@ def create_launchplane_fastapi_app(
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         ) or (
             setup_request.operation == "create-compose"
-            and setup_request.context != _LAUNCHPLANE_SERVICE_CONTEXT
+            and setup_request.expected_current_provider_target is None
             and resolved_authz_policy_runtime.policy.allows(
                 identity=identity,
                 action=DOKPLOY_TARGET_LANE_SETUP_ACTION,
                 product=setup_request.product,
                 context=setup_request.context,
                 target=AuthorizationTarget(scope="instance", instances=(setup_request.instance,)),
+            )
+            and _is_exclusive_lane_setup_context(
+                record_store=database_store, context=setup_request.context
             )
         )
         can_repair_domain_authority = setup_request.operation == "repair-domain-authority" and (

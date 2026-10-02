@@ -691,8 +691,10 @@ fresh immutable-ID administrator checks as the other candidates. The browser
 supplies only the candidate, the add/remove intent, an idempotent source event,
 and, for add, the product identifiers chosen with checkboxes. The server
 validates every selected id again: each must name an existing product profile
-whose lanes share exactly one context other than `launchplane`; an empty
-selection is refused; the list is deduplicated and sorted. Products and contexts
+whose lanes share exactly one lowercase context, other than `launchplane`
+(compared case-insensitively), that no other product's lanes or historical
+contexts use; an empty selection is refused; the list is deduplicated and
+sorted. Products and contexts
 are never hard-coded. The selection replaces the products the set already
 covers.
 
@@ -708,10 +710,12 @@ and token label; a later configuration change does not rebind it.
 Adding again with the same products is already satisfied. A set held by another
 identity, in another principal collection, missing a rule, or with any other
 shape is a conflict that preparation does not adopt or repair. Replay
-recognizes only the exact shape, the configured identity and the same
-normalized product list. The review uses the agent wording only when every rule
-binds the service's configured `local_operator` identity; a same-shape proposal
-for any other subject or token label gets the generic managed-policy review.
+recognizes only the exact shape, the configured identity, the same normalized
+product list, and contexts that the product records still confirm as each
+product's own. The review uses the agent wording only when every rule binds the
+service's configured `local_operator` identity and the product records confirm
+every rule's context; any other same-shape proposal gets the generic
+managed-policy review.
 
 Removal proposes an empty fragment for only this set and does not need the
 configured identity. Review names the selected products, what the rules reach,

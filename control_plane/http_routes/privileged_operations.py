@@ -58,6 +58,7 @@ from control_plane.authz_candidate_preparation import (
     AGENT_PRODUCT_SETUP_MAX_PRODUCTS,
     AuthorizationCandidateId,
     AuthorizationCandidatePreparationError,
+    agent_product_setup_grants_match_records,
     authorization_candidate_request_matches,
     compile_authorization_candidate,
     compile_ordinary_agent_delivery_policy_candidate,
@@ -596,6 +597,7 @@ def register_privileged_operation_routes(
         events: tuple[PrivilegedOperationEventRecord, ...],
         generated_at: datetime,
         trace_id: str,
+        record_store: object,
     ) -> PrivilegedOperationSemanticReview:
         try:
             return privileged_operation_semantic_review(
@@ -604,6 +606,11 @@ def register_privileged_operation_routes(
                 generated_at=generated_at,
                 configured_local_operator_identity=(
                     dependencies.read_configured_local_operator_identity()
+                ),
+                product_setup_grants_verified=lambda grants: (
+                    agent_product_setup_grants_match_records(
+                        record_store=record_store, grants=grants
+                    )
                 ),
             )
         except PrivilegedOperationSemanticReviewError as error:
@@ -1092,6 +1099,7 @@ def register_privileged_operation_routes(
                     ),
                     generated_at=generated_at,
                     trace_id=trace_id,
+                    record_store=record_store,
                 )
                 for record in records
             )
@@ -1182,6 +1190,7 @@ def register_privileged_operation_routes(
                 events=events,
                 generated_at=datetime.now(timezone.utc),
                 trace_id=trace_id,
+                record_store=record_store,
             ),
         )
 
@@ -1606,6 +1615,7 @@ def register_privileged_operation_routes(
                         configured_local_operator_identity=(
                             dependencies.read_configured_local_operator_identity()
                         ),
+                        record_store=record_store,
                     )
                 ):
                     raise PrivilegedOperationConflictError(
