@@ -1198,6 +1198,7 @@ export async function applyProductEnvironmentConfigForFixture(
       actor: "github:operator-demo",
       source_label: "product-environment-api",
       reason: payload.reason ?? "",
+      provider_key_adoption: [],
       runtime_environment: {
         action: runtimeKeys.length ? "updated" : "skipped",
         scope: "instance",
