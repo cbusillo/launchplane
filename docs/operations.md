@@ -2641,7 +2641,9 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   record for the site holds, preventing silent loss of configuration; record
   such a setting for the site or retire it. A lane's retirement also wins over
   a key its site's records hold, which keeps a shared setting off one lane;
-  declared and driver keys cannot be retired. Read-only replacement planning
+  declared and driver keys cannot be retired. A provider-only `ODOO_VERSION` is
+  not a leftover when the deployed artifact records its Odoo version: the driver
+  sets it from the artifact. Read-only replacement planning
   names those provider-only keys (`provider_keys_unrecorded`) and lists the key
   names it would deliver (`delivered_runtime_keys`), reading record and secret
   binding names without decrypting any secret. Upstream-restore plans still
