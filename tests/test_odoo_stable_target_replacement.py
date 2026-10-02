@@ -3872,6 +3872,7 @@ class OdooStableTargetReplacementOdooVersionTests(unittest.TestCase):
         manifest_odoo_version: str,
         site_values: dict[str, str],
         provider_odoo_version: str = "",
+        retire_odoo_version: bool = False,
     ) -> tuple[dict[str, str], dict[str, str]]:
         profile = _profile()
         if declare_odoo_version:
@@ -3901,6 +3902,15 @@ class OdooStableTargetReplacementOdooVersionTests(unittest.TestCase):
             inventory=_inventory(),
             artifact_manifest=artifact_manifest,
         )
+        if retire_odoo_version:
+            store.runtime_environment_records = tuple(
+                record.model_copy(
+                    update={"schema_version": 2, "retired_provider_keys": ("ODOO_VERSION",)}
+                )
+                if record.scope == "instance"
+                else record
+                for record in store.runtime_environment_records
+            )
         persisted_env = ""
         rendered_compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
             hold_web_until_integration_readback=False,
@@ -4020,6 +4030,18 @@ class OdooStableTargetReplacementOdooVersionTests(unittest.TestCase):
 
         self.assertEqual(env_map["ODOO_VERSION"], "19.0")
         self.assertEqual(runtime_source["artifact_odoo_version"], "19.0")
+
+    def test_a_retired_odoo_version_stays_retired_with_an_artifact_version(self) -> None:
+        env_map, runtime_source = self._apply(
+            declare_odoo_version=False,
+            manifest_odoo_version="19.0",
+            site_values={},
+            provider_odoo_version="18.0",
+            retire_odoo_version=True,
+        )
+
+        self.assertNotIn("ODOO_VERSION", env_map)
+        self.assertEqual(runtime_source["artifact_odoo_version"], "")
 
     def test_a_provider_only_odoo_version_without_an_artifact_version_is_refused(self) -> None:
         with self.assertRaises(OdooTargetReplacementStageError) as refusal:

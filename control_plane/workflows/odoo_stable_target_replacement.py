@@ -1414,10 +1414,15 @@ def build_odoo_stable_target_replacement_plan(
                     "artifact_source_ref_mismatch",
                     "Selected artifact source ref does not match the stored manifest.",
                 )
-            if artifact_odoo_version(artifact_manifest):
+            if ODOO_VERSION_ENV_KEY in provider_only_keys and artifact_odoo_version(
+                artifact_manifest
+            ):
                 # The driver sets ODOO_VERSION from this artifact, so a provider value
-                # for it is replaced, not lost.
+                # for it is replaced, not lost. (A retired key is never in this set.)
                 provider_only_keys.discard(ODOO_VERSION_ENV_KEY)
+                delivered_runtime_keys = tuple(
+                    sorted({*delivered_runtime_keys, ODOO_VERSION_ENV_KEY})
+                )
             missing_required_modules = missing_required_odoo_modules_from_artifact(
                 artifact_manifest
             )
@@ -1812,7 +1817,11 @@ def execute_odoo_stable_target_replacement_apply(
             runtime_port=profile.runtime_port,
         )
         current_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
-        if ODOO_VERSION_ENV_KEY in current_env_map and artifact_odoo_version(artifact_manifest):
+        if (
+            ODOO_VERSION_ENV_KEY in current_env_map
+            and ODOO_VERSION_ENV_KEY not in retired_provider_keys
+            and artifact_odoo_version(artifact_manifest)
+        ):
             # A lane that carries ODOO_VERSION keeps it, set from the artifact below,
             # whatever value the provider holds.
             application_runtime_keys.add(ODOO_VERSION_ENV_KEY)
