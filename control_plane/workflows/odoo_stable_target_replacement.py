@@ -154,6 +154,17 @@ ODOO_REPLACEMENT_DRIVER_ENV_KEYS = {
 }
 
 
+def _template_declared_keys(*, compose_file: str, retired_provider_keys: set[str]) -> set[str]:
+    """Keys this driver's own compose template names count as declared for every
+    Odoo product. Keys the driver writes itself and keys a reviewed retirement
+    removes stay out."""
+    return (
+        set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)", compose_file))
+        - ODOO_REPLACEMENT_DRIVER_ENV_KEYS
+        - retired_provider_keys
+    )
+
+
 def _runtime_configuration_blockers(
     *,
     compose_file: str,
@@ -1247,15 +1258,22 @@ def build_odoo_stable_target_replacement_plan(
                 retired_keys=retired_provider_keys,
                 application_keys=application_runtime_keys | ODOO_REPLACEMENT_DRIVER_ENV_KEYS,
             )
-            for code, message, keys in _runtime_configuration_blockers(
-                compose_file=dokploy_compose.render_odoo_raw_compose_file(
-                    image_reference=profile.image.repository,
-                    hold_web_until_integration_readback=(
-                        web_held_until_integration_readback(lane.instance)
-                    ),
-                    domain_hosts=current_target.domain_hosts,
-                    runtime_port=profile.runtime_port,
+            planned_compose_file = dokploy_compose.render_odoo_raw_compose_file(
+                image_reference=profile.image.repository,
+                hold_web_until_integration_readback=(
+                    web_held_until_integration_readback(lane.instance)
                 ),
+                domain_hosts=current_target.domain_hosts,
+                runtime_port=profile.runtime_port,
+            )
+            application_runtime_keys.update(
+                _template_declared_keys(
+                    compose_file=planned_compose_file,
+                    retired_provider_keys=retired_provider_keys,
+                )
+            )
+            for code, message, keys in _runtime_configuration_blockers(
+                compose_file=planned_compose_file,
                 current_env=live_runtime_values,
                 resolved_runtime_values=recorded_runtime_values,
                 application_runtime_keys=application_runtime_keys,
@@ -1664,6 +1682,19 @@ def execute_odoo_stable_target_replacement_apply(
                 retired_keys=retired_provider_keys,
                 application_keys=application_runtime_keys | ODOO_REPLACEMENT_DRIVER_ENV_KEYS,
             )
+            compose_file = dokploy_compose.render_odoo_raw_compose_file(
+                image_reference=image_reference,
+                hold_web_until_integration_readback=web_held_until_integration_readback(
+                    plan.instance
+                ),
+                domain_hosts=plan.expected_domain_hosts,
+                runtime_port=profile.runtime_port,
+            )
+            application_runtime_keys.update(
+                _template_declared_keys(
+                    compose_file=compose_file, retired_provider_keys=retired_provider_keys
+                )
+            )
             non_application_provider_keys = dokploy_api.parse_dokploy_env_text(
                 dokploy_api.serialize_dokploy_env_text(
                     {
@@ -1716,12 +1747,6 @@ def execute_odoo_stable_target_replacement_apply(
                 for key, value in runtime_key_safety.items()
                 if key in {"required", "status", "policy_record_id", "policy_sha256"}
             }
-        )
-        compose_file = dokploy_compose.render_odoo_raw_compose_file(
-            image_reference=image_reference,
-            hold_web_until_integration_readback=web_held_until_integration_readback(plan.instance),
-            domain_hosts=plan.expected_domain_hosts,
-            runtime_port=profile.runtime_port,
         )
         current_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
         application_env = {

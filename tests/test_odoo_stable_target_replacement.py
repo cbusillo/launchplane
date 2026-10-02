@@ -70,6 +70,8 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     _failure_stage,
     _merge_required_odoo_install_modules,
     _read_lane,
+    _runtime_configuration_blockers,
+    _template_declared_keys,
     build_odoo_stable_target_replacement_plan,
     execute_odoo_stable_target_replacement_apply,
     _target_health_url,
@@ -924,7 +926,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
                 side_effect=[
                     {"name": "cm-testing", "env": initial_env},
-                    {"name": "cm-testing", "env": initial_env + "\nODOO_WEB_HOST_PORT=18069"},
+                    {"name": "cm-testing", "env": initial_env + "\nADDON_FEATURE=on"},
                 ],
             ),
             patch(
@@ -948,7 +950,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 dokploy_request=_request,
             )
         self.assertEqual(result.deploy_status, "fail")
-        self.assertIn("ODOO_WEB_HOST_PORT", result.error_message)
+        self.assertIn("1 undeclared provider-only env key(s)", result.error_message)
         sync_source.assert_not_called()
 
     def test_apply_refuses_platform_credential_before_provider_write(self) -> None:
@@ -3366,10 +3368,10 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
     def test_apply_refuses_missing_or_undeclared_compose_inputs_before_provider_writes(
         self,
     ) -> None:
+        # Keys the driver's own compose template names need no declaration; see
+        # test_build_plan_counts_template_keys_as_declared.
         for key, declared in (
-            ("ODOO_DB_NAME", False),
             ("ODOO_DB_NAME", True),
-            ("ODOO_WEB_HOST_PORT", False),
             ("ADDON_FEATURE", False),
             ("addon_feature", False),
         ):
@@ -3452,40 +3454,19 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         ),
                         dokploy_request=cast(DokployRequest, _request),
                     )
-                    if declared or key in {"ADDON_FEATURE", "addon_feature"}:
-                        # Values and unrelated provider-only keys still need
-                        # execution's pre-provider checks after a ready plan.
-                        self.assertEqual(plan.plan_status, "ready")
-                        result = execute_odoo_stable_target_replacement_apply(
-                            control_plane_root=Path("."),
-                            record_store=store,
-                            request=OdooStableTargetReplacementApplyRequest(
-                                product=profile.product, instance="testing"
-                            ),
-                            dokploy_request=_request,
-                        )
-                        self.assertEqual(result.deploy_status, "fail")
-                        error_message = result.error_message
-                    else:
-                        self.assertEqual(plan.plan_status, "blocked")
-                        with self.assertRaises(click.ClickException) as refusal:
-                            execute_odoo_stable_target_replacement_apply(
-                                control_plane_root=Path("."),
-                                record_store=store,
-                                request=OdooStableTargetReplacementApplyRequest(
-                                    product=profile.product, instance="testing"
-                                ),
-                                dokploy_request=_request,
-                            )
-                        error_message = str(refusal.exception)
-                        self.assertEqual(store.deployment_records, [])
-                        # The undeclared key names travel as structured data.
-                        self.assertEqual(plan.blocker_keys["runtime_keys_undeclared"], (key,))
-                        self.assertIsInstance(refusal.exception, OdooTargetReplacementStageError)
-                        stage_error = cast(OdooTargetReplacementStageError, refusal.exception)
-                        self.assertEqual(stage_error.code, "plan_not_ready.runtime_keys_undeclared")
-                        self.assertEqual(stage_error.detail_keys, (key,))
-                        self.assertTrue(all(blocker in error_message for blocker in plan.blockers))
+                    # Values and unrelated provider-only keys still need
+                    # execution's pre-provider checks after a ready plan.
+                    self.assertEqual(plan.plan_status, "ready")
+                    result = execute_odoo_stable_target_replacement_apply(
+                        control_plane_root=Path("."),
+                        record_store=store,
+                        request=OdooStableTargetReplacementApplyRequest(
+                            product=profile.product, instance="testing"
+                        ),
+                        dokploy_request=_request,
+                    )
+                    self.assertEqual(result.deploy_status, "fail")
+                    error_message = result.error_message
                 if key in {"ADDON_FEATURE", "addon_feature"}:
                     self.assertIn("1 undeclared provider-only env key(s)", error_message)
                     self.assertNotIn(key, error_message)
@@ -3495,6 +3476,109 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 ensure_domain.assert_not_called()
                 update_env.assert_not_called()
                 trigger_deploy.assert_not_called()
+
+    def test_build_plan_counts_template_keys_as_declared(self) -> None:
+        template_keys = {
+            "ODOO_DB_NAME",
+            "ODOO_DB_USER",
+            "ODOO_DB_PASSWORD",
+            "ODOO_WEB_HOST_PORT",
+            "ODOO_WORKERS",
+        }
+        profile = _profile()
+        profile = profile.model_copy(
+            update={
+                "expected_config": profile.expected_config.model_copy(
+                    update={
+                        "runtime_environment_keys": tuple(
+                            requirement
+                            for requirement in profile.expected_config.runtime_environment_keys
+                            if requirement.key not in template_keys
+                        )
+                    }
+                )
+            }
+        )
+        store = _Store(
+            profile=profile,
+            target_record=_target_record(),
+            target_id_record=_target_id_record(),
+            inventory=_inventory(),
+        )
+        provider_env = "\n".join(
+            (
+                *_DATABASE_ENV_LINES,
+                "ODOO_WEB_HOST_PORT=18069",
+                "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                "ODOO_DB_VOLUME=cm_testing_odoo_db",
+            )
+        )
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
+                return_value={"name": "cm-testing", "env": provider_env},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-123", "status": "success"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment({"ODOO_WORKERS": "2"}),
+            ),
+        ):
+            plan = build_odoo_stable_target_replacement_plan(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=OdooStableTargetReplacementRequest(
+                    product=profile.product, instance="testing"
+                ),
+                dokploy_request=cast(DokployRequest, _request),
+            )
+        self.assertEqual(plan.plan_status, "ready", plan.blockers)
+        self.assertNotIn("runtime_keys_undeclared", plan.blocker_keys)
+
+    def test_template_declared_keys_leave_out_driver_and_retired_keys(self) -> None:
+        compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            hold_web_until_integration_readback=True,
+            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:artifact",
+            domain_hosts=("cm-testing.example.test",),
+            runtime_port=8069,
+        )
+        keys = _template_declared_keys(
+            compose_file=compose_file, retired_provider_keys={"ODOO_MAX_CRON_THREADS"}
+        )
+        self.assertTrue({"ODOO_WORKERS", "ODOO_DB_MAXCONN", "ODOO_DB_PASSWORD"} <= keys)
+        # The driver writes these itself; a stored lane value must never replace them.
+        for driver_key in (
+            ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+            LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,
+            LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
+            "PLATFORM_CONTEXT",
+            "PLATFORM_INSTANCE",
+        ):
+            self.assertNotIn(driver_key, keys)
+        self.assertNotIn("ODOO_MAX_CRON_THREADS", keys)
+
+    def test_upstream_restore_settings_still_need_declarations(self) -> None:
+        blockers = _runtime_configuration_blockers(
+            compose_file="ODOO_WORKERS: ${ODOO_WORKERS:-6}",
+            current_env={"ODOO_WORKERS": "2"},
+            resolved_runtime_values=dict(_UPSTREAM_RESTORE_ENV),
+            application_runtime_keys={"ODOO_WORKERS"},
+            data_source_mode="upstream_restore",
+        )
+        undeclared = [
+            keys for code, _message, keys in blockers if code == "runtime_keys_undeclared"
+        ]
+        self.assertEqual(len(undeclared), 1)
+        self.assertIn("ODOO_UPSTREAM_HOST", undeclared[0])
+        self.assertNotIn("ODOO_WORKERS", undeclared[0])
 
     def test_apply_records_runtime_key_safety_pass_evidence(self) -> None:
         store = _Store(
