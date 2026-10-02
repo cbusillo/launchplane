@@ -15,6 +15,7 @@ from control_plane import odoo_instance_overrides as control_plane_odoo_instance
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import release_tuples as control_plane_release_tuples
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
     artifact_manifest_matches_image_repository,
@@ -102,7 +103,9 @@ def _failure_stage(code: str) -> Iterator[None]:
         raise OdooTargetReplacementStageError(code, str(error)) from error
 
 
-class OdooStableTargetReplacementStore(RuntimeKeySafetyPolicyReadStore, Protocol):
+class OdooStableTargetReplacementStore(
+    RuntimeKeySafetyPolicyReadStore, control_plane_secrets.SecretBindingSelectionStore, Protocol
+):
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
     def read_dokploy_target_record(
@@ -142,6 +145,8 @@ ODOO_STABLE_TARGET_REPLACEMENT_VERIFY_RETRY_INTERVAL_SECONDS = 5
 ODOO_ADDONS_PATH_ENV_KEY = "ODOO_ADDONS_PATH"
 ODOO_INSTALL_MODULES_ENV_KEY = "ODOO_INSTALL_MODULES"
 ODOO_REQUIRED_VOLUME_ENV_KEYS = ("ODOO_DATA_VOLUME", "ODOO_LOG_VOLUME", "ODOO_DB_VOLUME")
+# Legacy provider values this driver drops, so they are not leftovers to record.
+ODOO_DISCARDED_LEGACY_PROVIDER_ENV = {"ODOO_WEB_COMMAND": "/odoo/odoo-bin"}
 ODOO_REPLACEMENT_DRIVER_ENV_KEYS = {
     "PLATFORM_CONTEXT",
     "PLATFORM_INSTANCE",
@@ -154,64 +159,117 @@ ODOO_REPLACEMENT_DRIVER_ENV_KEYS = {
 }
 
 
-def _runtime_configuration_blockers(
+def _upstream_restore_blockers(
     *,
-    compose_file: str,
     current_env: dict[str, str],
     resolved_runtime_values: dict[str, str],
-    application_runtime_keys: set[str],
-    data_source_mode: str,
-    retired_provider_keys: set[str] | None = None,
+    declared_runtime_keys: set[str],
+    retired_provider_keys: set[str],
 ) -> tuple[tuple[OdooTargetReplacementPlanBlockerCode, str, tuple[str, ...]], ...]:
-    """Each configuration blocker as its stable code, its human message and the
-    env-key names it is about."""
-    configured_keys = (current_env.keys() | resolved_runtime_values.keys()) - (
-        retired_provider_keys or set()
+    """Each upstream-restore blocker as its stable code, its human message and the
+    env-key names it is about.
+
+    An upstream restore copies a production database, so its source settings and
+    any configured migration options must be declared on the lane, not merely stored.
+    """
+    configured_keys = (current_env.keys() | resolved_runtime_values.keys()) - retired_provider_keys
+    required_declarations: set[str] = set(
+        dokploy_post_deploy.ODOO_UPSTREAM_RESTORE_WORKFLOW_ENV_KEYS
     )
-    compose_keys = set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)", compose_file))
-    required_declarations = compose_keys & configured_keys
-    if data_source_mode == "upstream_restore":
-        required_declarations.update(dokploy_post_deploy.ODOO_UPSTREAM_RESTORE_WORKFLOW_ENV_KEYS)
-        # Preserve explicitly configured migration mode/options even when a
-        # shared runtime record, rather than provider state, supplied them.
-        required_declarations.update(
-            configured_keys
-            & {
-                "ODOO_FILESTORE_PATH",
-                "OPENUPGRADE_ENABLED",
-                "OPENUPGRADE_TARGET_VERSION",
-                "OPENUPGRADE_SCRIPTS_PATH",
-                "OPENUPGRADE_SKIP_UPDATE_ADDONS",
-            }
-        )
+    required_declarations.update(
+        configured_keys
+        & {
+            "ODOO_FILESTORE_PATH",
+            "OPENUPGRADE_ENABLED",
+            "OPENUPGRADE_TARGET_VERSION",
+            "OPENUPGRADE_SCRIPTS_PATH",
+            "OPENUPGRADE_SKIP_UPDATE_ADDONS",
+        }
+    )
     undeclared_keys = sorted(
-        required_declarations - application_runtime_keys - ODOO_REPLACEMENT_DRIVER_ENV_KEYS
+        required_declarations - declared_runtime_keys - ODOO_REPLACEMENT_DRIVER_ENV_KEYS
     )
     blockers: list[tuple[OdooTargetReplacementPlanBlockerCode, str, tuple[str, ...]]] = []
     if undeclared_keys:
         blockers.append(
             (
                 "runtime_keys_undeclared",
-                "Odoo target replacement requires product-profile declarations for env key(s): "
+                "Odoo upstream restore requires product-profile declarations for env key(s): "
                 + ", ".join(undeclared_keys)
                 + ". Repair the lane's expected configuration before replacement.",
                 tuple(undeclared_keys),
             )
         )
-    if data_source_mode == "upstream_restore":
-        application_env = {
-            key: value
-            for key, value in (current_env | resolved_runtime_values).items()
-            if key in application_runtime_keys
-        }
-        try:
-            dokploy_post_deploy.resolve_upstream_restore_workflow_environment(
-                desired_env_map=application_env
-            )
-        except click.ClickException as error:
-            # This validator reports fixed schema keys only, never their values.
-            blockers.append(("upstream_restore_environment_invalid", str(error), ()))
+    application_env = {
+        key: value
+        for key, value in (current_env | resolved_runtime_values).items()
+        if key in declared_runtime_keys
+    }
+    try:
+        dokploy_post_deploy.resolve_upstream_restore_workflow_environment(
+            desired_env_map=application_env
+        )
+    except click.ClickException as error:
+        # This validator reports fixed schema keys only, never their values.
+        blockers.append(("upstream_restore_environment_invalid", str(error), ()))
     return tuple(blockers)
+
+
+def _provider_only_keys(
+    *, current_env: Mapping[str, str], application_keys: set[str], retired_keys: set[str]
+) -> set[str]:
+    """Well-formed provider env keys that no Launchplane record for the lane supplies.
+
+    Replacement rebuilds the provider env, so such a key would be lost silently; it
+    must be recorded for the site or retired first. Malformed multiline fragments
+    are left out: they are discarded, and their parsed names can contain secrets.
+    """
+    return {
+        key
+        for key in current_env.keys()
+        - application_keys
+        - ODOO_REPLACEMENT_DRIVER_ENV_KEYS
+        - retired_keys
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
+        and ODOO_DISCARDED_LEGACY_PROVIDER_ENV.get(key) != current_env[key].strip()
+    }
+
+
+def _site_runtime_key_names(
+    *,
+    record_store: OdooStableTargetReplacementStore,
+    target_record: DokployTargetRecord,
+    context: str,
+    instance: str,
+) -> set[str]:
+    """The key names ``resolve_site_runtime_environment`` would deliver, before
+    retirement, read without decrypting any secret.
+
+    The site's context and lane records, its tracked target settings and the
+    managed secrets stored for it; never global values or another site's.
+    """
+    names: set[str] = set(target_record.env)
+    definition = (
+        control_plane_runtime_environments.load_optional_runtime_environment_definition_from_store(
+            record_store=record_store
+        )
+    )
+    context_definition = definition.contexts.get(context) if definition is not None else None
+    if context_definition is not None:
+        names.update(context_definition.shared_env)
+        instance_definition = context_definition.instances.get(instance)
+        if instance_definition is not None:
+            names.update(instance_definition.env)
+    names.update(
+        control_plane_secrets.resolve_effective_secret_bindings_from_store(
+            record_store=record_store,
+            integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+            context_name=context,
+            instance_name=instance,
+            scopes=control_plane_runtime_environments.site_secret_scopes(instance),
+        )
+    )
+    return names
 
 
 class OdooStableTargetRuntimeSnapshot(BaseModel):
@@ -263,6 +321,9 @@ class OdooStableTargetReplacementPlan(BaseModel):
     data_source_mode: Literal["existing", "empty", "upstream_restore"] = "existing"
     approval_issue_url: str = ""
     retired_provider_keys: tuple[str, ...] = ()
+    # Names of the settings the replacement would give the app, from the site's
+    # records and the provider env; never values.
+    delivered_runtime_keys: tuple[str, ...] = ()
     blockers: tuple[str, ...] = ()
     # One stable code per blocker, in the same order as ``blockers``.
     blocker_codes: tuple[str, ...] = ()
@@ -1133,6 +1194,7 @@ def build_odoo_stable_target_replacement_plan(
     desired_volume_values: dict[str, str] = {}
     volume_authority_drift_keys: tuple[str, ...] = ()
     retired_provider_keys: set[str] = set()
+    delivered_runtime_keys: tuple[str, ...] = ()
     if target_record is None:
         block("target_record_missing", "Launchplane has no Dokploy target record for this lane.")
     if target_id_record is None:
@@ -1214,17 +1276,14 @@ def build_odoo_stable_target_replacement_plan(
         if not current_target.runtime_identity_present:
             warnings.append("Current target does not expose a Launchplane runtime identity yet.")
         try:
-            application_runtime_keys = (
-                control_plane_live_target_runtime.require_product_profile_runtime_keys(
-                    record_store=record_store,
-                    product_name=profile.product,
-                    context_name=lane.context,
-                    instance_name=lane.instance,
-                )
+            declared_runtime_keys = control_plane_live_target_runtime.product_lane_declared_keys(
+                record_store=record_store,
+                product_name=profile.product,
+                context_name=lane.context,
+                instance_name=lane.instance,
             )
-            application_runtime_keys.update(
-                (ODOO_ADDONS_PATH_ENV_KEY, ODOO_INSTALL_MODULES_ENV_KEY)
-            )
+            # Settings this driver's module and override contracts own.
+            driver_owned_keys = {ODOO_ADDONS_PATH_ENV_KEY, ODOO_INSTALL_MODULES_ENV_KEY}
             override_record = _read_odoo_instance_override_record(
                 record_store=record_store, context=lane.context, instance=lane.instance
             )
@@ -1233,9 +1292,8 @@ def build_odoo_stable_target_replacement_plan(
                     override_record,
                     protected_shopify_store_keys=target_record.policies.shopify.protected_store_keys,
                 )
-                application_runtime_keys.update(
-                    override.payload.required_container_environment_keys
-                )
+                driver_owned_keys.update(override.payload.required_container_environment_keys)
+            declared_runtime_keys |= driver_owned_keys
             retired_provider_keys = (
                 control_plane_runtime_environments.retired_provider_keys_from_store(
                     record_store=record_store,
@@ -1243,26 +1301,60 @@ def build_odoo_stable_target_replacement_plan(
                     instance_name=lane.instance,
                 )
             )
+            site_keys = control_plane_runtime_environments.site_application_keys(
+                _site_runtime_key_names(
+                    record_store=record_store,
+                    target_record=target_record,
+                    context=lane.context,
+                    instance=lane.instance,
+                )
+            )
             control_plane_live_target_runtime.validate_provider_key_retirement(
                 retired_keys=retired_provider_keys,
-                application_keys=application_runtime_keys | ODOO_REPLACEMENT_DRIVER_ENV_KEYS,
+                application_keys=site_keys
+                | declared_runtime_keys
+                | ODOO_REPLACEMENT_DRIVER_ENV_KEYS,
             )
-            for code, message, keys in _runtime_configuration_blockers(
-                compose_file=dokploy_compose.render_odoo_raw_compose_file(
-                    image_reference=profile.image.repository,
-                    hold_web_until_integration_readback=(
-                        web_held_until_integration_readback(lane.instance)
-                    ),
-                    domain_hosts=current_target.domain_hosts,
-                    runtime_port=profile.runtime_port,
+            # A declaration alone keeps no provider value: what the app gets comes
+            # from the site's records.
+            application_runtime_keys = driver_owned_keys | (site_keys - retired_provider_keys)
+            delivered_runtime_keys = tuple(
+                sorted(
+                    key
+                    for key in application_runtime_keys & (site_keys | live_runtime_values.keys())
+                    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
+                )
+            )
+            # Rendering checks the image, domains and port before any provider write.
+            dokploy_compose.render_odoo_raw_compose_file(
+                image_reference=profile.image.repository,
+                hold_web_until_integration_readback=(
+                    web_held_until_integration_readback(lane.instance)
                 ),
+                domain_hosts=current_target.domain_hosts,
+                runtime_port=profile.runtime_port,
+            )
+            if request.data_source_mode == "upstream_restore":
+                for code, message, keys in _upstream_restore_blockers(
+                    current_env=live_runtime_values,
+                    resolved_runtime_values=recorded_runtime_values,
+                    declared_runtime_keys=declared_runtime_keys,
+                    retired_provider_keys=retired_provider_keys,
+                ):
+                    block(code, message, keys)
+            provider_only_keys = _provider_only_keys(
                 current_env=live_runtime_values,
-                resolved_runtime_values=recorded_runtime_values,
-                application_runtime_keys=application_runtime_keys,
-                data_source_mode=request.data_source_mode,
-                retired_provider_keys=retired_provider_keys,
-            ):
-                block(code, message, keys)
+                application_keys=application_runtime_keys,
+                retired_keys=retired_provider_keys,
+            )
+            if provider_only_keys:
+                block(
+                    "provider_keys_unrecorded",
+                    f"Current target has {len(provider_only_keys)} provider-only env key(s) "
+                    "with no Launchplane record for this site. Record them for the site or "
+                    "retire them before replacement.",
+                    tuple(provider_only_keys),
+                )
         except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
             block("live_runtime_keys_invalid", str(error))
         except click.ClickException:
@@ -1358,6 +1450,7 @@ def build_odoo_stable_target_replacement_plan(
         data_source_mode=request.data_source_mode,
         approval_issue_url=approval_issue_url,
         retired_provider_keys=tuple(sorted(retired_provider_keys)),
+        delivered_runtime_keys=delivered_runtime_keys,
         blockers=blockers_tuple,
         blocker_codes=tuple(blocker_codes),
         blocker_keys=blocker_keys,
@@ -1624,31 +1717,31 @@ def execute_odoo_stable_target_replacement_apply(
             target_type="compose",
             target_id=target_id_record.target_id,
         )
-        runtime_environment_values = (
-            control_plane_runtime_environments.resolve_site_runtime_environment(
-                control_plane_root=control_plane_root,
+        site_environment = control_plane_runtime_environments.resolve_site_runtime_environment(
+            control_plane_root=control_plane_root,
+            context_name=plan.context,
+            instance_name=plan.instance,
+        )
+        # The site's own environment is delivered whole, as live sync does: worker
+        # credentials, global values and other sites' values never reach it.
+        runtime_environment_values = dict(site_environment.values)
+        try:
+            declared_runtime_keys = control_plane_live_target_runtime.product_lane_declared_keys(
+                record_store=record_store,
+                product_name=plan.product,
                 context_name=plan.context,
                 instance_name=plan.instance,
-            ).values
-        )
-        unfiltered_runtime_values = dict(runtime_environment_values)
-        try:
-            application_runtime_keys = (
-                control_plane_live_target_runtime.require_product_profile_runtime_keys(
-                    record_store=record_store,
-                    product_name=plan.product,
-                    context_name=plan.context,
-                    instance_name=plan.instance,
-                )
             )
-            # These settings are also owned by this driver's required-module contract.
-            application_runtime_keys.update(
-                (ODOO_ADDONS_PATH_ENV_KEY, ODOO_INSTALL_MODULES_ENV_KEY)
-            )
+            # Settings this driver's module and override contracts own.
+            driver_owned_keys = {ODOO_ADDONS_PATH_ENV_KEY, ODOO_INSTALL_MODULES_ENV_KEY}
             if runtime_override_payload is not None:
-                application_runtime_keys.update(
+                driver_owned_keys.update(
                     runtime_override_payload.required_container_environment_keys
                 )
+            declared_runtime_keys |= driver_owned_keys
+            # A declaration alone keeps no provider value: what the app gets comes
+            # from the site's records.
+            application_runtime_keys = driver_owned_keys | runtime_environment_values.keys()
             retired_provider_keys = (
                 control_plane_runtime_environments.retired_provider_keys_from_store(
                     record_store=record_store,
@@ -1662,22 +1755,12 @@ def execute_odoo_stable_target_replacement_apply(
                 )
             control_plane_live_target_runtime.validate_provider_key_retirement(
                 retired_keys=retired_provider_keys,
-                application_keys=application_runtime_keys | ODOO_REPLACEMENT_DRIVER_ENV_KEYS,
-            )
-            non_application_provider_keys = dokploy_api.parse_dokploy_env_text(
-                dokploy_api.serialize_dokploy_env_text(
-                    {
-                        key: value
-                        for key, value in runtime_environment_values.items()
-                        if key not in application_runtime_keys
-                    }
+                application_keys=control_plane_runtime_environments.site_application_keys(
+                    site_environment.site_keys
                 )
-            ).keys()
-            runtime_environment_values = {
-                key: value
-                for key, value in runtime_environment_values.items()
-                if key in application_runtime_keys
-            }
+                | declared_runtime_keys
+                | ODOO_REPLACEMENT_DRIVER_ENV_KEYS,
+            )
             runtime_secret_binding_keys = (
                 control_plane_live_target_runtime.require_product_profile_runtime_secret_keys(
                     record_store=record_store,
@@ -1741,32 +1824,44 @@ def execute_odoo_stable_target_replacement_apply(
                 "Odoo target replacement requires application env key(s): "
                 + ", ".join(missing_compose_keys)
             )
-        configuration_blockers = _runtime_configuration_blockers(
-            compose_file=compose_file,
-            current_env=current_env_map,
-            resolved_runtime_values=unfiltered_runtime_values,
-            application_runtime_keys=application_runtime_keys,
-            data_source_mode=request.data_source_mode,
-            retired_provider_keys=retired_provider_keys,
-        )
-        if configuration_blockers:
-            raise click.ClickException(
-                "; ".join(message for _code, message, _keys in configuration_blockers)
+        if request.data_source_mode == "upstream_restore":
+            configuration_blockers = _upstream_restore_blockers(
+                current_env=current_env_map,
+                resolved_runtime_values=runtime_environment_values,
+                declared_runtime_keys=declared_runtime_keys,
+                retired_provider_keys=retired_provider_keys,
             )
-        undeclared_provider_keys = {
-            key
-            for key in current_env_map.keys()
-            - application_runtime_keys
-            - ODOO_REPLACEMENT_DRIVER_ENV_KEYS
-            - non_application_provider_keys
-            - retired_provider_keys
-            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
-        }
-        if undeclared_provider_keys:
+            if configuration_blockers:
+                raise click.ClickException(
+                    "; ".join(message for _code, message, _keys in configuration_blockers)
+                )
+        provider_only_keys = _provider_only_keys(
+            current_env=current_env_map,
+            application_keys=application_runtime_keys,
+            retired_keys=retired_provider_keys,
+        )
+        if provider_only_keys:
             raise click.ClickException(
                 "Odoo target replacement found "
-                f"{len(undeclared_provider_keys)} undeclared provider-only env key(s). "
-                "Declare application settings in the product profile before replacement."
+                f"{len(provider_only_keys)} provider-only env key(s) with no Launchplane "
+                "record for this site. Record them for the site or retire them before "
+                "replacement."
+            )
+        # A value the provider env text cannot carry intact, such as a multiline
+        # key, would persist as fragments; refuse it by name before any write.
+        unportable_keys = sorted(
+            key
+            for key, value in runtime_environment_values.items()
+            if dokploy_api.parse_dokploy_env_text(
+                dokploy_api.serialize_dokploy_env_text({key: value})
+            )
+            != {key: value}
+        )
+        if unportable_keys:
+            raise click.ClickException(
+                "Odoo target replacement cannot carry the value of env key(s) "
+                + ", ".join(unportable_keys)
+                + " in the provider env; store them as single-line values."
             )
         if runtime_override_payload is not None:
             missing_override_secret_keys = tuple(
@@ -1866,7 +1961,7 @@ def execute_odoo_stable_target_replacement_apply(
         runtime_source["artifact_odoo_version"] = apply_artifact_odoo_version(
             desired_env_map,
             artifact_manifest=artifact_manifest,
-            declared_keys=application_runtime_keys,
+            declared_keys=application_runtime_keys | declared_runtime_keys,
         )
         addons_path = merge_required_odoo_addons_path(
             desired_env_map.get(ODOO_ADDONS_PATH_ENV_KEY, "")
@@ -1895,8 +1990,9 @@ def execute_odoo_stable_target_replacement_apply(
             artifact_manifest.odoo_install_modules
         )
         runtime_source["odoo_install_modules"] = desired_env_map[ODOO_INSTALL_MODULES_ENV_KEY]
-        if desired_env_map.get("ODOO_WEB_COMMAND", "").strip() == "/odoo/odoo-bin":
-            desired_env_map.pop("ODOO_WEB_COMMAND", None)
+        for key, legacy_value in ODOO_DISCARDED_LEGACY_PROVIDER_ENV.items():
+            if desired_env_map.get(key, "").strip() == legacy_value:
+                desired_env_map.pop(key, None)
         desired_env_map["PLATFORM_CONTEXT"] = plan.context
         desired_env_map["PLATFORM_INSTANCE"] = plan.instance
         desired_env_map["DOCKER_IMAGE_REFERENCE"] = image_reference

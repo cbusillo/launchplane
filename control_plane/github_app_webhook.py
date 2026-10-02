@@ -40,8 +40,6 @@ _PREVIEW_PULL_REQUEST_ACTIONS = frozenset(
         "opened",
         "reopened",
         "synchronize",
-        "ready_for_review",
-        "converted_to_draft",
         "labeled",
         "unlabeled",
         "closed",

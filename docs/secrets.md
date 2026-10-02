@@ -364,7 +364,8 @@ decryption key state denies the reveal or resolution.
 - Live target runtime sync uses `POST /v1/live-target-runtime/apply` or the
   `live-target-runtime.yml` workflow wrapper. Dry-run and apply both return
   sanitized key/count evidence.
-- Live target runtime sync delivers the site's own environment for the lane:
+- Live target runtime sync and Odoo target replacement deliver the site's own
+  environment for the lane:
   the site's context and lane settings, the tracked target's settings, secrets
   stored for exactly that lane, and, for testing and prod lanes only, secrets
   shared across the site. Global settings and secrets, other sites' values, and

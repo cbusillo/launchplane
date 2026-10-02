@@ -34169,6 +34169,7 @@
           "reason": {
             "enum": [
               "stable-inventory",
+              "previous-good-deployment",
               "release-tuple",
               "active-preview-generation",
               "active-preview-feedback"

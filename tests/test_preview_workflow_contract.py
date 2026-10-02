@@ -87,8 +87,8 @@ def _event(**overrides: object) -> PreviewWorkflowEvent:
 
 
 class PreviewWorkflowContractTests(unittest.TestCase):
-    def test_same_repo_ready_pr_refreshes_preview_on_every_ready_event(self) -> None:
-        for action in ("opened", "reopened", "synchronize", "ready_for_review"):
+    def test_same_repo_open_pr_refreshes_preview_on_every_change(self) -> None:
+        for action in ("opened", "reopened", "synchronize"):
             with self.subTest(action=action):
                 decision = decide_preview_workflow_operation(_event(action=action))
 
@@ -101,20 +101,15 @@ class PreviewWorkflowContractTests(unittest.TestCase):
                 self.assertTrue(decision.product_build_required)
                 self.assertTrue(decision.launchplane_feedback_required)
 
-    def test_draft_pr_gets_no_preview(self) -> None:
-        decision = decide_preview_workflow_operation(_event(action="opened", draft=True))
+    def test_draft_changes_destroy_nothing(self) -> None:
+        for event_name in ("pull_request", "pull_request_target"):
+            for action in ("converted_to_draft", "ready_for_review"):
+                with self.subTest(event_name=event_name, action=action):
+                    decision = decide_preview_workflow_operation(
+                        _event(event_name=event_name, action=action)
+                    )
 
-        self.assertEqual(decision.operation, "ignore")
-        self.assertEqual(decision.reason, "pull_request_draft")
-
-    def test_converting_to_draft_destroys_the_preview(self) -> None:
-        decision = decide_preview_workflow_operation(
-            _event(event_name="pull_request_target", action="converted_to_draft", draft=True)
-        )
-
-        self.assertEqual(decision.operation, "destroy")
-        self.assertEqual(decision.reason, "pull_request_converted_to_draft")
-        self.assertEqual(decision.feedback_status, "destroyed")
+                    self.assertEqual(decision.operation, "ignore")
 
     def test_label_events_change_no_preview(self) -> None:
         for event_name in ("pull_request", "pull_request_target"):
@@ -158,12 +153,10 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertEqual(decision.reason, "pull_request_target_does_not_change_preview")
 
     def test_pull_request_cleanup_is_ignored(self) -> None:
-        for action in ("closed", "converted_to_draft"):
-            with self.subTest(action=action):
-                decision = decide_preview_workflow_operation(_event(action=action))
+        decision = decide_preview_workflow_operation(_event(action="closed"))
 
-                self.assertEqual(decision.operation, "ignore")
-                self.assertEqual(decision.reason, "pull_request_cleanup_runs_on_target")
+        self.assertEqual(decision.operation, "ignore")
+        self.assertEqual(decision.reason, "pull_request_cleanup_runs_on_target")
 
     def test_dependabot_pull_request_event_fails_closed(self) -> None:
         with self.assertRaises(ValidationError):
@@ -308,7 +301,6 @@ class PreviewWorkflowDecisionCliTests(unittest.TestCase):
                         "repository": {"full_name": "cbusillo/sellyouroutboard"},
                         "pull_request": {
                             "number": 105,
-                            "draft": False,
                             "base": {
                                 "repo": {"full_name": "cbusillo/sellyouroutboard"},
                             },
@@ -347,7 +339,6 @@ class PreviewWorkflowDecisionCliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         payload = json.loads(result.output)
         self.assertEqual(payload["event"]["anchor_pr_number"], 105)
-        self.assertFalse(payload["event"]["draft"])
         self.assertEqual(payload["decision"]["operation"], "refresh")
         self.assertEqual(
             payload["decision"]["launchplane_route_path"],
@@ -458,7 +449,7 @@ class PreviewWorkflowDecisionCliTests(unittest.TestCase):
                 "--event-name",
                 "pull_request",
                 "--action",
-                "synchronize",
+                "labeled",
                 "--repository",
                 "cbusillo/sellyouroutboard",
                 "--anchor-repo",
@@ -471,7 +462,6 @@ class PreviewWorkflowDecisionCliTests(unittest.TestCase):
                 "cbusillo/sellyouroutboard",
                 "--head-repository",
                 "cbusillo/sellyouroutboard",
-                "--draft",
                 "--product",
                 "sell-your-outboard",
                 "--context",

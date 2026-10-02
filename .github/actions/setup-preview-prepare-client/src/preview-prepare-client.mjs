@@ -59,8 +59,7 @@ export function buildSameRepoPreviewPrepareOutputs(options = {}) {
   const event = options.event ?? {};
   const pullRequest = event.pull_request ?? {};
   const action = normalizeOptionalText(options.action ?? event.action);
-  // A preview follows the PR: an open PR that is ready for review has one.
-  const draft = (options.draft ?? pullRequest.draft) === true;
+  // A preview stays up until its PR closes or merges; drafts and labels play no part.
   const currentRepository = normalizeRepository(
     options.currentRepository ?? event.repository?.full_name,
   );
@@ -74,10 +73,7 @@ export function buildSameRepoPreviewPrepareOutputs(options = {}) {
   const previewSupported = Boolean(actor) && sameRepo && actor !== "dependabot[bot]";
 
   let mode = "noop";
-  if (
-    !draft &&
-    ["opened", "reopened", "synchronize", "ready_for_review"].includes(action)
-  ) {
+  if (["opened", "reopened", "synchronize"].includes(action)) {
     mode = previewSupported ? "refresh" : "unsupported";
   }
 
