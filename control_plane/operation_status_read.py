@@ -19,7 +19,11 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 OPERATION_STATUS_READ_ACTION = "operations.read"
 OPERATION_STATUS_READ_PRODUCT = "launchplane"
 
-_SAFE_CODE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,95}$")
+# Dot-separated snake_case words, each starting with a letter: the shape of
+# the codes Launchplane writes. Hosts with digits, IPs, hyphenated provider ids
+# and colon-separated values do not fit.
+_SAFE_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}(\.[a-z][a-z0-9_]{0,63}){0,3}$")
+_SAFE_CODE_MAX_LENGTH = 96
 _SAFE_RECORD_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}$")
 _RESULT_STEP_STATUSES = frozenset({"pending", "pass", "fail", "skipped"})
 _UNRECOGNIZED_CODE = "unrecognized_code"
@@ -88,4 +92,6 @@ def safe_operation_error_code(code: str) -> str:
     """``code`` when it looks like an error code; a fixed marker otherwise."""
     if not code:
         return ""
-    return code if _SAFE_CODE_PATTERN.match(code) else _UNRECOGNIZED_CODE
+    if len(code) <= _SAFE_CODE_MAX_LENGTH and _SAFE_CODE_PATTERN.match(code):
+        return code
+    return _UNRECOGNIZED_CODE

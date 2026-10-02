@@ -318,8 +318,7 @@ categories make identity/access drift visible without storing provider topology
 or secret values in the public contract. Keep this workflow canary-scoped until
 broader route ownership and approval UX are explicit.
 
-Callers with `route_binding.read` or `ingress_route.plan` for the target
-product/context can inspect
+Admins with `ingress_route.plan` for the target product/context can inspect
 those audit records through the native FastAPI service reads. List records with
 `GET /v1/ingress/route-audits/records?product=launchplane&context=example-prod`
 and optional `status`, `mode`, `provider_host_id`, `trace_id`,

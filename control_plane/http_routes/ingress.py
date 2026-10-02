@@ -176,16 +176,11 @@ def _ensure_ingress_route_audit_read_allowed(
     product: str,
     context_name: str,
 ) -> None:
-    # route_binding.read reads the same domains; ingress_route.plan is kept for
-    # the workflows that already read their own audits with it.
-    if not any(
-        dependencies.authorization_allows(
-            identity=identity,
-            action=action,
-            product=product,
-            context=context_name,
-        )
-        for action in ("route_binding.read", "ingress_route.plan")
+    if not dependencies.authorization_allows(
+        identity=identity,
+        action="ingress_route.plan",
+        product=product,
+        context=context_name,
     ):
         raise dependencies.http_error(
             status_code=403,

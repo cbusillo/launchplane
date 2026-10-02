@@ -183,7 +183,8 @@ def _rollback_response(
         operation=OdooProdRollbackOperationView.model_validate(
             {
                 **view_fields,
-                "reason": operation.request.reason,
+                # The rollback reason is requester text, so the read view omits it.
+                "reason": operation.request.reason if full else "",
                 "target_artifact_id": operation.target.artifact_id,
                 "target_deployment_record_id": operation.target.deployment_record_id,
             }

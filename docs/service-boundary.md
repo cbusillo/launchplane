@@ -2779,8 +2779,8 @@ context, preserve the `driver_id` filter, and continue accepting the dedicated
 Every Code worker token for the collection route only. Product profile show
 reads load the stored profile first, check `product_profile.read` against the
 stored profile product and Launchplane service context, and return the typed
-profile envelope. Ingress route audit reads check `route_binding.read` or
-`ingress_route.plan` against the requested query product/context before storage access, require those
+profile envelope. Ingress route audit reads check `ingress_route.plan` against
+the requested query product/context before storage access, require those
 scope query parameters for list and single-record reads, preserve optional
 `status`, `mode`, `provider_host_id`, `trace_id`, `idempotency_key`, and `limit`
 list filters, and return `404 not_found` when a record exists outside the

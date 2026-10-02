@@ -2747,33 +2747,6 @@ class FastApiIngressRouteAuditReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "rejected")
         self.assertEqual(payload["error"]["code"], "not_found")
 
-    async def test_route_binding_read_grant_reads_route_audits(self) -> None:
-        record = _ingress_route_audit_record()
-        with TemporaryDirectory() as temporary_directory_name:
-            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
-            store.write_ingress_route_audit_record(record)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_record_read_policy(action="route_binding.read", context="reon-prod"),
-                record_store_factory=lambda: store,
-            )
-
-            list_response = await _get_ingress_route_audit_records(
-                app, product="launchplane", context="reon-prod"
-            )
-            read_response = await _get_ingress_route_audit_record(
-                app, record.record_id, product="launchplane", context="reon-prod"
-            )
-            other_context = await _get_ingress_route_audit_records(
-                app, product="launchplane", context="cm-prod"
-            )
-
-        self.assertEqual(list_response.status_code, 200, list_response.text)
-        self.assertEqual(list_response.json()["count"], 1)
-        self.assertEqual(read_response.status_code, 200, read_response.text)
-        self.assertEqual(read_response.json()["record"]["record_id"], record.record_id)
-        self.assertEqual(other_context.status_code, 403)
-
     async def test_ingress_route_audit_reads_require_scoped_query(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),

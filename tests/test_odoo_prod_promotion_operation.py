@@ -917,13 +917,18 @@ class OdooProdPromotionOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 "error_message": "Backup host backup.internal at 10.9.8.7 refused.",
             }
         )
+        rollback_record = _rollback_operation().model_dump(mode="json")
         rollback = OdooProdRollbackOperationRecord.model_validate(
             {
-                **_rollback_operation().model_dump(mode="json"),
+                **rollback_record,
+                "request": {
+                    **rollback_record["request"],
+                    "reason": "Restore tenant_live on backup.internal (10.9.8.7)",
+                },
                 "status": "fail",
                 "phase": "failed",
                 "finished_at": "2026-09-30T00:05:00Z",
-                "error_code": "Provider said: backup.internal down",
+                "error_code": "10.9.8.7",
                 "error_message": "Provider at 10.9.8.7 refused.",
             }
         )
@@ -980,7 +985,9 @@ class OdooProdPromotionOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(promotion_view["error_message"], "")
         self.assertIsNone(promotion_view.get("result"))
         self.assertEqual(rollback_read.status_code, 200, rollback_read.text)
-        self.assertEqual(rollback_read.json()["operation"]["error_code"], "unrecognized_code")
+        rollback_view = rollback_read.json()["operation"]
+        self.assertEqual(rollback_view["error_code"], "unrecognized_code")
+        self.assertEqual(rollback_view["reason"], "")
         for response in (promotion_read, rollback_read):
             self.assertNotIn("backup.internal", response.text)
             self.assertNotIn("10.9.8.7", response.text)
