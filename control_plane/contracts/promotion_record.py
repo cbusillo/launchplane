@@ -161,6 +161,8 @@ class RollbackExecutionEvidence(BaseModel):
     status: ReleaseStatus = "skipped"
     detail: str = ""
     snapshot_name: str = ""
+    target_deployment_record_id: str = ""
+    deployment_record_id: str = ""
     started_at: str = ""
     finished_at: str = ""
 

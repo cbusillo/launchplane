@@ -9124,6 +9124,21 @@
             "title": "Release Url",
             "type": "string"
           },
+          "rollback_deployment_record_id": {
+            "default": "",
+            "title": "Rollback Deployment Record Id",
+            "type": "string"
+          },
+          "rollback_status": {
+            "default": "",
+            "title": "Rollback Status",
+            "type": "string"
+          },
+          "rollback_target_deployment_record_id": {
+            "default": "",
+            "title": "Rollback Target Deployment Record Id",
+            "type": "string"
+          },
           "source_health_status": {
             "default": "",
             "title": "Source Health Status",
@@ -9419,6 +9434,27 @@
           "release_url": {
             "default": "",
             "title": "Release Url",
+            "type": "string"
+          },
+          "rollback_deployment_record_id": {
+            "default": "",
+            "title": "Rollback Deployment Record Id",
+            "type": "string"
+          },
+          "rollback_status": {
+            "default": "skipped",
+            "enum": [
+              "pending",
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Rollback Status",
+            "type": "string"
+          },
+          "rollback_target_deployment_record_id": {
+            "default": "",
+            "title": "Rollback Target Deployment Record Id",
             "type": "string"
           },
           "source_git_ref": {
@@ -30990,6 +31026,27 @@
             "title": "Release Url",
             "type": "string"
           },
+          "rollback_deployment_record_id": {
+            "default": "",
+            "title": "Rollback Deployment Record Id",
+            "type": "string"
+          },
+          "rollback_status": {
+            "default": "skipped",
+            "enum": [
+              "pending",
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Rollback Status",
+            "type": "string"
+          },
+          "rollback_target_deployment_record_id": {
+            "default": "",
+            "title": "Rollback Target Deployment Record Id",
+            "type": "string"
+          },
           "source_git_ref": {
             "default": "",
             "title": "Source Git Ref",
@@ -35910,6 +35967,11 @@
             "title": "Attempted",
             "type": "boolean"
           },
+          "deployment_record_id": {
+            "default": "",
+            "title": "Deployment Record Id",
+            "type": "string"
+          },
           "detail": {
             "default": "",
             "title": "Detail",
@@ -35939,6 +36001,11 @@
               "skipped"
             ],
             "title": "Status",
+            "type": "string"
+          },
+          "target_deployment_record_id": {
+            "default": "",
+            "title": "Target Deployment Record Id",
             "type": "string"
           }
         },
