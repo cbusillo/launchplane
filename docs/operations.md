@@ -2117,7 +2117,8 @@ return a typed blocked result rather than guessing a domain.
   when Launchplane already has the source tuple state for the promoted-from lane.
 - `artifacts protected` and `GET /v1/artifacts/protected` compose Launchplane's
   current protected artifact inventory from stable environment inventory,
-  release tuples, active preview generations, and ready preview feedback.
+  each stable lane's default rollback target, release tuples, active preview
+  generations, and ready preview feedback.
   Registry cleanup jobs for every product must consume this inventory before
   deleting package versions and fail closed when the read fails or warns about a
   live artifact without a stored manifest. Service callers must include
