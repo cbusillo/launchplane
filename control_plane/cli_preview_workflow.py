@@ -49,11 +49,6 @@ def register_preview_workflow_commands(work_graph: click.Group) -> None:
 @click.option("--base-repository", default="", help="Pull request base owner/name repo.")
 @click.option("--head-repository", default="", help="Pull request head owner/name repo.")
 @click.option("--head-sha", default="", help="Pull request head SHA.")
-@click.option(
-    "--draft/--ready",
-    default=None,
-    help="Whether the pull request is a draft. Defaults to the event payload.",
-)
 @click.option("--product", default="", help="Product key used for idempotency output.")
 @click.option("--context", "context_name", default="", help="Preview context key.")
 @click.option("--run-id", default="", help="GitHub run id. Defaults to GITHUB_RUN_ID.")
@@ -74,7 +69,6 @@ def preview_workflow_decision(
     base_repository: str,
     head_repository: str,
     head_sha: str,
-    draft: bool | None,
     product: str,
     context_name: str,
     run_id: str,
@@ -94,7 +88,6 @@ def preview_workflow_decision(
             base_repository=base_repository,
             head_repository=head_repository,
             head_sha=head_sha,
-            draft=draft,
         )
         decision = decide_preview_workflow_operation(event)
         idempotency_key = ""
@@ -150,7 +143,6 @@ def _build_preview_workflow_event(
     base_repository: str,
     head_repository: str,
     head_sha: str,
-    draft: bool | None,
 ) -> PreviewWorkflowEvent:
     pull_request = _preview_workflow_object(github_event.get("pull_request"))
     repository_payload = _preview_workflow_object(github_event.get("repository"))
@@ -160,7 +152,6 @@ def _build_preview_workflow_event(
     head_repo_payload = _preview_workflow_object(head_payload.get("repo"))
     input_payload = _preview_workflow_object(github_event.get("inputs"))
 
-    resolved_draft = draft if draft is not None else pull_request.get("draft") is True
     resolved_event_name = _preview_workflow_string(event_name) or os.environ.get(
         "GITHUB_EVENT_NAME", ""
     )
@@ -202,7 +193,6 @@ def _build_preview_workflow_event(
         base_repository=resolved_base_repository,
         head_repository=resolved_head_repository,
         head_sha=resolved_head_sha,
-        draft=resolved_draft,
     )
 
 

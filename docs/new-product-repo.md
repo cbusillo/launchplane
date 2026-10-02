@@ -120,10 +120,10 @@ Start with these workflows:
   [dependency-health-contract.md](dependency-health-contract.md).
 - Publish image: build and publish an immutable artifact, then trigger
   Launchplane stable deploy for `testing`.
-- Preview trigger: for every open PR that is not a draft, build and publish an
+- Preview trigger: for every open PR, drafts included, build and publish an
   immutable preview image, then trigger Launchplane preview refresh.
-- Preview cleanup trigger: when a PR closes or converts to draft, trigger
-  Launchplane preview destroy. No label creates or removes a preview.
+- Preview cleanup trigger: when a PR closes or merges, trigger Launchplane
+  preview destroy. No label or draft change creates or removes a preview.
 
 The Launchplane trigger steps should use GitHub Actions OIDC and pass minimal
 facts only: product key, source ref or SHA, PR number when relevant, immutable

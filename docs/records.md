@@ -467,11 +467,13 @@ existing ORM rows and contract payloads behind the storage boundary so the next
 driver descriptor and GUI slices can consume a stable API shape.
 
 - `ProtectedArtifactSet`: registry-cleanup read model built from current
-  environment inventory, release tuples, active preview generations, ready
-  preview feedback, product profiles, and artifact manifests. It is not a new
-  durable record family; it is the Launchplane-owned liveness projection that
-  cleanup consumers must load before deleting registry artifacts. Missing
-  manifests for live inventory, release, or preview artifacts are returned as
+  environment inventory, each stable lane's previous passing deployment of a
+  different artifact (the default rollback target), release tuples, active
+  preview generations, ready preview feedback, product profiles, and artifact
+  manifests. It is not a new durable record family; it is the
+  Launchplane-owned liveness projection that cleanup consumers must load before
+  deleting registry artifacts. Missing manifests for live inventory, rollback,
+  release, or preview artifacts are returned as
   warnings while the artifact id remains protected, so cleanup stays fail-closed
   instead of treating unresolved live images as deletable.
 
@@ -1449,7 +1451,7 @@ records what it decided and did as `last_plan`:
   the `plan_not_ready` description plus that blocker's from
   `PLAN_BLOCKER_DESCRIPTIONS`; an unknown code gets a generic one),
   `Keys: A, B.` when the operation's `error_detail_keys` names the env keys a
-  key-list blocker is about (`runtime_keys_undeclared`,
+  key-list blocker is about (`runtime_keys_undeclared`, `provider_keys_unrecorded`,
   `volume_env_keys_missing`, `volume_authority_drift`: the plan's
   `blocker_keys`, names matching `^[A-Z][A-Z0-9_]{0,63}$` only, at most 32,
   never values), the result's step statuses, and the worker attempt. After three failed
@@ -1457,9 +1459,9 @@ records what it decided and did as `last_plan`:
   the request is `failed`, and its error ends with the last attempt's code and
   summary. A lane with another active operation leaves the
   request `pending` (`deferred: lane_busy`).
-- preview: `apply`, `destroy`, `wait` (open, not a draft, but no verified
-  build yet), or `none`. A draft, closed or merged PR wants no preview
-  (`pull_request_draft`, `pull_request_not_open`). An apply or destroy issues the preview plan the inputs route
+- preview: `apply`, `destroy`, `wait` (open, a draft included, but no
+  verified build yet), or `none`. Only a closed or merged PR wants no preview
+  (`pull_request_not_open`). An apply or destroy issues the preview plan the inputs route
   would and runs it through the durable preview operation under reservation
   scope `launchplane-reconcile:<product>`. Its key is the product, PR, verified
   build run and attempt (or `destroy`), and the preview record's current
@@ -2538,7 +2540,7 @@ credential, runtime grant, or stored record is changed by this code retirement.
 - One append-only record per Launchplane discovery of desired preview anchors.
 - Record the product/context/source, GitHub repository, anchor repo, preview
   slug prefix, discovered timestamp, discovered desired previews, and pass/fail
-  status. The desired previews are the open pull requests that are not drafts;
+  status. The desired previews are the open pull requests, drafts included;
   labels play no part (#2735). Records written earlier also name a label, which
   is ignored on read.
 - Desired-state records let Launchplane own the recurring open-PR discovery

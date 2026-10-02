@@ -22,9 +22,9 @@ again:
 - a completed `workflow_run` of the product's `.github/workflows/build.yml`
   from a `push`: the product's **testing** target;
 - a completed build from a `pull_request`, or a PR opened, reopened,
-  synchronized, marked ready for review, converted to draft, labeled,
-  unlabeled or closed: that PR's **preview** target. Label events only matter
-  for the Client mention below; no label creates or removes a preview.
+  synchronized, labeled, unlabeled or closed: that PR's **preview** target.
+  Label events only matter for the Client mention below; no label creates or
+  removes a preview.
 
 Launchplane re-reads every fact it acts on through the GitHub API with the
 product's read-only build-provenance token (`verify_build_artifact`). A
@@ -104,11 +104,10 @@ reservation. The webhook request never waits on a deploy.
     its plan as held (`action: wait`, reason `staff_testing`) and deploys
     nothing; see [Staff-testing hold](#staff-testing-hold).
 - **preview:** read the PR now.
-  - A preview follows the pull request. If it's open, not a draft, and its
-    current head has a verified preview build, the desired state is a preview
-    running that build. A draft, closed or merged PR has no preview: converting
-    to draft is the off switch, and marking it ready brings the preview back.
-    Labels play no part (#2735).
+  - A preview stays up until its pull request closes or merges. If the PR is
+    open (a draft included) and its current head has a verified preview build,
+    the desired state is a preview running that build. A closed or merged PR
+    has no preview. Labels and draft state play no part (#2735).
   - Compare the desired state with the preview record's verified build (run
     id and attempt), not just whether a preview exists, then apply or
     destroy.
@@ -116,8 +115,7 @@ reservation. The webhook request never waits on a deploy.
     and URL come from the product profile as today. The result is posted on
     the PR; see [Pull request feedback](#pull-request-feedback).
   - Read the PR state again after taking the preview's reservation and just
-    before the provider apply; if it closed, became a draft, or moved its
-    head, the reservation is released with no provider effect and the
+    before the provider apply; if it closed or moved its head, the reservation is released with no provider effect and the
     reconcile runs again.
   - The apply or destroy issues the same service plan as the preview inputs
     route and runs it through `run_odoo_preview_apply_operation`, under
@@ -141,8 +139,8 @@ need not read the deploy operation, whose status read needs the grant that
 starts a deploy. The summary is structured: the code's fixed description, step
 statuses, validated key names and attempt, with no provider text (see
 [records](records.md#reconciler)). Text fields are cut at 400 characters,
-except the summary, which keeps up to 1,500 so a long list of undeclared keys
-comes back whole.
+except the summary, which keeps up to 1,500 so a long key list comes back
+whole.
 
 ## Pull request feedback
 
@@ -256,9 +254,9 @@ or a backup gate.
 
 Every 30 minutes the worker requests a reconcile of every product's testing
 target, of every preview target with an existing, not yet destroyed preview
-record, and of every open pull request that is not a draft (one list of open
-pull requests per product, with the build-provenance token). A missed ready or
-opened event is corrected within one sweep. Reconciling is idempotent, so the sweep runs the same code as
+record, and of every open pull request, drafts included (one list of open pull
+requests per product, with the build-provenance token). A missed event is
+corrected within one sweep. Reconciling is idempotent, so the sweep runs the same code as
 the events, and a missed or out-of-order event is corrected within one sweep.
 
 ## Director steps

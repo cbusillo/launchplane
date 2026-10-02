@@ -304,6 +304,7 @@ def require_protected_artifact_store(record_store: object) -> ProtectedArtifactS
     required_methods = (
         "list_artifact_manifests",
         "list_environment_inventory",
+        "list_deployment_records",
         "list_product_profile_records",
         "list_release_tuple_records",
         "list_preview_records",
