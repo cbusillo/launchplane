@@ -1009,3 +1009,8 @@ When creating a new website repo for Launchplane:
 - Keep Launchplane lifecycle config out of the product repo unless this document
   or a driver-specific doc explicitly names a scoped bootstrap or rehearsal
   exception.
+
+A testing reconcile reports `action: none, reason: build_workflow_missing` when
+GitHub returns 404 for Build runs and a complete, accessible Actions workflow
+inventory confirms the Build workflow is absent. Unavailable, incomplete, or
+contradictory workflow reads remain failures; they do not authorize a deploy.
