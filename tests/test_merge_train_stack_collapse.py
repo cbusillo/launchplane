@@ -21,6 +21,10 @@ from control_plane.merge_train import (
     MergeTrainPullRequestSnapshot,
     discover_merge_train_stack,
 )
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy
+
+
+_EXAMPLE_POLICY = build_test_merge_train_policy(repository="example/merge-train-repo")
 
 
 class MergeTrainStackCollapseContractTests(unittest.TestCase):
@@ -45,6 +49,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
 
     def test_plan_uses_root_ready_to_merge_intent_and_leaf_to_root_mutations(self) -> None:
         discovery_result = discover_merge_train_stack(
+            policy=_EXAMPLE_POLICY,
             snapshot=MergeTrainDryRunSnapshot(
                 repository="example/merge-train-repo",
                 base_branch="main",
@@ -81,6 +86,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
 
     def test_plan_requires_a_ready_stack_discovery_result(self) -> None:
         discovery_result = discover_merge_train_stack(
+            policy=_EXAMPLE_POLICY,
             snapshot=MergeTrainDryRunSnapshot(
                 repository="example/merge-train-repo",
                 base_branch="main",
@@ -100,6 +106,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
     def test_plan_record_id_is_deterministic(self) -> None:
         plan = build_merge_train_stack_collapse_plan(
             discovery_result=discover_merge_train_stack(
+                policy=_EXAMPLE_POLICY,
                 snapshot=MergeTrainDryRunSnapshot(
                     repository="example/merge-train-repo",
                     base_branch="main",
@@ -133,6 +140,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
     def test_plan_record_id_canonicalizes_equivalent_utc_timestamps(self) -> None:
         plan = build_merge_train_stack_collapse_plan(
             discovery_result=discover_merge_train_stack(
+                policy=_EXAMPLE_POLICY,
                 snapshot=MergeTrainDryRunSnapshot(
                     repository="example/merge-train-repo",
                     base_branch="main",
@@ -483,6 +491,7 @@ def _pull_request(
 def _collapse_plan() -> MergeTrainStackCollapsePlan:
     return build_merge_train_stack_collapse_plan(
         discovery_result=discover_merge_train_stack(
+            policy=_EXAMPLE_POLICY,
             snapshot=MergeTrainDryRunSnapshot(
                 repository="example/merge-train-repo",
                 base_branch="main",

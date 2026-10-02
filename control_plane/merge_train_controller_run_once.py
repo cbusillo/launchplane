@@ -45,6 +45,7 @@ from control_plane.merge_train import (
     MergeTrainDryRunResult,
     build_merge_train_dry_run_result,
     discover_merge_train_stack,
+    merge_train_stack_child_readiness_reasons,
 )
 from control_plane.merge_admission import (
     GuardedMergeAdmission,
@@ -2464,6 +2465,18 @@ def _advance_planned_stack_collapse_record(
         )
         if observed_root_sha != root_pull_request.head_sha:
             return None
+    pull_requests_by_number = {
+        pull_request.number: pull_request for pull_request in snapshot.pull_requests
+    }
+    for mutation in planned_collapse_record.plan.mutations:
+        if mutation.status == "mutated":
+            continue
+        child_pull_request = pull_requests_by_number.get(mutation.child_pull_request_number)
+        # A child that is no longer ready falls through to live discovery, which reports why.
+        if child_pull_request is None or merge_train_stack_child_readiness_reasons(
+            repository_policy=repository_policy, pull_request=child_pull_request
+        ):
+            return None
     try:
         validate_merge_train_stack_collapse_record_for_controller(
             collapse_record=planned_collapse_record,
@@ -2578,6 +2591,7 @@ def _advance_from_live_snapshot(
         snapshot=snapshot, dry_run_result=dry_run_result
     ):
         stack_discovery = discover_merge_train_stack(
+            policy=policy,
             snapshot=snapshot,
             root_pull_request_number=selected_pr.number,
         )
@@ -2633,6 +2647,10 @@ def _advance_from_live_snapshot(
             "base_branch": request.base_branch,
             "mode": "dry-run",
             "controller_action": "stack_unsupported",
+            "blocking_reason": {
+                "code": "merge_train_stack_unsupported",
+                "message": "; ".join(stack_discovery.unsupported_reasons),
+            },
             "dry_run_result": dry_run_result.model_dump(mode="json"),
             "stack_discovery": stack_discovery.model_dump(mode="json"),
         }

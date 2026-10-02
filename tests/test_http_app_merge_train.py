@@ -3557,6 +3557,91 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(landing_response.json()["result"]["controller_action"], "plan_landing")
 
+    async def test_refuses_planned_collapse_when_child_turns_draft(self) -> None:
+        class DraftChildStackedSnapshotReader(_FakeStackedMergeTrainSnapshotReader):
+            def read_merge_train_snapshot(
+                self, *, repository: str, base_branch: str
+            ) -> MergeTrainDryRunSnapshot:
+                snapshot = super().read_merge_train_snapshot(
+                    repository=repository, base_branch=base_branch
+                )
+                return snapshot.model_copy(
+                    update={
+                        "pull_requests": tuple(
+                            pull_request.model_copy(update={"is_draft": True, "labels": ()})
+                            if pull_request.number == 2
+                            else pull_request
+                            for pull_request in snapshot.pull_requests
+                        )
+                    }
+                )
+
+        class RecordingStackMergeClient(_FakeMergeTrainGitHubClient):
+            stack_merges: list[tuple[int, int]] = []
+
+            def merge_stack_child_into_parent(self, **kwargs: Any) -> str:
+                self.stack_merges.append(
+                    (kwargs["child_pull_request_number"], kwargs["parent_pull_request_number"])
+                )
+                return super().merge_stack_child_into_parent(**kwargs)
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            with patch(
+                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                RecordingStackMergeClient,
+            ):
+                with patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _FakeStackedMergeTrainSnapshotReader,
+                ):
+                    plan_response = await _post_merge_train_controller_run_once(
+                        app, request_payload
+                    )
+                with patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    DraftChildStackedSnapshotReader,
+                ):
+                    refused_response = await _post_merge_train_controller_run_once(
+                        app, request_payload
+                    )
+            stack_records = store.list_merge_train_stack_collapse_plan_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(plan_response.json()["result"]["controller_action"], "plan_stack_collapse")
+        refused_result = refused_response.json()["result"]
+        self.assertEqual(refused_result["controller_action"], "stack_unsupported")
+        self.assertEqual(
+            refused_result["blocking_reason"],
+            {
+                "code": "merge_train_stack_unsupported",
+                "message": (
+                    "stacked pull request #2 is not ready for the train: draft pull request; "
+                    "stacked pull request #2 is not ready for the train: "
+                    "missing ready-to-merge label"
+                ),
+            },
+        )
+        self.assertEqual(RecordingStackMergeClient.stack_merges, [])
+        self.assertEqual({record.plan.status for record in stack_records}, {"planned"})
+
     async def test_advances_stacked_batch_flow(self) -> None:
         class CollapsedRootWithIndependentPrSnapshotReader(
             _FakeCollapsedRootStackedMergeTrainSnapshotReader
