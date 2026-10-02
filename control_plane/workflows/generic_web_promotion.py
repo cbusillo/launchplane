@@ -433,13 +433,10 @@ def execute_generic_web_prod_promotion(
         destination_health = _mark_health_skipped(destination_health)
         failure = f"Destination deploy failed: {deploy_result.error_message or 'no detail'}"
 
-    deployment_record = _write_deployment_health(
-        record_store=record_store,
-        deployment_record=deployment_record,
-        destination_health=destination_health,
-    )
     rollback = _RollbackOutcome()
     if failure:
+        # Restore production before writing evidence, so a failed record write
+        # cannot leave production on the failed artifact.
         rollback = _roll_back_production(
             control_plane_root=control_plane_root,
             record_store=record_store,
@@ -455,6 +452,11 @@ def execute_generic_web_prod_promotion(
             deployment_record_id=deploy_result.deployment_record_id,
             provider_effect_checkpoint=provider_effect_checkpoint,
         )
+    deployment_record = _write_deployment_health(
+        record_store=record_store,
+        deployment_record=deployment_record,
+        destination_health=destination_health,
+    )
     final_record = _build_promotion_record(
         request=request,
         promotion_record_id=promotion_record_id,

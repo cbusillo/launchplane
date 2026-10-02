@@ -325,8 +325,13 @@ cancelled caller or a lost response cannot skip it. The promotion record's
 production returned to, and the rollback's own `deployment_record_id`;
 `rollback_health` holds its health check. The promotion response repeats them
 as `rollback_status`, `rollback_target_deployment_record_id`, and
-`rollback_deployment_record_id`. A deploy that raises instead of returning a
-result is in doubt, not failed. Recover it through generic-web deploy recovery.
+`rollback_deployment_record_id`. When the rollback restores and verifies
+production, the promotion's provider operation completes with that failed
+result, so the next promotion is not blocked. If the rollback fails, the deploy
+raises instead of returning a result, or the operation's lease is lost, the
+operation stays in `reconcile_required`. The lease fence is never bypassed,
+because another operation may own the target. Recover it through generic-web
+deploy recovery, using the rollback target the promotion record names.
 
 Rollback begins with a Launchplane-owned rollback plan. The generic-web planner
 is exposed through `POST /v1/drivers/generic-web/prod-rollback-plan` as a

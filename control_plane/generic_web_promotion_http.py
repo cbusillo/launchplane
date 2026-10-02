@@ -57,6 +57,7 @@ __all__ = [
     "dispatch_generic_web_promotion_workflow_result",
     "build_generic_web_promotion_workflow_outbox_delivery",
     "execute_generic_web_prod_promotion_result",
+    "generic_web_promotion_outcome_is_settled",
     "resolve_generic_web_promotion_destination_lane",
     "resolve_generic_web_promotion_workflow_lane",
     "should_store_generic_web_promotion_idempotency",
@@ -379,6 +380,21 @@ def should_store_generic_web_promotion_idempotency(
     if any(str(value).strip() == "blocked" for value in statuses):
         return False
     return not any(str(value).strip() == "fail" for value in statuses)
+
+
+def generic_web_promotion_outcome_is_settled(
+    driver_result: GenericWebProdPromotionResult,
+) -> bool:
+    """Whether a live promotion left production in a known state.
+
+    A failed promotion whose rollback restored and verified the previous
+    deployment is finished, so its provider operation completes instead of
+    fencing the target for recovery.
+    """
+    return (
+        should_store_generic_web_promotion_idempotency(driver_result)
+        or driver_result.rollback_status == "pass"
+    )
 
 
 def _read_generic_web_promotion_profile(
