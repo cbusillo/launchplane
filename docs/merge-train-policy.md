@@ -880,8 +880,13 @@ Controller actions have these retry/stop semantics:
 - `execute_stack_collapse`: A stored planned or partially `collapsing` plan
   should be applied or resumed. Mutate once, then call again. Stop if the
   resulting plan is `blocked` or `stale`.
-- `wait_for_root_checks`: The collapsed root PR needs fresh required checks.
-  Stop and poll later; do not call phase endpoints.
+- `wait_for_root_checks`: The collapsed root PR's required checks are still
+  running. Stop and poll later; do not call phase endpoints. Any other state
+  of the collapsed root is answered from the whole queue, the same as for any
+  queued pull request: a root behind its base gets its branch refreshed, a root
+  with failed checks or conflicts reports `block`, and a root that left the
+  queue lets the other ready pull requests proceed. A refreshed root still
+  disposes of its stack's children when it lands.
 - `admit_collapsed_root`: The collapsed root PR is ready to enter the batch
   candidate path. Mutate once, then call again.
 - `stack_unsupported`: A stack exists but is not a supported same-repo linear
