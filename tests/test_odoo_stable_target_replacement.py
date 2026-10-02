@@ -3871,6 +3871,7 @@ class OdooStableTargetReplacementOdooVersionTests(unittest.TestCase):
         declare_odoo_version: bool,
         manifest_odoo_version: str,
         site_values: dict[str, str],
+        provider_odoo_version: str = "",
     ) -> tuple[dict[str, str], dict[str, str]]:
         profile = _profile()
         if declare_odoo_version:
@@ -3921,6 +3922,11 @@ class OdooStableTargetReplacementOdooVersionTests(unittest.TestCase):
                         "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                         "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                         "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                        *(
+                            (f"ODOO_VERSION={provider_odoo_version}",)
+                            if provider_odoo_version
+                            else ()
+                        ),
                     )
                 ),
                 "appName": "cm-testing",
@@ -4003,6 +4009,29 @@ class OdooStableTargetReplacementOdooVersionTests(unittest.TestCase):
 
         self.assertEqual(result.deploy_status, "pass")
         return control_plane_dokploy.parse_dokploy_env_text(persisted_env), result.runtime_source
+
+    def test_a_provider_only_odoo_version_is_replaced_by_the_artifact_version(self) -> None:
+        env_map, runtime_source = self._apply(
+            declare_odoo_version=False,
+            manifest_odoo_version="19.0",
+            site_values={},
+            provider_odoo_version="18.0",
+        )
+
+        self.assertEqual(env_map["ODOO_VERSION"], "19.0")
+        self.assertEqual(runtime_source["artifact_odoo_version"], "19.0")
+
+    def test_a_provider_only_odoo_version_without_an_artifact_version_is_refused(self) -> None:
+        with self.assertRaises(OdooTargetReplacementStageError) as refusal:
+            self._apply(
+                declare_odoo_version=False,
+                manifest_odoo_version="",
+                site_values={},
+                provider_odoo_version="18.0",
+            )
+
+        self.assertEqual(refusal.exception.code, "plan_not_ready.provider_keys_unrecorded")
+        self.assertEqual(refusal.exception.detail_keys, ("ODOO_VERSION",))
 
     def test_artifact_odoo_version_wins_over_the_site_setting(self) -> None:
         env_map, runtime_source = self._apply(

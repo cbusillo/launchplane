@@ -48,7 +48,9 @@ from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyResult,
     OdooStableTargetReplacementRequest,
     OdooTargetReplacementPlanBlockerCode,
+    ODOO_VERSION_ENV_KEY,
     apply_artifact_odoo_version,
+    artifact_odoo_version,
     merge_odoo_install_modules,
     missing_required_odoo_modules_from_artifact,
 )
@@ -1195,6 +1197,7 @@ def build_odoo_stable_target_replacement_plan(
     volume_authority_drift_keys: tuple[str, ...] = ()
     retired_provider_keys: set[str] = set()
     delivered_runtime_keys: tuple[str, ...] = ()
+    provider_only_keys: set[str] = set()
     if target_record is None:
         block("target_record_missing", "Launchplane has no Dokploy target record for this lane.")
     if target_id_record is None:
@@ -1343,19 +1346,12 @@ def build_odoo_stable_target_replacement_plan(
                     retired_provider_keys=retired_provider_keys,
                 ):
                     block(code, message, keys)
+            # Blocked below, once the artifact says whether this driver sets ODOO_VERSION.
             provider_only_keys = _provider_only_keys(
                 current_env=live_runtime_values,
                 application_keys=application_runtime_keys,
                 retired_keys=retired_provider_keys,
             )
-            if provider_only_keys:
-                block(
-                    "provider_keys_unrecorded",
-                    f"Current target has {len(provider_only_keys)} provider-only env key(s) "
-                    "with no Launchplane record for this site. Record them for the site or "
-                    "retire them before replacement.",
-                    tuple(provider_only_keys),
-                )
         except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
             block("live_runtime_keys_invalid", str(error))
         except click.ClickException:
@@ -1418,6 +1414,10 @@ def build_odoo_stable_target_replacement_plan(
                     "artifact_source_ref_mismatch",
                     "Selected artifact source ref does not match the stored manifest.",
                 )
+            if artifact_odoo_version(artifact_manifest):
+                # The driver sets ODOO_VERSION from this artifact, so a provider value
+                # for it is replaced, not lost.
+                provider_only_keys.discard(ODOO_VERSION_ENV_KEY)
             missing_required_modules = missing_required_odoo_modules_from_artifact(
                 artifact_manifest
             )
@@ -1427,6 +1427,14 @@ def build_odoo_stable_target_replacement_plan(
                     "Odoo target replacement requires artifact odoo_install_modules to declare required module(s): "
                     + ", ".join(missing_required_modules),
                 )
+    if provider_only_keys:
+        block(
+            "provider_keys_unrecorded",
+            f"Current target has {len(provider_only_keys)} provider-only env key(s) "
+            "with no Launchplane record for this site. Record them for the site or "
+            "retire them before replacement.",
+            tuple(provider_only_keys),
+        )
     expected_target_name = (
         target_record.target_name
         if isinstance(target_record, DokployTargetRecord) and target_record.target_name
@@ -1804,6 +1812,10 @@ def execute_odoo_stable_target_replacement_apply(
             runtime_port=profile.runtime_port,
         )
         current_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+        if ODOO_VERSION_ENV_KEY in current_env_map and artifact_odoo_version(artifact_manifest):
+            # A lane that carries ODOO_VERSION keeps it, set from the artifact below,
+            # whatever value the provider holds.
+            application_runtime_keys.add(ODOO_VERSION_ENV_KEY)
         application_env = {
             key: value
             for key, value in (current_env_map | runtime_environment_values).items()
