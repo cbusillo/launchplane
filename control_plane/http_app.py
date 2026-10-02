@@ -197,10 +197,8 @@ from control_plane.http_routes import (
     register_repository_inventory_write_routes,
     register_production_backup_authority_read_routes,
     register_production_backup_authority_write_routes,
-    REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE,
     TENANT_ADMISSION_CONTROLLER_RUN_ONCE_ROUTE,
     TENANT_ADMISSION_STATUS_RECONCILE_ROUTE,
-    TENANT_TECHNICAL_HUMAN_WAIVER_APPLY_ROUTE,
     TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE,
     TRUSTED_MAINTENANCE_POLICY_APPLY_ROUTE,
     TenantAdmissionReadRouteDependencies,
@@ -292,7 +290,10 @@ from control_plane.http_routes.release_review import (
     ReleaseReviewRouteDependencies,
     register_release_review_routes,
 )
-from control_plane.release_review import current_release_review
+from control_plane.release_review import (
+    ProductionChangeRequiresPromotion,
+    current_release_review,
+)
 from control_plane.release_review_record import publish_release_decision
 from control_plane.trusted_maintenance_github_webhook import TRUSTED_MAINTENANCE_WEBHOOK_ROUTE
 from control_plane.github_app_webhook import GITHUB_APP_WEBHOOK_ROUTE
@@ -760,6 +761,7 @@ from control_plane.service_auth import (
     LocalAdminIdentity,
     LocalOperatorIdentity,
     TerminalAgentIdentity,
+    configured_local_operator_identity,
     configured_terminal_agent_identity,
     TokenVerifier,
     agent_authz_audit,
@@ -940,8 +942,6 @@ _TESTING_HOLD_NOT_FOUND_MESSAGE = "Odoo product lane was not found for the reque
 _PRODUCT_OWNER_SETTING_MAX_BODY_BYTES = 16 * 1024
 _SECRET_REENCRYPT_MAX_BODY_BYTES = 64 * 1024
 _TENANT_REPOSITORY_CLASSIFICATION_MAX_BODY_BYTES = 64 * 1024
-_REPOSITORY_HUMAN_ROLE_POLICY_MAX_BODY_BYTES = 64 * 1024
-_TENANT_TECHNICAL_HUMAN_WAIVER_MAX_BODY_BYTES = 64 * 1024
 _TENANT_ADMISSION_CONTROLLER_RUN_ONCE_MAX_BODY_BYTES = 64 * 1024
 _TENANT_ADMISSION_STATUS_RECONCILE_MAX_BODY_BYTES = 64 * 1024
 _TRUSTED_MAINTENANCE_POLICY_MAX_BODY_BYTES = 64 * 1024
@@ -1095,18 +1095,6 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE: (
         "Tenant repository classification",
         _TENANT_REPOSITORY_CLASSIFICATION_MAX_BODY_BYTES,
-        True,
-        True,
-    ),
-    REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE: (
-        "Repository human role policy",
-        _REPOSITORY_HUMAN_ROLE_POLICY_MAX_BODY_BYTES,
-        True,
-        True,
-    ),
-    TENANT_TECHNICAL_HUMAN_WAIVER_APPLY_ROUTE: (
-        "Tenant technical human waiver",
-        _TENANT_TECHNICAL_HUMAN_WAIVER_MAX_BODY_BYTES,
         True,
         True,
     ),
@@ -2354,7 +2342,6 @@ class PreviewDesiredStateEnvelope(BaseModel):
     context: str
     source: str = "workflow"
     repository: str
-    label: str = "preview"
     anchor_repo: str
     preview_slug_prefix: str = "pr-"
     max_pages: int = Field(default=10, ge=1, le=20)
@@ -2369,8 +2356,6 @@ class PreviewDesiredStateEnvelope(BaseModel):
             raise ValueError("preview desired state requires source")
         if not self.repository.strip():
             raise ValueError("preview desired state requires repository")
-        if not self.label.strip():
-            raise ValueError("preview desired state requires label")
         if not self.anchor_repo.strip():
             raise ValueError("preview desired state requires anchor_repo")
         if not self.preview_slug_prefix.strip():
@@ -5016,6 +5001,9 @@ def create_launchplane_fastapi_app(
         policy_reader=lambda: resolved_authz_policy_runtime.policy,
         policy_record_reader=lambda: read_active_authz_policy_record(get_record_store()),
         read_configured_terminal_identity=lambda: configured_terminal_agent_identity(
+            bearer_identity_config or BearerIdentityConfig()
+        ),
+        read_configured_local_operator_identity=lambda: configured_local_operator_identity(
             bearer_identity_config or BearerIdentityConfig()
         ),
     )
@@ -9652,6 +9640,13 @@ def create_launchplane_fastapi_app(
                     "operation": odoo_target_replacement_apply_operation_payload(error.operation),
                 },
             )
+        except ProductionChangeRequiresPromotion as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=error.code,
+                message=error.message,
+            ) from error
         except (ValueError, click.ClickException) as error:
             raise _launchplane_http_error(
                 status_code=400,
@@ -12199,6 +12194,16 @@ def create_launchplane_fastapi_app(
                 code="not_found",
                 message=str(error),
             ) from error
+        if isinstance(identity, LocalOperatorIdentity) and profile.production_use == "live":
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="live_product_requires_operator",
+                message=(
+                    "A live product's expected configuration is changed by the operator, "
+                    "not with the local operator credential the operator's agent uses."
+                ),
+            )
         secret_bindings: tuple[SecretBinding, ...] = ()
         if expected_config_request.remove_managed_secret_bindings:
             list_secret_bindings = getattr(record_store, "list_secret_bindings", None)
@@ -14457,6 +14462,17 @@ def create_launchplane_fastapi_app(
                     "Launchplane request payload on this route."
                 ),
             )
+        if (
+            result.status == "target_busy"
+            and result.record is not None
+            and result.record.state == "reconcile_required"
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="mutation_reconciliation_required",
+                message=_held_provider_target_message(result.record),
+            )
         if result.status in {"in_progress", "target_busy"}:
             raise _launchplane_http_error(
                 status_code=409,
@@ -14472,6 +14488,20 @@ def create_launchplane_fastapi_app(
                 message=reconcile_message,
             )
         raise RuntimeError(f"Unsupported provider mutation status: {result.status}")
+
+    def _held_provider_target_message(held: LaunchplaneIdempotencyRecord) -> str:
+        # Name the earlier request without its key or caller scope.
+        started_at = held.created_at or "an unknown time"
+        stopped = (
+            f"in its {held.provider_effect_phase} phase"
+            if held.provider_effect_phase
+            else "before any provider effect"
+        )
+        return (
+            f"The provider target is held by an earlier {held.route_path} request that "
+            f"started at {started_at} and stopped {stopped} with no known outcome. "
+            "Retrying will not clear it; recover that request first."
+        )
 
     def _provider_mutation_failure_message(response_payload: Mapping[str, object]) -> str:
         result_payload = response_payload.get("result")
@@ -21597,7 +21627,6 @@ def create_launchplane_fastapi_app(
             source=desired_state_request.source,
             discovered_at=utc_now_timestamp(),
             repository=desired_state_request.repository,
-            label=desired_state_request.label,
             anchor_repo=desired_state_request.anchor_repo,
             preview_slug_prefix=desired_state_request.preview_slug_prefix,
             max_pages=desired_state_request.max_pages,
@@ -21744,6 +21773,13 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="not_found",
                 message=f"No Launchplane route for {_VERIREEL_PROD_DEPLOY_ROUTE}.",
+            ) from error
+        except ProductionChangeRequiresPromotion as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=error.code,
+                message=error.message,
             ) from error
         except (ValueError, click.ClickException) as error:
             raise_verireel_invalid_request_error(trace_id=trace_id, error=error)

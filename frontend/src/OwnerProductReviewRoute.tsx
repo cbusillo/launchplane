@@ -160,7 +160,7 @@ function OwnerPreviewReviewRoute({
         const apiError = loadError as LaunchplaneApiError;
         setError(
           apiError.statusCode === 403
-            ? "You are not this product's Owner, so this review is not available to you. If you expected to see it, ask the person who sent you the link."
+            ? "You are not this product's Client, so this review is not available to you. If you expected to see it, ask the person who sent you the link."
             : apiError.statusCode === 401
               ? "You are not signed in. Sign in with GitHub to review this change."
               : "The review could not be loaded. Try again in a moment.",
@@ -307,10 +307,10 @@ function ProductReviewCard({
 
 function cannotDecideMessage(review: ProductReviewResponse): string {
   if (!review.owner_set) {
-    return "No Owner set for this product. Ask the operator to name one before this change can be reviewed.";
+    return "No Client set for this product. Ask an admin to name one before this change can be reviewed.";
   }
   if (!review.viewer_is_owner) {
-    return "You are not this product's Owner. You can look, but only the Owner can record a decision.";
+    return "You are not this product's Client. You can look, but only the Client can record a decision.";
   }
   return "No preview yet. Come back when the pull request says the preview is ready.";
 }
@@ -421,7 +421,7 @@ function ProductReviewDecisionForm({
       const apiError = writeError as LaunchplaneApiError;
       setFailure(
         apiError.statusCode === 403
-          ? "Your decision was not recorded because you are not this product's Owner."
+          ? "Your decision was not recorded because you are not this product's Client."
           : apiError.statusCode === 409
             ? apiError.message
             : "Your decision was not recorded. Try again in a moment.",

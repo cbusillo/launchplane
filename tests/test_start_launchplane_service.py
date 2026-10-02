@@ -1,10 +1,53 @@
 import base64
 import os
+import re
 import stat
 import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+
+def _compose_service_blocks(compose_text: str) -> dict[str, str]:
+    services_section = re.split(r"(?m)^services:\n", compose_text, maxsplit=1)[1]
+    services_section = re.split(r"(?m)^\S", services_section, maxsplit=1)[0]
+    return dict(
+        re.findall(
+            r"(?ms)^ {2}([A-Za-z0-9_-]+):\n(.*?)(?=^ {2}[A-Za-z0-9_-]+:\n|\Z)",
+            services_section,
+        )
+    )
+
+
+def _compose_service_value(service_block: str, key: str) -> str:
+    match = re.search(rf"(?ms)^ {{4}}{key}:(.*?)(?=^ {{4}}\S|\Z)", service_block)
+    return match.group(1).strip() if match else ""
+
+
+def _assert_compose_supervises_worker_script(
+    test_case: unittest.TestCase,
+    *,
+    compose_path: Path,
+    script_path: Path,
+) -> None:
+    services = _compose_service_blocks(compose_path.read_text(encoding="utf-8"))
+    primary_service = services["launchplane"]
+    worker_services = [
+        service_block
+        for service_block in services.values()
+        if f"- /app/scripts/{script_path.name}\n" in service_block
+    ]
+
+    test_case.assertTrue(script_path.is_file())
+    test_case.assertEqual(len(worker_services), 1)
+    worker_service = worker_services[0]
+    for key in ("image", "restart", "env_file", "volumes", "networks"):
+        with test_case.subTest(key=key):
+            test_case.assertEqual(
+                _compose_service_value(worker_service, key),
+                _compose_service_value(primary_service, key),
+            )
+    test_case.assertIn("condition: service_healthy", worker_service)
 
 
 class StartLaunchplaneServiceScriptTests(unittest.TestCase):
@@ -451,21 +494,11 @@ printf '%s\n' "$@" >>"$UV_CAPTURE_FILE"
         self.assertIn("3", captured_args)
 
     def test_compose_includes_supervised_odoo_worker_service(self) -> None:
-        compose_text = self.compose_path.read_text(encoding="utf-8")
-
-        self.assertIn("  launchplane-odoo-workers:\n", compose_text)
-        self.assertIn("image: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}", compose_text)
-        self.assertIn("restart: unless-stopped", compose_text)
-        self.assertIn("healthcheck:", compose_text)
-        self.assertIn("condition: service_healthy", compose_text)
-        self.assertIn("- /app/scripts/start-launchplane-odoo-workers.sh", compose_text)
-        self.assertIn("- launchplane-runtime:/app/runtime", compose_text)
-        self.assertGreaterEqual(compose_text.count("- launchplane-external-network"), 2)
-        self.assertIn("  launchplane-external-network:\n", compose_text)
-        self.assertIn("name: ${LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK", compose_text)
-        self.assertIn("external: true", compose_text)
-        self.assertNotIn("cm-prod", compose_text)
-        self.assertNotIn("opw-prod", compose_text)
+        _assert_compose_supervises_worker_script(
+            self,
+            compose_path=self.compose_path,
+            script_path=self.script_path,
+        )
 
 
 class StartLaunchplaneVeriReelWorkersScriptTests(unittest.TestCase):
@@ -561,14 +594,11 @@ printf '%s\n' "$@" >>"$UV_CAPTURE_FILE"
         self.assertIn("3", captured_args)
 
     def test_compose_includes_supervised_verireel_worker_service(self) -> None:
-        compose_text = self.compose_path.read_text(encoding="utf-8")
-
-        self.assertIn("  launchplane-verireel-workers:\n", compose_text)
-        self.assertIn("restart: unless-stopped", compose_text)
-        self.assertIn("condition: service_healthy", compose_text)
-        self.assertIn("- /app/scripts/start-launchplane-verireel-workers.sh", compose_text)
-        self.assertIn("- launchplane-runtime:/app/runtime", compose_text)
-        self.assertGreaterEqual(compose_text.count("- launchplane-external-network"), 3)
+        _assert_compose_supervises_worker_script(
+            self,
+            compose_path=self.compose_path,
+            script_path=self.script_path,
+        )
 
 
 class StartLaunchplaneMergeTrainWorkersScriptTests(unittest.TestCase):
@@ -870,17 +900,11 @@ exit {exit_code}
         self.assertIn('"error_type":"probe_failed"', result.stdout)
 
     def test_compose_includes_supervised_privileged_operation_worker_service(self) -> None:
-        compose_text = self.compose_path.read_text(encoding="utf-8")
-
-        self.assertIn("  launchplane-privileged-operation-workers:\n", compose_text)
-        self.assertIn("image: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}", compose_text)
-        self.assertIn("restart: unless-stopped", compose_text)
-        self.assertIn("condition: service_healthy", compose_text)
-        self.assertIn(
-            "- /app/scripts/start-launchplane-privileged-operation-workers.sh", compose_text
+        _assert_compose_supervises_worker_script(
+            self,
+            compose_path=self.compose_path,
+            script_path=self.script_path,
         )
-        self.assertIn("- launchplane-runtime:/app/runtime", compose_text)
-        self.assertGreaterEqual(compose_text.count("- launchplane-external-network"), 4)
 
 
 if __name__ == "__main__":

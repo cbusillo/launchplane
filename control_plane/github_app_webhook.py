@@ -36,7 +36,14 @@ GITHUB_APP_WEBHOOK_SECRET_CONTEXT = "launchplane"
 GITHUB_APP_WEBHOOK_SECRET_BINDING_KEY = "webhook_secret"
 PRODUCT_BUILD_WORKFLOW_PATH = ".github/workflows/build.yml"
 _PREVIEW_PULL_REQUEST_ACTIONS = frozenset(
-    {"opened", "reopened", "synchronize", "labeled", "unlabeled", "closed"}
+    {
+        "opened",
+        "reopened",
+        "synchronize",
+        "labeled",
+        "unlabeled",
+        "closed",
+    }
 )
 
 GitHubAppWebhookStatus = Literal["recorded", "duplicate", "ignored"]

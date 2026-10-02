@@ -3023,7 +3023,11 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
             "mutation_reconciliation_required",
         )
         self.assertEqual(second_response.status_code, 409)
-        self.assertEqual(second_response.json()["error"]["code"], "mutation_in_progress")
+        self.assertEqual(
+            second_response.json()["error"]["code"],
+            "mutation_reconciliation_required",
+        )
+        self.assertNotIn("already running", second_response.json()["error"]["message"])
         self.assertEqual(apply_driver.call_count, 1)
         assert reconcile_stored is not None
         self.assertEqual(reconcile_stored.state, "reconcile_required")
@@ -5626,6 +5630,29 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
                 stored_operation.authorization.managed_rule_id,
                 "cm-target-replacement",
             )
+
+    async def test_odoo_target_replacement_apply_cannot_change_live_production(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state", include_prod_lane=True)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_target_replacement_apply(
+                app,
+                self._payload(
+                    instance="prod", artifact_id="artifact-cm-testing", source_git_ref="a" * 40
+                ),
+                idempotency_key="apply-cm-prod",
+            )
+
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.json()["error"]["code"], "promotion_required")
+            self.assertEqual(store.list_odoo_stable_target_replacement_operation_records(), ())
 
     async def test_odoo_target_replacement_apply_never_takes_a_reconcile_grant_from_a_request(
         self,

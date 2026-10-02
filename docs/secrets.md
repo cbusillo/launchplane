@@ -4,12 +4,12 @@ title: Secrets
 
 ## Purpose
 
-- Define the control-plane-owned secret contract for deploy and operator
+- Define the control-plane-owned secret contract for deploy and admin
   workflows.
 
-## Owner credential input
+## Client credential input
 
-An operator can request a credential by setting `owner_input` on one managed-secret
+An admin can request a credential by setting `owner_input` on one managed-secret
 requirement in the stored product profile. It contains a human-readable `label` and
 `instructions` and requires an explicit product context. An optional instance
 restricts it to one environment; a context request shares one submission across
@@ -17,36 +17,36 @@ the profile's named environments in that context, which the form lists. Omitted 
 declarations grant no submission surface. Real account names and provider details
 belong in these records, not application defaults.
 
-The named Owner signs in with GitHub at
+The named Client signs in with GitHub at
 `/ui/owner-secrets?product=PRODUCT&environment=ENVIRONMENT`. The page reads
 `GET /v1/owner-secret-inputs` and submits one write-only value to
-`POST /v1/owner-secret-inputs/submit`. The service checks the immutable Owner id,
+`POST /v1/owner-secret-inputs/submit`. The service checks the immutable Client id,
 the current request revision (including its environment set), CSRF, database storage and encryption availability.
 The password input is cleared before dispatch and on unmount; responses contain
-only request metadata and a receipt. Operators with product-profile read access
-can inspect receipts but cannot submit as the Owner.
+only request metadata and a receipt. Admins with product-profile read access
+can inspect receipts but cannot submit as the Client.
 
 Submissions reuse managed-secret encryption and atomic authority bundles, under
 the `owner_secret_submission` integration with **no secret bindings**. The profile
 that authorized the submission is checked under the product lock during commit.
-A changed Owner or request cannot produce a stale authorized write. No runtime
+A changed Client or request cannot produce a stale authorized write. No runtime
 environment, active runtime secret, provider target, or deployment changes.
 
-An operator separately selects the saved submission in the environment's Managed
+An admin separately selects the saved submission in the environment's Managed
 secrets form. The existing product-config dry-run/apply route accepts
 `owner_submission_version_id` instead of a plaintext `value`. It resolves only the
-current version for the exact product, environment, declared binding and Owner,
-after operator authorization. Normal matching dry-run, confirmation, idempotency
+current version for the exact product, environment, declared binding and Client,
+after admin authorization. Normal matching dry-run, confirmation, idempotency
 and runtime key-safety checks still apply. Application copies the value to a
-separate runtime secret; a later Owner submission cannot rotate that active value.
+separate runtime secret; a later Client submission cannot rotate that active value.
 Changing the profile during application aborts the atomic write. Live-target sync
-and actual application verification remain separate operator work.
+and actual application verification remain separate admin work.
 
 An exact retry of a completed application replays its stored receipt before
-resolving the submitted credential. Owner replacement or encryption-key retirement
+resolving the submitted credential. Client replacement or encryption-key retirement
 cannot strand a credential-reference-only request after a lost apply response.
 
-This is credential input, not an Owner operational role or a release decision.
+This is credential input, not a Client operational role or a release decision.
 Product-profile write authority still controls which inputs are requested.
 
 The receipt follows the submission audit event through recorded key re-encryption
@@ -95,10 +95,10 @@ not part of this input flow.
   persisted in artifacts, audit records, logs, or Launchplane managed secrets.
   Do not retain a PAT fallback.
 - Conventional product onboarding uses a dedicated read-only GitHub App to
-  resolve immutable repository and owner ids before protected review. Store its
+  resolve immutable repository and repository-owner ids before protected review. Store its
   client id in `LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID` and its private key
   in `LAUNCHPLANE_ONBOARDING_GITHUB_APP_PRIVATE_KEY`. Install it only on product
-  repositories that operators may onboard and grant only repository Contents
+  repositories that admins may onboard and grant only repository Contents
   read plus the GitHub App's mandatory metadata read access. Contents read is
   the minimum permission that lets an installation be scoped to selected
   private repositories; the workflow requests that exact permission when it
@@ -108,9 +108,9 @@ not part of this input flow.
   persist the token or private key in plan/apply artifacts. Do not use a PAT or
   the Launchplane service GitHub App as a fallback. Do not wait for a failed
   authorization run to discover a missing installation.
-  Before dispatch, operators should verify this selected-repository installation
+  Before dispatch, admins should verify this selected-repository installation
   instead of waiting for repository metadata token minting to fail.
-- Advisory engineering and Owner check-run projection uses its own dedicated
+- Advisory engineering and Client check-run projection uses its own dedicated
   GitHub App. Store its numeric id as the DB-backed Launchplane service-context
   runtime value `LAUNCHPLANE_ADVISORY_GITHUB_APP_ID` and its private key as the
   managed-secret value `LAUNCHPLANE_ADVISORY_GITHUB_APP_PRIVATE_KEY`. Install
@@ -130,17 +130,17 @@ not part of this input flow.
   managed set.
 - `LAUNCHPLANE_AUTHZ_OWNER_ACCEPTANCE_MANAGED_SET_JSON` names a retired
   compatibility set. `operator.owner-acceptance` accepts only an empty desired
-  policy for removal of existing grants. Current Owner review uses the Owner
-  on the product profile and has no Owner-grant secret prerequisite. This code
+  policy for removal of existing grants. Current Client review uses the Client
+  on the product profile and has no Client-grant secret prerequisite. This code
   retirement does not change deployed secrets or authorization records. See
-  [owner-acceptance.md](owner-acceptance.md).
+  [`owner-acceptance.md`](owner-acceptance.md).
 
 - The protected
   `LAUNCHPLANE_AUTHZ_PRODUCT_OWNER_POLICY_ADMIN_MANAGED_SET_JSON` secret contains
-  the complete `operator.product-owner-policy-admin` local-operator desired set.
-  Every rule must bind one exact operator subject and token label to one exact
-  product/system scope and exactly the Product Owner policy and requirement
-  read/write actions. Product identities, repository identities, and Owner
+  the complete `operator.product-owner-policy-admin` `local_operators` desired set.
+  Every rule must bind one exact admin subject and token label to one exact
+  product/system scope and exactly the product Client policy and requirement
+  read/write actions. Product identities, repository identities, and Client
   memberships remain DB-backed runtime records and do not belong in this secret.
 
 ## DB-Backed Secret Resolution
@@ -181,8 +181,8 @@ or Launchplane-owned integration.
 
 `secret_id`, `version_id`, and `encryption_key_id` are identifiers, not secret
 material. They must be stable, opaque, unique within their record family, and
-safe to show in redacted audit or operator status surfaces. They must not encode
-real plaintext values, provider tokens, operator identities, tenant values,
+safe to show in redacted audit or admin status surfaces. They must not encode
+real plaintext values, provider tokens, admin identities, tenant values,
 domains, or topology. `current_version_id` points to the active secret-value
 version; it is not the encryption-key id and must not be overloaded as rotation
 state for the master encryption root.
@@ -210,7 +210,7 @@ The target rotation model is:
 3. Run the deployed Launchplane service re-encryption endpoint in dry-run mode.
    The response reports unreadable versions, the active-key usage summary, keys
    blocked from retirement, and a digest bound to the current secret versions.
-4. Apply through the same service endpoint with the dry-run digest, an operator
+4. Apply through the same service endpoint with the dry-run digest, an admin
    reason, and an idempotency key. Launchplane atomically writes every new
    ciphertext version, current-version pointer, audit event, and apply
    idempotency completion record.
@@ -268,13 +268,13 @@ explicit `bootstrap_secret_operation` of `preserve`, `install`, or `remove`.
 Automatic deployments always preserve the target value; a missing repository
 secret never removes the active key ring. `install` requires non-empty JSON,
 minifies it before the private self-deploy request is written, and may use an
-operator-reviewed `self_deploy_idempotency_key`. `remove` is an explicit
+admin-reviewed `self_deploy_idempotency_key`. `remove` is an explicit
 rollback or retirement action and never follows merely from secret absence.
 Both operations use exact target-state preconditions. A post-mutation workflow
 failure automatically attempts the inverse key-ring change against the same
 immutable image, guarded by the reviewed value and a unique forward deployment
 marker; a distinct rollback marker proves restart completion. Ambiguous or
-stale state fails closed for manual operator follow-up instead of applying a
+stale state fails closed for manual admin follow-up instead of applying a
 blind inverse. The workflow removes private self-deploy payload files at job
 completion and must not copy the key-ring value into outputs, summaries,
 artifacts, or logs.
@@ -286,7 +286,7 @@ flow in reverse; Launchplane creates new versions instead of mutating history.
 
 Rotation is a service/storage operation, not a product workflow shortcut. It
 must not copy plaintext into GitHub issues, workflow logs, checked-in files,
-operator-local env files, provider env dumps, or docs. Ambiguous key ids,
+admin-local env files, provider env dumps, or docs. Ambiguous key ids,
 missing key ids, missing decryption roots, or mismatched active/historical key
 state block the read or write instead of silently trying another source.
 
@@ -295,7 +295,7 @@ state block the read or write instead of silently trying another source.
 The accepted provider is Launchplane-managed secrets backed by Launchplane
 storage and a minimal bootstrap decryption root. Future Vault, HSM, KMS, or
 cloud-secret-manager integrations are deferred provider candidates. They require
-a named Launchplane problem, local/dev bootstrap plan, operational owner,
+a named Launchplane problem, local/dev bootstrap plan, the party that operates it,
 failure mode, rollback posture, and proof that live secret values and assignments
 remain out of checked-in files.
 
@@ -320,7 +320,7 @@ password inputs and the immediate request local variable. It clears every value
 before dispatch and again on secret-input validation failure, HTTP failure,
 route change, and unmount. A successful dry-run retains only redacted plan
 evidence, the operation fingerprint/idempotency identity, and trace metadata;
-the operator must re-enter the same values for apply. Persisted product-config
+the admin must re-enter the same values for apply. Persisted product-config
 continuity and idempotency fingerprints that cover secret input use a
 server-keyed, purpose-separated HMAC derived from the active managed-secret
 root, never an unkeyed secret verifier. Secret values must not enter React state,
@@ -340,7 +340,7 @@ class, and finding codes. They must not include plaintext, ciphertext, token
 prefixes, provider env dumps, request bodies that contain secrets, or values
 derived from secret material.
 
-Trusted operator reveal paths, if added later, must be deliberate, reasoned,
+Trusted admin reveal paths, if added later, must be deliberate, reasoned,
 scoped, audited, and separate from routine metadata reads. Missing authorization,
 missing runtime key-safety approval, missing secret version metadata, or missing
 decryption key state denies the reveal or resolution.
@@ -350,13 +350,13 @@ decryption key state denies the reveal or resolution.
 - Runtime key-safety gates classify managed secret bindings by binding key and
   Launchplane metadata, not by plaintext value. The initial classification
   contract is `prod_only`, `testing`, `preview`, `non_prod`, and `shared_safe`.
-- Deploy-time runtime key-safety reconciliation accepts operator-supplied
+- Deploy-time runtime key-safety reconciliation accepts admin-supplied
   `LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON` metadata for runtime secret
   bindings that need Launchplane-managed storage. It writes binding key,
-  `secret_class`, and target-scope metadata only; operators still supply or
+  `secret_class`, and target-scope metadata only; admins still supply or
   rotate secret values through product-config managed secret writes.
 - Shared and production runtime mutations must execute through the deployed
-  Launchplane service API or an operator UI path backed by that API. Do not use
+  Launchplane service API or a Launchplane UI path backed by that API. Do not use
   local CLI live-target mutation commands from arbitrary checkouts as a fallback
   when the service API is missing; add the service boundary first so the
   deployed runtime resolves DB-backed target authority and records sanitized
@@ -364,7 +364,8 @@ decryption key state denies the reveal or resolution.
 - Live target runtime sync uses `POST /v1/live-target-runtime/apply` or the
   `live-target-runtime.yml` workflow wrapper. Dry-run and apply both return
   sanitized key/count evidence.
-- Live target runtime sync delivers the site's own environment for the lane:
+- Live target runtime sync and Odoo target replacement deliver the site's own
+  environment for the lane:
   the site's context and lane settings, the tracked target's settings, secrets
   stored for exactly that lane, and, for testing and prod lanes only, secrets
   shared across the site. Global settings and secrets, other sites' values, and
@@ -413,7 +414,7 @@ decryption key state denies the reveal or resolution.
   classifications, and finding codes. It must not include secret plaintext,
   ciphertext, provider env dumps, or token prefixes.
 - Runtime key-safety policy records live in
-  `launchplane_runtime_key_safety_policies`. Operators import JSON policy
+  `launchplane_runtime_key_safety_policies`. Admins import JSON policy
   records with `launchplane runtime-key-safety import-policy`, inspect active
   records with `launchplane runtime-key-safety list-policies`, and run a
   metadata-only check with `launchplane runtime-key-safety evaluate` before a
@@ -497,18 +498,18 @@ decryption key state denies the reveal or resolution.
 <instance> --json-output`
   emits the resolved runtime environment payload for a tenant environment with
   secret-shaped values redacted by default. Use `--include-secret-values` only
-  from a trusted operator shell when plaintext resolved values are required.
+  from a trusted admin shell when plaintext resolved values are required.
 - `uv run launchplane environments put --scope <scope> --set KEY=VALUE --allow-direct-db-mutation`
   is an explicit local/bootstrap repair path for non-secret runtime values in
   DB-backed runtime-environment records and redacts values from command output.
   Secret-shaped keys are rejected and should be written with `secrets put`.
   Routine shared and production config changes should use product-config
-  dry-run/apply through the deployed service route or operator UI instead of
+  dry-run/apply through the deployed service route or Launchplane UI instead of
   arbitrary local runtime-environment writes.
 - `uv run launchplane secrets put ... --allow-direct-db-mutation` is the
   matching explicit local/bootstrap repair path for direct managed-secret
   writes. Routine shared and production secret changes should use product-config
-  dry-run/apply through the deployed service route or operator UI instead of
+  dry-run/apply through the deployed service route or Launchplane UI instead of
   arbitrary local secret writes.
 - `uv run launchplane secrets reencrypt --allow-direct-db-mutation` is a
   bootstrap/recovery-only dry-run. A direct apply additionally requires
@@ -531,9 +532,9 @@ decryption key state denies the reveal or resolution.
   binding for the target runtime class.
 - Trusted local agents that need to call the deployed service instead of a
   browser session should source `~/.config/launchplane/local-operator.env` and
-  use `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` for routine owner-agent writes. Exact
+  use `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` for routine Director-agent writes. Exact
   authority is DB-backed by `local_operators` authz policy rules. Rare privileged
-  owner-agent writes can use `LAUNCHPLANE_LOCAL_ADMIN_TOKEN` only when matching
+  Director-agent writes can use `LAUNCHPLANE_LOCAL_ADMIN_TOKEN` only when matching
   `local_admins` authz policy rules grant the action. Write requests sent with
   either token must include a reason. Product-config apply also requires a
   previously recorded matching dry-run. They must still send plaintext secret
@@ -556,7 +557,7 @@ decryption key state denies the reveal or resolution.
 - Launchplane preview write/build helpers read `LAUNCHPLANE_PREVIEW_BASE_URL`
   from the shared plus context-scoped runtime environment contract, with shared
   values providing the default and context values allowed to override it.
-- `odoo-devkit` may consume that contract when the operator points
+- `odoo-devkit` may consume that contract when an admin points
   `ODOO_CONTROL_PLANE_ROOT` at a valid `launchplane` checkout.
 - When `odoo-devkit` is configured to use the control-plane contract, legacy
   devkit-local `.env` / `platform/.env` / `platform/secrets.toml` files should

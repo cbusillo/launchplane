@@ -3,6 +3,18 @@ title: Testing Style
 ---
 
 - Add targeted unit tests for storage, contracts, and workflow mapping.
+- A test stays only if it fails when the product is broken and passes when
+  someone makes an intended change. A version, toolchain, or dependency bump,
+  or an edit to a workflow step's wording, should need no test edit.
+- Do not assert a literal defined elsewhere (versions, pins, image digests,
+  hashes, counts, operation tables). Check agreement with the one source, or
+  keep a byte-exact gate only on a real generated artifact or immutable
+  evidence.
+- Do not assert workflow, action, config, or docs text. Run the embedded script
+  with inputs and check what it does, or enforce a rule that holds for every
+  workflow (fork isolation, pinned actions, permissions).
+- Verification code must not depend on working-tree state; read live state
+  only on the path that acts on it.
 - Prefer deterministic file-system tests using `TemporaryDirectory`.
 - Test fail-closed behavior explicitly.
 - Keep fixtures small and inline unless they are reused heavily.
@@ -49,11 +61,14 @@ LAUNCHPLANE_TEST_POSTGRES_URL=postgresql+psycopg://... uv run --extra dev launch
 ```
 
 The URL is a temporary/root test service URL, not a Launchplane runtime
-credential. The harness creates and drops isolated databases, upgrades each from
-empty schema through Alembic `head`, verifies the exact checked-in schema head
+credential. The harness creates and drops isolated databases. It upgrades one
+empty database through Alembic `head` per process and clones it as a template
+for each test that only needs a head schema (`_head_postgres_database`); tests
+that prove a migration upgrade their own database from the revision they need.
+It verifies the exact checked-in schema head
 and critical indexes/types, and runs focused two-connection concurrency tests
 for mutation reservation/replay/conflict, reconciliation-key fencing, atomic
-business-write completion and rollback, operation claims, stale lease owners,
+business-write completion and rollback, operation claims, stale lease holders,
 lease recovery, and active-operation partial uniqueness. Same-repo CI provides
 the URL via a PostgreSQL service container with an IPv4-only dynamic host port,
 preventing the runner from selecting an IPv6 mapping for an IPv4 connection;
@@ -101,6 +116,14 @@ branches, and missing API evidence run the full suite. Construction branches
 must remain outside required workflow triggers. Concurrency and required checks
 are unchanged, and every published final candidate SHA still receives its own
 gate.
+
+The `ci-gate` job reports the run's wall time against a 10-minute pull-request
+budget in the job summary and raises a warning annotation when a run exceeds
+it. The report never fails the gate; an exceeded budget is a signal to measure
+and fix the slow lane. Only pushes to `main` save the uv dependency cache:
+pull-request caches are scoped to that pull request, so saving one re-uploads
+hundreds of megabytes that main and other pull requests cannot restore, and
+self-hosted runners already keep a local uv cache.
 
 Same-repo CI currently uses 12 unittest shards with a 20-test/30-second split
 threshold to keep large app and service targets under the tool wall-clock
@@ -152,7 +175,7 @@ zero-replica services.
 
 ## Browser smoke
 
-Run the deterministic operator-journey smoke separately from the frontend unit,
+Run the deterministic admin-journey smoke separately from the frontend unit,
 type, OpenAPI, and production-build gate:
 
 ```bash
@@ -188,15 +211,20 @@ that proof. Deployed OIDC smoke remains a separate non-destructive evidence
 layer because it validates service authentication and deployment wiring rather
 than deterministic UI behavior.
 
-Workflow contract tests should parse workflow YAML through
-`tests/support/workflows.py` and assert named invariants instead of mirroring
-large YAML snippets, substring counts, or indentation-sensitive job fragments.
-Use semantic checks for event shape, fork-hosted versus same-repository
-self-hosted runner isolation, OIDC and permission requirements,
-`launchplane-request` inputs, artifact retention, immutable timing snapshots,
-and aggregate gate dependencies. Keep direct text assertions only for embedded
-script behavior that is not represented as YAML structure, and make invariant
-failures name both the workflow file and the violated invariant.
+Workflows are checked where they execute: CI runs them, `security.yml` runs
+actionlint over every workflow, and `tests/test_github_actions_security.py`
+holds the rules that apply to all of them. Do not add a test that re-reads one
+workflow to check that it says what it says. Workflow tests take one of three
+forms:
+
+- Run an embedded script step with inputs (through `tests/support/workflows.py`
+  `load_workflow` and `step_named`) and assert its output or exit code.
+- Enforce a rule over every workflow, such as fork pull requests never reaching
+  self-hosted runners, remote actions being pinned to a full commit SHA, or
+  `run:` scripts reading inputs and event fields through `env` instead of
+  `${{ }}`, and name the workflow file and violated rule on failure.
+- Check that two real files agree, such as an admin wrapper's inputs and the
+  pinned worker it forwards to.
 
 ## HTTP and ASGI contracts
 

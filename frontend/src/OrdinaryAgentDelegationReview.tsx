@@ -117,7 +117,7 @@ export function OrdinaryAgentDelegationReview(
         ) : null}
       </dl>
       {props.permissions.length ? (
-        <p>Required engineering checks and owner preview approvals remain in place.</p>
+        <p>Required engineering checks and Client preview approvals remain in place.</p>
       ) : null}
       {props.status === "approved" ? (
         <p>{props.applied ? (connection ? "Connection prepared." : "Session approved.") : "Launchplane is preparing the approved connection."}</p>

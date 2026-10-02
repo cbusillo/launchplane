@@ -15,6 +15,7 @@ def build_preview_lifecycle_plan(
     desired_previews: tuple[PreviewLifecycleDesiredPreview, ...],
     latest_inventory_scan: PreviewInventoryScanRecord | None,
     desired_state_id: str = "",
+    desired_state_error: str = "",
 ) -> PreviewLifecyclePlanRecord:
     desired_by_slug = {
         preview.preview_slug.strip(): preview.model_copy(
@@ -37,6 +38,20 @@ def build_preview_lifecycle_plan(
             desired_previews=normalized_desired_previews,
             desired_slugs=desired_slugs,
             error_message="Launchplane has not recorded a preview inventory scan for this context.",
+        )
+
+    if desired_state_error.strip():
+        # An unknown desired set must never make a ready PR's preview look orphaned.
+        return PreviewLifecyclePlanRecord(
+            plan_id=plan_id,
+            product=product,
+            context=context,
+            planned_at=planned_at,
+            source=source,
+            status="fail",
+            desired_state_id=desired_state_id,
+            inventory_scan_id=latest_inventory_scan.scan_id,
+            error_message=f"Desired previews are unknown: {desired_state_error.strip()}",
         )
 
     actual_slugs = tuple(sorted(set(latest_inventory_scan.preview_slugs)))

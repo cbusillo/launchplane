@@ -4,11 +4,6 @@ name: Reusable Generic Web Preview
 "on":
   workflow_call:
     inputs:
-      preview_label:
-        description: Pull request label that enables preview refreshes.
-        required: false
-        default: preview
-        type: string
       image_repository:
         description: >-
           GHCR image repository without a tag or digest. Defaults to
@@ -109,7 +104,6 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           IMAGE_REPOSITORY: ${{ inputs.image_repository }}
-          PREVIEW_LABEL: ${{ inputs.preview_label }}
           RUN_URL: >-
             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{
               github.run_id }}
@@ -125,13 +119,6 @@ jobs:
               throw new Error('pull_request payload is required.');
             }
 
-            const previewLabel = String(process.env.PREVIEW_LABEL || 'preview')
-              .trim()
-              .toLowerCase();
-            if (!previewLabel) {
-              throw new Error('preview_label must not be empty.');
-            }
-
             const repository = String(context.payload.repository?.full_name || '')
               .trim()
               .toLowerCase();
@@ -142,23 +129,9 @@ jobs:
             const sameRepository = Boolean(repository) && repository === headRepository;
             const trustedPreview = sameRepository && author !== 'dependabot[bot]';
             const action = String(context.payload.action || '').trim().toLowerCase();
-            const changedLabel = String(context.payload.label?.name || '')
-              .trim()
-              .toLowerCase();
-            const labels = (pullRequest.labels || []).map((label) =>
-              String(typeof label === 'string' ? label : label?.name || '')
-                .trim()
-                .toLowerCase(),
-            );
-            const previewRequested = labels.includes(previewLabel);
-
+            // A preview stays up until the PR closes or merges; drafts keep theirs.
             let operation = 'noop';
-            if (
-              trustedPreview &&
-              ((['opened', 'reopened', 'synchronize', 'edited'].includes(action) &&
-                previewRequested) ||
-                (action === 'labeled' && changedLabel === previewLabel))
-            ) {
+            if (trustedPreview && ['opened', 'reopened', 'synchronize'].includes(action)) {
               operation = 'refresh';
             }
 

@@ -1,10 +1,10 @@
 ---
-title: Operator Experience
+title: Launchplane UI Experience
 ---
 
 ## Direction
 
-Launchplane operator work is API-first, but the minimum trusted Owner preview page
+Launchplane admin work is API-first, but the minimum trusted Client preview page
 and readable denial explanation ship with the end-to-end delegated-delivery
 slice. Do not defer that usable path until every backend abstraction is complete.
 The current React context picker and product-config layout remain transitional.
@@ -12,7 +12,7 @@ Do not refine those transitional layouts except to correct secret-safety
 regressions.
 
 Current DB policy-administration activation uses the signed-in browser session
-directly; this is an administrator path, not site Owner operational authority.
+directly; this is an administrator path, not Client operational authority.
 The parameterless activation self-check returns only whether that exact
 immutable GitHub identity may administer policy now, plus bounded evaluation
 and opaque policy-generation evidence. It has no local-admin bearer helper,
@@ -26,7 +26,7 @@ next safe action.
 
 ## Primary User And Job
 
-The primary user is an operator who may also be a developer, but who is acting
+The primary user is an admin who may also be a developer, but who is acting
 in an operations context. Their job is:
 
 > Understand what is running for one product, which exact change produced it,
@@ -39,44 +39,44 @@ but those jobs must have separate navigation:
 
 - **Product Ops** owns product environments, previews, settings, secrets,
   promotions, maintenance, activity, and diagnosis.
-- **Delivery Governance** owns forge-neutral Owner acceptance,
+- **Delivery Governance** owns forge-neutral Client acceptance,
   engineering-review evidence, dependency health, admission, landing outcomes,
   and only the exact-change/dependency state needed to decide whether a change
   may enter an environment.
-- **Owner Review** (target) will show a plain-language change, isolated preview,
+- **Client Review** (target) will show a plain-language change, isolated preview,
   decision, and observed delivery state. It will allow only accept, request
-  changes, revoke, and feedback for the Owner's product; it will expose no source,
+  changes, revoke, and feedback for the Client's product; it will expose no source,
   configuration, deploy, merge, secret, or access-administration action.
 
 Product Ops is the default surface. Delivery Governance may reuse the same
 session, theme, and API transport, but it must not become a general issue
 tracker, planning system, work graph, engineering queue, or replacement forge.
 
-## Representative Operator Journeys
+## Representative Admin Journeys
 
 The clean-slate product model is grounded in recent Launchplane work rather than
 generic dashboard assumptions.
 
 ### Recover A Product Safely
 
-In the rebuilt UI, an operator who discovers that a product profile or scoped
+In the rebuilt UI, an admin who discovers that a product profile or scoped
 workflow grant is missing must see which product record, provider target, runtime
-configuration, secret bindings, and grants are missing. The operator reviews a
-dry-run, applies only the missing authority through the service, runs an
-isolated preview canary, destroys it, and sees clean lifecycle evidence.
+configuration, secret bindings, and grants are missing. The admin reviews a
+dry-run, applies only the missing authority through the service, and sees the
+product's next preview refresh and lifecycle evidence come back clean.
 
 ### Diagnose A Public TLS Failure
 
-In the rebuilt UI, an operator who sees that a preview or stable environment is
+In the rebuilt UI, an admin who sees that a preview or stable environment is
 unreachable must receive an environment view that explains the bound domain,
-runtime placement, ingress termination, TLS owner, certificate observation,
-provider/runtime identity, and the evidence behind the failure. Normal
-diagnosis must not require direct Dokploy, edge-proxy, DNS-provider, or database
-inspection.
+runtime placement, ingress termination, the party that manages TLS, certificate
+observation, provider/runtime identity, and the evidence behind the failure.
+Normal diagnosis must not require direct Dokploy, edge-proxy, DNS-provider, or
+database inspection.
 
 ### Prove Preview Apply And Destroy
 
-The rebuilt UI must let an operator compare desired and actual previews,
+The rebuilt UI must let an admin compare desired and actual previews,
 refresh one through a reviewed plan, verify health and runtime identity,
 destroy it, and confirm that no provider or Launchplane inventory remains
 orphaned. Apply, destroy, and report-only reconciliation are one understandable
@@ -96,7 +96,7 @@ creating a release or mutating production during dry-run.
 ### Change Runtime Settings Or Secrets
 
 The rebuilt UI must show expected runtime keys separately from managed-secret
-bindings and let an operator review missing/stale/disabled state, submit a
+bindings and let an admin review missing/stale/disabled state, submit a
 dry-run, and apply the change without plaintext secret values remaining in the
 browser, response, logs, or activity record.
 
@@ -149,7 +149,7 @@ Launchplane
 
 The product workspace is the primary object. Stable lanes and previews are
 visually distinct children of that product. Runtime settings and managed
-secrets are separate surfaces. Activity is an operator timeline. Diagnostics
+secrets are separate surfaces. Activity is an admin timeline. Diagnostics
 contains raw contexts, provider IDs, route paths, record IDs, and provider-only
 evidence that ordinary operation does not require.
 
@@ -160,7 +160,7 @@ Every visible action must declare one of these behaviors:
 - `inspect`: read-only navigation or evidence retrieval
 - `dry-run`: computes and records a plan without a live mutation
 - `apply`: performs a supported service mutation after required review
-- `workflow-dispatch`: starts a product-owned or operator-owned workflow
+- `workflow-dispatch`: starts a product-owned or admin-owned workflow
 - `destructive`: removes or disables live mutable state and requires explicit
   confirmation plus replacement/recovery evidence
 - `unsupported`: visible only when explaining why the capability is unavailable
@@ -207,7 +207,7 @@ alone.
 
 ## Product Model
 
-The primary operator model is:
+The primary Launchplane UI model is:
 
 ```text
 Product
@@ -230,7 +230,7 @@ environments live under that product as `testing` and `prod`. Legacy names such
 as `sellyouroutboard-testing` are transition details and must not be the primary
 picker model.
 
-These names describe the current operator model. Launchplane records remain the
+These names describe the current Launchplane UI model. Launchplane records remain the
 authority for live product keys, lanes, contexts, repositories, domains,
 targets, and bindings.
 
@@ -248,13 +248,13 @@ Add product/environment read models before replacing the UI:
 - action availability: dry-run, workflow dispatch, settings apply, preview
   refresh, and cleanup actions with explicit enabled/disabled reasons
 - activity: deployments, promotions, preview events, cleanup events, and authz or
-  policy changes that matter to operators
+  policy changes that matter to admins
 - incidents: active cross-product summaries plus environment-scoped incident
   history and detail with linked observations, material events, reminder state,
   and redacted delivery evidence
 
 Low-level records remain useful for diagnostics, but diagnostics are secondary.
-Normal operators should not need to choose a raw context or understand provider
+Admins should not normally need to choose a raw context or understand provider
 lookup rows before taking safe action.
 
 Incidents remain children of product environments rather than a separate raw
@@ -282,16 +282,16 @@ The first product/site read endpoints are:
 
 Delivery Governance currently exposes
 `/ui/engineering/governance-projection`, backed by
-`GET /v1/governance/projection`. The workbench keeps authoritative current Owner
+`GET /v1/governance/projection`. The workbench keeps authoritative current Client
 acceptance and its immutable history, current ephemeral readiness, immutable
 admission, landing outcome, and GitHub observations in separately named
 regions. The route name is transitional; the evidence contract is forge-neutral.
 It is read-only and does not add a browser mutation contract.
 
-The issue `#2240` target adds a trusted Owner route over the same separated
+The issue `#2240` target adds a trusted Client route over the same separated
 evidence. It must distinguish proposed, accepted, waiting, live, and
 failed/unknown state; observed runtime state remains independent from delivery
-job state. This route and its narrow Owner writes are prospective until the
+job state. This route and its narrow Client writes are prospective until the
 corresponding service contract is implemented and activated.
 
 The transitional Engineering privileged-operation route consumes the
@@ -311,7 +311,7 @@ bindings, authz policy, and evidence records. The shared read model must not add
 product-specific top-level fields; driver-specific data belongs behind driver
 descriptor actions, capabilities, panels, or a driver-namespaced extension.
 
-Product activity is an operator timeline composed from existing Launchplane
+Product activity is an admin timeline composed from existing Launchplane
 records. Events carry product, context, environment, driver id, action id,
 status, timestamp, and record links so the UI can render deployments,
 promotions, rollbacks, backup gates, previews, cleanup, feedback, and relevant
@@ -337,7 +337,7 @@ typed projection. Each exact promotion action reports one of `missing`,
 `invalid`, `stale`, `retired`, or `ready`, plus bounded policy/target record
 identity and revision. The browser must not render provider hosts, usernames,
 guest IDs, storage IDs, credentials, or raw runtime values. A rename or review
-updates the shared target stream rather than asking operators to edit
+updates the shared target stream rather than asking admins to edit
 product-prefixed environment keys.
 
 Operational enrollment readiness is a separate exact-lane, exact-action read.
@@ -377,7 +377,7 @@ deployment, secret, or scheduler target. An exact artifact ID is required only
 when the selected driver action declares artifact readiness; Launchplane reads
 the persisted manifest and never rebuilds or infers it.
 
-The environment `Actions` route lets an operator select one unambiguous primary
+The environment `Actions` route lets an admin select one unambiguous primary
 authorization action advertised by the environment read model, then derives the
 product, context, instance, candidate artifact, and expected current artifact
 from that same Launchplane-owned response before reading readiness. It does not
@@ -409,11 +409,11 @@ every control disabled.
 
 Browser sessions use only the product-owned
 `POST /v1/products/{product}/environments/{environment}/promotion/dry-run`
-route for direct promotion. The body contains an operator reason, reviewed
+route for direct promotion. The body contains an admin reason, reviewed
 evidence fingerprint, and bump mode; it never contains product context,
 artifact identity, source revision, provider identity, or a direct-live switch.
 Launchplane accepts workflow dry-run or live dispatch only after the same
-operator identity has an accepted direct dry-run matching the current evidence
+admin identity has an accepted direct dry-run matching the current evidence
 and bump mode.
 
 Live promotion is never executed directly from the browser. The UI dispatches
@@ -474,7 +474,7 @@ dry-run, blockers, and evidence are clean.
 
 ## Runtime Settings And Secrets
 
-Use operator language:
+Use admin-facing language:
 
 - Runtime settings: non-secret environment/config values Launchplane owns.
 - Secrets: managed secret records and bindings. The UI shows status, binding,
@@ -507,12 +507,12 @@ and a dry-run. Apply requires the exact server-advertised confirmation, the
 matching normalized payload, and a stable idempotency key. The confirmation
 surface shows product/lane scope, changed runtime and secret counts,
 irreversible consequences, and any separately required live-target sync before
-the operator can apply.
+the admin can apply.
 
 Managed-secret values exist only in uncontrolled password inputs and the
 immediate request local variable. The UI clears those inputs before dispatch and
 again on secret-input validation failure, request failure, route change, and
-unmount. Apply requires the operator to re-enter the same values; retained
+unmount. Apply requires the admin to re-enter the same values; retained
 browser operation state contains only a fingerprint, idempotency key, redacted
 result, trace, and failure evidence. An uncertain apply locks every editable
 draft field so the only mutation retry preserves the original operation key and
@@ -520,11 +520,11 @@ payload. Live-target endpoints returned in `next_actions` are rendered as
 inspect-only evidence until they have a separate generated browser adapter.
 
 The environment Managed secrets form can also select a credential supplied by the
-named Owner. The Owner receives the focused `/ui/owner-secrets` page, containing
-only profile-declared input requests. It exposes no existing values or operator
+named Client. The Client receives the focused `/ui/owner-secrets` page, containing
+only profile-declared input requests. It exposes no existing values or admin
 navigation. Its receipt means the credential was stored, not that a running
-product uses it. The operator reviews and applies the selected submission version
-through the existing dry-run/apply form. See [secrets.md](secrets.md#owner-credential-input).
+product uses it. The admin reviews and applies the selected submission version
+through the existing dry-run/apply form. See [secrets.md](secrets.md#client-credential-input).
 
 ## Cleanup Safety
 
@@ -538,7 +538,7 @@ mutable current-authority rows that Launchplane can prove are legacy.
 
 ## Data Trust
 
-Every operator-visible field needs a trust state:
+Every admin-visible field needs a trust state:
 
 - `verified`: directly refreshed from a provider or workflow within the expected
   freshness window
@@ -568,7 +568,7 @@ When the API contract is ready, rebuild the UI around:
 - promotion dry-run and workflow dispatch
 - preview state and lifecycle actions
 - activity and diagnostics
-- a separate trusted Owner-review route with narrow decision and feedback
+- a separate trusted Client-review route with narrow decision and feedback
   controls
 
 Reusable pieces from the current UI may survive only if they fit the new model:
@@ -598,11 +598,11 @@ The clean-slate shell uses URL-owned product selection under the service-owned
   server-advertised actions and renders exact server and browser blockers. It
   does not execute descriptor paths; action-specific forms are enabled only
   when a generated browser write operation is explicitly adapted.
-- `/ui/products/{product}/activity` is the operator timeline. It is labelled
+- `/ui/products/{product}/activity` is the admin timeline. It is labelled
   Recent activity because the current backend read model returns a bounded
   latest-event window rather than a paginated complete history.
 - Delivery Governance remains separate from product environment navigation. It
-  may show exact-change identity, Owner acceptance, independent engineering
+  may show exact-change identity, Client acceptance, independent engineering
   evidence, dependency health, admission, and landing outcomes.
 - Existing `/ui/engineering/work-graph`, `/ui/engineering/issue-inbox`, and
   `/ui/engineering/every-code` routes are transitional and receive no new

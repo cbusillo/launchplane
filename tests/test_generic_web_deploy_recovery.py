@@ -2380,3 +2380,64 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
         self.assertEqual(status_code, 200)
         self.assertEqual(payload["context"], "sellyouroutboard-testing")
         self.assertEqual(payload["proposed_action"], "replay_completed")
+
+    def test_deploy_behind_held_fence_names_the_held_request_not_already_running(
+        self,
+    ) -> None:
+        class _ResolvingProvider:
+            provider_id = "dokploy"
+
+            def __init__(self) -> None:
+                self.deploy_calls = 0
+
+            @staticmethod
+            def resolve_deploy_target(**_kwargs: object) -> GenericWebResolvedDeployTarget:
+                return _generic_web_recovery_target()
+
+            def execute_artifact_deploy(self, **_kwargs: object) -> GenericWebDeployResult:
+                self.deploy_calls += 1
+                return _generic_web_deploy_result()
+
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            held = _write_generic_web_recovery_reservation(
+                store,
+                _generic_web_recovery_reservation(
+                    original_deploy=_generic_web_recovery_original_deploy(),
+                    idempotency_key="generic-web-stable-deploy:held-run",
+                    provider_effect_phase="deploy_trigger",
+                ),
+            )
+            provider = _ResolvingProvider()
+            app = _create_recovery_app(root=root, store=store)
+            with patch(
+                "control_plane.generic_web_deploy_provider_adapter."
+                "default_generic_web_deploy_provider",
+                return_value=provider,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/deploy",
+                    authorization=f"Bearer {_OPERATOR_TOKEN}",
+                    payload=_generic_web_recovery_original_deploy(),
+                    headers={"Idempotency-Key": "generic-web-stable-deploy:later-run"},
+                )
+            store.close()
+
+        self.assertEqual(status_code, 409)
+        self.assertEqual(payload["error"]["code"], "mutation_reconciliation_required")
+        message = payload["error"]["message"]
+        self.assertIn(held.created_at, message)
+        self.assertIn("deploy_trigger", message)
+        self.assertNotIn("already running", message)
+        self.assertNotIn(held.idempotency_key, json.dumps(payload))
+        self.assertNotIn(held.scope, json.dumps(payload))
+        self.assertEqual(provider.deploy_calls, 0)

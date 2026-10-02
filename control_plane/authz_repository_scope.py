@@ -28,7 +28,6 @@ from control_plane.contracts.authz_access_read import (
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.repository_human_admission import RepositoryHumanRolePolicyRecord
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.tenant_merge_eligibility import (
     TenantRepositoryClassificationRecord,
@@ -60,18 +59,6 @@ class AuthzRepositoryScopeStore(Protocol):
         *,
         driver_id: str = "",
     ) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
-
-    def list_repository_human_role_policy_records(
-        self,
-        *,
-        repository_id: str = "",
-        repository_owner_id: str = "",
-        repository: str = "",
-        product: str = "",
-        context: str = "",
-        status: str = "",
-        limit: int | None = None,
-    ) -> tuple[RepositoryHumanRolePolicyRecord, ...]: ...
 
     def list_tenant_repository_classification_records(
         self,
@@ -146,13 +133,6 @@ def build_authz_repository_scope_response(
         source="product",
         truncated_sources=truncated_sources,
     )
-    role_policy_records = _bounded_records(
-        store.list_repository_human_role_policy_records(
-            limit=AUTHZ_REPOSITORY_SCOPE_MAX_SOURCE_RECORDS + 1
-        ),
-        source="repository_record",
-        truncated_sources=truncated_sources,
-    )
     classification_records = _bounded_records(
         store.list_tenant_repository_classification_records(
             limit=AUTHZ_REPOSITORY_SCOPE_MAX_SOURCE_RECORDS + 1
@@ -184,9 +164,6 @@ def build_authz_repository_scope_response(
         truncated_sources=truncated_sources,
     )
 
-    current_role_policy_records, role_policy_ambiguity_count = _current_role_policy_records(
-        role_policy_records
-    )
     current_classification_records, classification_ambiguity_count = (
         _current_classification_records(classification_records)
     )
@@ -203,10 +180,6 @@ def build_authz_repository_scope_response(
     evidence = (
         tuple(_product_evidence(record) for record in product_profiles)
         + tuple(
-            _role_policy_evidence(record, current_role_policy_records)
-            for record in role_policy_records
-        )
-        + tuple(
             _classification_evidence(record, current_classification_records)
             for record in classification_records
         )
@@ -221,8 +194,6 @@ def build_authz_repository_scope_response(
     gap_counts: Counter[tuple[AuthzRepositoryScopeGapSource, AuthzRepositoryScopeGapReason]] = (
         Counter()
     )
-    if role_policy_ambiguity_count:
-        gap_counts[("repository_record", "active_record_ambiguous")] += role_policy_ambiguity_count
     if classification_ambiguity_count:
         gap_counts[("repository_record", "active_record_ambiguous")] += (
             classification_ambiguity_count
@@ -274,7 +245,6 @@ def build_authz_repository_scope_response(
     timestamp_gaps = _timestamp_gap_counts(
         product_profiles=tuple(record for record in product_profiles if record.is_active),
         repository_records=(
-            *current_role_policy_records,
             *current_classification_records,
             *tracked_inventory_records,
         ),
@@ -352,8 +322,7 @@ def build_authz_repository_scope_response(
             state="complete" if not gaps else "partial",
             source_counts=AuthzRepositoryScopeSourceCounts(
                 product=sum(record.is_active for record in product_profiles),
-                repository_record=len(current_role_policy_records)
-                + len(current_classification_records)
+                repository_record=len(current_classification_records)
                 + len(tracked_inventory_records),
                 work_graph=len(current_work_requests),
                 authorization_chain=sum(
@@ -375,8 +344,7 @@ def build_authz_repository_scope_response(
                 tuple(record.updated_at for record in product_profiles if record.is_active)
             ),
             repository_record=_record_provenance(
-                tuple(record.effective_at for record in current_role_policy_records)
-                + tuple(record.classified_at for record in current_classification_records)
+                tuple(record.classified_at for record in current_classification_records)
                 + tuple(record.recorded_at for record in tracked_inventory_records)
             ),
             work_graph=_record_provenance(
@@ -454,16 +422,6 @@ def _bounded_interleaved_records(
     return tuple(retained)
 
 
-def _current_role_policy_records(
-    records: tuple[RepositoryHumanRolePolicyRecord, ...],
-) -> tuple[tuple[RepositoryHumanRolePolicyRecord, ...], int]:
-    return _latest_unique_records(
-        tuple(record for record in records if record.status == "active"),
-        key=lambda record: (record.repository_id, record.product, record.context),
-        revision=lambda record: record.role_policy_revision,
-    )
-
-
 def _current_classification_records(
     records: tuple[TenantRepositoryClassificationRecord, ...],
 ) -> tuple[tuple[TenantRepositoryClassificationRecord, ...], int]:
@@ -513,20 +471,6 @@ def _product_evidence(record: LaunchplaneProductProfileRecord) -> _Evidence:
         membership="product",
         current=record.is_active,
         preserves_repository_case=True,
-    )
-
-
-def _role_policy_evidence(
-    record: RepositoryHumanRolePolicyRecord,
-    current_records: tuple[RepositoryHumanRolePolicyRecord, ...],
-) -> _Evidence:
-    return _Evidence(
-        repository=record.repository,
-        repository_id=record.repository_id,
-        repository_owner_id=record.repository_owner_id,
-        membership="repository_record",
-        current=record in current_records,
-        preserves_repository_case=False,
     )
 
 
@@ -617,10 +561,7 @@ def _timestamp_gap_counts(
     *,
     product_profiles: tuple[LaunchplaneProductProfileRecord, ...],
     repository_records: tuple[
-        RepositoryHumanRolePolicyRecord
-        | TenantRepositoryClassificationRecord
-        | RepositoryInventoryRecord,
-        ...,
+        TenantRepositoryClassificationRecord | RepositoryInventoryRecord, ...
     ],
     work_requests: tuple[EveryCodeWorkRequestRecord, ...],
 ) -> Counter[tuple[AuthzRepositoryScopeGapSource, AuthzRepositoryScopeGapReason]]:
@@ -630,13 +571,9 @@ def _timestamp_gap_counts(
         (
             "repository_record",
             tuple(
-                record.effective_at
-                if isinstance(record, RepositoryHumanRolePolicyRecord)
-                else (
-                    record.classified_at
-                    if isinstance(record, TenantRepositoryClassificationRecord)
-                    else record.recorded_at
-                )
+                record.classified_at
+                if isinstance(record, TenantRepositoryClassificationRecord)
+                else record.recorded_at
                 for record in repository_records
             ),
         ),

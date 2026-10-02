@@ -404,3 +404,40 @@ test("access-policy preparation accepts the isolated product-evidence candidate 
   });
   assert.equal(calls[1].init.headers["X-CSRF-Token"], "csrf-product-evidence");
 });
+
+test("agent operate preparation sends only the selected product ids", async () => {
+  const calls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init });
+    const payload = String(input).endsWith("/v1/auth/session")
+      ? { csrf_token: "csrf-agent-operate" }
+      : {
+          trace_id: "trace-agent-operate",
+          state: "planned",
+          operation_id: "operation-agent-operate",
+        };
+    return new Response(JSON.stringify(payload), {
+      headers: { "Content-Type": "application/json" },
+      status: 200,
+    });
+  };
+
+  const response = await prepareAuthorizationCandidate(
+    "agent-operate-product-setup",
+    "add",
+    "ui:agent-operate-add",
+    undefined,
+    ["example-shop", "example-docs"],
+  );
+
+  assert.equal(response.state, "planned");
+  const body = JSON.parse(String(calls[1].init.body));
+  assert.deepEqual(body, {
+    candidate_id: "agent-operate-product-setup",
+    intent: "add",
+    source_event_id: "ui:agent-operate-add",
+    products: ["example-shop", "example-docs"],
+  });
+  assert.equal(Object.hasOwn(body, "subject"), false);
+  assert.equal(Object.hasOwn(body, "token_label"), false);
+});

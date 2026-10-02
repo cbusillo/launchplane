@@ -1997,3 +1997,40 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConfiguredLocalOperatorIdentityTests(unittest.TestCase):
+    def test_returns_identity_only_when_token_and_binding_are_configured(self) -> None:
+        from control_plane.service_auth import (
+            BearerIdentityConfig,
+            LocalOperatorIdentity,
+            configured_local_operator_identity,
+        )
+
+        self.assertIsNone(configured_local_operator_identity(BearerIdentityConfig()))
+        self.assertIsNone(
+            configured_local_operator_identity(
+                BearerIdentityConfig(
+                    local_operator_subject="operator-agent",
+                    local_operator_token_label="operator-agent-token",
+                )
+            )
+        )
+        self.assertIsNone(
+            configured_local_operator_identity(
+                BearerIdentityConfig(
+                    local_operator_token="secret-token",
+                    local_operator_subject="operator-agent",
+                )
+            )
+        )
+        self.assertEqual(
+            configured_local_operator_identity(
+                BearerIdentityConfig(
+                    local_operator_token="secret-token",
+                    local_operator_subject=" operator-agent ",
+                    local_operator_token_label="operator-agent-token",
+                )
+            ),
+            LocalOperatorIdentity(subject="operator-agent", token_label="operator-agent-token"),
+        )

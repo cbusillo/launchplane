@@ -20,7 +20,12 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord, ReleaseReviewStatus
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
-from control_plane.release_review import build_release_review, require_release_approval
+from control_plane.release_review import (
+    ProductionChangeRequiresPromotion,
+    build_release_review,
+    require_release_approval,
+    require_unchanged_production_artifact,
+)
 from control_plane.release_review_github import owner_test_notes, read_release_changes
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -279,6 +284,47 @@ class ReleaseReviewTests(unittest.TestCase):
                 record_store=self.store,
                 product="example-site",
                 artifact_id="other-artifact",
+            )
+
+    def test_direct_deploy_can_redeploy_but_not_change_live_production(self) -> None:
+        def direct_deploy(instance: str, artifact_id: str) -> None:
+            require_unchanged_production_artifact(
+                record_store=self.store,
+                product="example-site",
+                instance=instance,
+                artifact_id=artifact_id,
+            )
+
+        direct_deploy("prod", "artifact-prod")
+        direct_deploy("prod", "")
+        direct_deploy("testing", "artifact-testing")
+        with self.assertRaisesRegex(ProductionChangeRequiresPromotion, "promote the release"):
+            direct_deploy("prod", "artifact-testing")
+        with self.assertRaises(ProductionChangeRequiresPromotion):
+            direct_deploy(" Prod ", "artifact-testing")
+
+        self.store.write_product_profile_record(
+            profile().model_copy(update={"production_use": "unknown"})
+        )
+        with self.assertRaises(ProductionChangeRequiresPromotion):
+            direct_deploy("prod", "artifact-testing")
+
+        self.store.write_product_profile_record(
+            profile().model_copy(update={"production_use": "prelaunch"})
+        )
+        direct_deploy("prod", "artifact-testing")
+
+    def test_direct_deploy_cannot_establish_live_production(self) -> None:
+        store = FilesystemRecordStore(Path(self.directory.name) / "empty")
+        store.write_product_profile_record(profile())
+        with self.assertRaisesRegex(
+            ProductionChangeRequiresPromotion, "cannot establish production"
+        ):
+            require_unchanged_production_artifact(
+                record_store=store,
+                product="example-site",
+                instance="prod",
+                artifact_id="artifact-testing",
             )
 
     def test_odoo_run_stops_before_backup_and_provider_without_release_approval(self) -> None:

@@ -47,8 +47,8 @@ preview lifecycle operations, but they cannot record a manager decision or
 provide a status-writer token.
 
 Issue `#2240` replaces this as the target admission path with trusted Launchplane
-Owner acceptance. The legacy credential boundary remains enforced until that
-migration and rollback are implemented; neither path grants an Owner operational
+Client acceptance. The legacy credential boundary remains enforced until that
+migration and rollback are implemented; neither path grants a Client operational
 authority.
 
 The runner-host hygiene workflow's GitHub App token action receives a private

@@ -16,7 +16,7 @@ title: Records
   deployments created through `create_all`; future GUI/write-flow schema changes
   need explicit migrations instead of relying on implicit table creation.
 - Shared-service core-record writes use authenticated Launchplane service
-  ingress or operator workflows. Local core-record write commands are
+  ingress or admin workflows. Local core-record write commands are
   file-backed rehearsal helpers only; `storage import-core-records` is removed
   and arbitrary-checkout core-record DB imports are not a supported v2 mutation
   path.
@@ -118,7 +118,7 @@ and columns and fails closed when migrations are missing. Hosted Postgres
 verification accepts only the release-declared compatible revisions and verifies
 the critical JSONB/integer types, unique indexes, worker-claim indexes, and
 partial active-operation predicates used by idempotency, claims, leases,
-CAS-style owner checks, and active operation reservations.
+CAS-style holder checks, and active operation reservations.
 
 For a fresh or existing hosted database, use the same serialized helper as the
 service entrypoint:
@@ -133,7 +133,7 @@ the current revision only after the automated schema adoption verifier passes.
 The verifier inspects existing Launchplane-owned tables and fails closed when a
 live table is missing an ORM-managed column, has an unexpected column, or has a
 critical idempotency/active-operation index with missing uniqueness, columns, or
-partial predicate. A failure means the operator must stop and reconcile the
+partial predicate. A failure means the admin must stop and reconcile the
 schema before stamping; do not hand-edit the Alembic version table or skip the
 check.
 
@@ -213,7 +213,7 @@ must not use Launchplane runtime credentials or shared production databases.
 The `launchplane_idempotency_records` table is also the durable mutation-
 reservation boundary. Existing completed-response rows remain valid and are
 backfilled as `completed`; reservation-backed routes add promoted state, lease,
-attempt, owner, reconciliation-key, and timestamp columns while retaining the
+attempt, holder, reconciliation-key, and timestamp columns while retaining the
 typed payload as the complete evidence envelope.
 
 The same table stores ready Odoo preview apply-inputs issuance evidence. The
@@ -226,7 +226,7 @@ table; blocked plans are not issuance records.
 Reservation identity is `(scope, route_path, idempotency_key)` and remains
 unique in PostgreSQL. The typed lifecycle is:
 
-- `running`: one owner holds a bounded lease before effects begin.
+- `running`: one lease holder has a bounded lease before effects begin.
 - `completed`: the response status, trace, payload, and completion timestamp are
   durable replay evidence.
 - `reconcile_required`: an external operation key was bound and the effect is
@@ -239,7 +239,7 @@ Provider-operation reservations additionally retain a stable
 The phase is checkpointed under the current lease immediately before a provider
 write. It is part of transition identity, so a reservation snapshot from before
 the checkpoint cannot renew, complete, release, or advance provider work after a
-newer owner recovers the claim. The same rule covers compensating rollback
+newer holder recovers the claim. The same rule covers compensating rollback
 deletes and multi-write post-deploy work; each external write advances the phase
 before dispatch instead of treating the enclosing workflow as one effect.
 
@@ -247,10 +247,10 @@ Reservation attempts return typed `acquired`, `replayed`, `conflict`,
 `in_progress`, or `reconcile_required` decisions. A different request
 fingerprint always conflicts, including while the first request is running. An
 expired reservation without a reconciliation key may be reclaimed by a new
-owner with an incremented attempt. Once a provider operation or reconciliation
+holder with an incremented attempt. Once a provider operation or reconciliation
 key is bound, lease expiry transitions to `reconcile_required` instead of
 repeating the effect. Lease renewal, completion, and reconciliation binding use
-owner checks and fail closed for stale owners.
+holder checks and fail closed for stale holders.
 
 DB-only mutations should reserve and complete inside the same transaction as
 their business write. `POST /v1/product-profiles/preview-tls/apply`,
@@ -302,7 +302,7 @@ in the same transaction. Bundle deletes compare the current row payload with the
 planned expected record under the storage boundary and fail closed on missing or
 drifted authority instead of publishing a partial graph. Provider-target writes
 likewise carry an
-expected-current or expected-absent precondition so a concurrent route owner
+expected-current or expected-absent precondition so a concurrent route writer
 cannot be overwritten after planning. Lane-summary reads hold a shared bundle
 guard while assembling their multi-record view, so a bundle commit cannot split
 one response across the old and new authority graphs.
@@ -325,7 +325,7 @@ has been published yet. A stage left in `publishing` state is explicitly
 resumable: the next store access completes remaining `os.replace` writes and
 expected-payload deletes from the manifest, then removes the stage. If live data
 changed from the manifest while recovery was pending, recovery fails closed and
-leaves the stage for operator inspection rather than guessing at authority.
+leaves the stage for admin inspection rather than guessing at authority.
 Ordinary filesystem reads, writes, creates, deletes, and composite promotion
 evidence rollback hold the same bundle lock through their live-file access.
 
@@ -334,21 +334,21 @@ operation or reconciliation key before invoking the provider, and complete only
 after durable local evidence is ready. A crash or timeout after key binding is
 an unknown outcome, not permission to retry the provider mutation.
 
-## Retired Product Owner Policy Records
+## Retired Product Client Policy Records
 
-Historical product/system Owner grants, requirements, and routing remain in
+Historical product/system Client grants, requirements, and routing remain in
 `launchplane_product_owner_policies`, `launchplane_product_owner_requirements`,
 and `launchplane_product_owner_routing`. Their immutable payloads, digests,
 migrations, and archived authority-cutover rows remain readable. The retired
 evaluators and service routes are removed; these records cannot decide a merge
-or release. Current Owner identity comes from the product profile.
+or release. Current Client identity comes from the product profile.
 
 
-## Retired Owner Acceptance Event Records
+## Retired Client Acceptance Event Records
 
 `OwnerAcceptanceEventRecord` remains a historical, read-only compatibility
 contract. Its exact-binding evaluator and event writers have been removed; these
-records are never current Owner review or merge authority. Current decisions use
+records are never current Client review or merge authority. Current decisions use
 product-review records and release-checklist records instead.
 
 Filesystem history remains under `launchplane_owner_acceptance_events/`.
@@ -356,7 +356,7 @@ PostgreSQL retains `launchplane_owner_acceptance_events` and
 `launchplane_owner_acceptance_subject_sequences`, including their migrations and
 indexes. No row, event id, binding digest, replay digest, or sequence is rewritten
 or deleted. Filesystem-to-PostgreSQL import rejects archives containing retired
-Owner events before writing anything. See [owner-acceptance.md](owner-acceptance.md).
+Client events before writing anything. See [`owner-acceptance.md`](owner-acceptance.md).
 
 ## Retired Change Impact Policy Records
 
@@ -387,7 +387,7 @@ not a secret store.
 Workers claim due rows with bounded leases. PostgreSQL claims use `FOR UPDATE
 SKIP LOCKED` over pending or expired work so multiple service instances can
 claim independently without blocking on the same row. Completion remains
-lease-owner fenced; stale owners cannot record terminal state after another
+lease-holder fenced; stale holders cannot record terminal state after another
 worker reclaims the delivery. Attempts are bounded by `max_attempts`.
 
 Provider calls record a stable `provider_operation_key` and `provider_id` before
@@ -424,7 +424,7 @@ stale observer completing a newer attempt. An unknown observation stays
 the same reservation to a new attempt only when no provider phase was
 checkpointed or the adapter explicitly proves the recorded phase is retry-safe.
 An unknown observation never retries. A pre-effect rejection releases the fresh
-reservation through `release_reserved_mutation` (owner- and identity-fenced) so
+reservation through `release_reserved_mutation` (holder- and identity-fenced) so
 no poisoned claim is left behind. Odoo preview apply and generic web deploy are
 the first migrated provider routes; both require an `Idempotency-Key` and a
 database store. Provider-specific observation and reconciliation stay behind
@@ -467,11 +467,13 @@ existing ORM rows and contract payloads behind the storage boundary so the next
 driver descriptor and GUI slices can consume a stable API shape.
 
 - `ProtectedArtifactSet`: registry-cleanup read model built from current
-  environment inventory, release tuples, active preview generations, ready
-  preview feedback, product profiles, and artifact manifests. It is not a new
-  durable record family; it is the Launchplane-owned liveness projection that
-  cleanup consumers must load before deleting registry artifacts. Missing
-  manifests for live inventory, release, or preview artifacts are returned as
+  environment inventory, each stable lane's previous passing deployment of a
+  different artifact (the default rollback target), release tuples, active
+  preview generations, ready preview feedback, product profiles, and artifact
+  manifests. It is not a new durable record family; it is the
+  Launchplane-owned liveness projection that cleanup consumers must load before
+  deleting registry artifacts. Missing manifests for live inventory, rollback,
+  release, or preview artifacts are returned as
   warnings while the artifact id remains protected, so cleanup stays fail-closed
   instead of treating unresolved live images as deletable.
 
@@ -522,7 +524,7 @@ an ORM column/table or remains only in the evidence payload.
   metadata. PostgreSQL enforces unique revisions and at most one active row.
   Managed rules persist stable `(managed_set_id, managed_rule_id)` identities in
   the schema-v2 policy payload; content hashes describe versions rather than
-  ownership. Managed reconciliation audit records the operator identity, reason,
+  ownership. Managed reconciliation audit records the admin identity, reason,
   related issue, reviewed plan and desired-set digests, migration/adoption
   intent, previous/new revisions and policy digests, trace/request fingerprints,
   idempotency evidence, and a redacted rule-ID/hash diff. Policy CAS and
@@ -542,7 +544,7 @@ an ORM column/table or remains only in the evidence payload.
   Generic-web preview retirement plan evidence additionally records bounded
   authority sources, target managed rule IDs/count, and a SHA-256 digest of the
   resolved repository identity. It never records or returns raw numeric
-  repository or owner IDs in that evidence.
+  repository or repository owner IDs in that evidence.
   Production tracked-log reads and website-bootstrap writes use separate exact
   caller/worker rule identities. Their workflow artifacts are scoped by run and
   attempt so retries preserve distinct evidence without turning observation or
@@ -581,7 +583,7 @@ an ORM column/table or remains only in the evidence payload.
   controller adopt already-observed GitHub effects instead of continuing from
   stale in-memory assumptions. PostgreSQL acquisition and transition writes use
   one repository/base advisory lock, row-level compare-and-set checks, and the
-  database clock for lease expiry; a stale owner cannot overwrite or release a
+  database clock for lease expiry; a stale holder cannot overwrite or release a
   successor lease. Runtime repository/base authority still comes from the active
   merge-train policy record and live request scope, not from checked-in config.
   The tenant admission controller reuses this repository/base row only as a
@@ -692,7 +694,7 @@ an ORM column/table or remains only in the evidence payload.
   `current_version_id` points to the active secret-value version and is separate
   from the non-secret `encryption_key_id` recorded on encrypted version payloads.
   Version ids, key ids, descriptions, validation detail, and encrypted version
-  payloads stay payload-only until rotation or operator views need queryable
+  payloads stay payload-only until rotation or Launchplane UI views need queryable
   columns.
 - Secret binding: modeled fields are `binding_id`, `secret_id`, `integration`,
   `binding_key`, `context`, `instance`, `status`, and `updated_at`. Binding
@@ -709,7 +711,7 @@ an ORM column/table or remains only in the evidence payload.
 - Runner host hygiene audit: modeled fields are `audit_record_key`,
   `host_name`, `action`, `status`, and `mutate`. The payload carries the typed
   request, plan, pre/post hygiene reports, retained warm-builder evidence, and
-  operator message. Observation timestamps, generic cache-class availability,
+  admin message. Observation timestamps, generic cache-class availability,
   source and measurement-basis metadata, filesystem apparent/allocated bytes,
   Docker logical/reclaimable bytes, bounded inventory counts and truncation,
   age buckets, numeric run ids, GitHub completion state, bounded worker and
@@ -733,20 +735,20 @@ an ORM column/table or remains only in the evidence payload.
 - Runner lane registration audit: modeled fields are `audit_record_key`,
   `repository`, `host_name`, `lane_name`, `status`, and `mutate`. The payload
   carries the typed request, registration plan, pre/post runner inventory, and
-  operator message. GitHub registration token values are never persisted; token
-  metadata and host command evidence stay payload-only until operator views need
+  admin message. GitHub registration token values are never persisted; token
+  metadata and host command evidence stay payload-only until Launchplane UI views need
   them.
 - Ingress route audit: modeled fields are `record_id`, `product`, `context`,
   `mode`, `status`, `provider_host_id`, and `recorded_at`. The payload carries
   the typed requested domains, expected provider host id, dry-run/apply mode,
   plan operations, high-level change categories, trace id, idempotency key, and
-  operator reason. Provider payload details and comparison evidence stay
-  payload-only until route ownership gets a broader operator UI. Apply requests
+  admin reason. Provider payload details and comparison evidence stay
+  payload-only until route ownership gets a broader Launchplane UI. Apply requests
   first write a `pending` audit intent before provider mutation and then replace
   it with the final `applied` or `unchanged` outcome.
 - Edge endpoint: modeled fields are `endpoint_key`, `provider`, `server_name`,
   `upstream_host`, `upstream_scheme`, `upstream_port`, `status`, and
-  `updated_at`. `endpoint_key` and `server_name` are human-facing operator
+  `updated_at`. `endpoint_key` and `server_name` are human-facing admin
   identity. `upstream_host` is the provider data-plane value and must be an IP
   address for NPMplus-backed routes so a bad hostname cannot become a runtime
   Nginx startup dependency. Native FastAPI `POST /v1/edge-endpoints/apply`
@@ -767,7 +769,7 @@ an ORM column/table or remains only in the evidence payload.
   contract.
 - Environment route binding: modeled fields are `product`, `context`,
   `instance`, provider target summary, ingress provider/endpoint,
-  termination kind, primary domain, TLS owner, `status`, freshness, and
+  termination kind, primary domain, TLS manager, `status`, freshness, and
   `updated_at`. The payload carries all typed desired domains, source record
   references, and provider evidence needed to explain the binding. The primary
   key is the neutral environment tuple, not a provider host id, certificate id,
@@ -789,8 +791,8 @@ an ORM column/table or remains only in the evidence payload.
   unchanged no-op while more than 12 hours remain and refreshes at half-life or
   when evidence changes. Invalid or future source timestamps remain blocked.
   Reconcile supports expected-absent create and expected-current evidence
-  refresh, but any provider target, domain, ingress, TLS owner, lifecycle status,
-  operator ownership, missing join, ambiguity, unresolved audit, bounded-scan
+  refresh, but any provider target, domain, ingress, TLS manager, lifecycle status,
+  admin ownership, missing join, ambiguity, unresolved audit, bounded-scan
   exhaustion, or CAS drift is an explicit conflict or blocker rather than an
   overwrite.
   Native FastAPI
@@ -798,7 +800,7 @@ an ORM column/table or remains only in the evidence payload.
   testing-only discovery from product profiles and invokes this same planner for
   each active service-owned binding. Its contract contains no target selectors,
   caps discovery at 25 records, pre-authorizes every exact instance, and applies
-  due refreshes sequentially. Absent, disabled, operator-owned, non-Odoo, and
+  due refreshes sequentially. Absent, disabled, admin-owned, non-Odoo, and
   production records are not candidates. No schema migration is required.
   Externally managed ingress uses the separate native FastAPI
   `POST /v1/route-bindings/external/reconcile` contract. It derives the exact
@@ -806,7 +808,7 @@ an ORM column/table or remains only in the evidence payload.
   and provider-target records; callers cannot submit domains, provider ids,
   proxy host ids, certificates, upstreams, or edge addresses. The product lane
   must declare an enabled public HTTP health check that requires runtime
-  identity. The resulting operator-owned binding records
+  identity. The resulting admin-owned binding records
   `ingress.provider = "external"`, edge termination, external TLS ownership,
   and no internal proxy evidence. Its deterministic endpoint key identifies the
   declared public edge without claiming a provider host identity.
@@ -815,7 +817,7 @@ an ORM column/table or remains only in the evidence payload.
   the public-ingress monitor independently verifies HTTP, exact runtime
   identity, and TLS, and its observations expire after two hours. Apply uses
   separate exact-instance `route_binding.external.apply` authority;
-  dry-run uses `route_binding.external.plan`. An operator can explicitly set an
+  dry-run uses `route_binding.external.plan`. An admin can explicitly set an
   external binding to `disabled` to relinquish authority. Managed reconcile may
   replace only that disabled external record after the managed provider route
   has terminal audit evidence; it never silently takes over active external
@@ -844,13 +846,13 @@ to Dokploy.
 
 A product profile may name its `owner`: the person who accepts or rejects what
 customers see for that product, identified by immutable numeric GitHub id with
-the login kept for mentions and display. An Owner can veto a change but never
+the login kept for mentions and display. A Client can veto a change but never
 merge or deploy one (see [DIRECTION.md](../DIRECTION.md)). The field is optional;
-a product without one reports "No Owner set" instead of blocking.
+a product without one reports "No Client set" instead of blocking.
 
 Product profiles may also declare expected config requirements for stable lanes:
 runtime-environment key names and managed secret binding keys by context and
-instance. These requirements are declarative intent for operator readiness
+instance. These requirements are declarative intent for admin readiness
 views. Actual configured, missing, disabled, stale, or unsupported status is
 derived from runtime-environment records, managed secret binding records, driver
 support, and trust metadata; expected config requirements do not store runtime
@@ -893,7 +895,7 @@ does not participate in that migration.
 
 The product key is the durable workspace identity. For example,
 `sellyouroutboard` is the SellYourOutboard product workspace; `testing`, `prod`,
-and the preview inventory all appear under that workspace in the operator UI.
+and the preview inventory all appear under that workspace in the Launchplane UI.
 The `context` fields on lane and preview profile entries are technical routing
 and record lookup identifiers, not user-facing product names. Stable
 generic-web lanes should converge on the product context, such as
@@ -927,10 +929,10 @@ The service exposes product profile records through `GET /v1/product-profiles`,
 require the `product_profile.write` action for the target product in the
 Launchplane service context; reads use `product_profile.read`.
 
-The profile `owner` names the site Owner who may accept or request changes on
+The profile `owner` names the Client who may accept or request changes on
 previews and can never merge or deploy. Set or clear it with
-`POST /v1/product-profiles/{product}/owner` or the Owner control on the operator
-product page rather than a whole-record write: the operator supplies a GitHub
+`POST /v1/product-profiles/{product}/owner` or the Client control on the Launchplane UI
+product page rather than a whole-record write: the admin supplies a GitHub
 login, Launchplane resolves and stores the immutable numeric GitHub id, and no
 other profile field changes.
 
@@ -945,16 +947,16 @@ requirement is reported as `absent`, so dry-runs are honest and re-applies are
 idempotent. Removing a managed secret binding requirement never unbinds or
 deletes a stored secret; the response lists any configured binding that still
 holds a value under `still_bound`. It does not accept secret plaintext, runtime
-values, repositories, lanes, domains, or promotion settings. The operator
+values, repositories, lanes, domains, or promotion settings. The admin
 helper (`product-expected-config-dry-run`, then `product-expected-config-apply`
 with the reviewed dry-run evidence) is the supported path for additions and
 removals; real product, context, instance, and binding values come from the
-operator's private payload file, not checked-in defaults. The manual
-`Product Expected Config` workflow only adds requirements and is frozen under
-issue #2058. Because the route authorizes against
+admin's private payload file, not checked-in defaults. The manual
+`Product Expected Config` workflow only adds requirements; granting it new
+authority is a Director decision. Because the route authorizes against
 the target product in the Launchplane service context, product-specific workflow
 authority must come from managed authz reconciliation through the service or
-operator UI, not a checked-in product catalog.
+Launchplane UI, not a checked-in product catalog.
 
 Missing generic-web stable lanes can be restored through
 `POST /v1/product-profiles/stable-lane-repair/apply`. The same operation fills
@@ -969,7 +971,7 @@ target-id records. Dry-run returns a canonical plan SHA-256 without mutation;
 apply requires that reviewed digest plus an idempotency key and atomically
 compare-and-writes only the product profile. Existing lanes and every unrelated
 profile field are preserved, while provider records and provider state are
-read-only. Operators use the `stable-lane-repair` operation in
+read-only. Admins use the `stable-lane-repair` operation in
 `Product Onboarding Manifest (Advanced)`; the workflow has no real product,
 context, instance, domain, or target defaults. That operation calls
 `Reusable Stable Lane Repair` by full commit SHA, so the
@@ -986,11 +988,11 @@ Apply requires that reviewed SHA-256 plus an idempotency key and fails stale if
 the reviewed TLS plan inputs changed or the profile row changes during apply.
 Apply inserts its mutation reservation before the profile write and commits the
 profile plus completed response evidence in the same transaction, including
-no-op applies. The manual `Product Preview TLS` workflow is the audited operator
+no-op applies. The manual `Product Preview TLS` workflow is the audited admin
 surface for both modes and supplies the target product and requested `none` or
 `letsencrypt` value as runtime input. Its
 `product_profile.preview_tls.apply` grant is target-product scoped and must come
-from service-backed or operator-supplied authz input rather than a checked-in
+from service-backed or admin-supplied authz input rather than a checked-in
 product catalog.
 
 Stable-lane health policy and monitoring-intent changes use
@@ -1009,7 +1011,7 @@ canonical plan bound to the complete current profile; apply requires the reviewe
 digest and an idempotency key, then compare-and-writes only the selected check,
 lane intent, and server-owned profile audit fields. Whole-profile service writes
 cannot change existing health-monitoring authority, and onboarding updates
-preserve it; operators use this bounded apply path instead. Concurrent profile
+preserve it; admins use this bounded apply path instead. Concurrent profile
 edits fail stale instead of being overwritten.
 
 Odoo prelaunch rebuild policy changes use
@@ -1028,7 +1030,7 @@ requires the reviewed digest and an idempotency key, then compare-and-writes onl
 the selected policy. Whole-profile writes cannot change existing prelaunch
 rebuild authority, and onboarding updates preserve it.
 
-For initial seed or repair work, operators can write the same DB-backed record
+For initial seed or repair work, admins can write the same DB-backed record
 directly with
 `uv run launchplane product-profiles upsert --database-url ... --allow-direct-db-mutation`.
 That command is an explicit local/bootstrap repair tool for creating the
@@ -1125,7 +1127,7 @@ states separate:
 
 - `desired` is product-profile URL and public-domain intent.
 - `provider_recorded` is the current environment route-binding authority for
-  placement, bound domains, ingress provider/path/termination, and TLS owner and
+  placement, bound domains, ingress provider/path/termination, and TLS manager and
   terminator.
 - `observed` is runtime identity, public-ingress, and per-domain active TLS
   evidence, including certificate status, issuer and validity window,
@@ -1156,8 +1158,8 @@ Typed topology warnings identify missing or disabled authority, desired versus
 recorded domain divergence, placement disagreement, ingress or TLS ownership
 divergence, stale evidence, missing TLS observations, certificate mismatch,
 expiry, trust-chain failure, unreachability, and unsupported TLS. This lets an
-operator diagnose a wrong-certificate incident from the product read itself:
-the requested domain, recorded ingress/TLS owner and terminator, observed
+admin diagnose a wrong-certificate incident from the product read itself:
+the requested domain, recorded ingress/TLS manager and terminator, observed
 certificate names, failure code, incident, and likely cause remain visible
 without direct provider database access.
 
@@ -1297,8 +1299,8 @@ and secrets are intentionally excluded from the durable record.
 Incident records are the source of truth for whether Launchplane currently
 considers a lane to be in a public-ingress incident. Notification routing and
 delivery are separate record families: observations say what was measured,
-incidents say whether there is active operator state, and delivery records say
-where Launchplane attempted to notify operators.
+incidents say whether there is active admin state, and delivery records say
+where Launchplane attempted to notify admins.
 
 The Product Ops incident projection is read-only and remains subordinate to
 those durable records. The environment-scoped list and detail models resolve the
@@ -1348,7 +1350,7 @@ queue and are not wired into live lifecycle transitions.
 The legacy feedback path's repository-login/local-planning trust is not inherited
 by the new request action. Neither a legacy feedback row nor an ordinary worker
 status or rerun intent establishes feedback-resume authority. Persisted receipt
-fixtures and recovery observations do not authorize execution or operator
+fixtures and recovery observations do not authorize execution or admin
 resolution; those service-owned transitions remain separately implemented and
 gated as described in the linked contract.
 
@@ -1356,10 +1358,10 @@ gated as described in the linked contract.
 
 Every Code notification policy records are DB-backed Launchplane records under
 `launchplane_every_code_notification_policies`. They select enabled
-destinations for Every Code operator events, currently `work_request_blocked`,
+destinations for Every Code admin events, currently `work_request_blocked`,
 optionally scoped by repository. Policies store routing intent and managed
 secret references only; they must not store Discord webhook URLs or real
-operator destination values as source, workflow defaults, or checked-in config.
+admin destination values as source, workflow defaults, or checked-in config.
 
 Every Code notification attempt records are delivery evidence under
 `launchplane_every_code_notification_attempts`. Each attempt is keyed by the
@@ -1374,10 +1376,10 @@ failures remain inspectable even when no Every Code session starts.
 
 ## Product Review Decision Records
 
-Owner product-review decisions are append-only records under
+Client product-review decisions are append-only records under
 `launchplane_product_review_decisions`. Each record names the product, repository,
-pull request number, the preview URL and head revision the Owner looked at, the
-decision (`accepted` or `changes_requested` with its reason), the Owner's GitHub
+pull request number, the preview URL and head revision the Client looked at, the
+decision (`accepted` or `changes_requested` with its reason), the Client's GitHub
 id and login, and `decided_at`. The newest record for a repository and pull
 request is the current decision. The record authorizes nothing.
 
@@ -1421,8 +1423,17 @@ records what it decided and did as `last_plan`:
   product read shows. The code is the operation's `error_code` (an
   authorization denial: `operation_authorization_reconcile_refused`,
   `operation_authorization_revoked`, `operation_authorization_policy_unavailable`,
-  `operation_authorization_provenance_missing`; a step after the provider
-  deploy that raised instead of returning a result:
+  `operation_authorization_provenance_missing`; a check before the provider
+  deploy that refused it: `plan_build_failed`,
+  `plan_not_ready.<blocker code>` (the plan's first entry in `blocker_codes`,
+  listed in `ODOO_TARGET_REPLACEMENT_PLAN_BLOCKER_CODES` in
+  `control_plane/contracts/odoo_stable_target_replacement.py`, such as
+  `plan_not_ready.volume_authority_drift`; bare `plan_not_ready` when the plan
+  has no blocker code), `strategy_unsupported`, `target_not_compose`, `artifact_id_missing`,
+  `source_ref_missing`, `artifact_repository_mismatch`,
+  `artifact_source_ref_mismatch`, `artifact_required_modules_missing`,
+  `health_verification_required` or `health_url_missing`; a step after the
+  provider deploy that raised instead of returning a result:
   `post_deploy_setup_failed` when post-deploy could not start, or
   `release_tuple_mint_failed` when a passed deploy's release tuple could not
   be recorded; for an error the worker did not
@@ -1436,14 +1447,21 @@ records what it decided and did as `last_plan`:
   result, and `operation_cancelled` for a cancelled attempt. The summary is
   structured and contains no provider, script or exception text: the code's
   fixed description (`TESTING_FAILURE_DESCRIPTIONS` in
-  `control_plane/product_reconcile.py`; an unknown code gets a generic one),
-  the result's step statuses, and the worker attempt. After three failed
+  `control_plane/product_reconcile.py`; for `plan_not_ready.<blocker code>`,
+  the `plan_not_ready` description plus that blocker's from
+  `PLAN_BLOCKER_DESCRIPTIONS`; an unknown code gets a generic one),
+  `Keys: A, B.` when the operation's `error_detail_keys` names the env keys a
+  key-list blocker is about (`runtime_keys_undeclared`, `provider_keys_unrecorded`,
+  `volume_env_keys_missing`, `volume_authority_drift`: the plan's
+  `blocker_keys`, names matching `^[A-Z][A-Z0-9_]{0,63}$` only, at most 32,
+  never values), the result's step statuses, and the worker attempt. After three failed
   attempts of one artifact
   the request is `failed`, and its error ends with the last attempt's code and
   summary. A lane with another active operation leaves the
   request `pending` (`deferred: lane_busy`).
-- preview: `apply`, `destroy`, `wait` (open and labeled but no verified build
-  yet), or `none`. An apply or destroy issues the preview plan the inputs route
+- preview: `apply`, `destroy`, `wait` (open, a draft included, but no
+  verified build yet), or `none`. Only a closed or merged PR wants no preview
+  (`pull_request_not_open`). An apply or destroy issues the preview plan the inputs route
   would and runs it through the durable preview operation under reservation
   scope `launchplane-reconcile:<product>`. Its key is the product, PR, verified
   build run and attempt (or `destroy`), and the preview record's current
@@ -1464,7 +1482,7 @@ records what it decided and did as `last_plan`:
 The testing replacement carries the `launchplane_reconcile` grant (see Durable
 Operation Authorization); a preview runs in-process after a direct check that
 it is the product's own preview in its preview context. A product whose driver is not Odoo keeps `held: true` plans.
-Only the lease owner completes a request; one folded in during the run returns
+Only the lease holder completes a request; one folded in during the run returns
 it to `pending`, and a deferred request folds itself in the same way. Every 30
 minutes each worker also requests the testing target of every active product
 with a `repository_id` and a testing lane, and every live preview of those
@@ -1473,7 +1491,7 @@ products, without GitHub reads.
 ## Preview PR Feedback Notification Records
 
 Preview PR feedback remediation records are stored under
-`launchplane_preview_pr_feedback_remediations`. Each record binds the operator,
+`launchplane_preview_pr_feedback_remediations`. Each record binds the admin,
 reason, related issue, product/context/repository/PR, idempotency key, reviewed
 request digest, bounded managed-comment observation, planned action, outcome,
 and mutation evidence. Dry-runs are durable. Successful applies also write a
@@ -1485,7 +1503,7 @@ Preview PR feedback notification policy records are DB-backed Launchplane
 records under `launchplane_preview_pr_feedback_notification_policies`. They
 select enabled destinations for skipped or failed `/v1/previews/pr-feedback`
 delivery by product, context, and repository. Policies store routing intent and
-managed secret record ids only; Discord webhook URLs and operator destination
+managed secret record ids only; Discord webhook URLs and admin destination
 values must stay in managed secrets, not checked-in workflow defaults, examples,
 or service-host env.
 
@@ -1497,7 +1515,7 @@ GitHub credentials produce `delivery_skipped`; GitHub API failures produce
 plus bounded provider-safe action/error text. Launchplane writes a pending
 attempt before calling Discord and updates it after the provider returns, so
 idempotent retries have durable dispatch evidence instead of silently re-sending
-or silently dropping operator feedback.
+or silently dropping admin feedback.
 
 Odoo stable bootstrap eligibility is lane-owned product-profile data. A lane's
 `odoo_stable_bootstrap` policy defaults to disabled and must explicitly carry
@@ -1627,7 +1645,7 @@ state/
   same provider endpoint. Missing, ambiguous, stale, retired, mismatched, or
   invalid history fails closed.
 - `review_after` makes stale authority explicit and queryable. It is an
-  operator review boundary, not a service-host environment fallback.
+  admin review boundary, not a service-host environment fallback.
 - `POST /v1/production-backup-authority/apply` supports reviewed dry-run/apply
   with exact expected-current records, one canonical authority digest,
   PostgreSQL idempotency, and atomic target/policy revision writes. The bounded
@@ -1653,7 +1671,7 @@ state/
   return only its code.
 - Odoo prod backup-gate records are created by the Launchplane Odoo driver after
   a real compose-local DB dump and filestore archive capture. They should not be
-  synthesized with generic operator assertions for release drills. Passing
+  synthesized with generic admin assertions for release drills. Passing
   records include the request nonce, exact backup/database identity, non-empty
   artifact sizes, and SHA-256 values returned by the exact Dokploy schedule
   deployment. Dokploy terminal status alone is not backup evidence; a missing,
@@ -1686,7 +1704,7 @@ state/
   lease, runs the delegated backup worker, writes the terminal backup-gate
   evidence, and completes the operation record. Expired operations retry only
   before the external backup side-effect boundary; once the phase reaches
-  `backup_gate`, lease expiry fails closed for operator review.
+  `backup_gate`, lease expiry fails closed for admin review.
   A pending operation can be cancelled through the deployed service. The
   storage transition is pending-only and writes terminal cancellation evidence
   together with a failed backup-gate record so promotion cannot treat an
@@ -1730,7 +1748,7 @@ state/
   Successful bootstrap refreshes inventory and sets `bootstrap_record_id` to the
   same record as `deployment_record_id`; failed or partially verified bootstrap
   attempts leave the current deployment inventory unchanged and update only
-  `bootstrap_record_id` so operators can see the latest bootstrap attempt.
+  `bootstrap_record_id` so admins can see the latest bootstrap attempt.
 - Odoo stable bootstrap also writes durable operation records under
   `odoo_stable_bootstrap_operations`. These operation records are the
   create/read/poll boundary for the service-backed workflow: they store the
@@ -1738,7 +1756,7 @@ state/
   deployment-record id when available, final driver result, and terminal error.
   A `pending`, `running`, or `reconciliation_required` record is the
   single-flight guard for that product/context/instance. Unsafe lease expiry
-  clears the stale lease but keeps the lane blocked until an authorized operator
+  clears the stale lease but keeps the lane blocked until an authorized admin
   has inspected provider state and records cancellation evidence.
 - Odoo stable target replacement apply writes durable operation records under
   `odoo_stable_target_replacement_operations`. These records mirror the stable
@@ -1753,7 +1771,7 @@ state/
   reusing it for a different request is rejected; an active `pending` or
   `running` operation blocks another apply for the same product/context/instance
   through a storage-owned lane reservation. Filesystem reservations wait briefly
-  for a concurrent owner id to settle, then give that owner record its own
+  for a concurrent holder id to settle, then give that holder record its own
   bounded settle window before clearing abandoned empty or orphaned reservations
   so an interrupted writer cannot block the lane forever.
 - Odoo production backup restore apply writes dedicated operation records under
@@ -1769,7 +1787,7 @@ state/
   product/context/instance. Expired work may be recovered only before a
   provider-effect phase; after any provider effect has started, lease recovery
   moves the operation to `reconciliation_required` and preserves the lane fence
-  for explicit operator review.
+  for explicit admin review.
 - Odoo retained-volume backup import plan and apply write dedicated operation
   records under `odoo_prod_retained_volume_backup_import_operations`. Plan and
   apply have separate operation kinds, request fingerprints, idempotency scopes,
@@ -1779,7 +1797,7 @@ state/
   product/context/instance lane across plan and apply while work is pending,
   running, or reconciliation-required. Expired work is recoverable only before a
   provider-effect checkpoint; later expiry preserves a reconciliation-required
-  lane fence for explicit operator inspection. When the read-only provider
+  lane fence for explicit admin inspection. When the read-only provider
   inspection terminates unsuccessfully, its checkpoint may contain the exact
   inspection schedule/deployment ids when known, request nonce, backup-record
   id, and one allowlisted failure stage/code pair. Provider log or exception
@@ -1787,7 +1805,7 @@ state/
   `provider_control` stage with distinct target, schedule, trigger, wait, and
   identity codes; result-read and result-parse failures use bounded `result`
   codes.
-- Odoo prod promotions and rollbacks queued from the operator's release panel
+- Odoo prod promotions and rollbacks queued from the Launchplane UI release panel
   write `OdooProdPromotionOperationRecord` entries to
   `launchplane_odoo_prod_promotion_operations` and
   `OdooProdRollbackOperationRecord` entries to
@@ -1818,7 +1836,7 @@ state/
   transaction-scoped advisory lock for the lane (`synchronous_release`) on an
   open session for their whole run, after checking under the lane lock that no
   durable operation is active. Every create and claim tries the same lock inside
-  its lane-locked transaction and treats a held one as an active owner, so the
+  its lane-locked transaction and treats a held one as an active holder, so the
   two sides exclude each other. The lock ends with the session, on success, on
   failure, or when a crashed process's connection closes and PostgreSQL ends its
   backend, so a crash cannot leave the lane reserved. SQLite rehearsal stores
@@ -1826,7 +1844,7 @@ state/
   Filesystem storage serializes the exact product/context/instance with one lock;
   PostgreSQL uses a transaction-scoped advisory lock and checks all six blocking
   operation tables before inserting or claiming. Claims choose one deterministic
-  owner across legacy cross-kind queue entries, prioritizing reconciliation and
+  holder across legacy cross-kind queue entries, prioritizing reconciliation and
   running work before the oldest pending record. Per-table partial indexes remain
   a second same-kind defense, but no operation kind can race another into the
   same lane. The schema migration refuses to activate this worker contract when
@@ -1898,7 +1916,7 @@ state/
   safe-release attestation that records an inspection timestamp between the
   fence and cancellation request, observed provider state, and an evidence
   reference. A claim that wins the race returns `409 operation_not_pending`;
-  operators must inspect that running operation rather than assume cancellation
+  admins must inspect that running operation rather than assume cancellation
   prevented an effect.
 - The target execution model for these Odoo long-running operation records is a
   dedicated Launchplane worker process backed by DB leases and heartbeats. The
@@ -1907,7 +1925,7 @@ state/
   daemon threads. Operation
   records carry execution fields for `attempt`, `lease_owner`,
   `lease_expires_at`, and `heartbeat_at`; terminal writes are guarded by the
-  current lease owner so stale workers cannot overwrite recovered work.
+  current lease holder so stale workers cannot overwrite recovered work.
   Filesystem mutations and recovery share the exact operation lock, while SQLite
   starts an immediate write transaction before reading mutable operation state;
   the recovery fence and stale-worker heartbeat/checkpoint/completion are
@@ -1923,7 +1941,7 @@ run` is the foreground loop intended for an external process supervisor, and
   storage-owned recovery in `reconcile`, `run-once`, and the worker loop.
   The deployed service exposes the same redacted read model at
   `GET /v1/service/odoo-workers/status` for callers authorized to
-  `launchplane_service.read` on product/context `launchplane`, so operators can
+  `launchplane_service.read` on product/context `launchplane`, so admins can
   prove worker queue state without shelling into provider containers. The
   deployed service also exposes `POST /v1/service/odoo-workers/reconcile` for
   callers authorized to `launchplane_service.reconcile_odoo_workers` on the same
@@ -1931,7 +1949,7 @@ run` is the foreground loop intended for an external process supervisor, and
   Launchplane itself rather than via provider shell access.
   The checked-in Launchplane compose topology starts a separate
   `launchplane-odoo-workers` process with the same image, runtime volume, and
-  operator-supplied environment as the HTTP service. That process runs
+  admin-supplied environment as the HTTP service. That process runs
   `/app/scripts/start-launchplane-odoo-workers.sh`, refuses startup without
   `LAUNCHPLANE_DATABASE_URL`, and only accepts generic worker timing knobs as
   process wiring; live operation selection remains in Launchplane records.
@@ -1963,7 +1981,7 @@ run` is the foreground loop intended for an external process supervisor, and
   for successful continuous-worker polls. It stores only domain-separated
   SHA-256 worker identity, an immutable image reference when one is available,
   the code-bounded poll interval, and the latest successful-poll timestamp. It
-  never stores a raw hostname, container ID, lease owner, operation ID, payload,
+  never stores a raw hostname, container ID, lease holder, operation ID, payload,
   credential, or log line. One row is upserted per worker identity. Each write
   prunes rows older than seven days and rows more than the allowed 60-second
   future-skew window in the same transaction. The heartbeat write occurs after
@@ -1988,7 +2006,7 @@ run` is the foreground loop intended for an external process supervisor, and
   heartbeat freshness, image, or identity remains fail-closed.
   Production operation remains observable through the `launchplane service
   verireel-workers status` and `launchplane service verireel-workers reconcile`
-  operator commands, and through
+  admin commands, and through
   `GET /v1/service/verireel-workers/status` and
   `POST /v1/service/verireel-workers/reconcile` on the deployed Launchplane
   service. Live operation selection remains in Launchplane records.
@@ -2002,8 +2020,8 @@ run` is the foreground loop intended for an external process supervisor, and
   prod promotion record's `rollback` and `rollback_health` fields. The selected
   rollback source is the artifact of the previous passing prod deployment record
   (the newest passing one whose artifact differs from the lane's latest
-  deployment) unless the operator supplies an explicit DB-backed artifact ID;
-  operators must not supply unrecorded image refs or source SHAs.
+  deployment) unless the admin supplies an explicit DB-backed artifact ID;
+  admins must not supply unrecorded image refs or source SHAs.
 - Generic-web rollback planning writes `GenericWebRollbackPlanRecord` entries
   under `generic_web_rollback_plans` in file-backed state and
   `launchplane_generic_web_rollback_plans` in DB-backed state. These records are
@@ -2015,7 +2033,7 @@ run` is the foreground loop intended for an external process supervisor, and
   normal deployment and inventory records through the generic deploy path.
 - Direct `ship` and `promote` execution fail closed if the referenced artifact
   id does not already have a stored manifest in control-plane state.
-- Artifact manifests may also carry `addon_selectors` metadata so operators can
+- Artifact manifests may also carry `addon_selectors` metadata so admins can
   inspect the original selector intent, but `addon_sources` remains the exact
   SHA-backed release truth used for tuple minting and deploy execution.
 - Odoo stable target replacement also treats artifact `odoo_install_modules` as
@@ -2073,10 +2091,10 @@ run` is the foreground loop intended for an external process supervisor, and
   records. Add a Launchplane-owned base-image promotion record only if
   Launchplane starts deciding or executing those image-track promotions itself.
 - Lane and driver read models expose the current lane's stored artifact manifest
-  when the inventory or latest deployment points to one. Operators can inspect
+  when the inventory or latest deployment points to one. Admins can inspect
   the Odoo base-image digests/tags/source refs and `odoo-devkit` provenance from
-  Launchplane read evidence without treating support repos as release-tuple
-  owners.
+  Launchplane read evidence without treating support repos as owning the release
+  tuple.
 - For a second product such as VeriReel, the first Launchplane onboarding slice
   should ingest deployment evidence from that product's existing release
   workflows into this record shape before Launchplane owns the deploy execution.
@@ -2112,7 +2130,7 @@ run` is the foreground loop intended for an external process supervisor, and
 - Record the stable target definition fields Launchplane owns for that route,
   such as target type, project/target names, source metadata, env keys,
   domains, health policy, and typed product policies.
-- Live `target_id` values remain a sibling DB-backed record so operators can
+- Live `target_id` values remain a sibling DB-backed record so admins can
   update route metadata and route identity independently when needed.
 - Paired Dokploy target and target-id records project to the neutral
   `ProviderTargetRecord` shape for audit and backfill comparison only. Missing
@@ -2132,17 +2150,17 @@ run` is the foreground loop intended for an external process supervisor, and
   event-driven testing deploys while site staff test: a reason, who recorded it
   and when. Absent means no hold; see
   [event-driven deploys](event-driven-deploys.md#staff-testing-hold).
-- The operator write path for this record family is the Launchplane CLI,
+- The admin write path for this record family is the Launchplane CLI,
   including `dokploy-targets list`, `show`,
   `put-shopify-protected-store-key`, and
   `unset-shopify-protected-store-key`. Direct local writes, including Shopify
   protected-store-key mutation, relabel, adoption apply, and application-create
   apply, require `--allow-direct-db-mutation` and are explicit local/bootstrap
   repair only; routine shared/live target setup should use the deployed service
-  route or operator workflow.
+  route or admin workflow.
 - Repo-local Dokploy target TOML files are not a supported runtime authority or
   mutation surface for these records.
-- For service-shaped products, persistent volume mounts remain operator-owned
+- For service-shaped products, persistent volume mounts remain admin-owned
   Dokploy target configuration. The product repo may document the expected mount
   path, but Launchplane records own the live target identity and mutation path,
   and managed secrets remain separate from volume contents.
@@ -2181,7 +2199,7 @@ run` is the foreground loop intended for an external process supervisor, and
   contract: homepage and route URLs are local Odoo route paths,
   `primary_page_xmlid` is a dotted XML ID, and at most one route can be marked
   as the homepage. The reusable service workflow prevalidates the local-route
-  portion of that contract for fast operator feedback, while the service remains
+  portion of that contract for fast admin feedback, while the service remains
   the write authority. The local CLI applies the same validation for explicit
   repair writes only. Persisted record reads remain tolerant so older records
   can be inspected and repaired instead of becoming unreadable after validation
@@ -2194,7 +2212,7 @@ run` is the foreground loop intended for an external process supervisor, and
   null when the record only has other overrides. It does not return config
   parameters, addon settings, or secrets, and does not contact the runtime
   provider. Missing records return 404.
-- The supported operator write path is a thin dispatch workflow pinned to an
+- The supported admin write path is a thin dispatch workflow pinned to an
   immutable reusable worker. The worker persists through the service route,
   records only redacted request-shape evidence, and treats the write as complete
   only when the response confirms `result.website_bootstrap=true`.
@@ -2233,82 +2251,20 @@ run` is the foreground loop intended for an external process supervisor, and
 - Records classify GitHub repositories by numeric `repository_id` as either `engineering` or `tenant_ui`; both use their normal technical merge flow.
 - Each revision is immutable and identified by a deterministic record ID (`tenant-repository-classification-<repository_id>-r<revision>`) and payload SHA-256 digest.
 - Monotonically increasing revisions (`revision=1`, `revision=2`, ...) form an append-only classification ledger. Revision 1 must not specify `supersedes_record_id`; subsequent revisions must set `supersedes_record_id` equal to the active current record ID.
-- Classification writes use CAS (compare-and-swap) operator recovery: callers supply `expected_current_record_id` (empty when no record exists). Mismatches fail closed with HTTP 409 conflict, and sequence gaps or invalid supersedes links fail closed with HTTP 400. Apply reserves durable DB idempotency, locks the repository classification stream, validates CAS, appends the revision, and completes the stored response in one PostgreSQL transaction. Exact same-key, same-payload retries replay that completed response; a different key must revalidate current state and cannot replay an already-applied revision. Dry-run results report `would_apply` or `would_replay` without writing.
+- Classification writes use CAS (compare-and-swap) admin recovery: callers supply `expected_current_record_id` (empty when no record exists). Mismatches fail closed with HTTP 409 conflict, and sequence gaps or invalid supersedes links fail closed with HTTP 400. Apply reserves durable DB idempotency, locks the repository classification stream, validates CAS, appends the revision, and completes the stored response in one PostgreSQL transaction. Exact same-key, same-payload retries replay that completed response; a different key must revalidate current state and cannot replay an already-applied revision. Dry-run results report `would_apply` or `would_replay` without writing.
 - Filesystem storage is rehearsal/import input only. Both filesystem and DB writers validate the append-only revision chain, and filesystem-to-DB import orders revisions oldest-first before accepting them as authority.
 - Classification records are pure factual classification authority without heuristics, wildcard matching, or PR label fallbacks. Identity matches require exact `repository_id`, `repository_owner_id`, `repository` owner/name, `product`, and `context`.
 - Pure tenant merge eligibility matches this DB classification authority. A matching tenant UI candidate is eligible for the controller's separate required-check and exact source-control gates; retired human admission paths do not qualify a merge.
 - This record and pure evaluation remain separate from scheduler merge train admission (`merge_train_admission`).
 
-## Repository Human Admission Contracts
+## Retired Repository Human Admission Records
 
-- Repository human role-policy contracts bind one revision to exact numeric GitHub repository and owner IDs plus repository, product, and context. They name repository-owner humans, primary managers, optional backup managers, and direct time-bounded manager delegations without hard-coding people in code or checked-in configuration.
-- A delegation is valid only while its current role-policy revision is active and effective, its grantor remains a primary or backup manager, and its start, expiration, and revocation timestamps permit it. Silence or elapsed review time never creates approval authority.
-- Technical human waiver events are append-only create/revoke evidence. Creation
-  requires a browser-authenticated GitHub human session whose numeric
-  `github_id` is positive, whose ID is a current repository owner in exactly one
-  active role policy for the candidate repository/product/context, and whose ID
-  is explicitly present in exactly one managed schema-v2
-  `tenant_technical_human_waiver.write` GitHub-human authorization rule. Login,
-  org, team, role-only, local-admin/operator, GitHub Actions, terminal-agent, and
-  Every Code identities are never write authority for this record type.
-- Waiver evidence binds repository, product, context, pull request, exact head
-  SHA, classification revision/digest, role-policy revision/digest, active
-  authorization-policy revision/digest, human numeric identity, display login,
-  source event, reason, authoritative database/server occurrence time,
-  `recorded_at`, and optional creation expiration. Apply callers cannot provide
-  `occurred_at`, author ID, or author login; Launchplane builds the binding,
-  authorization provenance, event IDs, and digests inside the domain builder.
-  `recorded_at` equals the authoritative occurrence time. New commits or any
-  bound policy/classification/authz drift make prior evidence stale; revocation
-  wins a same-timestamp tie.
-- The role-policy read model is keyed by immutable `repository_id`, `product`,
-  and `context`. It returns `missing`, `available`, or fail-closed
-  `ambiguous` state plus the active current record when exactly one current tip
-  exists. Authorization uses `repository_human_role_policy.read` against the
-  submitted product/context and an explicit context target; repository names,
-  paths, actor strings, logins, and changed files are never authority hints.
-- Role-policy dry-run/apply accepts a strict envelope containing the candidate
-  role-policy record plus the caller's expected current tip record ID and digest
-  (both empty only for revision 1). Dry-run validates with filesystem or DB read
-  stores and writes nothing. Apply is PostgreSQL-only, requires a non-empty
-  `Idempotency-Key`, rejects terminal agents, authorizes
-  `repository_human_role_policy.write` against the submitted product/context,
-  and performs reservation, stream advisory lock, CAS/current-tip validation,
-  supersede plus insert, stored-response completion, and commit in one database
-  transaction. Same key plus same canonical request replays the stored HTTP 202
-  response; same key plus changed request returns `idempotency_key_reused`.
-  Repeating the exact currently active record under a new key also returns a
-  replay without adding history, but the request must retain its original
-  predecessor record ID and digest CAS.
-- Role-policy apply fails closed on missing, ambiguous, stale, scope-drifted,
-  conflicting, inactive, or sequence-invalid candidates. Request-provided
-  superseded records are ignored; the database writer derives supersession from
-  the locked current stream. The separate technical-human waiver apply route does
-  not add trusted-maintenance evidence, unified status, controller changes,
-  rollout decisions, UI controls, GitHub provider calls, or Launchplane
-  authz-policy mutation.
-- Filesystem storage can rehearse role-policy revision history and technical
-  human waiver event history locally. Shared PostgreSQL storage now persists
+- Repository human role policies (the manager and delegate roles) and the
+  technical human waiver are retired. Their routes, contracts, evaluation, and
+  store methods are deleted. Existing
   `launchplane_repository_human_role_policies` and
-  `launchplane_tenant_technical_human_waiver_events` with canonical payloads,
-  promoted filter/audit columns, serialized role-policy stream writes, one
-  active role-policy tip per repository/product/context, and append-only waiver
-  event replay/conflict semantics.
-- `POST /v1/tenant-admission/technical-human-waivers/apply` accepts strict
-  `mode: dry_run|apply` and `action: created|revoked` envelopes with candidate,
-  expected classification/role-policy/authz record IDs plus digests, source event
-  kind/id, reason, optional creation expiration, and revoke-only expected current
-  waiver ID plus event digest. Dry-run uses the pure read/planning helpers and
-  may run against rehearsal stores without writing. Apply is PostgreSQL-only,
-  requires a non-empty `Idempotency-Key`, scopes idempotency by numeric GitHub ID
-  (`github-human-id|<id>`), locks classification, role-policy, authz-policy, and
-  waiver binding/history authority in deterministic order, revalidates all
-  expected IDs/digests and lifecycle CAS under lock, appends the event, verifies
-  the resulting path, stores the HTTP response, and commits once. Same key plus
-  same canonical body replays the stored response with the original trace; same
-  key plus a changed body returns conflict; a different key revalidates current
-  authority and history.
-- Manager-preview authorization can carry the same role-policy provenance for primary, backup, or delegated managers. Legacy approval records remain readable, but they cannot satisfy an evaluation once a repository role policy is explicitly enforced.
+  `launchplane_tenant_technical_human_waiver_events` rows stay in the database
+  unread until the Director decides whether to drop them.
 - Trusted-maintenance policy records are a separate contract, not a human role
   policy and not a generic authz-policy reuse. Each policy revision is keyed by
   immutable numeric `repository_id` plus `repository_owner_id`, `repository`,
@@ -2350,8 +2306,8 @@ run` is the foreground loop intended for an external process supervisor, and
   /v1/work-graph/tenant-admission/trusted-maintenance-policy` requires
   `trusted_maintenance_policy.read`; `POST
   /v1/tenant-admission/trusted-maintenance-policies/apply` requires
-  `trusted_maintenance_policy.write`. Both actions are separate from repository
-  human role-policy actions and are scoped to the submitted product/context.
+  `trusted_maintenance_policy.write`. Both actions are scoped to the submitted
+  product/context.
   Apply is browser-GitHub-human-only, PostgreSQL-only, requires a non-empty
   `Idempotency-Key`, and reserves idempotency, locks the policy stream,
   validates CAS, writes/replays the response, and commits in one database
@@ -2386,7 +2342,7 @@ run` is the foreground loop intended for an external process supervisor, and
 - For relevant deliveries, Launchplane resolves the GitHub token from the
   DB-authoritative repository classification product/context, re-fetches the
   current PR, and persists only re-fetched current facts. The base repository
-  numeric ID, owner, and full name must exactly match the signed tuple; the PR
+  numeric ID, repository owner, and full name must exactly match the signed tuple; the PR
   must still be open; the re-fetched PR author numeric ID and type must match the
   signed author identity, while the current login is stored for audit only; the
   re-fetched head SHA must equal the signed head SHA; and the head repository
@@ -2418,20 +2374,15 @@ run` is the foreground loop intended for an external process supervisor, and
   separate requirements before a merge.
 - The public read model exposes the candidate, classification binding,
   decision, generation time, and `engineering`, `eligible`, `stale`, or
-  `unavailable`. Current paths are empty. Legacy path fields and categories
-  remain in stored-result contracts for historical readability. Current reads
-  do not consult manager, waiver, or maintenance admission records.
+  `unavailable`. The only path slot left is trusted maintenance, and current
+  reads leave it empty.
 - The classic GitHub `tenant-admission` commit status is a non-authoritative
   projection of that recomputation. Reconciliation first re-fetches the open PR
-  and verifies its numeric base-repository ID, numeric owner ID, full name, and
+  and verifies its numeric base-repository ID, numeric repository owner ID, full name, and
   exact head SHA. It then recomputes from DB records and writes or replays the
   status on that exact SHA. GitHub read/write uncertainty returns retryable
   failure and never manufactures a passing decision. Engineering candidates do
   not require or receive this tenant-only projection.
-- Legacy manager-preview records that store only a bare repository name remain
-  compatible only when their bound PR URL is the canonical
-  `https://github.com/OWNER/REPO/pull/N` URL for the exact candidate. A different
-  owner, host, PR number, query, or fragment cannot satisfy tenant admission.
 - Merge-controller enforcement, branch protection, portfolio rollout, UI, and
   real repository policy values remain separate follow-up work. Blanket Bot
   bypass and changed-file, repository-name, branch, title, or label heuristics
@@ -2466,7 +2417,7 @@ delete provider values or deploy an application.
   policy, configure a credential, or contact a runtime provider.
 - Store policy metadata, status, source, timestamp, and binding-key
   classifications only. Do not store secret plaintext, ciphertext, provider env
-  dumps, token prefixes, or operator-local overrides in these records.
+  dumps, token prefixes, or admin-local overrides in these records.
 - Active policy records are the Launchplane-owned authority for deciding whether
   a managed secret binding may be used by a target runtime class. Evaluation
   fails closed when no active policy record exists or when a required binding is
@@ -2499,7 +2450,7 @@ delete provider values or deploy an application.
   preview evidence in the same record shape without first adopting Launchplane-
   managed routing.
 - Higher-level transition commands may also rewrite preview records through the
-  tested Launchplane transition helpers so operators do not have to hand-edit link
+  tested Launchplane transition helpers so admins do not have to hand-edit link
   fields for common lifecycle states.
 - For a second product such as VeriReel, preview-control-plane and cleanup
   workflow evidence is the first candidate source for proving this preview
@@ -2543,12 +2494,12 @@ delete provider values or deploy an application.
 
 ## Retired Manager Preview Approval Event Record
 
-Historical manager events remain append-only in their existing filesystem and
-PostgreSQL stores. Payloads, event IDs, binding digests, and migrations are
-unchanged. Their evaluator, command parser, reconcile endpoint, and projection
-writer are deleted. Preview refresh/destroy no longer creates manager events.
-Current approval uses product review and the release checklist; manager history
-cannot satisfy either gate.
+Manager preview approval is retired. Its contracts, evaluator, command parser,
+reconcile endpoint, projection writer, and store methods are deleted, and
+filesystem-to-database import no longer copies manager events. Existing
+`launchplane_manager_preview_approval_events` rows stay in the database unread
+until the Director decides whether to drop them. Current approval uses product
+review and the release checklist.
 
 The configured `/v1/manager-preview-approval/github-webhook` URL and its existing
 bootstrap secret remain solely as a transport compatibility boundary for signed
@@ -2587,10 +2538,12 @@ credential, runtime grant, or stored record is changed by this code retirement.
 ## Launchplane Preview Desired State Record
 
 - One append-only record per Launchplane discovery of desired preview anchors.
-- Record the product/context/source, GitHub repository, label, anchor repo,
-  preview slug prefix, discovered timestamp, discovered desired previews, and
-  pass/fail status.
-- Desired-state records let Launchplane own the recurring PR label discovery
+- Record the product/context/source, GitHub repository, anchor repo, preview
+  slug prefix, discovered timestamp, discovered desired previews, and pass/fail
+  status. The desired previews are the open pull requests, drafts included;
+  labels play no part (#2735). Records written earlier also name a label, which
+  is ignored on read.
+- Desired-state records let Launchplane own the recurring open-PR discovery
   loop before it plans cleanup against provider inventory.
 
 ## Launchplane Preview Lifecycle Cleanup Record
@@ -2635,7 +2588,7 @@ preflights.
   Once a record has a non-zero fence, service status updates must carry that
   exact `fencing_token`; missing and stale tokens are rejected before the row is
   changed. Heartbeats enforce the same host-and-fence match, preventing
-  stale-owner writes after a lease expires and a new worker reclaims.
+  stale-holder writes after a lease expires and a new worker reclaims.
 - Workers send periodic heartbeats through `POST /v1/every-code/work-requests/heartbeat`
   to extend `lease_expires_at` before it lapses. A heartbeat is rejected (409)
   when the host or fencing token does not match, or when the request is already
@@ -2645,7 +2598,7 @@ preflights.
   records whose `lease_expires_at` has passed and applies a recovery policy:
   `safe_requeue` (attempt ≤ 3) resets the record to `queued` with all lease
   fields cleared so another worker can pick it up; `manual_review` (attempt > 3)
-  marks the record `blocked` with an error message requiring operator inspection
+  marks the record `blocked` with an error message requiring admin inspection
   before any requeue. Recovery locks and compares the exact stale snapshot, so a
   concurrent heartbeat or status transition wins cleanly instead of being
   overwritten by a stale recovery decision.
@@ -2672,7 +2625,7 @@ preflights.
   immediate `blocked` status, and wraps the visible command so terminal success
   or failure calls `uv run launchplane every-code finish` with the fencing token
   captured at launch. A recovered or superseded session therefore cannot read a
-  newer token and finish as the new owner.
+  newer token and finish as the new holder.
 - A Mac host can leave the poller running with
   `uv run launchplane every-code start`, inspect it with
   `uv run launchplane every-code status`, and stop it with
@@ -2683,8 +2636,8 @@ preflights.
   can be merged or an issue can close. After a terminal session is gone, worker
   maintenance removes clean Every Code worktrees and their local `every-code/*`
   branches from the source checkout. Dirty or suspicious worktrees are left in
-  place for operator inspection.
-- Operators can reconcile older local cleanup residue with
+  place for admin inspection.
+- Admins can reconcile older local cleanup residue with
   `uv run launchplane every-code reconcile-cleanup`. The command inventories
   saved session JSON, worker worktree directories, registered Git worktrees, and
   linked local `every-code/*` branches. It defaults to dry-run/report mode;
@@ -2706,7 +2659,7 @@ preflights.
   existing request without overwriting worker state, and skips issues that do
   not currently carry the trigger label.
 - Launchplane owns this coordination record so GitHub webhooks, reconciliation,
-  local Mac workers, and the future operator UI share one inspectable source of
+  local Mac workers, and the future Launchplane UI share one inspectable source of
   truth instead of relying on GitHub API polling or local shell lock files.
 - GitHub webhook ingress accepts signed `issues.labeled` deliveries for the
   `every-code` label through `POST /v1/every-code/github-webhook`. The route
@@ -2854,7 +2807,7 @@ preflights.
   current state.
 - The CLI status/read-model commands are expected to compose inventory with the
   linked promotion, deployment, and backup-gate records rather than forcing
-  operators to open those files directly.
+  admins to open those files directly.
 - Successful waited `ship` executions refresh inventory directly from the final
   deployment record.
 - Successful waited `promote` executions refresh the same inventory record and
@@ -2865,7 +2818,7 @@ Batch candidate and landing-plan payloads add structural provenance in place;
 they do not create a new record family or table. Candidate records own exact
 base/head/result commit and tree identities, ordered positions, impact subjects,
 policy and candidate fingerprints, and optional stack-collapse proof. Current
-impact, changed-path, and Owner review composition evidence is supplied to the
+impact, changed-path, and Client review composition evidence is supplied to the
 pure evaluator later rather than persisted in the candidate record. Landing
 plan records own the active plan fingerprint and additive per-entry rolling-base,
 landed-head, and merge-result identities, including parent-preserving `skipped`
@@ -2912,7 +2865,7 @@ disabled secret records, bindings, and audit events produced by apply.
 
 Product profiles include `lifecycle_state` with backward-compatible default
 `active`. Migration `c6e8f1b3d5a7` creates the retirement ledger after the
-owner-review context-binding migration. `retiring` and `retired` profiles
+Client-review context-binding migration. `retiring` and `retired` profiles
 remain directly readable and appear in complete profile listings as audit
 authority; active discovery and automation filter them explicitly.
 
@@ -2950,7 +2903,7 @@ secret mutation, target rewrite, or runtime mutation fields.
 Guarded merge authorization is persisted separately from mutable batch landing
 progress. `MergeAdmissionRecord` is append-only evidence written immediately
 before one exact provider merge attempt. It binds the current L2 readiness
-result and digest, structural result and provenance digest, Owner and
+result and digest, structural result and provenance digest, Client and
 engineering evidence carried by L2, all seven policy fingerprints, repository,
 base branch, PR and queue position, candidate and landing-plan identity,
 rolling base/head/tree identity, algorithm version, controller lease, expected
@@ -2979,11 +2932,11 @@ Migration `e9b1d3f5a7c0` creates both tables after the detached application
 retirement migration. Historical landing plans are not backfilled into L3
 authority.
 
-The governance projection adds no record stream. It reads the immutable Owner,
+The governance projection adds no record stream. It reads the immutable Client,
 admission, and landing records above and may attach a freshly recomputed
 ephemeral L2 view. A missing current L2 result never mutates or weakens the
 stored evidence; the projection reports `not_active` or `unavailable` and keeps
-historical facts independently visible. Owner events and admission/outcome
+historical facts independently visible. Client events and admission/outcome
 records are marked current or historical relative to the resolved PR head/tree;
 historical records never grant current effect authority.
 
@@ -3035,7 +2988,7 @@ checks while retaining the exact version-2 section, descriptor-scoped vector, an
 schema digests carried by version `4`, so provenance cannot silently rewrite
 existing wire, verification, lifecycle, or descriptor contracts.
 
-Owner-control shadow-verifier state is persisted only in PostgreSQL through
+`owner-control` shadow-verifier state is persisted only in PostgreSQL through
 `PostgresRecordStore`: `launchplane_owner_control_channel_sessions` stores one
 enrolled canonical binding, inert authority marker, and revocation state;
 `launchplane_owner_control_enrollment_provenance` stores one immutable row keyed
@@ -3069,7 +3022,7 @@ refuses while provenance rows exist.
 
 Challenge issuance is service-only and provenance-bound: the store derives the
 canonical approval request from one locked planned operation, exactly one active
-policy, and the enrolled session owner. Its partial unique index permits at most
+policy, and the enrolled session holder. Its partial unique index permits at most
 one `issued` challenge per operation. When the active row has expired at or
 before the database clock, issuance terminalizes it and appends its lifecycle
 event before flushing and inserting the replacement in the same transaction.
@@ -3079,7 +3032,7 @@ Issuance never updates the privileged operation current projection or its
 append-only event ledger.
 
 `AdministratorEnrollmentRecord` is a separate, versioned, inert preparation
-record for a future second control-proven GitHub-human policy administrator.
+record for a future second control-proven GitHub-human admin.
 PostgreSQL stores it in `launchplane_administrator_enrollments`; filesystem
 storage mirrors it only for local/test/rehearsal parity. It retains an immutable
 proposer GitHub ID, a server-derived candidate GitHub ID only after a successful

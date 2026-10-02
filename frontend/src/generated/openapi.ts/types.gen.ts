@@ -204,8 +204,9 @@ export type AuthorizationCandidatePolicyProvenance = {
 };
 
 export type AuthorizationCandidatePrepareEnvelope = {
-    candidate_id: 'ordinary-agent-delivery-administration' | 'administrator-product-evidence-read' | 'ordinary-agent-enrollment-requester';
+    candidate_id: 'ordinary-agent-delivery-administration' | 'administrator-product-evidence-read' | 'ordinary-agent-enrollment-requester' | 'agent-operate-product-setup';
     intent: 'add' | 'remove';
+    products?: Array<string>;
     source_event_id: string;
 };
 
@@ -2424,7 +2425,7 @@ export type PrivilegedOperationSemanticReview = {
     rollback: PrivilegedOperationSemanticReviewRollback;
     safety_class: 'secret_backed' | 'policy_admin';
     schema_version: number;
-    title: 'Managed-secret re-encryption review' | 'Managed authorization policy review' | 'Review agent delivery administration' | 'Review administrator product evidence access' | 'Review client delivery access' | 'Review terminal client connection requests' | 'Review removing terminal client connection requests' | 'Managed merge-train policy review' | 'Review agent delivery setup' | 'Review stopping agent delivery';
+    title: 'Managed-secret re-encryption review' | 'Managed authorization policy review' | 'Review agent delivery administration' | 'Review administrator product evidence access' | 'Review agent operate access' | 'Review removing agent operate access' | 'Review client delivery access' | 'Review terminal client connection requests' | 'Review removing terminal client connection requests' | 'Managed merge-train policy review' | 'Review agent delivery setup' | 'Review stopping agent delivery';
 };
 
 export type PrivilegedOperationSemanticReviewActivityEntry = {
@@ -2891,7 +2892,7 @@ export type ProductIncidentEventSummary = {
 export type ProductIncidentMaterialEvidence = {
     affected_targets: Array<'base_url' | 'health_url' | 'private_health_url' | 'monitoring_intent' | 'provider' | 'tls_domain'>;
     check_kind: 'public_http' | 'private_http' | 'provider' | 'tls';
-    failure_code: 'connection_timeout' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
+    failure_code: 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
     failure_layer: 'configuration' | 'dns' | 'network' | 'redirect' | 'http' | 'tls' | 'runtime_identity' | 'provider' | 'unknown';
     route_authority_kind: string;
     runtime_identity_mismatched_fields: Array<string>;
@@ -2914,7 +2915,7 @@ export type ProductIncidentNotificationAttemptSummary = {
 };
 
 export type ProductIncidentObservationSummary = {
-    failure_code: 'connection_timeout' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error' | '';
+    failure_code: 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error' | '';
     incident_event_id: string;
     material_fingerprint_sha256: string;
     notification_sent: boolean;
@@ -2956,7 +2957,7 @@ export type ProductIncidentSummary = {
     context: string;
     display_name: string;
     environment: string;
-    failure_code: 'connection_timeout' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
+    failure_code: 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
     failure_layer: 'configuration' | 'dns' | 'network' | 'redirect' | 'http' | 'tls' | 'runtime_identity' | 'provider' | 'unknown';
     incident_id: string;
     instance: string;
@@ -3988,7 +3989,7 @@ export type TenantAdmissionPathResult = {
     evidence_digest: string;
     evidence_id: string;
     head_sha: string;
-    path_kind: 'trusted_maintenance' | 'technical_human_waiver' | 'manager_preview_approval';
+    path_kind: 'trusted_maintenance';
     pull_request_number: number;
     repository: string;
     repository_id: string;
@@ -4017,7 +4018,7 @@ export type TenantAdmissionRequiredTechnicalCheck = {
 };
 
 export type TenantAdmissionStatusReadModel = {
-    category: 'engineering' | 'eligible' | 'pending' | 'manager-approved' | 'technical-waived' | 'maintenance-admitted' | 'stale' | 'denied' | 'unavailable';
+    category: 'engineering' | 'eligible' | 'pending' | 'maintenance-admitted' | 'stale' | 'denied' | 'unavailable';
     classification_digest: string;
     classification_kind: 'engineering' | 'tenant_ui' | '';
     classification_revision: number;
@@ -4070,11 +4071,11 @@ export type TenantMergeEligibilityDecision = {
     evaluated_at: string;
     evidence_digest: string;
     evidence_id: string;
-    evidence_kind: 'none' | 'trusted_maintenance' | 'technical_human_waiver' | 'manager_preview_approval';
+    evidence_kind: 'none' | 'trusted_maintenance';
     head_sha: string;
     product: string;
     pull_request_number: number;
-    reason_code: 'engineering_normal_flow' | 'tenant_normal_flow' | 'trusted_maintenance_admitted' | 'technical_human_waiver_admitted' | 'manager_preview_approved' | 'manager_preview_required' | 'evidence_denied' | 'evidence_stale' | 'evidence_unavailable' | 'evidence_identity_drift' | 'evidence_head_mismatch' | 'evidence_policy_drift' | 'classification_missing' | 'classification_unknown' | 'classification_ambiguous' | 'classification_identity_drift';
+    reason_code: 'engineering_normal_flow' | 'tenant_normal_flow' | 'trusted_maintenance_admitted' | 'evidence_denied' | 'evidence_stale' | 'evidence_unavailable' | 'evidence_identity_drift' | 'evidence_head_mismatch' | 'evidence_policy_drift' | 'classification_missing' | 'classification_unknown' | 'classification_ambiguous' | 'classification_identity_drift';
     repository: string;
     repository_id: string;
     repository_owner_id: string;
@@ -4083,9 +4084,7 @@ export type TenantMergeEligibilityDecision = {
 };
 
 export type TenantMergeEligibilityEvidenceInputs = {
-    manager_preview_approval: TenantAdmissionPathResult | null;
     schema_version: number;
-    technical_human_waiver: TenantAdmissionPathResult | null;
     trusted_maintenance: TenantAdmissionPathResult | null;
 };
 

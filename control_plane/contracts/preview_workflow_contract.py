@@ -10,9 +10,6 @@ PreviewWorkflowPullRequestAction = Literal[
     "opened",
     "reopened",
     "synchronize",
-    "edited",
-    "labeled",
-    "unlabeled",
     "closed",
 ]
 PreviewWorkflowOperation = Literal[
@@ -22,6 +19,8 @@ PreviewWorkflowOperation = Literal[
     "ignore",
 ]
 PreviewWorkflowExecutionTrust = Literal["same_repo", "fork", "dependabot"]
+# A preview stays up until its pull request closes or merges; drafts keep theirs.
+_PREVIEW_REFRESH_ACTIONS = frozenset({"opened", "reopened", "synchronize"})
 
 
 class PreviewWorkflowEvent(BaseModel):
@@ -37,9 +36,6 @@ class PreviewWorkflowEvent(BaseModel):
     base_repository: str
     head_repository: str
     head_sha: str = ""
-    label_names: tuple[str, ...] = ()
-    action_label: str = ""
-    preview_label: str = "preview"
 
     @model_validator(mode="after")
     def _validate_event(self) -> "PreviewWorkflowEvent":
@@ -51,14 +47,10 @@ class PreviewWorkflowEvent(BaseModel):
             raise ValueError("preview workflow event requires base_repository")
         if not self.head_repository.strip():
             raise ValueError("preview workflow event requires head_repository")
-        if not self.preview_label.strip():
-            raise ValueError("preview workflow event requires preview_label")
         if self.event_name in {"pull_request", "pull_request_target"} and not self.action.strip():
             raise ValueError("pull request preview workflow events require action")
         if self.event_name == "workflow_dispatch" and not self.operation.strip():
             raise ValueError("workflow_dispatch preview workflow events require operation")
-        if self.action == "labeled" and not self.action_label.strip():
-            raise ValueError("labeled preview workflow events require action_label")
         if self.event_name == "pull_request" and _is_dependabot_actor(self.actor):
             raise ValueError("dependabot preview workflow events must use pull_request_target")
         return self
@@ -70,7 +62,6 @@ class PreviewWorkflowDecision(BaseModel):
     operation: PreviewWorkflowOperation
     reason: str
     execution_trust: PreviewWorkflowExecutionTrust
-    label_enabled: bool
     launchplane_route_path: str = ""
     feedback_status: Literal["pending", "destroyed", "unsupported", ""] = ""
     checkout_untrusted_head: bool = False
@@ -79,9 +70,11 @@ class PreviewWorkflowDecision(BaseModel):
 
 
 def decide_preview_workflow_operation(event: PreviewWorkflowEvent) -> PreviewWorkflowDecision:
-    """Classify a thin product-repo preview trigger into the Launchplane contract."""
+    """Classify a thin product-repo preview trigger into the Launchplane contract.
 
-    label_enabled = _preview_label_enabled(event)
+    Labels and draft state play no part: a preview exists while its PR is open.
+    """
+
     execution_trust = _execution_trust(event)
 
     if event.event_name == "workflow_dispatch":
@@ -90,7 +83,6 @@ def decide_preview_workflow_operation(event: PreviewWorkflowEvent) -> PreviewWor
                 operation="destroy",
                 reason="manual_destroy_requested",
                 execution_trust=execution_trust,
-                label_enabled=label_enabled,
                 launchplane_route_path="/v1/drivers/generic-web/preview-destroy",
                 feedback_status="destroyed",
                 launchplane_feedback_required=True,
@@ -99,7 +91,6 @@ def decide_preview_workflow_operation(event: PreviewWorkflowEvent) -> PreviewWor
             operation="refresh",
             reason="manual_refresh_requested",
             execution_trust=execution_trust,
-            label_enabled=label_enabled,
             launchplane_route_path="/v1/drivers/generic-web/preview-refresh",
             feedback_status="pending",
             checkout_untrusted_head=True,
@@ -113,31 +104,15 @@ def decide_preview_workflow_operation(event: PreviewWorkflowEvent) -> PreviewWor
                 operation="destroy",
                 reason="pull_request_closed",
                 execution_trust=execution_trust,
-                label_enabled=label_enabled,
                 launchplane_route_path="/v1/drivers/generic-web/preview-destroy",
                 feedback_status="destroyed",
                 launchplane_feedback_required=True,
             )
-        if (
-            execution_trust == "same_repo"
-            and event.action == "unlabeled"
-            and event.action_label == event.preview_label
-        ):
-            return PreviewWorkflowDecision(
-                operation="destroy",
-                reason="preview_label_removed",
-                execution_trust=execution_trust,
-                label_enabled=False,
-                launchplane_route_path="/v1/drivers/generic-web/preview-destroy",
-                feedback_status="destroyed",
-                launchplane_feedback_required=True,
-            )
-        if _needs_unsupported_notice(event=event, label_enabled=label_enabled):
+        if execution_trust != "same_repo" and event.action in _PREVIEW_REFRESH_ACTIONS:
             return PreviewWorkflowDecision(
                 operation="unsupported_notice",
                 reason=f"preview_not_supported_for_{execution_trust}",
                 execution_trust=execution_trust,
-                label_enabled=label_enabled,
                 launchplane_route_path="/v1/previews/pr-feedback",
                 feedback_status="unsupported",
                 launchplane_feedback_required=True,
@@ -146,7 +121,6 @@ def decide_preview_workflow_operation(event: PreviewWorkflowEvent) -> PreviewWor
             operation="ignore",
             reason="pull_request_target_does_not_change_preview",
             execution_trust=execution_trust,
-            label_enabled=label_enabled,
         )
 
     if execution_trust != "same_repo":
@@ -154,7 +128,6 @@ def decide_preview_workflow_operation(event: PreviewWorkflowEvent) -> PreviewWor
             operation="ignore",
             reason=f"pull_request_event_must_not_run_untrusted_{execution_trust}_preview",
             execution_trust=execution_trust,
-            label_enabled=label_enabled,
         )
 
     if event.action == "closed":
@@ -162,44 +135,13 @@ def decide_preview_workflow_operation(event: PreviewWorkflowEvent) -> PreviewWor
             operation="ignore",
             reason="pull_request_cleanup_runs_on_target",
             execution_trust=execution_trust,
-            label_enabled=label_enabled,
         )
 
-    if event.action == "unlabeled" and event.action_label == event.preview_label:
-        return PreviewWorkflowDecision(
-            operation="ignore",
-            reason="pull_request_cleanup_runs_on_target",
-            execution_trust=execution_trust,
-            label_enabled=False,
-        )
-
-    if not label_enabled:
-        return PreviewWorkflowDecision(
-            operation="ignore",
-            reason="preview_label_not_enabled",
-            execution_trust=execution_trust,
-            label_enabled=False,
-        )
-
-    if event.action in {"opened", "reopened", "synchronize", "edited"}:
+    if event.action in _PREVIEW_REFRESH_ACTIONS:
         return PreviewWorkflowDecision(
             operation="refresh",
             reason=f"pull_request_{event.action}",
             execution_trust=execution_trust,
-            label_enabled=True,
-            launchplane_route_path="/v1/drivers/generic-web/preview-refresh",
-            feedback_status="pending",
-            checkout_untrusted_head=True,
-            product_build_required=True,
-            launchplane_feedback_required=True,
-        )
-
-    if event.action == "labeled" and event.action_label == event.preview_label:
-        return PreviewWorkflowDecision(
-            operation="refresh",
-            reason="preview_label_added",
-            execution_trust=execution_trust,
-            label_enabled=True,
             launchplane_route_path="/v1/drivers/generic-web/preview-refresh",
             feedback_status="pending",
             checkout_untrusted_head=True,
@@ -211,7 +153,6 @@ def decide_preview_workflow_operation(event: PreviewWorkflowEvent) -> PreviewWor
         operation="ignore",
         reason=f"pull_request_{event.action}_does_not_change_preview",
         execution_trust=execution_trust,
-        label_enabled=label_enabled,
     )
 
 
@@ -236,24 +177,12 @@ def preview_workflow_idempotency_key(
     )
 
 
-def _preview_label_enabled(event: PreviewWorkflowEvent) -> bool:
-    return event.preview_label.strip() in {label_name.strip() for label_name in event.label_names}
-
-
 def _execution_trust(event: PreviewWorkflowEvent) -> PreviewWorkflowExecutionTrust:
     if _is_dependabot_actor(event.actor):
         return "dependabot"
     if event.base_repository.casefold() != event.head_repository.casefold():
         return "fork"
     return "same_repo"
-
-
-def _needs_unsupported_notice(*, event: PreviewWorkflowEvent, label_enabled: bool) -> bool:
-    if not label_enabled:
-        return False
-    if event.action not in {"opened", "reopened", "synchronize", "edited", "labeled"}:
-        return False
-    return _execution_trust(event) in {"fork", "dependabot"}
 
 
 def _is_dependabot_actor(actor: str) -> bool:

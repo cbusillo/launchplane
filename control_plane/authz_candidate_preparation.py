@@ -9,6 +9,7 @@ from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationRecord,
 )
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.privileged_operation import (
     ORDINARY_AGENT_DELIVERY_ACTIVATION_APPROVE_ACTION,
@@ -28,6 +29,8 @@ from control_plane.service_auth import (
     AuthorizationTarget,
     GitHubHumanPolicyRule,
     LaunchplaneAuthzPolicy,
+    LocalOperatorIdentity,
+    LocalOperatorPolicyRule,
     TerminalAgentIdentity,
     TerminalAgentPolicyRule,
     authz_selector_matches,
@@ -64,10 +67,22 @@ ADMINISTRATOR_PRODUCT_EVIDENCE_READ_REASON = (
 )
 ADMINISTRATOR_PRODUCT_EVIDENCE_READ_RELATED_ISSUE = "#2058"
 
+AGENT_OPERATE_PRODUCT_SETUP_CANDIDATE_ID: Final = "agent-operate-product-setup"
+AGENT_OPERATE_PRODUCT_SETUP_MANAGED_SET_ID = "operator.agent-operate"
+AGENT_OPERATE_PRODUCT_SETUP_MANAGED_RULE_ID = "agent-operate-product-setup"
+AGENT_OPERATE_PRODUCT_SETUP_ACTIONS = ("product_profile.expected_config.apply",)
+AGENT_OPERATE_PRODUCT_SETUP_CONTEXTS = ("launchplane",)
+AGENT_OPERATE_PRODUCT_SETUP_REASON = (
+    "Prepare standing agent operate access for setup writes on non-live products."
+)
+AGENT_OPERATE_PRODUCT_SETUP_RELATED_ISSUE = "#2467"
+AGENT_OPERATE_PRODUCT_SETUP_MAX_PRODUCTS = 100
+
 AuthorizationCandidateId = Literal[
     "ordinary-agent-delivery-administration",
     "administrator-product-evidence-read",
     "ordinary-agent-enrollment-requester",
+    "agent-operate-product-setup",
 ]
 AuthorizationCandidateIntent = Literal["add", "remove"]
 AuthorizationCandidateState = Literal["available", "active", "conflict"]
@@ -80,6 +95,10 @@ AuthorizationCandidatePreparationReason = Literal[
     "current_activation_requires_stop",
     "activation_storage_unavailable",
     "activation_history_truncated",
+    "candidate_principal_unavailable",
+    "candidate_products_required",
+    "candidate_product_unavailable",
+    "candidate_product_live",
 ]
 
 
@@ -804,6 +823,228 @@ def is_legacy_administrator_product_evidence_read_request(
     )
 
 
+_AgentOperateProductSetupState = Literal["absent", "present", "conflict"]
+
+
+def _is_exact_selector_tuple(values: tuple[str, ...]) -> bool:
+    return (
+        bool(values)
+        and all(_is_exact_terminal_selector(value) and value == value.strip() for value in values)
+        and values == tuple(sorted(set(values)))
+    )
+
+
+def _is_exact_agent_operate_rule(rule: LocalOperatorPolicyRule) -> bool:
+    return (
+        rule.managed_set_id == AGENT_OPERATE_PRODUCT_SETUP_MANAGED_SET_ID
+        and rule.managed_rule_id == AGENT_OPERATE_PRODUCT_SETUP_MANAGED_RULE_ID
+        and len(rule.subjects) == 1
+        and len(rule.token_labels) == 1
+        and _is_exact_terminal_selector(rule.subjects[0])
+        and _is_exact_terminal_selector(rule.token_labels[0])
+        and _is_exact_selector_tuple(rule.products)
+        and len(rule.products) <= AGENT_OPERATE_PRODUCT_SETUP_MAX_PRODUCTS
+        and rule.contexts == AGENT_OPERATE_PRODUCT_SETUP_CONTEXTS
+        and rule.actions == AGENT_OPERATE_PRODUCT_SETUP_ACTIONS
+        and not rule.instances
+    )
+
+
+def _agent_operate_product_setup_rule(
+    policy: LaunchplaneAuthzPolicy,
+) -> tuple[_AgentOperateProductSetupState, LocalOperatorPolicyRule | None]:
+    owned_rules = tuple(
+        (principal_type, rule)
+        for principal_type, rule in _rules(policy)
+        if getattr(rule, "managed_set_id", None) == AGENT_OPERATE_PRODUCT_SETUP_MANAGED_SET_ID
+    )
+    if not owned_rules:
+        return "absent", None
+    if policy.schema_version not in (2, 3) or len(owned_rules) != 1:
+        return "conflict", None
+    principal_type, rule = owned_rules[0]
+    if (
+        principal_type != "local_operators"
+        or not isinstance(rule, LocalOperatorPolicyRule)
+        or not _is_exact_agent_operate_rule(rule)
+    ):
+        return "conflict", None
+    return "present", rule
+
+
+def agent_operate_product_setup_state(
+    policy: LaunchplaneAuthzPolicy,
+    *,
+    identity: LocalOperatorIdentity | None,
+) -> AuthorizationCandidateState:
+    """Report whether the operate set is absent, the exact prepared shape, or foreign."""
+    state, rule = _agent_operate_product_setup_rule(policy)
+    if state == "absent":
+        return "available"
+    if state == "conflict" or rule is None:
+        return "conflict"
+    if (
+        identity is None
+        or rule.subjects != (identity.subject,)
+        or rule.token_labels != (identity.token_label,)
+    ):
+        return "conflict"
+    return "active"
+
+
+def normalize_agent_operate_products(products: tuple[str, ...]) -> tuple[str, ...]:
+    """Dedupe and sort a browser product selection without trusting its order."""
+    return tuple(sorted({product.strip() for product in products if product.strip()}))
+
+
+def _require_agent_operate_products(
+    *,
+    record_store: object,
+    products: tuple[str, ...],
+) -> tuple[str, ...]:
+    normalized = normalize_agent_operate_products(products)
+    if not normalized:
+        raise AuthorizationCandidatePreparationError(
+            "candidate_products_required",
+            "Agent operate access requires at least one selected product.",
+        )
+    if len(normalized) > AGENT_OPERATE_PRODUCT_SETUP_MAX_PRODUCTS:
+        raise AuthorizationCandidatePreparationError(
+            "candidate_product_unavailable",
+            "Agent operate access accepts a bounded product selection.",
+        )
+    if any(not _is_exact_terminal_selector(product) for product in normalized):
+        raise AuthorizationCandidatePreparationError(
+            "candidate_product_unavailable",
+            "Agent operate access requires exact product identifiers.",
+        )
+    reader = getattr(record_store, "read_product_profile_record", None)
+    if not callable(reader):
+        raise TypeError("Agent operate preparation requires product profile storage.")
+    for product in normalized:
+        try:
+            record = reader(product)
+        except FileNotFoundError as error:
+            raise AuthorizationCandidatePreparationError(
+                "candidate_product_unavailable",
+                "A selected product has no product profile record.",
+            ) from error
+        profile = (
+            record
+            if isinstance(record, LaunchplaneProductProfileRecord)
+            else LaunchplaneProductProfileRecord.model_validate(record)
+        )
+        if profile.product != product:
+            raise AuthorizationCandidatePreparationError(
+                "candidate_product_unavailable",
+                "A selected product has no matching product profile record.",
+            )
+        if profile.production_use == "live":
+            raise AuthorizationCandidatePreparationError(
+                "candidate_product_live",
+                "Live products cannot receive agent operate access.",
+            )
+    return normalized
+
+
+def compile_agent_operate_product_setup_candidate(
+    *,
+    current_policy: LaunchplaneAuthzPolicy,
+    identity: LocalOperatorIdentity | None,
+    intent: AuthorizationCandidateIntent,
+    products: tuple[str, ...],
+    record_store: object,
+) -> tuple[Literal["planned", "already_satisfied"], ManagedAuthzPolicySetProposalInput | None]:
+    """Compile the closed operate set for the service-configured local operator."""
+    state, existing_rule = _agent_operate_product_setup_rule(current_policy)
+    if state == "conflict":
+        raise AuthorizationCandidatePreparationError(
+            "candidate_set_conflict",
+            "The agent operate set is occupied or has an unexpected shape.",
+        )
+    if current_policy.schema_version not in (2, 3):
+        raise AuthorizationCandidatePreparationError(
+            "candidate_set_conflict",
+            "Agent operate access requires authorization policy version 2 or 3.",
+        )
+    if intent == "remove":
+        if state == "absent":
+            return "already_satisfied", None
+        desired_rules: tuple[LocalOperatorPolicyRule, ...] = ()
+    else:
+        if (
+            identity is None
+            or not _is_exact_terminal_selector(identity.subject)
+            or not _is_exact_terminal_selector(identity.token_label)
+        ):
+            raise AuthorizationCandidatePreparationError(
+                "candidate_principal_unavailable",
+                "No exact configured local operator identity is available.",
+            )
+        selected = _require_agent_operate_products(record_store=record_store, products=products)
+        desired_rule = LocalOperatorPolicyRule(
+            managed_set_id=AGENT_OPERATE_PRODUCT_SETUP_MANAGED_SET_ID,
+            managed_rule_id=AGENT_OPERATE_PRODUCT_SETUP_MANAGED_RULE_ID,
+            subjects=(identity.subject,),
+            token_labels=(identity.token_label,),
+            products=selected,
+            contexts=AGENT_OPERATE_PRODUCT_SETUP_CONTEXTS,
+            actions=AGENT_OPERATE_PRODUCT_SETUP_ACTIONS,
+        )
+        if existing_rule is not None:
+            if existing_rule.subjects != desired_rule.subjects or (
+                existing_rule.token_labels != desired_rule.token_labels
+            ):
+                raise AuthorizationCandidatePreparationError(
+                    "candidate_set_conflict",
+                    "The agent operate set belongs to a different local operator identity.",
+                )
+            if existing_rule == desired_rule:
+                return "already_satisfied", None
+        desired_rules = (desired_rule,)
+    return (
+        "planned",
+        ManagedAuthzPolicySetProposalInput(
+            managed_set_id=AGENT_OPERATE_PRODUCT_SETUP_MANAGED_SET_ID,
+            desired_policy=LaunchplaneAuthzPolicy(
+                schema_version=current_policy.schema_version,
+                local_operators=desired_rules,
+            ),
+            schema_migration="reject",
+            administrator_quorum_change=None,
+            reason=AGENT_OPERATE_PRODUCT_SETUP_REASON,
+            related_issue=AGENT_OPERATE_PRODUCT_SETUP_RELATED_ISSUE,
+        ),
+    )
+
+
+def is_agent_operate_product_setup_request(
+    request: ManagedAuthzPolicySetProposalInput,
+    *,
+    intent: AuthorizationCandidateIntent,
+) -> bool:
+    """Recognize the exact operate authority shape, independently of audit wording."""
+    desired = request.desired_policy
+    if (
+        request.managed_set_id != AGENT_OPERATE_PRODUCT_SETUP_MANAGED_SET_ID
+        or request.schema_migration != "reject"
+        or request.administrator_quorum_change is not None
+        or request.ordinary_agent_preparation_context is not None
+        or desired.schema_version not in (2, 3)
+        or desired.administrator_quorum is not None
+        or desired.github_actions
+        or desired.github_humans
+        or desired.terminal_agents
+        or desired.local_admins
+        or desired.ordinary_agents
+    ):
+        return False
+    rules = desired.local_operators
+    if intent == "remove":
+        return not rules
+    return len(rules) == 1 and _is_exact_agent_operate_rule(rules[0])
+
+
 def compile_authorization_candidate(
     *,
     candidate_id: AuthorizationCandidateId,
@@ -812,7 +1053,17 @@ def compile_authorization_candidate(
     intent: AuthorizationCandidateIntent,
     record_store: object,
     configured_terminal_identity: TerminalAgentIdentity | None = None,
+    configured_local_operator_identity: LocalOperatorIdentity | None = None,
+    products: tuple[str, ...] = (),
 ) -> tuple[Literal["planned", "already_satisfied"], ManagedAuthzPolicySetProposalInput | None]:
+    if candidate_id == AGENT_OPERATE_PRODUCT_SETUP_CANDIDATE_ID:
+        return compile_agent_operate_product_setup_candidate(
+            current_policy=current_policy,
+            identity=configured_local_operator_identity,
+            intent=intent,
+            products=products,
+            record_store=record_store,
+        )
     if candidate_id == ORDINARY_AGENT_DELIVERY_ADMINISTRATION_CANDIDATE_ID:
         return compile_ordinary_agent_delivery_administration_candidate(
             current_policy=current_policy,
@@ -868,7 +1119,21 @@ def authorization_candidate_request_matches(
     request: ManagedAuthzPolicySetProposalInput,
     github_id: int,
     intent: AuthorizationCandidateIntent,
+    products: tuple[str, ...] = (),
+    configured_local_operator_identity: LocalOperatorIdentity | None = None,
 ) -> bool:
+    if candidate_id == AGENT_OPERATE_PRODUCT_SETUP_CANDIDATE_ID:
+        if not is_agent_operate_product_setup_request(request, intent=intent):
+            return False
+        if intent == "remove":
+            return not products
+        rule = request.desired_policy.local_operators[0]
+        return (
+            configured_local_operator_identity is not None
+            and rule.subjects == (configured_local_operator_identity.subject,)
+            and rule.token_labels == (configured_local_operator_identity.token_label,)
+            and rule.products == normalize_agent_operate_products(products)
+        )
     if candidate_id == ORDINARY_AGENT_DELIVERY_ADMINISTRATION_CANDIDATE_ID:
         recognized = is_ordinary_agent_delivery_administration_request(request)
     elif candidate_id == ADMINISTRATOR_PRODUCT_EVIDENCE_READ_CANDIDATE_ID:

@@ -22,6 +22,8 @@ again:
   from a `push`: the product's **testing** target;
 - a completed build from a `pull_request`, or a PR opened, reopened,
   synchronized, labeled, unlabeled or closed: that PR's **preview** target.
+  Label events only matter for the Client mention below; no label creates or
+  removes a preview.
 
 Launchplane re-reads every fact it acts on through the GitHub API with the
 product's read-only build-provenance token (`verify_build_artifact`). A
@@ -81,9 +83,10 @@ reservation. The webhook request never waits on a deploy.
     its plan as held (`action: wait`, reason `staff_testing`) and deploys
     nothing; see [Staff-testing hold](#staff-testing-hold).
 - **preview:** read the PR now.
-  - If it's open, carries the product's preview label, and its current head
-    has a verified preview build, the desired state is a preview running
-    that build. Otherwise the desired state is no preview.
+  - A preview stays up until its pull request closes or merges. If the PR is
+    open (a draft included) and its current head has a verified preview build,
+    the desired state is a preview running that build. A closed or merged PR
+    has no preview. Labels and draft state play no part (#2735).
   - Compare the desired state with the preview record's verified build (run
     id and attempt), not just whether a preview exists, then apply or
     destroy.
@@ -91,8 +94,7 @@ reservation. The webhook request never waits on a deploy.
     and URL come from the product profile as today. The result is posted on
     the PR; see [Pull request feedback](#pull-request-feedback).
   - Read the PR state again after taking the preview's reservation and just
-    before the provider apply; if it closed, lost its label, or moved its
-    head, the reservation is released with no provider effect and the
+    before the provider apply; if it closed or moved its head, the reservation is released with no provider effect and the
     reconcile runs again.
   - The apply or destroy issues the same service plan as the preview inputs
     route and runs it through `run_odoo_preview_apply_operation`, under
@@ -106,15 +108,18 @@ returns them to a caller with `product_profile.read` on the product, so an
 event-driven preview or testing deploy can be checked without service logs.
 Exact commit SHAs and `sha256:` digests come back as they are, and so do the
 ids Launchplane records itself: the GitHub delivery id and the plan's top-level
-`*_id` fields, when they are a UUID or a `name-<hex>` id. Every other
+`*_id` fields, when they are a UUID or a `name-<hex>` id; those ids also stay
+readable where the last error names them. Every other
 string in the plan and error goes through the shared redactor, which removes
 secret assignments, tokens, authorization headers, URLs, paths and long
 random strings. A failed testing deploy's reason is on the plan as
-`last_failed_error_code` and `last_failed_error_summary`, so the operator
+`last_failed_error_code` and `last_failed_error_summary`, so the admin
 need not read the deploy operation, whose status read needs the grant that
 starts a deploy. The summary is structured: the code's fixed description, step
-statuses and attempt, with no provider text (see
-[records](records.md#reconciler)).
+statuses, validated key names and attempt, with no provider text (see
+[records](records.md#reconciler)). Text fields are cut at 400 characters,
+except the summary, which keeps up to 1,500 so a long key list comes back
+whole.
 
 ## Pull request feedback
 
@@ -150,10 +155,10 @@ needs no workflow to report previews or testing deploys.
   A "queued" testing comment becomes "runs this change" at the next reconcile
   after the deploy finishes, at the latest the next sweep.
 
-- **Owner review:** when the PR carries the product Owner's review label and
-  the preview is ready, the comment mentions the Owner with the link to record
-  Accept or Request changes, as the preview feedback route does; with no Owner
-  set it says the operator needs to set one. The link's origin is Launchplane's
+- **Client review:** when the PR carries the product Client's review label and
+  the preview is ready, the comment mentions the Client with the link to record
+  Accept or Request changes, as the preview feedback route does; with no Client
+  set it says an admin needs to set one. The link's origin is Launchplane's
   own bootstrap `LAUNCHPLANE_PUBLIC_URL`, the setting the human session
   manager's public origin comes from, which the workers share with the service.
   Without it (or with an invalid one) the comment has no mention, the reconcile
@@ -166,7 +171,7 @@ needs no workflow to report previews or testing deploys.
 ## Staff-testing hold
 
 Once site staff test on a testing lane, a merge must not deploy mid-session.
-The site operator holds the lane, and lifts the hold when staff are done.
+An admin holds the lane, and lifts the hold when staff are done.
 
 - The hold is `policies.staff_testing_hold` on the testing lane's tracked
   target record: a reason, who recorded it and when. It is set and lifted only
@@ -180,8 +185,8 @@ The site operator holds the lane, and lifts the hold when staff are done.
 - A deploy the reconciler queued just before the hold is cancelled by the
   worker before any provider effect. Its cancellation names the hold and the
   reconciler; it doesn't count toward the three failed attempts.
-- A deploy an operator queued runs regardless: deploying during staff testing
-  is the operator's call.
+- A deploy an admin queued runs regardless: deploying during staff testing
+  is that admin's call.
 - Lifting the hold requests a reconcile of the product's testing target, so
   the newest verified build deploys right away rather than at the next sweep.
 - Previews are unaffected.
@@ -220,17 +225,19 @@ authorization from the verified caller. Before the testing replacement runs,
 the worker re-reads the product profile and accepts the grant only for that
 product's testing lane in the recorded context; any other operation kind,
 instance, context, or product fails closed. The grant does not
-replace operator approval at a stop boundary, a site owner's release approval,
+replace Director approval at a stop boundary, a Client's release approval,
 or a backup gate.
 
 ## Catch-up sweep
 
 Every 30 minutes the worker requests a reconcile of every product's testing
-target, and of every preview target with an open labeled PR or an existing
-preview record. Reconciling is idempotent, so the sweep runs the same code as
+target, of every preview target with an existing, not yet destroyed preview
+record, and of every open pull request, drafts included (one list of open pull
+requests per product, with the build-provenance token). A missed event is
+corrected within one sweep. Reconciling is idempotent, so the sweep runs the same code as
 the events, and a missed or out-of-order event is corrected within one sweep.
 
-## Owner steps
+## Director steps
 
 Once the receiver is deployed: set the App's webhook URL to the receiver,
 generate its secret and store it through Launchplane's managed-secret path,

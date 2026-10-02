@@ -7699,7 +7699,8 @@
             "enum": [
               "ordinary-agent-delivery-administration",
               "administrator-product-evidence-read",
-              "ordinary-agent-enrollment-requester"
+              "ordinary-agent-enrollment-requester",
+              "agent-operate-product-setup"
             ],
             "title": "Candidate Id",
             "type": "string"
@@ -7711,6 +7712,18 @@
             ],
             "title": "Intent",
             "type": "string"
+          },
+          "products": {
+            "default": [],
+            "description": "Product identifiers selected for agent operate access. Accepted only when adding agent-operate-product-setup; the server validates each one.",
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Products",
+            "type": "array"
           },
           "source_event_id": {
             "maxLength": 128,
@@ -21030,6 +21043,8 @@
               "Managed authorization policy review",
               "Review agent delivery administration",
               "Review administrator product evidence access",
+              "Review agent operate access",
+              "Review removing agent operate access",
               "Review client delivery access",
               "Review terminal client connection requests",
               "Review removing terminal client connection requests",
@@ -23742,6 +23757,7 @@
           "failure_code": {
             "enum": [
               "connection_timeout",
+              "deploy_fence_held",
               "dns_failure",
               "health_status_error",
               "http_error",
@@ -23928,6 +23944,7 @@
               {
                 "enum": [
                   "connection_timeout",
+                  "deploy_fence_held",
                   "dns_failure",
                   "health_status_error",
                   "http_error",
@@ -24182,6 +24199,7 @@
           "failure_code": {
             "enum": [
               "connection_timeout",
+              "deploy_fence_held",
               "dns_failure",
               "health_status_error",
               "http_error",
@@ -30372,11 +30390,7 @@
             "type": "string"
           },
           "path_kind": {
-            "enum": [
-              "trusted_maintenance",
-              "technical_human_waiver",
-              "manager_preview_approval"
-            ],
+            "const": "trusted_maintenance",
             "title": "Path Kind",
             "type": "string"
           },
@@ -30544,8 +30558,6 @@
               "engineering",
               "eligible",
               "pending",
-              "manager-approved",
-              "technical-waived",
               "maintenance-admitted",
               "stale",
               "denied",
@@ -30875,9 +30887,7 @@
             "default": "none",
             "enum": [
               "none",
-              "trusted_maintenance",
-              "technical_human_waiver",
-              "manager_preview_approval"
+              "trusted_maintenance"
             ],
             "title": "Evidence Kind",
             "type": "string"
@@ -30900,9 +30910,6 @@
               "engineering_normal_flow",
               "tenant_normal_flow",
               "trusted_maintenance_admitted",
-              "technical_human_waiver_admitted",
-              "manager_preview_approved",
-              "manager_preview_required",
               "evidence_denied",
               "evidence_stale",
               "evidence_unavailable",
@@ -30971,31 +30978,11 @@
       "TenantMergeEligibilityEvidenceInputs": {
         "additionalProperties": false,
         "properties": {
-          "manager_preview_approval": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/TenantAdmissionPathResult"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "schema_version": {
             "default": 1,
             "minimum": 1,
             "title": "Schema Version",
             "type": "integer"
-          },
-          "technical_human_waiver": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/TenantAdmissionPathResult"
-              },
-              {
-                "type": "null"
-              }
-            ]
           },
           "trusted_maintenance": {
             "anyOf": [
@@ -31011,9 +30998,7 @@
         "title": "TenantMergeEligibilityEvidenceInputs",
         "type": "object",
         "required": [
-          "manager_preview_approval",
           "schema_version",
-          "technical_human_waiver",
           "trusted_maintenance"
         ]
       },

@@ -18,6 +18,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Literal, Protocol, cast
+from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
 from uuid import uuid4
 
@@ -139,6 +140,7 @@ PREVIEW_APPLY_TIMEOUT_SECONDS = 600
 TESTING_BUILD_RUN_PAGE_SIZE = 50
 TESTING_VERIFY_LIMIT = 3
 _ENDED_PREVIEW_STATES = frozenset({"destroyed", "teardown_pending"})
+OPEN_PULL_REQUEST_SWEEP_PAGES = 5
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -548,6 +550,25 @@ TESTING_FAILURE_DESCRIPTIONS: dict[str, str] = {
     "logo_check_failed": "The website logo check did not pass.",
     "driver_result_failed": "The driver reported a failure outside its recorded steps.",
     "operation_failed": "The deploy stopped with an error before the driver returned a result.",
+    "plan_build_failed": "Building the replacement plan failed before the deploy started.",
+    "plan_not_ready": "The replacement plan was blocked before the deploy started.",
+    "strategy_unsupported": "The deploy asked for a replacement strategy Launchplane does not run.",
+    "target_not_compose": "The lane's Dokploy target is not a compose target.",
+    "artifact_id_missing": "The deploy named no artifact and the lane records none.",
+    "source_ref_missing": "The deploy named no source commit and the lane records none.",
+    "artifact_repository_mismatch": (
+        "The artifact's image repository does not match the product profile's image repository."
+    ),
+    "artifact_source_ref_mismatch": (
+        "The deploy's source commit does not match the artifact manifest's source commit."
+    ),
+    "artifact_required_modules_missing": (
+        "The artifact does not declare the Odoo modules Launchplane requires."
+    ),
+    "health_verification_required": (
+        "The lane requires runtime identity, but the deploy turned health verification off."
+    ),
+    "health_url_missing": "The lane requires runtime identity, but it has no health URL.",
     "post_deploy_setup_failed": (
         "The deploy finished, but the post-deploy update could not start: its target or "
         "setting overrides could not be read."
@@ -570,6 +591,53 @@ TESTING_FAILURE_DESCRIPTIONS: dict[str, str] = {
     ),
 }
 _UNKNOWN_TESTING_FAILURE = "The deploy failed with a code this Launchplane does not describe."
+# What each replacement-plan blocker code means, for ``plan_not_ready.<code>``.
+PLAN_BLOCKER_DESCRIPTIONS: dict[str, str] = {
+    "target_record_missing": "The lane has no Dokploy target record.",
+    "target_id_record_missing": "The lane has no Dokploy target-id record.",
+    "target_not_compose": "The lane's Dokploy target is not a compose target.",
+    "allow_empty_data_required": (
+        "A prelaunch rebuild request did not explicitly allow empty data."
+    ),
+    "volume_authority_unresolved": (
+        "Launchplane could not resolve the lane's stored Odoo volume settings."
+    ),
+    "prelaunch_rebuild_policy_refused": "The lane's prelaunch rebuild policy refused the request.",
+    "volume_env_keys_missing": "The current target is missing required Odoo volume settings.",
+    "volume_authority_drift": (
+        "The current target's Odoo volume settings do not match Launchplane's stored settings."
+    ),
+    "domains_missing": "The current target has no domains to carry over.",
+    "runtime_keys_undeclared": (
+        "The lane's upstream-restore settings are not declared in its product profile."
+    ),
+    "provider_keys_unrecorded": (
+        "The current target has settings that no Launchplane record for the site holds."
+    ),
+    "upstream_restore_environment_invalid": (
+        "The lane's upstream-restore settings are missing or invalid."
+    ),
+    "live_runtime_keys_invalid": (
+        "The lane's runtime settings could not be checked against its product profile."
+    ),
+    "compose_or_override_render_failed": (
+        "Launchplane could not render the replacement compose file or setting overrides."
+    ),
+    "current_artifact_changed": ("The lane's current artifact changed after the readiness check."),
+    "artifact_manifest_missing": "Launchplane has no manifest for the deploy's artifact.",
+    "artifact_repository_mismatch": (
+        "The artifact's image repository does not match the product profile's image repository."
+    ),
+    "artifact_source_ref_missing": "The deploy has no source commit evidence for its artifact.",
+    "artifact_source_ref_mismatch": (
+        "The deploy's source commit does not match the artifact manifest's source commit."
+    ),
+    "artifact_required_modules_missing": (
+        "The artifact does not declare the Odoo modules Launchplane requires."
+    ),
+}
+_UNKNOWN_PLAN_BLOCKER = "Launchplane does not describe this blocker."
+_PLAN_NOT_READY_PREFIX = "plan_not_ready."
 _ERROR_CODE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 
 
@@ -579,8 +647,9 @@ def _testing_failure_reason(
     """The failed attempt's error code and a structured summary of it.
 
     The code is the operation's own ``error_code``, or the first failed step of
-    its driver result. The summary is that code's fixed description plus the
-    result's step statuses and the worker attempt; never the error message.
+    its driver result. The summary is that code's fixed description plus any
+    validated env-key names, the result's step statuses and the worker attempt;
+    never the error message.
     """
     error_code = operation.error_code.strip()
     if not _ERROR_CODE_PATTERN.match(error_code):
@@ -590,9 +659,19 @@ def _testing_failure_reason(
         description = (
             "The deploy stopped with an unexpected error before the driver returned a result."
         )
+    elif error_code.startswith(_PLAN_NOT_READY_PREFIX):
+        # The apply names the plan's first blocker by its code, never its message.
+        blocker_code = error_code.removeprefix(_PLAN_NOT_READY_PREFIX)
+        description = (
+            f"{TESTING_FAILURE_DESCRIPTIONS['plan_not_ready']} Blocker: "
+            f"{PLAN_BLOCKER_DESCRIPTIONS.get(blocker_code, _UNKNOWN_PLAN_BLOCKER)}"
+        )
     else:
         description = TESTING_FAILURE_DESCRIPTIONS.get(error_code, _UNKNOWN_TESTING_FAILURE)
     parts = [description]
+    if operation.error_detail_keys:
+        # Env-key names the record validated, such as undeclared runtime keys.
+        parts.append(f"Keys: {', '.join(sorted(operation.error_detail_keys))}.")
     result = operation.result
     if result is not None:
         parts.append(
@@ -635,7 +714,7 @@ def _plan_testing_target(
     lane = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
     if lane is None:
         raise ProductReconcileError(f"Product {profile.product} has no testing lane.")
-    desired, rejected = _desired_release(
+    desired, rejected, absent_reason = _desired_release(
         transport=transport, profile=profile, repository_id=repository_id, lane=lane
     )
     current_artifact_id, current_digest = _current_testing_release(
@@ -653,7 +732,7 @@ def _plan_testing_target(
     if rejected:
         plan["rejected_builds"] = rejected
     if desired is None:
-        plan.update(action="none", reason="no_verified_build", held=False)
+        plan.update(action="none", reason=absent_reason, held=False)
         return plan, None
     manifest = desired.manifest
     desired_digest = manifest.image.digest.lower()
@@ -714,7 +793,7 @@ def _plan_preview_target(
     transport: BuildProvenanceTransport,
     pull_request_number: int,
 ) -> _PreviewDecision:
-    """Desired: a preview of the PR head's verified build while open and labeled."""
+    """Desired: a preview of the PR head's verified build while the PR is open, draft or not."""
     preview_context = profile.preview.context.strip()
     plan: dict[str, object] = {
         "target": "preview",
@@ -748,12 +827,10 @@ def _plan_preview_target(
     plan["head_sha"] = head_sha.lower()
     observed.update(
         head_sha=head_sha.lower(),
-        eligible=_preview_eligible(pull_request, profile.preview.enable_label),
+        eligible=_preview_eligible(pull_request),
     )
     if pull_request.get("state") != "open":
         return without_preview("pull_request_not_open")
-    if profile.preview.enable_label not in _labels(pull_request):
-        return without_preview("preview_label_missing")
     # The agent that opened the PR marks it for the Owner with a label.
     plan["owner_review_requested"] = profile.owner.review_label in _labels(pull_request)
     try:
@@ -820,7 +897,7 @@ def _run_preview_operation(
 
     def pre_mutation_guard() -> None:
         # Holding the reservation, just before the provider apply: a PR that closed,
-        # lost its label, or moved its head since the plan releases with no effect.
+        # or moved its head since the plan releases with no effect.
         if decision.observed and _pull_request_moved(
             transport=transport,
             profile=profile,
@@ -1036,9 +1113,15 @@ def reconcile_reservation_scope(product: str) -> str:
 
 
 def request_product_reconcile_sweep(
-    record_store: ProductReconcileStore, now: str
+    record_store: ProductReconcileStore,
+    now: str,
+    transport_factory: TransportFactory = resolve_build_provenance_transport,
 ) -> tuple[str, ...]:
-    """Request every mapped product's testing target and every live preview; no GitHub reads."""
+    """Request every mapped product's testing target, live preview and open PR.
+
+    A preview stays up while its pull request is open, so the sweep also lists each
+    product's open PRs: one whose event was missed still gets its preview within a sweep.
+    """
     targets: list[ProductReconcileTarget] = []
     inventory_records = record_store.list_repository_inventory_records()
     profiles = record_store.list_product_profile_records()
@@ -1053,6 +1136,12 @@ def request_product_reconcile_sweep(
         preview_context = profile.preview.context.strip()
         if not preview_context:
             continue
+        for number in _open_pull_requests(record_store, profile, transport_factory):
+            targets.append(
+                ProductReconcileTarget(
+                    product=profile.product, target_kind="preview", pull_request_number=number
+                )
+            )
         for preview in record_store.list_preview_records(
             context_name=preview_context, anchor_repo=_preview_anchor_repo(profile)
         ):
@@ -1068,6 +1157,35 @@ def request_product_reconcile_sweep(
     for target in unique_targets.values():
         record_store.request_product_reconcile(target, now)
     return tuple(unique_targets)
+
+
+def _open_pull_requests(
+    record_store: ProductReconcileStore,
+    profile: LaunchplaneProductProfileRecord,
+    transport_factory: TransportFactory,
+) -> tuple[int, ...]:
+    """The product's open PRs, drafts included; an unreadable list only skips this product."""
+    if not profile.preview.enabled:
+        return ()
+    numbers: list[int] = []
+    try:
+        transport = transport_factory(record_store, profile)
+        for page in range(1, OPEN_PULL_REQUEST_SWEEP_PAGES + 1):
+            pulls = _list(
+                transport.get_json(
+                    f"/repos/{_repository_path(profile)}/pulls?state=open&per_page=100&page={page}"
+                )
+            )
+            numbers.extend(
+                pull["number"]
+                for pull in pulls
+                if isinstance(pull, dict) and isinstance(pull.get("number"), int)
+            )
+            if len(pulls) < 100:
+                break
+    except (BuildProvenanceError, ProductReconcileError, OSError, ValueError) as error:
+        _LOGGER.warning("Sweep could not list %s's open pull requests: %s", profile.product, error)
+    return tuple(numbers)
 
 
 def _has_repository_identity(
@@ -1090,7 +1208,7 @@ def _desired_release(
     profile: LaunchplaneProductProfileRecord,
     repository_id: str,
     lane: ProductLaneProfile,
-) -> tuple[VerifiedBuildArtifact | None, list[dict[str, str]]]:
+) -> tuple[VerifiedBuildArtifact | None, list[dict[str, str]], str]:
     default_branch = profile.default_branch
     workflow_file = BUILD_WORKFLOW_PATH.rsplit("/", 1)[-1]
     query = urlencode(
@@ -1101,12 +1219,32 @@ def _desired_release(
             "per_page": str(TESTING_BUILD_RUN_PAGE_SIZE),
         }
     )
-    payload = _object(
-        transport.get_json(
-            f"/repos/{_repository_path(profile)}/actions/workflows/{workflow_file}/runs?{query}"
-        ),
-        "workflow runs",
-    )
+    try:
+        payload = _object(
+            transport.get_json(
+                f"/repos/{_repository_path(profile)}/actions/workflows/{workflow_file}/runs?{query}"
+            ),
+            "workflow runs",
+        )
+    except BuildProvenanceError as error:
+        if not isinstance(error.__cause__, HTTPError) or error.__cause__.code != 404:
+            raise
+        # A successful, complete Actions inventory distinguishes absence from hidden access.
+        workflows = _object(
+            transport.get_json(
+                f"/repos/{_repository_path(profile)}/actions/workflows?per_page=100"
+            ),
+            "workflows",
+        )
+        entries = workflows.get("workflows")
+        if (
+            not isinstance(entries, list)
+            or workflows.get("total_count") != len(entries)
+            or any(not isinstance(entry, dict) or not entry.get("path") for entry in entries)
+            or any(entry["path"] == BUILD_WORKFLOW_PATH for entry in entries)
+        ):
+            raise
+        return None, [], "build_workflow_missing"
     built_commits = {
         str(run.get("head_sha") or "").lower()
         for run in (item for item in _list(payload.get("workflow_runs")) if isinstance(item, dict))
@@ -1139,10 +1277,11 @@ def _desired_release(
                     image_repository=profile.image.repository,
                 ),
                 rejected,
+                "",
             )
         except BuildProvenanceError as error:
             rejected.append({"commit": commit, "error": str(error)})
-    return None, rejected
+    return None, rejected, "no_verified_build"
 
 
 def _current_testing_release(
@@ -1241,12 +1380,13 @@ def _pull_request_moved(
     )
     head_sha = str(_object(pull_request.get("head"), "pull request head").get("sha") or "")
     return head_sha.lower() != observed.get("head_sha") or _preview_eligible(
-        pull_request, profile.preview.enable_label
+        pull_request
     ) != observed.get("eligible")
 
 
-def _preview_eligible(pull_request: dict[str, object], enable_label: str) -> bool:
-    return pull_request.get("state") == "open" and enable_label in _labels(pull_request)
+def _preview_eligible(pull_request: dict[str, object]) -> bool:
+    """A preview stays up until its PR closes or merges; drafts and labels play no part."""
+    return pull_request.get("state") == "open"
 
 
 def _labels(pull_request: dict[str, object]) -> set[str]:

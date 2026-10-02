@@ -25,7 +25,7 @@ export interface MergeTrainTargetOption {
 }
 
 export const ISSUE_RECONCILIATION_BROWSER_BOUNDARY =
-  "Browser reconciliation is unsupported. The service route requires the native GitHub Actions OIDC or trusted owner-agent write identity boundary and is intentionally absent from the generated browser write contract.";
+  "Browser reconciliation is unsupported. The service route requires the native GitHub Actions OIDC or trusted Director-agent write identity boundary and is intentionally absent from the generated browser write contract.";
 
 export const MERGE_TRAIN_BROWSER_BOUNDARY =
   "Merge-train worker mutations are not browser operations. This route reads policy and controller evidence only and never executes a worker route dynamically.";

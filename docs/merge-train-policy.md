@@ -22,14 +22,14 @@ steps below describe the current GitHub adapter:
 5. If the candidate fails or cannot be built, split or reduce the batch to
    isolate blockers, then mark or requeue entries according to policy.
 
-Until the batch candidate and landing records exist, docs and operators should
+Until the batch candidate and landing records exist, docs and admins should
 describe the live implementation as the ordered merge queue baseline.
 
 Launchplane merge trains use an explicit repository policy before any worker is
 allowed to enqueue, update, or merge pull requests. Live service routes resolve
 the active `launchplane_merge_train_policies` record from Launchplane storage.
 If no active record exists, service routes fail closed with
-`merge_train_policy_not_configured`. Operators change live policy by writing a
+`merge_train_policy_not_configured`. Admins change live policy by writing a
 new DB-backed policy record, not by relying on checked-in config files,
 service-host env, or generic service-code conditionals.
 
@@ -46,7 +46,7 @@ without reconstructing the active policy. The supported service surface is:
 
 Both routes use the existing descriptor's managed human proposal authority;
 the POST also requires the normal browser mutation and CSRF checks. They do not
-introduce an authorization-policy administrator requirement. Repository names
+introduce an authorization-policy admin requirement. Repository names
 come from current unambiguous tracked inventory. The caller supplies labels,
 merge method, review and failure policy, enqueue rules, and merge-identity
 metadata. An optional provider-protection expectation is a reviewed input;
@@ -77,7 +77,7 @@ eligibility, and activation evidence. `merge_identity` is policy metadata for
 this path, not proof of an installed App or credential. The shared
 `service_authz` gate does not select or grant a repository. Preparing or
 installing this policy does not activate an ordinary worker, create credentials,
-or establish preview readiness. Site Owners do not use this engineering
+or establish preview readiness. Clients do not use this engineering
 administration surface.
 
 ## Credential Source And Policy Readback
@@ -144,8 +144,8 @@ The target-list route remains the smaller scoped summary.
 Scheduler merge train admission (`merge_train_admission`) governs pull request queueing, batch candidate construction, and landing order under active `launchplane_merge_train_policies` records.
 
 Tenant merge eligibility (`evaluate_tenant_merge_eligibility`) and repository classification records (`launchplane_tenant_repository_classifications`) operate independently under their own DB authority:
-- Repository classifications explicitly categorize repositories as `engineering` (taking the normal engineering fast path) or `tenant_ui` (requiring one exact-head manager-preview, technical-human-waiver, or trusted-maintenance path).
-- Repository classifications use exact immutable identity and CAS operator recovery without heuristics or PR label fallback.
+- Repository classifications explicitly categorize repositories as `engineering` (taking the normal engineering fast path) or `tenant_ui`; both take the normal technical merge flow, and retired human admission paths do not qualify a merge.
+- Repository classifications use exact immutable identity and CAS admin recovery without heuristics or PR label fallback.
 - Unified tenant admission is recomputed from DB records. The GitHub `tenant-admission` commit status is a public projection, not merge authority.
 - The tenant admission controller is a separate exact-PR landing path. It re-fetches current GitHub identity/head/mergeability facts, recomputes admission, reads the live required-status-check policy, filters admission projection contexts out of that policy, enforces strict base freshness when configured, and rechecks all three immediately before an expected-SHA merge. Missing or malformed required-check policy or evidence fails closed. It does not enqueue work or reuse scheduler ordering, labels, batch candidates, stack collapse, or failure policy.
 - The tenant controller and merge train share the repository/base controller-state row only as a mutual-exclusion and crash-reconciliation fence. Acquisition writes a controller-specific initial action atomically and adoption is action-aware, so one controller cannot rewrite another controller's unfinished recovery state even before its first checkpoint. The row cannot make a tenant admission decision and a green GitHub status is never merge authority.
@@ -158,9 +158,9 @@ Tenant merge eligibility (`evaluate_tenant_merge_eligibility`) and repository cl
 ## Controller Lease And Resume State
 
 Mutating controller passes are fenced by a Launchplane-owned repository/base
-controller lease record. One controller owner may actively mutate one
-`repository/base_branch` pair at a time; a second owner must fail closed while
-the current lease is still valid. The lease record stores owner, expiry,
+controller lease record. One controller lease holder may actively mutate one
+`repository/base_branch` pair at a time; a second holder must fail closed while
+the current lease is still valid. The lease record stores holder, expiry,
 active action/phase, and reconciliation detail under Launchplane storage, not
 in workflow inputs or checked-in config.
 
@@ -178,10 +178,10 @@ controller stops in `reconcile_required` state instead of continuing
 optimistically.
 
 Reconciliation detail distinguishes retryable provider interruptions from
-operator-required conflicts. Retryable states retain the exact active phase and
+admin-required conflicts. Retryable states retain the exact active phase and
 may be adopted by the next mutating controller pass. Deterministic policy,
 expected-SHA, or provider rejection states use an `operator_required:` detail
-so operators can repair the repository or provider condition before retrying
+so admins can repair the repository or provider condition before retrying
 through the service. The next mutating controller pass adopts that exact phase
 and re-observes provider state; no out-of-band record edit is required or
 supported. Read-only controller calls report either state without acquiring or
@@ -205,8 +205,8 @@ provider evidence still require explicit reconciliation.
 Lease expiry semantics are fail closed. PostgreSQL observes acquisition,
 heartbeat, and expiry time inside the advisory-locked transaction rather than
 trusting a caller timestamp. Once a lease expires and another controller
-acquires the same repository/base fence, the stale owner cannot heartbeat,
-checkpoint, or release because every transition compares both owner and
+acquires the same repository/base fence, the stale holder cannot heartbeat,
+checkpoint, or release because every transition compares both holder and
 acquisition token under the same storage lock. Local filesystem rehearsal uses
 an atomic per-controller file lock with the same transition contract.
 
@@ -468,11 +468,11 @@ If the provider has already merged the batch but the exact source-PR completion
 cannot be established, the controller retains the fence and never retires that
 effect as unused. Current recovery requires matching provider evidence; there is
 no automatic service disposition for permanently contradictory source heads.
-Operator diagnostics cover every unresolved member of the shared effect.
+Admin diagnostics cover every unresolved member of the shared effect.
 An out-of-controller merge without preceding admissions, or after conclusive
 rejection of the recorded attempt, likewise remains fenced even when Git proves
 the code landed. It does not retroactively acquire a Launchplane admission. The
-generated PR explicitly instructs operators to let the controller merge it and
+generated PR explicitly instructs admins to let the controller merge it and
 to leave its generated branch unchanged.
 
 ### Stacked Pull Requests
@@ -487,13 +487,13 @@ linear stacks, Launchplane should detect the stack rooted at a PR targeting the
 protected base branch, collapse child changes into that root with explicit
 stored evidence and fresh SHA guards, wait for the root PR to pass required
 checks against the base branch, then admit only the root PR to the flat batch
-train. The root PR's `enqueue_label` is the operator/agent intent: it means
+train. The root PR's `enqueue_label` is the Director/agent intent: it means
 "land this work through Launchplane," including any required same-repository
 linear stack collapse before train admission. Launchplane records a stack
 collapse plan before mutating branches so the root PR, child order, expected
 SHAs, mutation sequence, policy digest, and idempotency evidence remain
 auditable. Ambiguous, forked, cyclic, or unsupported branch-protection cases
-must fail closed with operator-visible reasons.
+must fail closed with admin-visible reasons.
 
 Stack collapse mutates from the leaf PR back toward the root PR. Each child is
 merged into its parent feature branch, and the parent merge commit becomes the
@@ -521,7 +521,7 @@ on the construction ref; no new canonical train ref is published. The controller
 persists that candidate as `failed`, reports the exact pull request reached by the build, and
 releases the controller lease without replaying the rejected merge. The same
 queue-change rule then governs replacement planning; an unchanged queue remains
-stopped for operator attention.
+stopped for Director attention.
 
 An exhausted final-publication readback also fails closed, with no individual
 failed pull request: its checkpoint identifies the publication phase and the
@@ -593,7 +593,7 @@ context = "launchplane"
 env_var = "GH_TOKEN"
 ```
 
-## Operator Changes
+## Admin Changes
 
 To add or change a repository policy without editing generic service logic,
 import a new active `launchplane_merge_train_policies` record. The service
@@ -613,8 +613,8 @@ unknown field. A rollback must first restore an empty, old-compatible allowlist
 while the newer service is still running.
 
 Prepare a TOML payload with every repository/base policy the service should
-support, store it outside the repo or generate it from operator automation, then
-import it through the deployed service API. GitHub Actions operator workflows
+support, store it outside the repo or generate it from admin automation, then
+import it through the deployed service API. GitHub Actions admin workflows
 should build the JSON request with Launchplane's typed CLI and call the shared
 `launchplane-request` action rather than fetching GitHub OIDC tokens in shell:
 
@@ -636,9 +636,8 @@ uv run launchplane merge-train-policies build-import-request \
     idempotency-key: merge-train-policy-import:${{ github.run_id }}
 ```
 
-During the `#2058` authorization freeze, reviewed merge-train policy changes
-use the typed `managed-merge-train-policy-import` privileged-operation path
-instead of adding workflow, local-operator, or local-admin
+Reviewed merge-train policy changes use the typed `managed-merge-train-policy-import` privileged-operation path
+instead of adding workflow, `local-operator`, or local-admin
 `merge_train.policy_import` authority. The privileged-operation proposal accepts
 one complete candidate record and produces redacted active/candidate digests,
 target counts, and stable policy-key changes. A signed-in immutable-ID GitHub
@@ -656,7 +655,7 @@ approved database-repair procedure, updating both the promoted `status` column
 and `payload.status`, then rerun the migration; do not use an ordinary import as
 a migration-repair shortcut.
 
-For local operator terminals, the compatibility CLI import path still reads the
+For local admin terminals, the compatibility CLI import path still reads the
 bearer token from `LAUNCHPLANE_SERVICE_TOKEN` unless a browser
 `--session-cookie` is supplied:
 
@@ -703,7 +702,7 @@ uv run launchplane work-graph merge-train-policy \
   --base-branch main
 ```
 
-Operators can validate an external TOML before importing it as a policy record:
+Admins can validate an external TOML before importing it as a policy record:
 
 ```sh
 uv run launchplane work-graph merge-train-policy \
@@ -737,7 +736,7 @@ The deployed Launchplane service projects the work-graph GitHub credential into
 imported policies normally reference that same explicit GitHub credential source.
 
 Passing `--mutate` applies exactly one ordered-queue worker transition from that
-fresh snapshot. Use it only from the intended operator environment for the smoke
+fresh snapshot. Use it only from the intended admin environment for the smoke
 or configured target; the command is a narrow bootstrap surface, not the full
 batch train scheduler.
 
@@ -798,7 +797,7 @@ candidate SHA. Landing the original PRs remains a later PR-native phase with
 separate records.
 
 The controller service endpoint
-`POST /v1/work-graph/merge-train/controller/run-once` is the preferred operator
+`POST /v1/work-graph/merge-train/controller/run-once` is the preferred admin
 entrypoint for the full train. It accepts the same repository/base selector and
 `mutate` flag as the Level 1 route, but chooses the next safe batch phase from
 the latest DB-backed records. Repeated calls can drive an unstacked train through
@@ -898,7 +897,7 @@ Controller actions have these retry/stop semantics:
   creation. Mutate once, then call again.
 - `land_batch`: A landing plan with planned or in-progress merge entries is
   ready to merge or resume the original PRs in order. Mutate once only after
-  operator intent; call again to verify terminal state.
+  Director intent; call again to verify terminal state.
 - `batch_landed`: The batch already landed. Stop; the train phase is complete
   for that batch.
 - `block`: The selected PR is blocked by conflicts or failed checks. Stop and
@@ -919,7 +918,7 @@ stop on terminal or attention states: `batch_landed`, `candidate_failed`,
 should include `error.code`, `trace_id`, and the retry/stop recommendation, not
 the original request body.
 
-Schedulers and operators report train progress through
+Schedulers and admins report train progress through
 `POST /v1/work-graph/merge-train/pr-feedback`. The route accepts a
 repository/base selector, pull request number, feedback event, and optional
 controller action, record id, and message. Launchplane renders one managed
@@ -964,14 +963,14 @@ enters a durable cleanup phase for the generated `launchplane/train/...`
 candidate branch ref. Missing candidate refs are treated as already-clean so
 landing retries remain idempotent. A cleanup failure does not roll back the
 persisted landing result, but the controller remains `reconcile_required` with
-the cleanup phase and candidate ref intact. The next owner resumes that exact
+the cleanup phase and candidate ref intact. The next lease holder resumes that exact
 phase before planning new train work.
 
 ### Guarded Level 3 landing
 
 Controller landing and direct batch landing use the same per-entry guarded
 boundary documented in [merge-admission.md](merge-admission.md). Immediately
-before each provider merge, Launchplane re-resolves current Owner,
+before each provider merge, Launchplane re-resolves current Client,
 change-impact, engineering-review, technical-check, policy, candidate, queue,
 rolling-base, head/tree, lease, and expected-effect evidence. It persists one
 immutable admission before mutation and a separate truthful landing outcome
@@ -1002,11 +1001,11 @@ controller status read below accept either the repository policy's
 identity that may not run the train can still explain why it refused a pull
 request.
 
-Operator views can read the broader stored controller state from the native
+Admin views can read the broader stored controller state from the native
 FastAPI route
 `GET /v1/work-graph/merge-train/controller/status?repository=owner/name&base_branch=main`.
 That route returns the same admission decision plus the latest Level 1 run record,
-controller owner, active action and phase, lease and heartbeat age, reconciliation
+controller lease holder, active action and phase, lease and heartbeat age, reconciliation
 state, and compact summaries for active batch candidates, landing plans, and
 stack collapse plans. When the latest run is dry-run evidence, the response also
 includes a compact queue summary with the intended next action, selected PR,
@@ -1044,7 +1043,7 @@ that the provider still agrees.
 
 The existing repository policy's `service_authz` authorizes this bounded
 controller diagnostic, as it does the controller's reconciliation errors. It
-does not expose Owner decisions, engineering review/readiness payloads, or the
+does not expose Client decisions, engineering review/readiness payloads, or the
 full governance projection. Reading it performs no provider calls or writes and
 cannot reconcile a landing, create an admission, change policy, or release the
 controller fence. Recovery requires its own supported action and current
@@ -1097,7 +1096,7 @@ closed if another identity-bearing phase result disagrees.
 
 ## Scheduler rollout runbook
 
-Roll out controller-mode scheduling as an operator-controlled lane. The service
+Roll out controller-mode scheduling as an admin-controlled lane. The service
 must already have an active merge-train policy for the target repository/base
 branch, the deployed authz grants must allow `.github/workflows/merge-train-runner.yml`
 to read admission and run the selected worker route, and the target repository
@@ -1125,11 +1124,11 @@ deferred admission response, `runner_mode=controller`, `mutate=false`, and a
 controller result whose mode is `dry-run`. Dry-run controller passes may render
 feedback payloads for inspection, but they must report zero delivered feedback
 comments and must not create or update Launchplane-managed PR comments. The
-operator UI controller status panel or the controller-status route should show
+Launchplane UI controller status panel or the controller-status route should show
 the same active records, stale-record reasons, latest run result, and next
 controller action without requiring a GitHub read.
 
-Enable mutation only after an operator explicitly chooses to promote the dry-run
+Enable mutation only after the Director explicitly chooses to promote the dry-run
 lane. Import a replacement active policy record with `scheduler.mutate = true`
 for that promotion and confirm that service deploy health, required checks,
 runner capacity, and target PR heads are still current. A mutate run still

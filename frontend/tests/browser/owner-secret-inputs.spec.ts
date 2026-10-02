@@ -23,7 +23,7 @@ test("Owner input clears before dispatch and a receipt survives reload without t
   await page.goto("/ui/owner-secrets?product=example-site&environment=testing");
   await page.getByLabel("Mail credential", { exact: true }).fill("sample-app-credential");
   await page.getByRole("button", { name: "Save credential" }).click();
-  await expect(page.getByRole("status")).toHaveText("Credential received. The operator can now apply it.");
+  await expect(page.getByRole("status")).toHaveText("Credential received. An admin can now apply it.");
   await expect(page.locator("body")).not.toContainText("sample-app-credential");
   await page.reload();
   await expect(page.getByText("Last received:", { exact: false })).toBeVisible();

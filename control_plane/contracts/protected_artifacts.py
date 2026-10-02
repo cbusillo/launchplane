@@ -3,6 +3,10 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.deployment_record import (
+    DeploymentRecord,
+    previous_passing_deployment,
+)
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
@@ -13,6 +17,7 @@ from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 
 ProtectedArtifactReason = Literal[
     "stable-inventory",
+    "previous-good-deployment",
     "release-tuple",
     "active-preview-generation",
     "active-preview-feedback",
@@ -74,6 +79,14 @@ class ProtectedArtifactStore(Protocol):
     def list_artifact_manifests(self) -> tuple[ArtifactIdentityManifest, ...]: ...
 
     def list_environment_inventory(self) -> tuple[EnvironmentInventory, ...]: ...
+
+    def list_deployment_records(
+        self,
+        *,
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[DeploymentRecord, ...]: ...
 
     def list_product_profile_records(self) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
 
@@ -288,6 +301,96 @@ def _stable_inventory_entries(
     return entries, warnings
 
 
+def _stable_lanes(
+    record_store: ProtectedArtifactStore,
+    *,
+    profiles: tuple[LaunchplaneProductProfileRecord, ...],
+    profile_map: dict[str, LaunchplaneProductProfileRecord],
+    product: str,
+    context_name: str,
+) -> list[tuple[str, str, str]]:
+    lanes: list[tuple[str, str, str]] = []
+    for profile in profiles:
+        for lane in profile.lanes:
+            lanes.append((profile.product, lane.context, lane.instance))
+    for inventory in record_store.list_environment_inventory():
+        lanes.append(
+            (
+                _product_for_context(profile_map, inventory.context),
+                inventory.context,
+                inventory.instance,
+            )
+        )
+    selected: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for lane_product, lane_context, lane_instance in lanes:
+        if product and lane_product != product:
+            continue
+        if context_name and lane_context != context_name:
+            continue
+        if (lane_context, lane_instance) in seen:
+            continue
+        seen.add((lane_context, lane_instance))
+        selected.append((lane_product, lane_context, lane_instance))
+    return selected
+
+
+def _previous_good_deployment_entries(
+    record_store: ProtectedArtifactStore,
+    *,
+    profiles: tuple[LaunchplaneProductProfileRecord, ...],
+    profile_map: dict[str, LaunchplaneProductProfileRecord],
+    manifests: dict[str, ArtifactIdentityManifest],
+    product: str,
+    context_name: str,
+) -> tuple[list[ProtectedArtifactEntry], list[str]]:
+    """Protect the artifact a default rollback of each stable lane would deploy."""
+
+    entries: list[ProtectedArtifactEntry] = []
+    warnings: list[str] = []
+    for lane_product, lane_context, lane_instance in _stable_lanes(
+        record_store,
+        profiles=profiles,
+        profile_map=profile_map,
+        product=product,
+        context_name=context_name,
+    ):
+        record = previous_passing_deployment(
+            record_store.list_deployment_records(
+                context_name=lane_context, instance_name=lane_instance
+            )
+        )
+        if record is None or record.artifact_identity is None:
+            continue
+        artifact_id = record.artifact_identity.artifact_id
+        manifest = manifests.get(artifact_id)
+        if manifest is None:
+            warnings.append(_missing_manifest_warning(artifact_id, "deployment"))
+        runtime_image_reference = ""
+        if record.runtime_identity and record.runtime_identity.image_reference:
+            runtime_image_reference = record.runtime_identity.image_reference
+        entries.append(
+            ProtectedArtifactEntry(
+                product=lane_product,
+                context=lane_context,
+                instance=lane_instance,
+                environment_kind="stable",
+                artifact_id=artifact_id,
+                image_references=_entry_image_references(
+                    manifest=manifest,
+                    runtime_image_reference=runtime_image_reference,
+                ),
+                source_git_ref=record.source_git_ref,
+                reason="previous-good-deployment",
+                source_record_type="deployment",
+                source_record_id=record.record_id,
+                image_repository=manifest.image.repository if manifest is not None else "",
+                image_digest=manifest.image.digest if manifest is not None else "",
+            )
+        )
+    return entries, warnings
+
+
 def _release_tuple_entries(
     record_store: ProtectedArtifactStore,
     *,
@@ -434,6 +537,14 @@ def build_protected_artifact_set(
         product=normalized_product,
         context_name=normalized_context,
     )
+    previous_good_entries, previous_good_warnings = _previous_good_deployment_entries(
+        record_store,
+        profiles=profiles,
+        profile_map=profile_map,
+        manifests=manifests,
+        product=normalized_product,
+        context_name=normalized_context,
+    )
     release_tuple_entries, release_tuple_warnings = _release_tuple_entries(
         record_store,
         profile_map=profile_map,
@@ -448,13 +559,25 @@ def build_protected_artifact_set(
         product=normalized_product,
         context_name=normalized_context,
     )
-    entries = [*stable_entries, *release_tuple_entries, *preview_entries]
+    entries = [
+        *stable_entries,
+        *previous_good_entries,
+        *release_tuple_entries,
+        *preview_entries,
+    ]
     artifact_ids = _normalized_values([entry.artifact_id for entry in entries])
     image_references = _normalized_values(
         [image_reference for entry in entries for image_reference in entry.image_references]
     )
     image_digests = _normalized_values([entry.image_digest for entry in entries])
-    warnings = _normalized_values([*stable_warnings, *release_tuple_warnings, *preview_warnings])
+    warnings = _normalized_values(
+        [
+            *stable_warnings,
+            *previous_good_warnings,
+            *release_tuple_warnings,
+            *preview_warnings,
+        ]
+    )
     return ProtectedArtifactSet(
         product=normalized_product,
         context=normalized_context,

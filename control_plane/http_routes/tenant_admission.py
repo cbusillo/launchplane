@@ -24,34 +24,11 @@ from control_plane.http_routes.support import (
     HttpErrorFactory,
     ReadRouteDependencies,
 )
-from control_plane.contracts.repository_human_admission import (
-    REPOSITORY_HUMAN_ROLE_POLICY_READ_ACTION,
-    REPOSITORY_HUMAN_ROLE_POLICY_WRITE_ACTION,
-)
 from control_plane.contracts.trusted_maintenance import (
     TRUSTED_MAINTENANCE_POLICY_READ_ACTION,
     TRUSTED_MAINTENANCE_POLICY_WRITE_ACTION,
 )
 from control_plane.contracts.tenant_merge_eligibility import TenantMergeCandidate
-from control_plane.repository_human_admission import (
-    RepositoryHumanRolePolicyApplyEnvelope,
-    RepositoryHumanRolePolicyApplyResult,
-    RepositoryHumanRolePolicyConflictError,
-    RepositoryHumanRolePolicyReadModel,
-    RepositoryHumanRolePolicySequenceError,
-    TenantTechnicalHumanWaiverApplyEnvelope,
-    TenantTechnicalHumanWaiverApplyResult,
-    TenantTechnicalHumanWaiverAuthorizationError,
-    TenantTechnicalHumanWaiverEventConflictError,
-    TenantTechnicalHumanWaiverRevokeCurrentError,
-    TenantTechnicalHumanWaiverStaleAuthorityError,
-    apply_tenant_technical_human_waiver,
-    apply_repository_human_role_policy,
-    get_repository_human_role_policy_read_model,
-    normalize_repository_human_role_policy_lookup_scope,
-    require_repository_human_role_policy_read_store,
-    require_tenant_technical_human_waiver_authority_read_store,
-)
 from control_plane.service_auth import (
     GitHubHumanIdentity,
     LaunchplaneIdentity,
@@ -110,9 +87,9 @@ from control_plane.trusted_maintenance import (
     TrustedMaintenancePolicySequenceError,
     apply_trusted_maintenance_policy,
     get_trusted_maintenance_policy_read_model,
+    normalize_trusted_maintenance_policy_lookup_scope,
     require_trusted_maintenance_policy_read_store,
 )
-from control_plane.workflows.ship import utc_now_timestamp
 
 TENANT_REPOSITORY_CLASSIFICATION_READ_ROUTE = (
     "/v1/work-graph/tenant-admission/repository-classification"
@@ -120,15 +97,8 @@ TENANT_REPOSITORY_CLASSIFICATION_READ_ROUTE = (
 TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE = (
     "/v1/tenant-admission/repository-classifications/apply"
 )
-REPOSITORY_HUMAN_ROLE_POLICY_READ_ROUTE = (
-    "/v1/work-graph/tenant-admission/repository-human-role-policy"
-)
-REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE = (
-    "/v1/tenant-admission/repository-human-role-policies/apply"
-)
 TRUSTED_MAINTENANCE_POLICY_READ_ROUTE = "/v1/work-graph/tenant-admission/trusted-maintenance-policy"
 TRUSTED_MAINTENANCE_POLICY_APPLY_ROUTE = "/v1/tenant-admission/trusted-maintenance-policies/apply"
-TENANT_TECHNICAL_HUMAN_WAIVER_APPLY_ROUTE = "/v1/tenant-admission/technical-human-waivers/apply"
 TENANT_ADMISSION_STATUS_READ_ROUTE = "/v1/work-graph/tenant-admission/status"
 TENANT_ADMISSION_EVALUATION_READ_ROUTE = "/v1/work-graph/tenant-admission/evaluation"
 TENANT_ADMISSION_STATUS_RECONCILE_ROUTE = "/v1/tenant-admission/status/reconcile"
@@ -180,30 +150,6 @@ class TenantRepositoryClassificationApplyResponse(BaseModel):
     )
 
 
-class RepositoryHumanRolePolicyReadResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    read_model: RepositoryHumanRolePolicyReadModel
-
-
-class RepositoryHumanRolePolicyApplyResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    result: RepositoryHumanRolePolicyApplyResult
-    replayed: bool | None = Field(
-        default=None,
-        json_schema_extra={"x-launchplane-optional-response": True},
-    )
-    original_trace_id: str | None = Field(
-        default=None,
-        json_schema_extra={"x-launchplane-optional-response": True},
-    )
-
-
 class TrustedMaintenancePolicyReadResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -218,22 +164,6 @@ class TrustedMaintenancePolicyApplyResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     result: TrustedMaintenancePolicyApplyResult
-    replayed: bool | None = Field(
-        default=None,
-        json_schema_extra={"x-launchplane-optional-response": True},
-    )
-    original_trace_id: str | None = Field(
-        default=None,
-        json_schema_extra={"x-launchplane-optional-response": True},
-    )
-
-
-class TenantTechnicalHumanWaiverApplyResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    result: TenantTechnicalHumanWaiverApplyResult
     replayed: bool | None = Field(
         default=None,
         json_schema_extra={"x-launchplane-optional-response": True},
@@ -506,65 +436,6 @@ def register_tenant_admission_read_routes(
             read_model=read_model,
         )
 
-    def read_repository_human_role_policy(
-        repository_id: Annotated[str, Query(..., alias="repository_id")],
-        product: Annotated[str, Query(..., alias="product")],
-        context: Annotated[str, Query(..., alias="context")],
-        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
-        record_store: Annotated[object, Depends(common.get_record_store)],
-    ) -> RepositoryHumanRolePolicyReadResponse:
-        trace_id = common.next_trace_id()
-        try:
-            normalized_repository_id, normalized_product, normalized_context = (
-                normalize_repository_human_role_policy_lookup_scope(
-                    repository_id=repository_id,
-                    product=product,
-                    context=context,
-                )
-            )
-        except ValueError as error:
-            raise common.http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message=str(error),
-            ) from error
-
-        if not common.authorization_allows(
-            identity=identity,
-            action=REPOSITORY_HUMAN_ROLE_POLICY_READ_ACTION,
-            product=normalized_product,
-            context=normalized_context,
-            target=AuthorizationTarget(scope="context"),
-        ):
-            raise common.http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot read repository human role policies.",
-            )
-
-        try:
-            store = require_repository_human_role_policy_read_store(record_store)
-        except TypeError as error:
-            raise common.http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-
-        read_model = get_repository_human_role_policy_read_model(
-            repository_id=normalized_repository_id,
-            product=normalized_product,
-            context=normalized_context,
-            store=store,
-        )
-        return RepositoryHumanRolePolicyReadResponse(
-            trace_id=trace_id,
-            read_model=read_model,
-        )
-
     def read_trusted_maintenance_policy(
         repository_id: Annotated[str, Query(..., alias="repository_id")],
         product: Annotated[str, Query(..., alias="product")],
@@ -575,7 +446,7 @@ def register_tenant_admission_read_routes(
         trace_id = common.next_trace_id()
         try:
             normalized_repository_id, normalized_product, normalized_context = (
-                normalize_repository_human_role_policy_lookup_scope(
+                normalize_trusted_maintenance_policy_lookup_scope(
                     repository_id=repository_id,
                     product=product,
                     context=context,
@@ -671,21 +542,6 @@ def register_tenant_admission_read_routes(
     )
 
     app.add_api_route(
-        REPOSITORY_HUMAN_ROLE_POLICY_READ_ROUTE,
-        read_repository_human_role_policy,
-        methods=["GET"],
-        response_model=RepositoryHumanRolePolicyReadResponse,
-        operation_id="read_repository_human_role_policy",
-        summary="Read current repository human role-policy read model",
-        responses={
-            400: {"model": common.error_response_model},
-            401: {"model": common.error_response_model},
-            403: {"model": common.error_response_model},
-            503: {"model": common.error_response_model},
-        },
-    )
-
-    app.add_api_route(
         TRUSTED_MAINTENANCE_POLICY_READ_ROUTE,
         read_trusted_maintenance_policy,
         methods=["GET"],
@@ -706,8 +562,6 @@ def register_tenant_admission_write_routes(
     *,
     dependencies: TenantAdmissionWriteRouteDependencies,
 ) -> None:
-    def _human_waiver_idempotency_scope(identity: GitHubHumanIdentity) -> str:
-        return f"github-human-id|{identity.github_id}"
 
     async def run_tenant_admission_controller_once_route(
         envelope: TenantAdmissionControllerRunOnceEnvelope,
@@ -908,69 +762,6 @@ def register_tenant_admission_write_routes(
             ),
         )
 
-    def _map_waiver_apply_write_result(
-        *,
-        trace_id: str,
-        write_result: object,
-    ) -> TenantTechnicalHumanWaiverApplyResponse:
-        status = getattr(write_result, "status", "")
-        idempotency_record = getattr(write_result, "idempotency_record", None)
-        if status == "idempotency_conflict":
-            raise dependencies.http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="idempotency_key_reused",
-                message=(
-                    "Idempotency-Key was already used for a different Launchplane "
-                    "request payload on this route."
-                ),
-            )
-        if status == "replayed":
-            if idempotency_record is None:
-                raise dependencies.http_error(
-                    status_code=500,
-                    trace_id=trace_id,
-                    code="internal_error",
-                    message="Tenant technical human waiver replay missing stored response.",
-                )
-            payload = dict(idempotency_record.response_payload)
-            payload["replayed"] = True
-            payload["original_trace_id"] = idempotency_record.response_trace_id
-            return TenantTechnicalHumanWaiverApplyResponse.model_validate(payload)
-        if status == "reservation_in_progress":
-            raise dependencies.http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="mutation_in_progress",
-                message="Tenant technical human waiver apply is already in progress.",
-            )
-        if status == "reconciliation_required":
-            raise dependencies.http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="mutation_reconciliation_required",
-                message="Tenant technical human waiver apply requires reconciliation before retry.",
-            )
-        if status in {"written", "exact_replay"}:
-            result = getattr(write_result, "result", None)
-            if not isinstance(result, TenantTechnicalHumanWaiverApplyResult):
-                raise dependencies.http_error(
-                    status_code=500,
-                    trace_id=trace_id,
-                    code="internal_error",
-                    message="Tenant technical human waiver apply missing result.",
-                )
-            return TenantTechnicalHumanWaiverApplyResponse(
-                trace_id=trace_id,
-                result=result,
-            )
-        raise dependencies.http_error(
-            status_code=500,
-            trace_id=trace_id,
-            code="internal_error",
-            message="Tenant technical human waiver apply returned an unknown result.",
-        )
-
     def _map_trusted_maintenance_policy_write_result(
         *,
         trace_id: str,
@@ -1032,162 +823,6 @@ def register_tenant_admission_write_routes(
             trace_id=trace_id,
             code="internal_error",
             message="Trusted-maintenance policy apply returned an unknown result.",
-        )
-
-    async def apply_tenant_technical_human_waiver_route(
-        request: Request,
-        envelope: TenantTechnicalHumanWaiverApplyEnvelope,
-        identity: Annotated[
-            LaunchplaneIdentity,
-            Depends(dependencies.read_browser_mutation_identity),
-        ],
-        record_store: Annotated[object, Depends(dependencies.get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> TenantTechnicalHumanWaiverApplyResponse:
-        trace_id = dependencies.next_trace_id()
-        if not isinstance(identity, GitHubHumanIdentity) or identity.github_id < 1:
-            raise dependencies.http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Tenant technical human waiver requires a browser GitHub human session.",
-            )
-
-        if envelope.mode == "apply":
-            normalized_idempotency_key = idempotency_key.strip()
-            if not normalized_idempotency_key:
-                raise dependencies.http_error(
-                    status_code=400,
-                    trace_id=trace_id,
-                    code="idempotency_key_required",
-                    message="Apply operation requires an Idempotency-Key header.",
-                )
-            if (
-                not isinstance(record_store, PostgresRecordStore)
-                or record_store.database_dialect_name != "postgresql"
-            ):
-                raise dependencies.http_error(
-                    status_code=503,
-                    trace_id=trace_id,
-                    code="database_storage_required",
-                    message=(
-                        "Tenant technical human waiver apply requires PostgreSQL-backed "
-                        "Launchplane storage."
-                    ),
-                )
-            raw_payload = await request.json()
-            payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
-            response_payload: dict[str, object] = {"status": "ok", "trace_id": trace_id}
-            try:
-                write_result = record_store.compare_and_write_tenant_technical_human_waiver_event(
-                    identity=identity,
-                    envelope=envelope,
-                    mutation=DbOnlyMutationRequest(
-                        scope=_human_waiver_idempotency_scope(identity),
-                        route_path=TENANT_TECHNICAL_HUMAN_WAIVER_APPLY_ROUTE,
-                        idempotency_key=normalized_idempotency_key,
-                        request_fingerprint=payload_fingerprint,
-                        lease_owner=trace_id,
-                        response_status_code=202,
-                        response_trace_id=trace_id,
-                        response_payload=response_payload,
-                    ),
-                )
-            except TenantTechnicalHumanWaiverAuthorizationError as error:
-                raise dependencies.http_error(
-                    status_code=403,
-                    trace_id=trace_id,
-                    code="authorization_denied",
-                    message=str(error),
-                ) from error
-            except TenantTechnicalHumanWaiverStaleAuthorityError as error:
-                raise dependencies.http_error(
-                    status_code=409,
-                    trace_id=trace_id,
-                    code="stale_authority",
-                    message=str(error),
-                ) from error
-            except TenantTechnicalHumanWaiverRevokeCurrentError as error:
-                raise dependencies.http_error(
-                    status_code=409,
-                    trace_id=trace_id,
-                    code="revoke_not_current",
-                    message=str(error),
-                ) from error
-            except TenantTechnicalHumanWaiverEventConflictError as error:
-                raise dependencies.http_error(
-                    status_code=409,
-                    trace_id=trace_id,
-                    code="waiver_lifecycle_conflict",
-                    message=str(error),
-                ) from error
-            except ValueError as error:
-                raise dependencies.http_error(
-                    status_code=400,
-                    trace_id=trace_id,
-                    code="invalid_request",
-                    message=str(error),
-                ) from error
-            return _map_waiver_apply_write_result(
-                trace_id=trace_id,
-                write_result=write_result,
-            )
-
-        try:
-            read_store = require_tenant_technical_human_waiver_authority_read_store(record_store)
-        except TypeError as error:
-            raise dependencies.http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-
-        try:
-            result = apply_tenant_technical_human_waiver(
-                store=read_store,
-                identity=identity,
-                envelope=envelope,
-                observed_at=utc_now_timestamp(),
-            )
-        except TenantTechnicalHumanWaiverAuthorizationError as error:
-            raise dependencies.http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message=str(error),
-            ) from error
-        except TenantTechnicalHumanWaiverStaleAuthorityError as error:
-            raise dependencies.http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="stale_authority",
-                message=str(error),
-            ) from error
-        except TenantTechnicalHumanWaiverRevokeCurrentError as error:
-            raise dependencies.http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="revoke_not_current",
-                message=str(error),
-            ) from error
-        except TenantTechnicalHumanWaiverEventConflictError as error:
-            raise dependencies.http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="waiver_lifecycle_conflict",
-                message=str(error),
-            ) from error
-        except ValueError as error:
-            raise dependencies.http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message=str(error),
-            ) from error
-        return TenantTechnicalHumanWaiverApplyResponse(
-            trace_id=trace_id,
-            result=result,
         )
 
     async def apply_tenant_repository_classification_route(
@@ -1558,220 +1193,6 @@ def register_tenant_admission_write_routes(
             result=result,
         )
 
-    async def apply_repository_human_role_policy_route(
-        request: Request,
-        envelope: RepositoryHumanRolePolicyApplyEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_write_identity)],
-        record_store: Annotated[object, Depends(dependencies.get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> RepositoryHumanRolePolicyApplyResponse:
-        trace_id = dependencies.next_trace_id()
-
-        if isinstance(identity, TerminalAgentIdentity):
-            raise dependencies.http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Terminal agent credentials cannot apply repository human role policies.",
-            )
-
-        if not dependencies.authorization_allows(
-            identity=identity,
-            action=REPOSITORY_HUMAN_ROLE_POLICY_WRITE_ACTION,
-            product=envelope.record.product,
-            context=envelope.record.context,
-            target=AuthorizationTarget(scope="context"),
-        ):
-            raise dependencies.http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Caller lacks permission to apply repository human role policies.",
-            )
-
-        if envelope.mode == "apply":
-            normalized_idempotency_key = idempotency_key.strip()
-            if not normalized_idempotency_key:
-                raise dependencies.http_error(
-                    status_code=400,
-                    trace_id=trace_id,
-                    code="idempotency_key_required",
-                    message="Apply operation requires an Idempotency-Key header.",
-                )
-
-            if (
-                not isinstance(record_store, PostgresRecordStore)
-                or record_store.database_dialect_name != "postgresql"
-            ):
-                raise dependencies.http_error(
-                    status_code=503,
-                    trace_id=trace_id,
-                    code="database_storage_required",
-                    message=(
-                        "Repository human role-policy apply requires PostgreSQL-backed "
-                        "Launchplane storage."
-                    ),
-                )
-
-            store = record_store
-            normalized_scope = idempotency_scope(identity)
-            raw_payload = await request.json()
-            payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
-            applied_result = RepositoryHumanRolePolicyApplyResult(
-                status="applied",
-                mode="apply",
-                repository_id=envelope.record.repository_id,
-                product=envelope.record.product,
-                context=envelope.record.context,
-                role_policy_revision=envelope.record.role_policy_revision,
-                record_id=envelope.record.record_id,
-                role_policy_digest=envelope.record.role_policy_digest,
-                supersedes_record_id=envelope.record.supersedes_record_id,
-                effective_at=envelope.record.effective_at,
-            )
-            replayed_result = applied_result.model_copy(update={"status": "replayed"})
-            response = RepositoryHumanRolePolicyApplyResponse(
-                trace_id=trace_id,
-                result=applied_result,
-            )
-            replay_response = RepositoryHumanRolePolicyApplyResponse(
-                trace_id=trace_id,
-                result=replayed_result,
-            )
-            try:
-                write_result = store.compare_and_write_repository_human_role_policy_record(
-                    record=envelope.record,
-                    expected_current_record_id=envelope.expected_current_record_id,
-                    expected_current_role_policy_digest=(
-                        envelope.expected_current_role_policy_digest
-                    ),
-                    mutation=DbOnlyMutationRequest(
-                        scope=normalized_scope,
-                        route_path=REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE,
-                        idempotency_key=normalized_idempotency_key,
-                        request_fingerprint=payload_fingerprint,
-                        lease_owner=trace_id,
-                        response_status_code=202,
-                        response_trace_id=trace_id,
-                        response_payload=response.model_dump(mode="json"),
-                        replay_response_payload=replay_response.model_dump(mode="json"),
-                    ),
-                )
-            except RepositoryHumanRolePolicyConflictError as error:
-                raise dependencies.http_error(
-                    status_code=409,
-                    trace_id=trace_id,
-                    code="role_policy_conflict",
-                    message=str(error),
-                ) from error
-            except RepositoryHumanRolePolicySequenceError as error:
-                raise dependencies.http_error(
-                    status_code=400,
-                    trace_id=trace_id,
-                    code="invalid_sequence",
-                    message=str(error),
-                ) from error
-            except ValueError as error:
-                raise dependencies.http_error(
-                    status_code=400,
-                    trace_id=trace_id,
-                    code="invalid_request",
-                    message=str(error),
-                ) from error
-
-            if write_result.status == "idempotency_conflict":
-                raise dependencies.http_error(
-                    status_code=409,
-                    trace_id=trace_id,
-                    code="idempotency_key_reused",
-                    message=(
-                        "Idempotency-Key was already used for a different "
-                        "Launchplane request payload on this route."
-                    ),
-                )
-            if write_result.status in {"replayed", "exact_replay"}:
-                if write_result.idempotency_record is None:
-                    raise dependencies.http_error(
-                        status_code=500,
-                        trace_id=trace_id,
-                        code="internal_error",
-                        message="Repository human role-policy replay missing stored response.",
-                    )
-                payload = dict(write_result.idempotency_record.response_payload)
-                if write_result.status == "replayed":
-                    payload["replayed"] = True
-                    payload["original_trace_id"] = write_result.idempotency_record.response_trace_id
-                return RepositoryHumanRolePolicyApplyResponse.model_validate(payload)
-            if write_result.status == "reservation_in_progress":
-                raise dependencies.http_error(
-                    status_code=409,
-                    trace_id=trace_id,
-                    code="mutation_in_progress",
-                    message="Repository human role-policy apply is already in progress.",
-                )
-            if write_result.status == "reconciliation_required":
-                raise dependencies.http_error(
-                    status_code=409,
-                    trace_id=trace_id,
-                    code="mutation_reconciliation_required",
-                    message=(
-                        "Repository human role-policy apply requires reconciliation before retry."
-                    ),
-                )
-            if write_result.status == "written":
-                return response
-            raise dependencies.http_error(
-                status_code=500,
-                trace_id=trace_id,
-                code="internal_error",
-                message="Repository human role-policy apply returned an unknown result.",
-            )
-
-        try:
-            read_store = require_repository_human_role_policy_read_store(record_store)
-        except TypeError as error:
-            raise dependencies.http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-
-        try:
-            result = apply_repository_human_role_policy(
-                store=read_store,
-                record=envelope.record,
-                expected_current_record_id=envelope.expected_current_record_id,
-                expected_current_role_policy_digest=(envelope.expected_current_role_policy_digest),
-                mode="dry_run",
-            )
-        except RepositoryHumanRolePolicyConflictError as error:
-            raise dependencies.http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="role_policy_conflict",
-                message=str(error),
-            ) from error
-        except RepositoryHumanRolePolicySequenceError as error:
-            raise dependencies.http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_sequence",
-                message=str(error),
-            ) from error
-        except ValueError as error:
-            raise dependencies.http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message=str(error),
-            ) from error
-
-        return RepositoryHumanRolePolicyApplyResponse(
-            trace_id=trace_id,
-            result=result,
-        )
-
     app.add_api_route(
         TENANT_ADMISSION_CONTROLLER_RUN_ONCE_ROUTE,
         run_tenant_admission_controller_once_route,
@@ -1807,46 +1228,12 @@ def register_tenant_admission_write_routes(
     )
 
     app.add_api_route(
-        TENANT_TECHNICAL_HUMAN_WAIVER_APPLY_ROUTE,
-        apply_tenant_technical_human_waiver_route,
-        methods=["POST"],
-        status_code=202,
-        response_model=TenantTechnicalHumanWaiverApplyResponse,
-        operation_id="apply_tenant_technical_human_waiver",
-        summary="Apply or dry-run a tenant technical human waiver event",
-        responses={
-            400: {"model": dependencies.error_response_model},
-            401: {"model": dependencies.error_response_model},
-            403: {"model": dependencies.error_response_model},
-            409: {"model": dependencies.error_response_model},
-            503: {"model": dependencies.error_response_model},
-        },
-    )
-
-    app.add_api_route(
         TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE,
         apply_tenant_repository_classification_route,
         methods=["POST"],
         response_model=TenantRepositoryClassificationApplyResponse,
         operation_id="apply_tenant_repository_classification",
         summary="Apply or dry-run a tenant repository classification record",
-        responses={
-            400: {"model": dependencies.error_response_model},
-            401: {"model": dependencies.error_response_model},
-            403: {"model": dependencies.error_response_model},
-            409: {"model": dependencies.error_response_model},
-            503: {"model": dependencies.error_response_model},
-        },
-    )
-
-    app.add_api_route(
-        REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE,
-        apply_repository_human_role_policy_route,
-        methods=["POST"],
-        status_code=202,
-        response_model=RepositoryHumanRolePolicyApplyResponse,
-        operation_id="apply_repository_human_role_policy",
-        summary="Apply or dry-run a repository human role-policy record",
         responses={
             400: {"model": dependencies.error_response_model},
             401: {"model": dependencies.error_response_model},

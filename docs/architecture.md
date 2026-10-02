@@ -10,11 +10,11 @@ title: Architecture
 - Own the authoritative delivery evidence and admission decisions required to
   move exact changes into managed environments.
 
-This repo is the Launchplane implementation and operator surface. Odoo was the
+This repo is the Launchplane implementation and admin surface. Odoo was the
 first product proving ground, and VeriReel is now the second product proof, but
 the durable boundary is Launchplane: an audited, forge-neutral product-delivery
 control plane with DB-backed records, authenticated forge ingress, product
-drivers, provider calls, admission evidence, and operator read models.
+drivers, provider calls, admission evidence, and admin read models.
 
 ## Repo Boundary
 
@@ -33,7 +33,7 @@ drivers, provider calls, admission evidence, and operator read models.
 - Launchplane preview and generation records
 - product drivers for Odoo and VeriReel
 - provider integrations for Dokploy, GHCR, GitHub, health, and backups
-- site Owner product and release decisions, engineering-review evidence, merge admission,
+- Client product and release decisions, engineering-review evidence, merge admission,
   dependency health, and the exact-change/dependency state needed to decide
   whether a change may enter a managed environment
 
@@ -53,7 +53,7 @@ current forge adapter, not Launchplane's permanent product boundary. Future
 adapters may target an open-source or hosted forge without moving Launchplane's
 delivery authority back into the forge.
 
-Each product profile names its site Owner. That person reviews product previews
+Each product profile names its Client. That person reviews product previews
 and the release checklist in Launchplane. These decisions grant no operational
 authority and do not enter machine merge readiness. Production promotion checks
 the separate release approval and backup evidence. See `docs/release-review.md`.
@@ -68,18 +68,18 @@ variation in thin request/config surfaces.
 ## Target Launchplane Shape
 
 - Launchplane should become a long-running control-plane service, expected to live
-  behind an operator-owned stable address.
+  behind an admin-owned stable address.
 - Launchplane should expose authenticated service ingress for runtime evidence,
-  operator actions, and eventually driver-triggered orchestration.
+  admin actions, and eventually driver-triggered orchestration.
 - Forge-issued workload identity should be the default machine-to-machine
   authentication boundary for product workflows talking to Launchplane.
   GitHub Actions OIDC is the first adapter for that contract.
 - Launchplane should authorize workflow callers from verified forge identity
   claims such as repository, workflow, ref, environment, and event context,
   rather than from copied long-lived static tokens.
-- Launchplane core should own durable records, operator read models, auditability,
+- Launchplane core should own durable records, admin read models, auditability,
   and shared orchestration contracts.
-- Launchplane should own forge-neutral Owner, review, dependency, admission, and
+- Launchplane should own forge-neutral Client, review, dependency, admission, and
   landing evidence while projecting checks, comments, and merge operations
   through replaceable forge adapters.
 - Product-specific runtime logic should live behind Launchplane-owned drivers,
@@ -174,7 +174,7 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
   environments. Example: a VeriReel preview workflow may be allowed to write
   preview evidence for `verireel-testing`, while a promotion workflow may be
   allowed to write promotion evidence for production lanes.
-- Human/operator access in Launchplane may still use a separate auth layer, but
+- Human/admin access in Launchplane may still use a separate auth layer, but
   machine evidence ingress should trust workflow identity first.
 - The stable cross-product contract is the typed Launchplane API payload, not the
   particular client used to submit it.
@@ -263,7 +263,7 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
   later promotion enforcement. This model slice does not execute providers or
   replace the existing promotion gate before downstream execution and
   enforcement work lands.
-- Operator-facing status/history reads should also terminate here by composing
+- Admin-facing status/history reads should also terminate here by composing
   inventory, deployment, promotion, and backup-gate records into a control-
   plane-owned read model.
 - Planning-time ship request rendering, Dokploy target source-of-truth
@@ -290,7 +290,7 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
 
 Product repos keep source, build, verification, and thin OIDC request wrappers,
 while Launchplane owns the durable service routes, DB-backed records,
-managed-secret/runtime authority, driver execution, and operator read models for
+managed-secret/runtime authority, driver execution, and admin read models for
 the current Odoo and VeriReel deployment, promotion, rollback, backup, and
 preview paths.
 
@@ -299,8 +299,8 @@ service/read-model contract, not a second migration track.
 
 Compatibility paths are deletion-bound, not a permanent architecture layer.
 Production-capable mutation paths must use typed Launchplane service routes with
-DB-backed authority or explicit operator input. Any required local-development,
+DB-backed authority or explicit admin input. Any required local-development,
 test, rehearsal, diagnostic, or recovery capability must migrate into generic
-test infrastructure, supported read models, operator APIs, or narrow
+test infrastructure, supported read models, admin APIs, or narrow
 root-of-trust recovery paths before the obsolete compatibility implementation is
 deleted.

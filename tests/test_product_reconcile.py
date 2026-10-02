@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone, tzinfo
+from email.message import Message
 import io
 import json
 import unittest
@@ -7,10 +8,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 import click
 
-from control_plane.build_provenance import BUILD_WORKFLOW_PATH
+from control_plane.build_provenance import BUILD_WORKFLOW_PATH, GitHubBuildProvenanceTransport
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetPolicies,
     DokployTargetRecord,
@@ -57,6 +59,8 @@ from control_plane.product_review_status import owner_review_reference_url
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy, MergeTrainPolicyRecord
 from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.product_reconcile import (
+    PLAN_BLOCKER_DESCRIPTIONS,
+    TESTING_FAILURE_DESCRIPTIONS,
     PreviewProviderHooks,
     ProductReconcileError,
     request_product_reconcile_sweep,
@@ -111,10 +115,13 @@ class FakeGitHub:
         self.first_parents = {NEWEST: DEPLOYABLE, DEPLOYABLE: OLDER, OLDER: ""}
         self.pull_request: dict[str, object] = {
             "state": "open",
-            "labels": [{"name": LABEL}],
+            "draft": False,
+            "labels": [],
             "head": {"sha": PR_HEAD},
         }
         self.pull_request_reads = 0
+        # The open PR list the sweep reads.
+        self.open_pulls: list[dict[str, object]] = []
         # (read count, change): the PR changes right after that many reads of it.
         self.pull_request_move: tuple[int, dict[str, object]] | None = None
 
@@ -153,6 +160,8 @@ class FakeGitHub:
                 {"sha": sha, "parents": [{"sha": parent}] if parent else []}
                 for sha, parent in self.first_parents.items()
             ]
+        if path.startswith(f"/repos/{REPOSITORY}/pulls?state=open"):
+            return self.open_pulls if "page=1" in path else []
         if path.startswith(f"/repos/{REPOSITORY}/pulls/"):
             current = dict(self.pull_request)
             self.pull_request_reads += 1
@@ -853,6 +862,91 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
             "The deploy's authorization was removed or narrowed before it ran.",
         )
 
+    def test_a_blocked_plan_code_describes_its_blocker_without_message_text(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        operation_id = cast(str, self.reconcile()["queued_operation_id"])
+        expected = (
+            (
+                "plan_not_ready.volume_authority_drift",
+                "The replacement plan was blocked before the deploy started. Blocker: "
+                "The current target's Odoo volume settings do not match Launchplane's "
+                "stored settings.",
+            ),
+            (
+                "plan_not_ready.some_future_blocker",
+                "The replacement plan was blocked before the deploy started. Blocker: "
+                "Launchplane does not describe this blocker.",
+            ),
+        )
+        for error_code, summary in expected:
+            with self.subTest(error_code=error_code):
+                operation = self.store.read_odoo_stable_target_replacement_operation_record(
+                    operation_id
+                )
+                self.store.write_odoo_stable_target_replacement_operation_record(
+                    operation.model_copy(
+                        update={
+                            "status": "fail",
+                            "phase": "failed",
+                            "finished_at": "2026-09-30T12:00:00Z",
+                            "error_code": error_code,
+                            "error_message": "Volume drift on site-prod-app at 203.0.113.42.",
+                        }
+                    )
+                )
+                self.request()
+
+                plan = self.reconcile()
+
+                self.assertEqual(plan["last_failed_error_code"], error_code)
+                self.assertEqual(plan["last_failed_error_summary"], summary)
+                operation_id = cast(str, plan["queued_operation_id"])
+
+    def test_a_key_list_failure_names_the_keys_without_message_text(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        operation_id = cast(str, self.reconcile()["queued_operation_id"])
+        operation = self.store.read_odoo_stable_target_replacement_operation_record(operation_id)
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            operation.model_copy(
+                update={
+                    "status": "fail",
+                    "phase": "failed",
+                    "finished_at": "2026-09-30T12:00:00Z",
+                    "error_code": "plan_not_ready.provider_keys_unrecorded",
+                    "error_message": "Unrecorded ODOO_WEB_HOST_PORT on 203.0.113.42.",
+                    # Stored unvalidated here; the read drops what is not a key name.
+                    "error_detail_keys": ("ODOO_WEB_HOST_PORT", "203.0.113.42", "ODOO_DB_NAME"),
+                }
+            )
+        )
+        self.request()
+
+        plan = self.reconcile()
+
+        self.assertEqual(plan["last_failed_error_code"], "plan_not_ready.provider_keys_unrecorded")
+        self.assertEqual(
+            plan["last_failed_error_summary"],
+            f"{TESTING_FAILURE_DESCRIPTIONS['plan_not_ready']} Blocker: "
+            f"{PLAN_BLOCKER_DESCRIPTIONS['provider_keys_unrecorded']} "
+            "Keys: ODOO_DB_NAME, ODOO_WEB_HOST_PORT.",
+        )
+        self.assertNotIn("203.0.113.42", cast(str, plan["last_failed_error_summary"]))
+
+    def test_an_operation_stored_before_detail_keys_still_loads(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        operation_id = cast(str, self.reconcile()["queued_operation_id"])
+        payload = self.store.read_odoo_stable_target_replacement_operation_record(
+            operation_id
+        ).model_dump(mode="json")
+        payload.pop("error_detail_keys")
+
+        operation = OdooStableTargetReplacementOperationRecord.model_validate(payload)
+
+        self.assertEqual(operation.error_detail_keys, ())
+
     def test_testing_is_left_alone_when_the_release_already_has_that_digest(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
         self.store.write_release_tuple_record(
@@ -996,17 +1090,18 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.request("preview", 5)
         self.assertEqual(self.reconcile()["reason"], "already_serving")
 
-        self.github.pull_request["labels"] = []
+        self.github.pull_request["state"] = "closed"
         self.request("preview", 5)
         destroyed = self.reconcile()
 
         self.assertEqual(
-            (destroyed["action"], destroyed["preview_result_status"]), ("destroy", "pass")
+            (destroyed["action"], destroyed["reason"], destroyed["preview_result_status"]),
+            ("destroy", "pull_request_not_open", "pass"),
         )
         self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
 
         # The same build asked for again after a destroy is a new operation, not a replay.
-        self.github.pull_request["labels"] = [{"name": LABEL}]
+        self.github.pull_request["state"] = "open"
         self.request("preview", 5)
         self.assertEqual(self.reconcile()["action"], "apply")
         self.assertEqual(self.provider.applied, [("refresh", 5), ("destroy", 5), ("refresh", 5)])
@@ -1050,7 +1145,7 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
             with self.subTest(name):
                 self.github.runs.clear()
                 self.github.pull_request.update(
-                    {"state": "open", "labels": [{"name": LABEL}], **pull_request}
+                    {"state": "open", "draft": False, "labels": [], **pull_request}
                 )
                 if built:
                     self.github.add_run(50, PR_HEAD, event="pull_request")
@@ -1078,6 +1173,56 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(self.provider.applied, [])
         self.assertEqual(self.store.list_preview_records(), ())
 
+    def test_preview_follows_the_pull_request_state(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        # A preview stays up until the PR closes or merges; a draft is not closed.
+        transitions: tuple[tuple[str, dict[str, object], str, str], ...] = (
+            ("opened as a draft", {"draft": True}, "apply", ""),
+            ("ready for review", {"draft": False}, "none", "already_serving"),
+            ("converted to draft", {"draft": True}, "none", "already_serving"),
+            ("closed", {"state": "closed"}, "destroy", "pull_request_not_open"),
+            ("reopened as a draft", {"state": "open"}, "apply", ""),
+            ("merged", {"state": "closed", "merged": True}, "destroy", "pull_request_not_open"),
+        )
+        for name, change, action, reason in transitions:
+            with self.subTest(name):
+                self.github.pull_request.update(change)
+                self.request("preview", 5)
+
+                plan = self.reconcile()
+
+                self.assertEqual((plan["action"], plan.get("reason", "")), (action, reason))
+        self.assertEqual(
+            self.provider.applied, [("refresh", 5), ("destroy", 5), ("refresh", 5), ("destroy", 5)]
+        )
+        self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
+
+    def test_removing_any_label_destroys_nothing(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.github.pull_request["labels"] = [{"name": "preview"}, {"name": "owner-review"}]
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["action"], "apply")
+
+        self.github.pull_request["labels"] = []
+        self.request("preview", 5)
+        kept = self.reconcile()
+
+        self.assertEqual((kept["action"], kept["reason"]), ("none", "already_serving"))
+        self.assertEqual(self.provider.applied, [("refresh", 5)])
+        self.assertEqual(self.store.list_preview_records()[0].state, "active")
+
+    def test_a_pr_closed_before_the_provider_change_is_reconciled_again(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        # Reads: the plan, the build verification, then the check just before applying.
+        self.github.pull_request_move = (2, {"state": "closed"})
+        self.request("preview", 5)
+
+        completed = self.run_once()
+
+        self.assertEqual(completed.state, "pending")
+        self.assertEqual(completed.last_plan["deferred"], "pull_request_moved")
+        self.assertEqual(self.provider.applied, [])
+
 
 class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
     def setUp(self) -> None:
@@ -1103,10 +1248,10 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.assertEqual(self.reconcile_preview()["action"], "apply")
         self.assertIn("preview is ready for PR #5", self.comment_body())
         self.assertIn("https://pr-5.example.test", self.comment_body())
-        self.assertIn(f"`{LABEL}` label", self.comment_body())
+        self.assertIn("Close or merge the PR to remove the preview.", self.comment_body())
         self.assertEqual(self.reconcile_preview()["reason"], "already_serving")
 
-        self.github.pull_request["labels"] = []
+        self.github.pull_request["state"] = "closed"
         destroyed = self.reconcile_preview()
 
         self.assertIn("retired the preview for PR #5", self.comment_body())
@@ -1150,10 +1295,10 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
             LaunchplaneProductProfileRecord.model_validate(payload)
         )
         self.github.add_run(50, PR_HEAD, event="pull_request")
-        cases = (
-            (5, [LABEL, "owner-review"], self.public_origin, "mentioned"),
-            (6, [LABEL], self.public_origin, None),
-            (7, [LABEL, "owner-review"], "", "no_public_origin"),
+        cases: tuple[tuple[int, list[str], str, str | None], ...] = (
+            (5, ["owner-review"], self.public_origin, "mentioned"),
+            (6, [], self.public_origin, None),
+            (7, ["owner-review"], "", "no_public_origin"),
         )
         for number, labels, origin, owner_review in cases:
             with self.subTest(number=number):
@@ -1188,7 +1333,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.assertEqual(self.reconcile_preview()["action"], "apply")
         self.assertNotIn("@site-owner", self.comment_body())
 
-        self.github.pull_request["labels"] = [{"name": LABEL}, {"name": "owner-review"}]
+        self.github.pull_request["labels"] = [{"name": "owner-review"}]
         marked = self.reconcile_preview()
 
         self.assertEqual(marked["reason"], "already_serving")
@@ -1536,6 +1681,54 @@ class ProductReconcileGrantTests(ProductReconcileTestCase):
 
 
 class ProductReconcileFailureTests(ProductReconcileTestCase):
+    def test_missing_build_workflow_is_a_noop_only_with_complete_actions_inventory(self) -> None:
+        scenarios: tuple[tuple[dict[str, object] | int, str, str], ...] = (
+            ({"total_count": 0, "workflows": []}, "done", "build_workflow_missing"),
+            ({"total_count": 1, "workflows": [{"path": BUILD_WORKFLOW_PATH}]}, "failed", ""),
+            ({"total_count": 1, "workflows": []}, "failed", ""),
+            ({}, "failed", ""),
+            (404, "failed", ""),
+            (403, "failed", ""),
+        )
+        for inventory, state, reason in scenarios:
+            with self.subTest(inventory=inventory):
+                self.request()
+                original_get = self.github.get_json
+
+                def get_json(path: str) -> object:
+                    if "/actions/workflows/" in path:
+                        transport = GitHubBuildProvenanceTransport(token="test")
+                        with patch(
+                            "control_plane.build_provenance.urlopen",
+                            side_effect=HTTPError(path, 404, "Not Found", Message(), None),
+                        ):
+                            return transport.get_json(path)
+                    if "/actions/workflows?" in path:
+                        if isinstance(inventory, int):
+                            transport = GitHubBuildProvenanceTransport(token="test")
+                            with patch(
+                                "control_plane.build_provenance.urlopen",
+                                side_effect=HTTPError(path, inventory, "Denied", Message(), None),
+                            ):
+                                return transport.get_json(path)
+                        return inventory
+                    return original_get(path)
+
+                with patch.object(self.github, "get_json", side_effect=get_json):
+                    if state == "failed":
+                        with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                            result = self.run_once()
+                    else:
+                        result = self.run_once()
+                self.assertEqual(result.state, state)
+                if state == "done":
+                    self.assertEqual(result.last_plan["action"], "none")
+                    self.assertEqual(result.last_plan["reason"], reason)
+                    self.assertEqual(result.last_error, "")
+                else:
+                    self.assertIn("GitHub read failed", result.last_error)
+                self.assertEqual(self.provider.applied, [])
+
     def test_missing_merge_train_app_fails_without_a_token(self) -> None:
         self.request()
         with self.assertLogs("control_plane.product_reconcile", "WARNING"):
@@ -1699,14 +1892,29 @@ class ProductReconcileSweepTests(ProductReconcileTestCase):
         )
         self.write_preview(number=5)
         self.write_preview(number=6, state="destroyed")
+        # PRs 7 and 8 are open with no preview yet (their events were missed); 8 is a draft.
+        self.github.open_pulls = [{"number": 7, "draft": False}, {"number": 8, "draft": True}]
 
-        requested = request_product_reconcile_sweep(self.store, "2026-09-29T12:00:00Z")
+        requested = request_product_reconcile_sweep(
+            self.store, "2026-09-29T12:00:00Z", lambda _store, _profile: self.github
+        )
 
-        self.assertEqual(set(requested), {"site:testing", "site:preview:5"})
+        expected = {"site:testing", "site:preview:5", "site:preview:7", "site:preview:8"}
+        self.assertEqual(set(requested), expected)
         self.assertEqual(
             {request.target_key for request in self.store.list_product_reconcile_requests()},
-            {"site:testing", "site:preview:5"},
+            expected,
         )
+
+    def test_an_unreadable_pull_request_list_still_sweeps_the_rest(self) -> None:
+        def no_token(_store: object, _profile: LaunchplaneProductProfileRecord) -> FakeGitHub:
+            raise ProductReconcileError("No build-provenance token: minting failed.")
+
+        self.write_preview(number=5)
+
+        requested = request_product_reconcile_sweep(self.store, "2026-09-29T12:00:00Z", no_token)
+
+        self.assertEqual(set(requested), {"site:testing", "site:preview:5"})
 
 
 class _ClaimOrderStore:

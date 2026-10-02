@@ -35,6 +35,7 @@ from control_plane.contracts.odoo_prod_backup_restore_operation import (
     OdooProdBackupRestoreOperationRecord,
     odoo_prod_backup_restore_operation_is_verification_replay_claim,
 )
+from control_plane.contracts.odoo_stable_target_replacement import apply_artifact_odoo_version
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -707,6 +708,15 @@ def execute_odoo_prod_backup_restore_apply(
             desired_env_map=runtime_values,
             retired_keys=control_plane_runtime_environments.retired_provider_keys_from_store(
                 record_store=record_store,
+                context_name=plan.context,
+                instance_name=plan.instance,
+            ),
+        )
+        runtime_source["artifact_odoo_version"] = apply_artifact_odoo_version(
+            desired_env,
+            artifact_manifest=artifact_manifest,
+            declared_keys=control_plane_live_target_runtime.declared_runtime_keys(
+                profile=profile,
                 context_name=plan.context,
                 instance_name=plan.instance,
             ),

@@ -7,7 +7,7 @@ The record binds the repository and base branch, base commit and tree, policy
 identity, ordered PR positions, exact PR head commits and trees, every rolling
 parent/head/result commit and tree, the terminal candidate
 identity, and an optional proven stack-collapse root. The candidate builder and
-live evaluator do not consume retired Owner or change-impact authority.
+live evaluator do not consume retired Client or change-impact authority.
 
 The provenance and candidate fingerprints are canonical SHA-256 digests. A
 landing-plan fingerprint separately binds the active plan while excluding
@@ -29,12 +29,12 @@ readiness:
 - `unknown` means required evidence is absent or legacy records predate this
   additive contract. Old records remain readable but never default to exact.
 
-Legacy delta fingerprints, affected subjects and combined Owner bindings remain
+Legacy delta fingerprints, affected subjects and combined Client bindings remain
 optional readable fields during retirement; the evaluator does not use them.
 Changes to a batch are qualified by the exact candidate, ordered head/tree
 identities, recorded parent/result chain and technical checks. The live adapter
 reads repository evidence immediately before each landing, without querying
-Owner events or change-impact policies. Candidate no-op entries still require
+Client events or change-impact policies. Candidate no-op entries still require
 exact structural containment and landing evidence.
 
 Strict technical checks still read current required-check policy and results

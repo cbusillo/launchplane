@@ -69,7 +69,7 @@ export function EnvironmentDiagnostics({
             ["Ingress provider", detail.topology.provider_recorded.ingress.provider || "missing"],
             ["Ingress path", detail.topology.provider_recorded.ingress.path],
             ["TLS provider", detail.topology.provider_recorded.tls.provider || "missing"],
-            ["TLS owner", detail.topology.provider_recorded.tls.owner],
+            ["TLS managed by", detail.topology.provider_recorded.tls.owner],
             ["TLS terminator", detail.topology.provider_recorded.tls.terminator],
           ]}
         />

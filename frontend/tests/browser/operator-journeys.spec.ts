@@ -192,7 +192,7 @@ test.describe("operator journeys", () => {
 
     const card = page.locator('[data-product="example-site"]');
     await expect(card.getByLabel("Recorded decision")).toContainText("Changes requested");
-    await expect(card.getByText("You are not this product's Owner", { exact: false })).toBeVisible();
+    await expect(card.getByText("You are not this product's Client", { exact: false })).toBeVisible();
     await expect(card.getByRole("button", { name: "Accept" })).toHaveCount(0);
     await expect(card.getByRole("button", { name: "Request changes" })).toHaveCount(0);
     await assertDocumentBasics(page);
@@ -206,7 +206,7 @@ test.describe("operator journeys", () => {
       "/ui/owner-review?fixture=products&scenario=no-owner&repository=example%2Fcontrol-plane&pull_request=308",
     );
 
-    await expect(page.getByText("No Owner set for this product", { exact: false })).toBeVisible();
+    await expect(page.getByText("No Client set for this product", { exact: false })).toBeVisible();
     await expect(page.getByRole("button", { name: "Accept" })).toHaveCount(0);
     await assertDocumentBasics(page);
     diagnostics.assertClean();
@@ -835,7 +835,7 @@ test.describe("operator journeys", () => {
       page.getByText("No exact action readiness contract", { exact: true }),
     ).toBeVisible();
     await expect(
-      page.getByText("No operator actions advertised", { exact: true }),
+      page.getByText("No admin actions advertised", { exact: true }),
     ).toBeVisible();
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "action-readiness-empty");
@@ -938,7 +938,7 @@ test.describe("operator journeys", () => {
     await expect(ownerPanel).toBeVisible();
     await expect(
       ownerPanel.getByText(
-        "The Owner can accept or request changes on previews. They can never merge or deploy.",
+        "The Client can accept or request changes on previews. They can never merge or deploy.",
       ),
     ).toBeVisible();
     const saveButton = ownerPanel.getByRole("button", { name: "Save" });
@@ -950,7 +950,7 @@ test.describe("operator journeys", () => {
     await ownerPanel.getByRole("button", { name: "Preview change" }).click();
 
     await expect(ownerPanel.getByRole("status")).toHaveText(
-      "Set the Owner to new-owner (id 7009).",
+      "Set the Client to new-owner (id 7009).",
     );
     await expect(saveButton).toBeEnabled();
     await ownerPanel.getByLabel("GitHub login").fill("someone-else");
@@ -986,9 +986,6 @@ test.describe("operator journeys", () => {
     ).toBeVisible();
     await expect(
       page.getByText("Manager preview approval", { exact: true }),
-    ).toHaveCount(0);
-    await expect(
-      page.getByText("Repository-owner technical waiver", { exact: true }),
     ).toHaveCount(0);
     await expect(
       page.getByRole("heading", { name: "Required checks" }),
@@ -1533,6 +1530,76 @@ test.describe("operator journeys", () => {
     expect(sourceEventIds).toHaveLength(3);
     expect(sourceEventIds[1]).toBe(sourceEventIds[0]);
     expect(sourceEventIds[2]).toBe(sourceEventIds[0]);
+  });
+
+  test("agent operate preparation lists only non-live products and sends their ids", async ({ page }) => {
+    const requests: Array<Record<string, unknown>> = [];
+    await page.route("**/v1/auth/session", async (route) => {
+      await route.fulfill({ json: { csrf_token: "fixture-agent-operate-csrf" } });
+    });
+    await page.route(
+      "**/v1/privileged-operations/authorization-candidates/prepare",
+      async (route) => {
+        const body = route.request().postDataJSON() as Record<string, unknown>;
+        requests.push(body);
+        await route.fulfill({
+          json: {
+            trace_id: `trace-agent-operate-${String(body.intent)}`,
+            state: "already_satisfied",
+          },
+        });
+      },
+    );
+
+    await page.goto("/ui/engineering/privileged-operations?fixture=products");
+    await page.getByRole("button", { name: "Access policy" }).click();
+
+    const operateCard = page
+      .locator("section.privileged-operation-card")
+      .filter({
+        has: page.getByRole("heading", { name: "Prepare agent operate access" }),
+      });
+    await expect(operateCard).toBeVisible();
+    await expect(
+      operateCard.getByText("Live products are not listed.", { exact: false }),
+    ).toBeVisible();
+    await expect(
+      operateCard.getByText("changes nothing until it is approved", { exact: false }),
+    ).toBeVisible();
+    await expect(operateCard.getByRole("checkbox")).toHaveCount(2);
+    await expect(operateCard.getByText("Example Live")).toHaveCount(0);
+    const addButton = operateCard.getByRole("button", { name: "Prepare operate access" });
+    await expect(addButton).toBeDisabled();
+
+    await operateCard.getByRole("checkbox", { name: /Example Shop/ }).check();
+    await addButton.click();
+    await expect(
+      operateCard.getByText("Agent operate access already covers exactly these products."),
+    ).toBeVisible();
+    await operateCard.getByRole("button", { name: "Prepare operate removal" }).click();
+    await expect(
+      operateCard.getByText("Agent operate access is already removed."),
+    ).toBeVisible();
+
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toMatchObject({
+      candidate_id: "agent-operate-product-setup",
+      intent: "add",
+      products: ["example-shop"],
+    });
+    expect(Object.keys(requests[0]).sort()).toEqual([
+      "candidate_id",
+      "intent",
+      "products",
+      "source_event_id",
+    ]);
+    expect(Object.keys(requests[1]).sort()).toEqual([
+      "candidate_id",
+      "intent",
+      "source_event_id",
+    ]);
+    expect(requests[1].intent).toBe("remove");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false);
   });
 
   test("project evidence preparation has independent add and removal cards", async ({ page }) => {
