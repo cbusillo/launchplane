@@ -90,15 +90,30 @@ from control_plane.workflows.odoo_verification import (
 )
 
 
+_DATABASE_ENV = {
+    "ODOO_DB_NAME": "test_db",
+    "ODOO_DB_USER": "test_user",
+    "ODOO_DB_PASSWORD": "test_password",
+}
+_DATABASE_ENV_LINES = tuple(f"{key}={value}" for key, value in _DATABASE_ENV.items())
+
+
 def _site_environment(values: dict[str, str]) -> SiteRuntimeEnvironment:
+    """The cm/testing site's records: ``values`` over its database and volume settings.
+
+    ``values`` itself is the delivered mapping, so a test can change it after the plan.
+    """
+    for key, value in (
+        _DATABASE_ENV
+        | {
+            "ODOO_DATA_VOLUME": "cm_testing_odoo_data",
+            "ODOO_LOG_VOLUME": "cm_testing_odoo_logs",
+            "ODOO_DB_VOLUME": "cm_testing_odoo_db",
+        }
+    ).items():
+        values.setdefault(key, value)
     return SiteRuntimeEnvironment(values=values, secret_keys=frozenset())
 
-
-_DATABASE_ENV_LINES = (
-    "ODOO_DB_NAME=test_db",
-    "ODOO_DB_USER=test_user",
-    "ODOO_DB_PASSWORD=test_password",
-)
 
 _UPSTREAM_RESTORE_ENV = {
     "ODOO_FILESTORE_PATH": "/volumes/data/filestore",
@@ -321,6 +336,7 @@ def _runtime_environment_records_for_profile(
             context=lane.context,
             instance=lane.instance,
             env={
+                **_DATABASE_ENV,
                 "ODOO_DATA_VOLUME": f"{volume_prefix}_odoo_data",
                 "ODOO_LOG_VOLUME": f"{volume_prefix}_odoo_logs",
                 "ODOO_DB_VOLUME": f"{volume_prefix}_odoo_db",
@@ -3395,6 +3411,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         for key, site_values, blocker_keys in (
             ("", {"ODOO_DB_NAME": ""}, None),
             ("ODOO_WEB_HOST_PORT", {}, ("ODOO_WEB_HOST_PORT",)),
+            # A profile declaration alone does not keep a provider-only value.
+            ("ODOO_WORKERS", {}, ("ODOO_WORKERS",)),
             ("ADDON_FEATURE", {}, ("ADDON_FEATURE",)),
             # A name that is not an env-key name is counted but never echoed.
             ("addon_feature", {}, ()),

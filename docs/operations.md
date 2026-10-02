@@ -2623,9 +2623,8 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   tracked target settings and the managed secrets stored for it (secrets shared
   across the site reach only testing and prod). Global values, other sites'
   values and worker credentials (their own `launchplane_worker` store) never
-  reach it. Products do not declare settings to deploy; a profile declaration
-  still names a provider value the replacement keeps, and declared managed
-  secrets must be present. The driver adds its addon-path,
+  reach it. Products do not declare settings to deploy, and a declaration alone
+  keeps no provider value; declared managed secrets must still be present. The driver adds its addon-path,
   module-installation, override and runtime identity fields; secret keys
   required by a typed instance-override payload are also application inputs.
   Every managed secret the deploy carries, declared or not, passes runtime key

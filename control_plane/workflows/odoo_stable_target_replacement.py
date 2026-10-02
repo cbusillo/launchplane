@@ -145,6 +145,8 @@ ODOO_STABLE_TARGET_REPLACEMENT_VERIFY_RETRY_INTERVAL_SECONDS = 5
 ODOO_ADDONS_PATH_ENV_KEY = "ODOO_ADDONS_PATH"
 ODOO_INSTALL_MODULES_ENV_KEY = "ODOO_INSTALL_MODULES"
 ODOO_REQUIRED_VOLUME_ENV_KEYS = ("ODOO_DATA_VOLUME", "ODOO_LOG_VOLUME", "ODOO_DB_VOLUME")
+# Legacy provider values this driver drops, so they are not leftovers to record.
+ODOO_DISCARDED_LEGACY_PROVIDER_ENV = {"ODOO_WEB_COMMAND": "/odoo/odoo-bin"}
 ODOO_REPLACEMENT_DRIVER_ENV_KEYS = {
     "PLATFORM_CONTEXT",
     "PLATFORM_INSTANCE",
@@ -229,6 +231,7 @@ def _provider_only_keys(
         - ODOO_REPLACEMENT_DRIVER_ENV_KEYS
         - retired_keys
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
+        and ODOO_DISCARDED_LEGACY_PROVIDER_ENV.get(key) != current_env[key].strip()
     }
 
 
@@ -1279,7 +1282,8 @@ def build_odoo_stable_target_replacement_plan(
                 context_name=lane.context,
                 instance_name=lane.instance,
             )
-            declared_runtime_keys.update((ODOO_ADDONS_PATH_ENV_KEY, ODOO_INSTALL_MODULES_ENV_KEY))
+            # Settings this driver's module and override contracts own.
+            driver_owned_keys = {ODOO_ADDONS_PATH_ENV_KEY, ODOO_INSTALL_MODULES_ENV_KEY}
             override_record = _read_odoo_instance_override_record(
                 record_store=record_store, context=lane.context, instance=lane.instance
             )
@@ -1288,7 +1292,8 @@ def build_odoo_stable_target_replacement_plan(
                     override_record,
                     protected_shopify_store_keys=target_record.policies.shopify.protected_store_keys,
                 )
-                declared_runtime_keys.update(override.payload.required_container_environment_keys)
+                driver_owned_keys.update(override.payload.required_container_environment_keys)
+            declared_runtime_keys |= driver_owned_keys
             retired_provider_keys = (
                 control_plane_runtime_environments.retired_provider_keys_from_store(
                     record_store=record_store,
@@ -1310,7 +1315,9 @@ def build_odoo_stable_target_replacement_plan(
                 | declared_runtime_keys
                 | ODOO_REPLACEMENT_DRIVER_ENV_KEYS,
             )
-            application_runtime_keys = declared_runtime_keys | (site_keys - retired_provider_keys)
+            # A declaration alone keeps no provider value: what the app gets comes
+            # from the site's records.
+            application_runtime_keys = driver_owned_keys | (site_keys - retired_provider_keys)
             delivered_runtime_keys = tuple(
                 sorted(
                     key
@@ -1725,13 +1732,16 @@ def execute_odoo_stable_target_replacement_apply(
                 context_name=plan.context,
                 instance_name=plan.instance,
             )
-            # These settings are also owned by this driver's required-module contract.
-            declared_runtime_keys.update((ODOO_ADDONS_PATH_ENV_KEY, ODOO_INSTALL_MODULES_ENV_KEY))
+            # Settings this driver's module and override contracts own.
+            driver_owned_keys = {ODOO_ADDONS_PATH_ENV_KEY, ODOO_INSTALL_MODULES_ENV_KEY}
             if runtime_override_payload is not None:
-                declared_runtime_keys.update(
+                driver_owned_keys.update(
                     runtime_override_payload.required_container_environment_keys
                 )
-            application_runtime_keys = declared_runtime_keys | runtime_environment_values.keys()
+            declared_runtime_keys |= driver_owned_keys
+            # A declaration alone keeps no provider value: what the app gets comes
+            # from the site's records.
+            application_runtime_keys = driver_owned_keys | runtime_environment_values.keys()
             retired_provider_keys = (
                 control_plane_runtime_environments.retired_provider_keys_from_store(
                     record_store=record_store,
@@ -1951,7 +1961,7 @@ def execute_odoo_stable_target_replacement_apply(
         runtime_source["artifact_odoo_version"] = apply_artifact_odoo_version(
             desired_env_map,
             artifact_manifest=artifact_manifest,
-            declared_keys=application_runtime_keys,
+            declared_keys=application_runtime_keys | declared_runtime_keys,
         )
         addons_path = merge_required_odoo_addons_path(
             desired_env_map.get(ODOO_ADDONS_PATH_ENV_KEY, "")
@@ -1980,8 +1990,9 @@ def execute_odoo_stable_target_replacement_apply(
             artifact_manifest.odoo_install_modules
         )
         runtime_source["odoo_install_modules"] = desired_env_map[ODOO_INSTALL_MODULES_ENV_KEY]
-        if desired_env_map.get("ODOO_WEB_COMMAND", "").strip() == "/odoo/odoo-bin":
-            desired_env_map.pop("ODOO_WEB_COMMAND", None)
+        for key, legacy_value in ODOO_DISCARDED_LEGACY_PROVIDER_ENV.items():
+            if desired_env_map.get(key, "").strip() == legacy_value:
+                desired_env_map.pop(key, None)
         desired_env_map["PLATFORM_CONTEXT"] = plan.context
         desired_env_map["PLATFORM_INSTANCE"] = plan.instance
         desired_env_map["DOCKER_IMAGE_REFERENCE"] = image_reference
