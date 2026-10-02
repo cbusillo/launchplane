@@ -2435,6 +2435,8 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 )
 
         rejected_thin_connectors = (
+            (".github/workflows/build.yml", "IMAGE_REPOSITORY", "${{ github.token }}"),
+            (".github/workflows/launchplane-deploy.yml", "TAGS", "${{ github.token }}"),
             (".github/workflows/build.yml", "uses", "./scripts/workflows/tests.yml"),
             (
                 ".github/workflows/build.yml",

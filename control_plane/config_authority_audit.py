@@ -3480,7 +3480,11 @@ def _is_github_context_or_step_output_reference(value_text: str) -> bool:
     match = GITHUB_EXPRESSION_PATTERN.match(value_text)
     if match is None:
         return False
-    return bool(GITHUB_CONTEXT_OR_STEP_OUTPUT_REFERENCE_PATTERN.match(match.group("body").strip()))
+    body = match.group("body").strip()
+    # github.token is a credential, not image metadata.
+    if body == "github.token":
+        return False
+    return bool(GITHUB_CONTEXT_OR_STEP_OUTPUT_REFERENCE_PATTERN.match(body))
 
 
 def _is_github_step_output_reference(value_text: str) -> bool:
