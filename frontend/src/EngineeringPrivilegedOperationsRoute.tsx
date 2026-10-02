@@ -352,7 +352,8 @@ function AgentProductSetupCandidateCard({
           <p>
             On each selected product, the Director's agent may plan and apply
             settings and secrets on the testing lane, create the testing lane's
-            Dokploy compose target (create only), and write the production
+            Dokploy compose target in a new provider project (create only), and
+            write the production
             backup policy that promotion's backup gate relies on. It cannot
             change the Client or release review, deploy, promote, roll back, run
             a backup, or reach any other product. The selection replaces the

@@ -663,7 +663,7 @@ label and the product's one lane context:
 |---|---|---|---|
 | `<product>.testing-config` | the product | `testing` | `product_config.plan`, `product_config.apply` |
 | `<product>.prod-backup-policy` | the product | `prod` | `production_backup_authority.write` |
-| `<product>.testing-target` | `launchplane` | `testing` | `dokploy_target.lane_setup` |
+| `<product>.testing-target` | the product | `testing` | `dokploy_target.lane_setup` |
 
 The set deliberately leaves out:
 
@@ -676,8 +676,9 @@ The set deliberately leaves out:
 - `dokploy_target.setup`. It is checked on product and context `launchplane`,
   so it reaches every product's Dokploy targets. `dokploy_target.lane_setup` is
   the lane-scoped alternative (see the Dokploy target setup section in
-  `service-boundary.md`): it creates only the named lane's compose and can't
-  adopt, re-point or prune a target.
+  `service-boundary.md`): it is checked on the product that owns the lane's
+  context, creates only that lane's compose in a new provider project and
+  environment, and can't adopt, re-point, replace or prune a target.
 
 What it can reach on a live product: the testing lane's settings and secrets,
 the testing lane's new compose target, and production's backup policy. The

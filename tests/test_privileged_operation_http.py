@@ -302,7 +302,7 @@ def _setup_rules_payload(product: str = "example-shop") -> list[dict[str, object
         {
             **common,
             "managed_rule_id": f"{product}.testing-target",
-            "products": ["launchplane"],
+            "products": [product],
             "instances": ["testing"],
             "actions": ["dokploy_target.lane_setup"],
         },

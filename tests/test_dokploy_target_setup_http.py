@@ -211,7 +211,10 @@ class DokployTargetSetupHttpTests(unittest.TestCase):
                 403,
             ),
             (replacement, ("synthetic-product",), 403),
+            ({"project_id": "project-existing"}, ("synthetic-product",), 403),
+            ({"environment_id": "environment-existing"}, ("synthetic-product",), 403),
             ({}, ("synthetic-product", "other-product"), 403),
+            ({}, ("other-product",), 403),
             ({}, (), 403),
         ):
             with self.subTest(overrides=overrides, owners=owners):
@@ -259,7 +262,7 @@ class DokployTargetSetupHttpTests(unittest.TestCase):
                         "repository": "synthetic-owner/synthetic-repo",
                         "workflow_refs": [workflow_ref],
                         "event_names": ["workflow_dispatch"],
-                        "products": ["launchplane"],
+                        "products": ["synthetic-product"],
                         "contexts": ["synthetic-context"],
                         "instances": ["testing"],
                         "actions": ["dokploy_target.lane_setup"],

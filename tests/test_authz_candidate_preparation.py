@@ -865,7 +865,7 @@ def _setup_rules(
         {
             **common,
             "managed_rule_id": f"{product}.testing-target",
-            "products": ["launchplane"],
+            "products": [product],
             "instances": ["testing"],
             "actions": ["dokploy_target.lane_setup"],
         },
@@ -948,7 +948,7 @@ class AgentProductSetupCandidateCompilerTests(unittest.TestCase):
         target = rules["example-docs.testing-target"]
         self.assertEqual(
             (target.products, target.contexts, target.instances, target.actions),
-            (("launchplane",), ("docs-ctx",), ("testing",), ("dokploy_target.lane_setup",)),
+            (("example-docs",), ("docs-ctx",), ("testing",), ("dokploy_target.lane_setup",)),
         )
         granted = {action for rule in rules.values() for action in rule.actions}
         self.assertNotIn("product_profile.write", granted)
@@ -1117,7 +1117,7 @@ class AgentProductSetupCandidateCompilerTests(unittest.TestCase):
             ("testing-config", "actions", ["product_config.apply", "product_profile.write"]),
             ("testing-config", "instances", ["*"]),
             ("prod-backup-policy", "instances", ["testing"]),
-            ("testing-target", "products", ["example-shop"]),
+            ("testing-target", "products", ["launchplane"]),
             ("testing-target", "contexts", ["other-context"]),
             ("testing-config", "subjects", ["operator-agent", "other"]),
             ("prod-backup-policy", "managed_rule_id", "example-shop.other-rule"),

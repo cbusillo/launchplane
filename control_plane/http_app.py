@@ -1203,13 +1203,16 @@ _AUTH_LOGOUT_ROUTE = "/auth/logout"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 
 
-def _is_exclusive_lane_setup_context(*, record_store: object, context: str) -> bool:
-    """True when exactly one product uses ``context`` and it is canonical."""
+def _lane_setup_context_owner(*, record_store: object, context: str) -> str:
+    """The one product that owns ``context`` exclusively and canonically, or ''."""
     owners = product_context_owners(record_store)
     products = owners.get(context.strip().lower(), frozenset())
-    return len(products) == 1 and is_exclusive_product_lane_context(
-        context=context, product=next(iter(products)), owners=owners
-    )
+    if len(products) != 1:
+        return ""
+    (product,) = products
+    if not is_exclusive_product_lane_context(context=context, product=product, owners=owners):
+        return ""
+    return product
 
 
 _AGENT_WRITE_INTENT_EVALUATE_ROUTE = "/v1/agent/write-intents/evaluate"
@@ -23218,9 +23221,13 @@ def create_launchplane_fastapi_app(
             record_store=record_store,
             trace_id=trace_id,
         )
-        # A lane-scoped grant may only create a new compose for its own lane:
-        # adopting, re-pointing or replacing could bind the lane to another
-        # lane's provider target. Its context must belong to one product only.
+        # A lane-scoped grant may only create a new compose, in a new provider
+        # project and environment, for its own lane: adopting, re-pointing,
+        # replacing or reusing existing placement could reach another lane's
+        # resources. It is checked on the one product that owns the context.
+        lane_owner = _lane_setup_context_owner(
+            record_store=database_store, context=setup_request.context
+        )
         can_setup_target = resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action="dokploy_target.setup",
@@ -23229,15 +23236,15 @@ def create_launchplane_fastapi_app(
         ) or (
             setup_request.operation == "create-compose"
             and setup_request.expected_current_provider_target is None
+            and not setup_request.project_id
+            and not setup_request.environment_id
+            and bool(lane_owner)
             and resolved_authz_policy_runtime.policy.allows(
                 identity=identity,
                 action=DOKPLOY_TARGET_LANE_SETUP_ACTION,
-                product=setup_request.product,
+                product=lane_owner,
                 context=setup_request.context,
                 target=AuthorizationTarget(scope="instance", instances=(setup_request.instance,)),
-            )
-            and _is_exclusive_lane_setup_context(
-                record_store=database_store, context=setup_request.context
             )
         )
         can_repair_domain_authority = setup_request.operation == "repair-domain-authority" and (

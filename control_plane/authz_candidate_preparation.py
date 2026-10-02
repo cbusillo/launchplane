@@ -68,7 +68,6 @@ ADMINISTRATOR_PRODUCT_EVIDENCE_READ_REASON = (
 )
 ADMINISTRATOR_PRODUCT_EVIDENCE_READ_RELATED_ISSUE = "#2058"
 
-LAUNCHPLANE_SERVICE_PRODUCT = "launchplane"
 LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 
 AGENT_PRODUCT_SETUP_CANDIDATE_ID: Final = "agent-product-setup"
@@ -80,12 +79,11 @@ AGENT_PRODUCT_SETUP_REASON = (
 AGENT_PRODUCT_SETUP_RELATED_ISSUE = "#2766"
 AGENT_PRODUCT_SETUP_MAX_PRODUCTS = 20
 # Each selected product gets exactly these rules, bound to one lane each:
-# (rule id suffix, granted on the product itself, lane, actions).
+# (rule id suffix, lane, actions).
 _AGENT_PRODUCT_SETUP_RULE_SHAPES: Final = (
-    ("testing-config", True, "testing", ("product_config.plan", "product_config.apply")),
-    ("prod-backup-policy", True, "prod", ("production_backup_authority.write",)),
-    # Dokploy target setup is authorized on Launchplane's service product.
-    ("testing-target", False, "testing", (DOKPLOY_TARGET_LANE_SETUP_ACTION,)),
+    ("testing-config", "testing", ("product_config.plan", "product_config.apply")),
+    ("prod-backup-policy", "prod", ("production_backup_authority.write",)),
+    ("testing-target", "testing", (DOKPLOY_TARGET_LANE_SETUP_ACTION,)),
 )
 
 AuthorizationCandidateId = Literal[
@@ -850,12 +848,12 @@ def _agent_product_setup_rules(
             managed_rule_id=f"{product}.{suffix}",
             subjects=(subject,),
             token_labels=(token_label,),
-            products=(product if on_product else LAUNCHPLANE_SERVICE_PRODUCT,),
+            products=(product,),
             contexts=(context,),
             instances=(instance,),
             actions=actions,
         )
-        for suffix, on_product, instance, actions in _AGENT_PRODUCT_SETUP_RULE_SHAPES
+        for suffix, instance, actions in _AGENT_PRODUCT_SETUP_RULE_SHAPES
     )
 
 

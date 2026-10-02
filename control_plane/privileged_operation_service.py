@@ -572,8 +572,8 @@ def _build_privileged_operation_semantic_review(
             authz_change_summary = (
                 "Allow the operator's agent, on these products only: "
                 f"{setup_products}. On each it may plan and apply settings and secrets on "
-                "the testing lane, create the testing lane's Dokploy compose target (create "
-                "only), and write the production backup policy that promotion's backup gate "
+                "the testing lane, create the testing lane's Dokploy compose target in a new "
+                "provider project (create only), and write the production backup policy that promotion's backup gate "
                 "relies on. It cannot change the Client or release review, deploy, promote, "
                 "roll back, run a backup, or reach any other product. This standing access "
                 "remains until a separately governed removal; the Approve-by deadline only "
