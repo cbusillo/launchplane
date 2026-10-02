@@ -15,6 +15,9 @@ from pydantic import BaseModel
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     safe_error_detail_keys,
 )
+from control_plane.contracts.odoo_target_replacement_failures import (
+    deploy_failure_description,
+)
 
 OPERATION_STATUS_READ_ACTION = "operations.read"
 OPERATION_STATUS_READ_PRODUCT = "launchplane"
@@ -53,6 +56,8 @@ def operation_status_read_view(operation: BaseModel, *, poll_url: str) -> dict[s
     view["attempt"] = int(record.get("attempt") or 0)
     view.update(_safe_record_ids(record))
     view["error_code"] = safe_operation_error_code(str(record.get("error_code") or ""))
+    # Launchplane's fixed description of the code; stored text is never copied.
+    view["error_description"] = deploy_failure_description(str(view["error_code"]))
     view["error_detail_keys"] = list(safe_error_detail_keys(record.get("error_detail_keys") or ()))
     checkpoints = record.get("checkpoints")
     if isinstance(checkpoints, list):

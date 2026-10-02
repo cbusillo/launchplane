@@ -69,9 +69,17 @@ from control_plane.product_reconcile import (
     TESTING_FAILURE_DESCRIPTIONS,
 )
 from control_plane.workflows.odoo_stable_operation_worker import _unexpected_error_code
+from control_plane.contracts.odoo_target_replacement_failures import (
+    DEPLOY_BLOCKED_DESCRIPTIONS,
+    deploy_blocked_code,
+    deploy_blocked_code_for_runtime_error,
+    deploy_failure_description,
+)
+from control_plane.operation_status_read import safe_operation_error_code
 from control_plane.workflows.odoo_stable_target_replacement import (
     DokployRequest,
     OdooTargetReplacementStageError,
+    _deploy_step_failure,
     _failure_stage,
     _merge_required_odoo_install_modules,
     _read_lane,
@@ -990,6 +998,16 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             )
         self.assertEqual(result.deploy_status, "fail")
         self.assertIn("1 provider-only env key(s)", result.error_message)
+        self.assertEqual(result.error_code, "deploy_blocked.provider_only_keys")
+        self.assertEqual(result.error_detail_keys, ("ODOO_WEB_HOST_PORT",))
+        failure = store.deployment_records[-1].failure
+        assert failure is not None
+        self.assertEqual(failure.code, "deploy_blocked.provider_only_keys")
+        self.assertEqual(failure.keys, ("ODOO_WEB_HOST_PORT",))
+        self.assertEqual(
+            failure.description,
+            deploy_failure_description("deploy_blocked.provider_only_keys"),
+        )
         sync_source.assert_not_called()
 
     def test_apply_refuses_platform_credential_before_provider_write(self) -> None:
@@ -2682,6 +2700,10 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             result.error_message,
         )
         self.assertIn("ODOO_OVERRIDE_SECRET__ADDON__OPENAI__API_KEY", result.error_message)
+        self.assertEqual(result.error_code, "deploy_blocked.override_secret_keys_missing")
+        self.assertEqual(
+            result.error_detail_keys, ("ODOO_OVERRIDE_SECRET__ADDON__OPENAI__API_KEY",)
+        )
         sync_source.assert_not_called()
         update_env.assert_not_called()
         trigger_deploy.assert_not_called()
@@ -4451,6 +4473,43 @@ class OdooTargetReplacementFailureStageTests(unittest.TestCase):
             "release_tuple_mint_failed",
         ):
             self.assertIn(code, TESTING_FAILURE_DESCRIPTIONS)
+
+    def test_every_deploy_check_has_a_description_and_fits_the_error_code(self) -> None:
+        for check in DEPLOY_BLOCKED_DESCRIPTIONS:
+            code = deploy_blocked_code(check)
+            self.assertRegex(code, r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+            self.assertEqual(safe_operation_error_code(code), code)
+            self.assertTrue(deploy_failure_description(code))
+
+    def test_runtime_errors_map_to_deploy_checks(self) -> None:
+        self.assertEqual(
+            deploy_blocked_code_for_runtime_error("runtime_key_safety_failed"),
+            "deploy_blocked.runtime_key_safety_refused",
+        )
+        self.assertEqual(
+            deploy_blocked_code_for_runtime_error("some_future_runtime_error"),
+            "deploy_blocked.runtime_settings_unavailable",
+        )
+
+    def test_deploy_step_failure_keeps_codes_and_never_the_message(self) -> None:
+        uncoded = _deploy_step_failure(click.ClickException("Provider 203.0.113.42 refused."))
+        coded = _deploy_step_failure(
+            OdooTargetReplacementStageError(
+                deploy_blocked_code("unportable_values"),
+                "Value of ODOO_KEY on db.internal is multiline.",
+                ("ODOO_KEY", "not a key"),
+            )
+        )
+
+        self.assertEqual(
+            (uncoded.code, uncoded.description, uncoded.keys),
+            ("deploy_failed", "The deploy step failed.", ()),
+        )
+        self.assertEqual(coded.code, "deploy_blocked.unportable_values")
+        self.assertEqual(coded.keys, ("ODOO_KEY",))
+        for failure in (uncoded, coded):
+            self.assertNotIn("203.0.113.42", failure.model_dump_json())
+            self.assertNotIn("db.internal", failure.model_dump_json())
 
     def test_every_plan_blocker_code_has_a_description_and_fits_the_error_code(self) -> None:
         for code in ODOO_TARGET_REPLACEMENT_PLAN_BLOCKER_CODES:

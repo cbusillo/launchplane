@@ -52,6 +52,9 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
     safe_error_detail_keys,
 )
+from control_plane.contracts.odoo_target_replacement_failures import (
+    deploy_failure_description,
+)
 from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationDeniedError,
@@ -2003,10 +2006,12 @@ def _target_replacement_terminal_operation(
             "finished_at": finished_at,
             "lease_owner": lease_owner,
             "result": result,
-            "error_code": "",
+            "error_code": "" if passed else result.error_code,
             "error_message": ""
             if passed
             else (result.error_message or "Odoo stable target replacement failed."),
+            "error_detail_keys": () if passed else result.error_detail_keys,
+            "error_description": ("" if passed else deploy_failure_description(result.error_code)),
         }
     )
 

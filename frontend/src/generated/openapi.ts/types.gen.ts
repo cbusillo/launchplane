@@ -347,6 +347,12 @@ export type DeploymentEvidenceOutput = {
     target_type: 'application' | 'compose';
 };
 
+export type DeploymentFailure = {
+    code: string;
+    description: string;
+    keys: Array<string>;
+};
+
 export type DeploymentRecordOutput = {
     artifact_identity: ArtifactIdentityReference | null;
     bootstrap: BootstrapEvidence;
@@ -355,6 +361,7 @@ export type DeploymentRecordOutput = {
     deploy: DeploymentEvidenceOutput;
     deployed_target: DeployedTargetReference | null;
     destination_health: HealthcheckEvidence;
+    failure: DeploymentFailure | null;
     instance: string;
     no_cache: boolean;
     post_deploy_update: PostDeployUpdateEvidence;

@@ -870,6 +870,34 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
             "The deploy's authorization was removed or narrowed before it ran.",
         )
 
+    def test_a_deploy_check_code_keeps_its_fixed_description_and_keys(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        first = cast(str, self.reconcile()["queued_operation_id"])
+        operation = self.store.read_odoo_stable_target_replacement_operation_record(first)
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            operation.model_copy(
+                update={
+                    "status": "fail",
+                    "phase": "failed",
+                    "finished_at": "2026-09-30T12:00:00Z",
+                    "error_code": "deploy_blocked.compose_keys_missing",
+                    "error_message": "Missing ODOO_DB_HOST on site-prod-app at 203.0.113.42.",
+                    "error_detail_keys": ("ODOO_DB_HOST",),
+                }
+            )
+        )
+        self.request()
+
+        plan = self.reconcile()
+
+        self.assertEqual(plan["last_failed_error_code"], "deploy_blocked.compose_keys_missing")
+        self.assertEqual(
+            plan["last_failed_error_summary"],
+            "The compose template requires settings that neither the site's records nor the "
+            "target provide. Keys: ODOO_DB_HOST.",
+        )
+
     def test_a_blocked_plan_code_describes_its_blocker_without_message_text(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
         self.request()

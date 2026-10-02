@@ -20,7 +20,11 @@ from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
     artifact_manifest_matches_image_repository,
 )
-from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.deployment_record import (
+    DeploymentFailure,
+    DeploymentRecord,
+    ResolvedTargetEvidence,
+)
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -28,6 +32,12 @@ from control_plane.contracts.odoo_instance_override_record import OdooInstanceOv
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideApplyPhase
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     safe_error_detail_keys,
+)
+from control_plane.contracts.odoo_target_replacement_failures import (
+    DEPLOY_FAILED_CODE,
+    deploy_blocked_code,
+    deploy_blocked_code_for_runtime_error,
+    deploy_failure_description,
 )
 from control_plane.contracts.odoo_runtime_environment import (
     LAUNCHPLANE_REQUIRED_ODOO_ADDON_PATHS,
@@ -364,6 +374,8 @@ class _ApplyResultBase(BaseModel):
         runtime_identity_injected: bool = False,
         runtime_source: dict[str, str] | None = None,
         error_message: str = "",
+        error_code: str = "",
+        error_detail_keys: tuple[str, ...] = (),
     ) -> OdooStableTargetReplacementApplyResult:
         post_deploy_payload = post_deploy_result
         return OdooStableTargetReplacementApplyResult(
@@ -403,6 +415,8 @@ class _ApplyResultBase(BaseModel):
             image_reference=self.image_reference,
             runtime_source=runtime_source or {},
             error_message=error_message,
+            error_code=error_code,
+            error_detail_keys=safe_error_detail_keys(error_detail_keys),
         )
 
 
@@ -1005,21 +1019,48 @@ def _write_failed_deployment(
     runtime_identity: RuntimeIdentity | None = None,
     post_deploy_update: PostDeployUpdateEvidence | None = None,
     destination_health: HealthcheckEvidence | None = None,
+    failure: DeploymentFailure | None = None,
 ) -> None:
-    record_store.write_deployment_record(
-        build_deployment_record(
-            request=ship_request,
-            record_id=deployment_record_id,
-            deployment_id="control-plane-dokploy",
-            deployment_status="fail",
-            started_at=started_at,
-            finished_at=utc_now_timestamp(),
-            resolved_target=resolved_target,
-            runtime_source=runtime_source,
-            runtime_identity=runtime_identity,
-            post_deploy_update=post_deploy_update,
-            destination_health=destination_health,
-        )
+    record = build_deployment_record(
+        request=ship_request,
+        record_id=deployment_record_id,
+        deployment_id="control-plane-dokploy",
+        deployment_status="fail",
+        started_at=started_at,
+        finished_at=utc_now_timestamp(),
+        resolved_target=resolved_target,
+        runtime_source=runtime_source,
+        runtime_identity=runtime_identity,
+        post_deploy_update=post_deploy_update,
+        destination_health=destination_health,
+    )
+    record_store.write_deployment_record(record.model_copy(update={"failure": failure}))
+
+
+def _deploy_step_failure(error: click.ClickException) -> DeploymentFailure:
+    """The deploy step's failure as its code, fixed description and key names.
+
+    A check before the provider env write raises its own code; anything else in
+    the deploy step is ``deploy_failed``. The error's message never reaches it.
+    """
+    code = error.code if isinstance(error, OdooTargetReplacementStageError) else ""
+    description = deploy_failure_description(code)
+    if not description:
+        code = DEPLOY_FAILED_CODE
+        description = deploy_failure_description(code)
+    keys = error.detail_keys if isinstance(error, OdooTargetReplacementStageError) else ()
+    return DeploymentFailure(code=code, description=description, keys=keys)
+
+
+def _runtime_error_binding_keys(
+    error: control_plane_live_target_runtime.LiveTargetRuntimeError,
+) -> tuple[str, ...]:
+    """The env-key names of a key-safety refusal's findings; nothing else."""
+    findings = error.summary.get("findings")
+    if not isinstance(findings, list):
+        return ()
+    return safe_error_detail_keys(
+        str(finding.get("binding_key") or "") for finding in findings if isinstance(finding, dict)
     )
 
 
@@ -1724,18 +1765,20 @@ def execute_odoo_stable_target_replacement_apply(
         runtime_source["runtime_override_payload_rendered"] = "false"
 
     try:
-        host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
-        target_payload = dokploy_api.fetch_dokploy_target_payload(
-            host=host,
-            token=token,
-            target_type="compose",
-            target_id=target_id_record.target_id,
-        )
-        site_environment = control_plane_runtime_environments.resolve_site_runtime_environment(
-            control_plane_root=control_plane_root,
-            context_name=plan.context,
-            instance_name=plan.instance,
-        )
+        with _failure_stage(deploy_blocked_code("provider_target_unreadable")):
+            host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
+            target_payload = dokploy_api.fetch_dokploy_target_payload(
+                host=host,
+                token=token,
+                target_type="compose",
+                target_id=target_id_record.target_id,
+            )
+        with _failure_stage(deploy_blocked_code("site_environment_unresolved")):
+            site_environment = control_plane_runtime_environments.resolve_site_runtime_environment(
+                control_plane_root=control_plane_root,
+                context_name=plan.context,
+                instance_name=plan.instance,
+            )
         # The site's own environment is delivered whole, as live sync does: worker
         # credentials, global values and other sites' values never reach it.
         runtime_environment_values = dict(site_environment.values)
@@ -1764,8 +1807,10 @@ def execute_odoo_stable_target_replacement_apply(
                 )
             )
             if retired_provider_keys != set(plan.retired_provider_keys):
-                raise click.ClickException(
-                    "Provider key retirement changed during execution; review current configuration."
+                raise OdooTargetReplacementStageError(
+                    deploy_blocked_code("retirement_changed"),
+                    "Provider key retirement changed during execution; review current configuration.",
+                    tuple(retired_provider_keys ^ set(plan.retired_provider_keys)),
                 )
             control_plane_live_target_runtime.validate_provider_key_retirement(
                 retired_keys=retired_provider_keys,
@@ -1800,8 +1845,10 @@ def execute_odoo_stable_target_replacement_apply(
                 )
             )
         except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
-            raise click.ClickException(
-                control_plane_live_target_runtime.runtime_key_safety_error_message(error)
+            raise OdooTargetReplacementStageError(
+                deploy_blocked_code_for_runtime_error(error.code),
+                control_plane_live_target_runtime.runtime_key_safety_error_message(error),
+                _runtime_error_binding_keys(error),
             ) from error
         runtime_source.update(
             {
@@ -1838,9 +1885,11 @@ def execute_odoo_stable_target_replacement_apply(
             key for key in required_compose_keys if not application_env.get(key, "").strip()
         )
         if missing_compose_keys:
-            raise click.ClickException(
+            raise OdooTargetReplacementStageError(
+                deploy_blocked_code("compose_keys_missing"),
                 "Odoo target replacement requires application env key(s): "
-                + ", ".join(missing_compose_keys)
+                + ", ".join(missing_compose_keys),
+                tuple(missing_compose_keys),
             )
         if request.data_source_mode == "upstream_restore":
             configuration_blockers = _upstream_restore_blockers(
@@ -1850,8 +1899,10 @@ def execute_odoo_stable_target_replacement_apply(
                 retired_provider_keys=retired_provider_keys,
             )
             if configuration_blockers:
-                raise click.ClickException(
-                    "; ".join(message for _code, message, _keys in configuration_blockers)
+                raise OdooTargetReplacementStageError(
+                    deploy_blocked_code("upstream_restore_blocked"),
+                    "; ".join(message for _code, message, _keys in configuration_blockers),
+                    tuple(key for _code, _message, keys in configuration_blockers for key in keys),
                 )
         provider_only_keys = _provider_only_keys(
             current_env=current_env_map,
@@ -1859,11 +1910,13 @@ def execute_odoo_stable_target_replacement_apply(
             retired_keys=retired_provider_keys,
         )
         if provider_only_keys:
-            raise click.ClickException(
+            raise OdooTargetReplacementStageError(
+                deploy_blocked_code("provider_only_keys"),
                 "Odoo target replacement found "
                 f"{len(provider_only_keys)} provider-only env key(s) with no Launchplane "
                 "record for this site. Record them for the site or retire them before "
-                "replacement."
+                "replacement.",
+                tuple(provider_only_keys),
             )
         # A value the provider env text cannot carry intact, such as a multiline
         # key, would persist as fragments; refuse it by name before any write.
@@ -1876,10 +1929,12 @@ def execute_odoo_stable_target_replacement_apply(
             != {key: value}
         )
         if unportable_keys:
-            raise click.ClickException(
+            raise OdooTargetReplacementStageError(
+                deploy_blocked_code("unportable_values"),
                 "Odoo target replacement cannot carry the value of env key(s) "
                 + ", ".join(unportable_keys)
-                + " in the provider env; store them as single-line values."
+                + " in the provider env; store them as single-line values.",
+                tuple(unportable_keys),
             )
         if runtime_override_payload is not None:
             missing_override_secret_keys = tuple(
@@ -1888,9 +1943,11 @@ def execute_odoo_stable_target_replacement_apply(
                 if not application_env.get(key, "").strip()
             )
             if missing_override_secret_keys:
-                raise click.ClickException(
+                raise OdooTargetReplacementStageError(
+                    deploy_blocked_code("override_secret_keys_missing"),
                     "Odoo target replacement requires override secret env key(s) before deployment: "
-                    + ", ".join(missing_override_secret_keys)
+                    + ", ".join(missing_override_secret_keys),
+                    missing_override_secret_keys,
                 )
         # Malformed multiline fragments can contain secrets in their parsed key
         # names, so record only a count of discarded provider entries.
@@ -2150,6 +2207,7 @@ def execute_odoo_stable_target_replacement_apply(
             }
         )
     except click.ClickException as error:
+        failure = _deploy_step_failure(error)
         _write_failed_deployment(
             record_store=record_store,
             ship_request=ship_request,
@@ -2159,12 +2217,15 @@ def execute_odoo_stable_target_replacement_apply(
             runtime_source=runtime_source,
             runtime_identity=runtime_identity,
             destination_health=HealthcheckEvidence(status="skipped"),
+            failure=failure,
         )
         return base_result.result(
             deploy_status="fail",
             runtime_identity_injected=False,
             runtime_source=runtime_source,
             error_message=str(error),
+            error_code=failure.code,
+            error_detail_keys=failure.keys,
         )
 
     post_deploy_phase: OdooOverrideApplyPhase = (
