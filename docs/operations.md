@@ -104,6 +104,10 @@ checkout.
   `service outbox-workers run-once` and `service outbox-workers run` operate
   PostgreSQL transactional outbox deliveries for external workflow dispatch and
   notification effects.
+  `service merge-train-workers run-once` and `service merge-train-workers run`
+  run the scheduled merge-train pass for every scheduler-enabled policy target;
+  the `launchplane-merge-train-workers` compose service runs it every five
+  minutes.
   `service ordinary-agent-workers run-once` and `run` are a dormant,
   PostgreSQL-only finite-job worker definition. They use an independent scan
   cursor and telemetry surface, perform an exact startup schema/relation probe,

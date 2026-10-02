@@ -1,0 +1,317 @@
+from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
+from unittest import TestCase
+from unittest.mock import MagicMock, patch
+
+from control_plane import merge_train_scheduler
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerLeaseHeldError,
+)
+from control_plane.contracts.merge_train_policy import (
+    MergeTrainPolicyRecord,
+    MergeTrainSchedulerPolicy,
+    parse_merge_train_policy_toml,
+)
+from control_plane.merge_train_controller_run_once import MergeTrainControllerRunOnceResult
+from control_plane.merge_train_policy_source import MergeTrainPolicyStoreMissingError
+from control_plane.merge_train_scheduler import (
+    MergeTrainScheduledTargetResult,
+    run_merge_train_scheduler_loop,
+    run_merge_train_scheduler_pass,
+)
+from tests.merge_train_policy_fixtures import _policy_table
+
+_ROOT = Path("/tmp/launchplane-test-root")
+
+
+def _policy_record(
+    *schedulers: tuple[str, MergeTrainSchedulerPolicy],
+) -> MergeTrainPolicyRecord:
+    policy = parse_merge_train_policy_toml(
+        "\n\n".join(
+            ("schema_version = 1", *(_policy_table(repository) for repository, _ in schedulers))
+        )
+    )
+    scheduler_by_repository = dict(schedulers)
+    policy = policy.model_copy(
+        update={
+            "policies": tuple(
+                repository_policy.model_copy(
+                    update={"scheduler": scheduler_by_repository[repository_policy.repository]}
+                )
+                for repository_policy in policy.policies
+            )
+        }
+    )
+    return MergeTrainPolicyRecord(
+        record_id="merge-train-policy-scheduler-test",
+        status="active",
+        source="test",
+        updated_at="2026-10-01T00:00:00Z",
+        policy=policy,
+    )
+
+
+def _admission(status: str, reason_code: str = "") -> SimpleNamespace:
+    return SimpleNamespace(status=status, reason_code=reason_code)
+
+
+def _controller_result() -> MergeTrainControllerRunOnceResult:
+    return MergeTrainControllerRunOnceResult(
+        accepted_result={
+            "repository": "cbusillo/alpha",
+            "base_branch": "main",
+            "controller_action": "wait_for_checks",
+            "candidate": {"entries": [{"pull_request_number": 7}]},
+        },
+        records={"merge_train_controller_state_record_id": "controller-1"},
+    )
+
+
+class MergeTrainSchedulerPassTests(TestCase):
+    def setUp(self) -> None:
+        self.record_store = MagicMock()
+        self.patchers = {
+            name: patch.object(merge_train_scheduler, name)
+            for name in (
+                "resolve_merge_train_policy_record",
+                "evaluate_merge_train_admission_from_store",
+                "resolve_merge_train_github_token",
+                "execute_merge_train_controller_run_once",
+                "execute_recorded_merge_train_run_once",
+                "build_merge_train_pr_feedback_record",
+            )
+        }
+        self.mocks = {name: patcher.start() for name, patcher in self.patchers.items()}
+        for patcher in self.patchers.values():
+            self.addCleanup(patcher.stop)
+        self.mocks["resolve_merge_train_github_token"].return_value = "token"
+        self.mocks["execute_merge_train_controller_run_once"].return_value = _controller_result()
+        self.mocks["build_merge_train_pr_feedback_record"].return_value = SimpleNamespace(
+            delivery_status="delivered"
+        )
+
+    def _run(self) -> tuple[MergeTrainScheduledTargetResult, ...]:
+        return run_merge_train_scheduler_pass(
+            record_store=self.record_store,
+            control_plane_root=_ROOT,
+            now=lambda: "2026-10-01T06:00:00Z",
+        )
+
+    def test_no_policy_record_is_an_empty_pass(self) -> None:
+        self.mocks[
+            "resolve_merge_train_policy_record"
+        ].side_effect = MergeTrainPolicyStoreMissingError("missing")
+
+        self.assertEqual(self._run(), ())
+
+    def test_only_scheduler_enabled_targets_run(self) -> None:
+        self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True)),
+            ("cbusillo/beta", MergeTrainSchedulerPolicy(enabled=False)),
+        )
+        self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
+            "admitted"
+        )
+
+        results = self._run()
+
+        self.assertEqual([result.repository for result in results], ["cbusillo/alpha"])
+        self.assertEqual(results[0].status, "ran")
+
+    def test_deferred_admission_runs_nothing(self) -> None:
+        self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True)),
+        )
+        self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
+            "deferred", "poll_interval_not_elapsed"
+        )
+
+        (result,) = self._run()
+
+        self.assertEqual(
+            (result.status, result.reason_code), ("deferred", "poll_interval_not_elapsed")
+        )
+        self.mocks["execute_merge_train_controller_run_once"].assert_not_called()
+
+    def test_missing_token_fails_closed(self) -> None:
+        self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True)),
+        )
+        self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
+            "admitted"
+        )
+        self.mocks["resolve_merge_train_github_token"].return_value = ""
+
+        (result,) = self._run()
+
+        self.assertEqual(
+            (result.status, result.reason_code), ("failed", "github_token_not_configured")
+        )
+        self.mocks["execute_merge_train_controller_run_once"].assert_not_called()
+
+    def test_one_failing_train_does_not_stop_the_others(self) -> None:
+        self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True)),
+            ("cbusillo/beta", MergeTrainSchedulerPolicy(enabled=True)),
+            ("cbusillo/gamma", MergeTrainSchedulerPolicy(enabled=True)),
+        )
+        self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
+            "admitted"
+        )
+        self.mocks["execute_merge_train_controller_run_once"].side_effect = [
+            RuntimeError("GitHub is down"),
+            MergeTrainControllerLeaseHeldError("held"),
+            _controller_result(),
+        ]
+
+        results = self._run()
+
+        self.assertEqual(
+            [(result.repository, result.status, result.reason_code) for result in results],
+            [
+                ("cbusillo/alpha", "failed", "RuntimeError"),
+                ("cbusillo/beta", "deferred", "controller_lease_held"),
+                ("cbusillo/gamma", "ran", ""),
+            ],
+        )
+
+    def test_each_target_acts_on_the_policy_current_when_it_starts(self) -> None:
+        both_enabled = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True)),
+            ("cbusillo/beta", MergeTrainSchedulerPolicy(enabled=True)),
+        )
+        beta_disabled = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True)),
+            ("cbusillo/beta", MergeTrainSchedulerPolicy(enabled=False)),
+        )
+        # The operator turns beta off while alpha's pass is running.
+        self.mocks["resolve_merge_train_policy_record"].side_effect = [
+            both_enabled,
+            both_enabled,
+            beta_disabled,
+        ]
+        self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
+            "admitted"
+        )
+
+        results = self._run()
+
+        self.assertEqual([result.repository for result in results], ["cbusillo/alpha"])
+        self.mocks["execute_merge_train_controller_run_once"].assert_called_once()
+
+    def test_a_stop_request_starts_no_further_targets(self) -> None:
+        self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True)),
+            ("cbusillo/beta", MergeTrainSchedulerPolicy(enabled=True)),
+        )
+        self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
+            "admitted"
+        )
+        stop_requested = Event()
+
+        def run_controller_then_request_stop(**_: object) -> MergeTrainControllerRunOnceResult:
+            stop_requested.set()
+            return _controller_result()
+
+        self.mocks[
+            "execute_merge_train_controller_run_once"
+        ].side_effect = run_controller_then_request_stop
+
+        results = run_merge_train_scheduler_pass(
+            record_store=self.record_store,
+            control_plane_root=_ROOT,
+            now=lambda: "2026-10-01T06:00:00Z",
+            should_stop=stop_requested.is_set,
+        )
+
+        self.assertEqual([result.repository for result in results], ["cbusillo/alpha"])
+
+    def test_dry_run_controller_pass_posts_no_feedback(self) -> None:
+        self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=False)),
+        )
+        self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
+            "admitted"
+        )
+
+        (result,) = self._run()
+
+        request = self.mocks["execute_merge_train_controller_run_once"].call_args.kwargs["request"]
+        self.assertFalse(request.mutate)
+        self.assertEqual(result.feedback_delivered, 0)
+        self.mocks["build_merge_train_pr_feedback_record"].assert_not_called()
+
+    def test_mutating_controller_pass_delivers_feedback(self) -> None:
+        self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True)),
+        )
+        self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
+            "admitted"
+        )
+
+        (result,) = self._run()
+
+        self.assertTrue(
+            self.mocks["execute_merge_train_controller_run_once"].call_args.kwargs["request"].mutate
+        )
+        feedback_request = self.mocks["build_merge_train_pr_feedback_record"].call_args.kwargs[
+            "request"
+        ]
+        self.assertEqual(feedback_request.pull_request_number, 7)
+        self.assertEqual(feedback_request.source, "launchplane:merge-train-scheduler")
+        self.assertEqual(result.feedback_delivered, 1)
+        self.record_store.write_merge_train_pr_feedback_record.assert_called_once()
+
+    def test_level1_target_runs_the_level1_step(self) -> None:
+        self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
+            (
+                "cbusillo/alpha",
+                MergeTrainSchedulerPolicy(enabled=True, runner_mode="level1", mutate=True),
+            ),
+        )
+        self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
+            "admitted"
+        )
+        self.mocks["execute_recorded_merge_train_run_once"].return_value = SimpleNamespace(
+            records={"merge_train_run_id": "run-1"}
+        )
+
+        (result,) = self._run()
+
+        call = self.mocks["execute_recorded_merge_train_run_once"].call_args.kwargs
+        self.assertTrue(call["request"].mutate)
+        self.assertIsNotNone(call["controller_state_store"])
+        self.assertEqual(result.records, {"merge_train_run_id": "run-1"})
+        self.mocks["execute_merge_train_controller_run_once"].assert_not_called()
+
+
+class MergeTrainSchedulerLoopTests(TestCase):
+    def test_passes_start_on_the_interval_and_survive_a_failed_pass(self) -> None:
+        clock = iter([0.0, 40.0, 300.0, 310.0])
+        waits: list[float] = []
+        stop_event = MagicMock(spec=Event)
+        stop_event.is_set.return_value = False
+        stop_event.wait.side_effect = lambda timeout: waits.append(timeout)
+        passes: list[tuple[MergeTrainScheduledTargetResult, ...]] = []
+
+        with patch.object(
+            merge_train_scheduler,
+            "run_merge_train_scheduler_pass",
+            side_effect=[RuntimeError("policy unreadable"), ()],
+        ):
+            count = run_merge_train_scheduler_loop(
+                record_store=object(),
+                control_plane_root=_ROOT,
+                interval_seconds=300,
+                stop_event=stop_event,
+                max_passes=2,
+                pass_callback=passes.append,
+                monotonic=lambda: next(clock),
+            )
+
+        self.assertEqual(count, 2)
+        self.assertEqual(passes, [(), ()])
+        # The first pass took 40 seconds, so the next one starts 260 seconds later.
+        self.assertEqual(waits, [260.0])
