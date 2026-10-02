@@ -23297,12 +23297,13 @@ def create_launchplane_fastapi_app(
         lane_owner = _lane_setup_context_owner(
             record_store=database_store, context=setup_request.context
         )
-        can_setup_target = resolved_authz_policy_runtime.policy.allows(
+        service_scoped = resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action="dokploy_target.setup",
             product=setup_request.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ) or (
+        )
+        lane_scoped_only = not service_scoped and (
             setup_request.operation == "create-compose"
             and setup_request.expected_current_provider_target is None
             and not setup_request.project_id
@@ -23316,6 +23317,7 @@ def create_launchplane_fastapi_app(
                 target=AuthorizationTarget(scope="instance", instances=(setup_request.instance,)),
             )
         )
+        can_setup_target = service_scoped or lane_scoped_only
         can_repair_domain_authority = setup_request.operation == "repair-domain-authority" and (
             can_setup_target
             or resolved_authz_policy_runtime.policy.allows(
@@ -23399,7 +23401,18 @@ def create_launchplane_fastapi_app(
                 control_plane_root_path=resolved_control_plane_root,
                 record_store=database_store,
                 request=setup_request,
+                # A lane-scoped caller's owner is re-checked when records commit.
+                required_context_owner=(
+                    (lane_owner, setup_request.context) if lane_scoped_only else None
+                ),
             )
+        except ProductContextOwnershipError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="local_operator_lane_scope_required",
+                message=str(error),
+            ) from error
         except (ValueError, click.ClickException) as error:
             raise _launchplane_http_error(
                 status_code=400,

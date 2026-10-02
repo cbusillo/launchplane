@@ -8,6 +8,12 @@ from unittest.mock import patch
 from click import Command
 from click.testing import CliRunner, Result
 
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductImageProfile,
+    ProductLaneProfile,
+)
+from control_plane.storage.product_authority_bundle import ProductContextOwnershipError
 from control_plane.cli import main
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.deploy_target import DeployedTargetReference, ProviderTargetRecord
@@ -1220,6 +1226,62 @@ class DokployTargetAdoptionTests(unittest.TestCase):
         self.assertEqual(target_id_record.target_id, "compose-123")
         self.assertEqual(provider_target.provider_target_type, "compose")
         self.assertEqual(provider_target.target_id, "compose-123")
+
+    def test_create_compose_refuses_records_when_the_context_changed_owner(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            for product in ("cm-website", "other-site"):
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord(
+                        product=product,
+                        display_name=product,
+                        repository=f"example/{product}",
+                        driver_id="generic-web",
+                        image=ProductImageProfile(repository=f"ghcr.io/example/{product}"),
+                        lanes=(ProductLaneProfile(instance="prod", context="cm_website"),),
+                        updated_at="2026-05-04T23:00:00Z",
+                        source="test:lane-setup-owner",
+                    )
+                )
+
+            def mutate_provider(
+                _host: str, _token: str, path: str, payload: JsonObject
+            ) -> JsonObject:
+                responses: dict[str, JsonObject] = {
+                    "/api/project.create": {"projectId": "project-123"},
+                    "/api/environment.create": {"environmentId": "env-123"},
+                    "/api/compose.create": {"composeId": "compose-123"},
+                }
+                return responses[path]
+
+            with self.assertRaises(ProductContextOwnershipError):
+                create_dokploy_compose_target(
+                    record_store=store,
+                    host="https://dokploy.example.invalid",
+                    token="token",
+                    context="cm_website",
+                    instance="testing",
+                    target_name="cm-website-testing",
+                    project_name="Odoo",
+                    server_id="server-123",
+                    domains=("cm-website-testing.shinycomputers.com",),
+                    updated_at="2026-05-04T23:10:00Z",
+                    apply=True,
+                    mutate_provider=mutate_provider,
+                    fetch_target_payload=lambda *_args: {
+                        "name": "cm-website-testing",
+                        "sourceType": "raw",
+                        "composePath": "docker-compose.yml",
+                        "environment": {"project": {"name": "Odoo"}},
+                    },
+                    required_context_owner=("cm-website", "cm_website"),
+                )
+            with self.assertRaises(FileNotFoundError):
+                store.read_dokploy_target_record(context_name="cm_website", instance_name="testing")
+            store.close()
 
     def test_create_application_target_canonicalizes_route_keys_before_persisting(
         self,
