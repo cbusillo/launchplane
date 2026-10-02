@@ -36,6 +36,7 @@ from control_plane.http_routes.every_code import (
     register_every_code_work_request_read_routes,
 )
 from control_plane.http_routes.ingress import register_ingress_read_routes
+from control_plane.http_routes.path_check import register_product_path_check_read_routes
 from control_plane.http_routes.retirement_records import register_retirement_record_read_routes
 from control_plane.http_routes.governance_projection import (
     GOVERNANCE_PROJECTION_ROUTE,
@@ -188,6 +189,7 @@ __all__ = (
     "register_preview_record_read_routes",
     "register_product_config_status_read_routes",
     "register_product_environment_read_routes",
+    "register_product_path_check_read_routes",
     "register_product_promotion_status_read_routes",
     "register_product_profile_read_routes",
     "register_protected_artifact_read_routes",
