@@ -1,7 +1,8 @@
 // Print the text the frontend shows people, one JSON object per line, for
 // scripts/validate_role_words.py. JSX text counts, and so do string literals
-// that are a phrase or a capitalized word. Lowercase keys, class names, element
-// ids, module paths, types, and comments do not. A literal that a reader
+// that are a phrase or a capitalized word, or the value of an attribute such as
+// aria-label or title. Lowercase keys, class names, element ids, module paths,
+// types, and comments do not. A literal that a reader
 // parses, such as a marker other repositories write, keeps its legacy spelling
 // when its line or the line above says "role-words: legacy".
 import { readdirSync, readFileSync } from "node:fs";
@@ -14,6 +15,7 @@ const SOURCE = join(FRONTEND, "src");
 const PHRASE = /\S\s+\S|^[A-Z][a-z]/;
 const LEGACY = "role-words: legacy";
 const HIDDEN_ATTRIBUTE = /^(?:className|id|htmlFor|key|data-.*)$/;
+const SHOWN_ATTRIBUTE = /^(?:aria-label|aria-description|title|placeholder|alt|label)$/;
 
 function sourceFiles(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -23,11 +25,21 @@ function sourceFiles(directory) {
   });
 }
 
+function jsxAttributeName(node) {
+  for (let current = node.parent; current; current = current.parent) {
+    if (ts.isJsxAttribute(current)) return current.name.getText();
+    if (ts.isJsxElement(current) || ts.isJsxSelfClosingElement(current) || ts.isStatement(current)) {
+      return null;
+    }
+  }
+  return null;
+}
+
 function isNotShown(node) {
   const parent = node.parent;
   if (!parent) return false;
   if (ts.isImportDeclaration(parent) || ts.isExportDeclaration(parent)) return true;
-  if (ts.isJsxAttribute(parent) && HIDDEN_ATTRIBUTE.test(parent.name.getText())) return true;
+  if (HIDDEN_ATTRIBUTE.test(jsxAttributeName(node) ?? "")) return true;
   return ts.isLiteralTypeNode(parent);
 }
 
@@ -49,6 +61,7 @@ export function visibleStrings(fileName, text) {
       ts.isTemplateTail(node)
     ) {
       value = isNotShown(node) ? null : node.text;
+      always = ts.isJsxAttribute(node.parent) && SHOWN_ATTRIBUTE.test(node.parent.name.getText());
     }
     if (value !== null && value.trim() && (always || PHRASE.test(value.trim()))) {
       const { line } = source.getLineAndCharacterOfPosition(node.getStart(source));

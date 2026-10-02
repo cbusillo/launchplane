@@ -26,6 +26,15 @@ export function Panel({ role }: { role: Role }) {
   assert.deepEqual(texts(source), ["Client", "Read-only", "Client release decision", "Change the Client"]);
 });
 
+test("reports a short visible attribute and skips class names built in expressions", () => {
+  const source = `
+export const Badge = ({ active }: { active: boolean }) => (
+  <span aria-label="operator" className={active ? "owner badge" : "badge"} title={active ? "owner-review" : "Badge"} />
+);
+`;
+  assert.deepEqual(texts(source), ["operator", "Badge"]);
+});
+
 test("skips a literal marked as a legacy marker on its line or the line above", () => {
   const source = `
 // role-words: legacy marker that product pull requests write.

@@ -18,11 +18,18 @@ class RoleWordsMarkdownTests(unittest.TestCase):
             "The site Owner accepts the release.\n"
             "Ask the operator before a grant.\n"
             "Only a policy administrator can apply it.\n"
+            "Only the signed-in policy\n"
+            "administrator can apply it.\n"
         )
 
         self.assertEqual(
             validate_role_words.findings(text),
-            [(3, "Owner"), (4, "operator"), (5, "policy administrator")],
+            [
+                (3, "Owner"),
+                (4, "operator"),
+                (5, "policy administrator"),
+                (7, "policy administrator"),
+            ],
         )
 
     def test_allows_repository_sense_code_links_and_wrapped_qualifiers(self) -> None:

@@ -111,12 +111,12 @@ route, execute action, static execution credential, or agent execution path.
 The registry is not an arbitrary route, command, SQL, or payload proxy. New
 descriptors require code, schemas, tests, documentation, and review.
 
-## Client-Control Contract Seam
+## Admin Confirmation Contract Seam
 
 `contracts/owner-control-contract.json` publishes canonical `owner-control`
 request and response bytes plus generic golden vectors for every registered
 descriptor. It is a cross-host conformance artifact only: it does not issue a
-challenge, consume a Client confirmation, alter browser approval, add a route,
+challenge, consume an admin confirmation, alter browser approval, add a route,
 or authorize execution. See `docs/owner-control-channel.md`.
 
 The DB-backed shadow verifier remains independent from this lifecycle. No

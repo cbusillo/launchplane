@@ -706,8 +706,8 @@ is a Director decision.
 
 The Agent delivery workbench offers **Check setup prerequisites** when preparing
 delivery. Its parameterless read uses the existing managed
-`authz_policy_operation.propose` authority and strict immutable-ID policy
-administrator checks against the current runtime and active DB policy. The five
+`authz_policy_operation.propose` authority and strict immutable-ID admin
+checks against the current runtime and active DB policy. The five
 activation lifecycle actions alone do not authorize this inspection.
 
 The response reports current authorization-policy provenance, tracked repository

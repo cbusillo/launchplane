@@ -3319,8 +3319,8 @@ The route is owned by native FastAPI; its descriptor remains discoverable, the
 native route owns execution.
 
 `POST /v1/odoo-prod-promotions` queues the same promotion run as a durable
-operation for the admin release panel. It requires the signed-in policy
-administrator and an `Idempotency-Key`, refuses with `promotion_not_ready` when
+operation for the admin release panel. It requires the signed-in admin
+and an `Idempotency-Key`, refuses with `promotion_not_ready` when
 inputs, release approval, or the verified infrastructure backup are missing, and
 otherwise captures a `policy_administrator` authorization on the prod instance
 and returns the queued operation. `POST /v1/odoo-prod-rollbacks` does the same

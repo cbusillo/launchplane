@@ -25,6 +25,12 @@ TLS.
 
 ## Release Rule
 
+This is the target rule; it lands with the code migration (cbusillo/direction#13
+step (d) and cbusillo/launchplane#2716). Until then, release review requires a
+recorded Client acceptance or admin override, as
+[release-review.md](release-review.md) describes, even when the Client is the
+Director.
+
 Each product records its Client. A production release needs the Client's
 acceptance, unless the Client is the Director; then the Director's standing
 direction is the acceptance. Either way the release runs the same gated path:

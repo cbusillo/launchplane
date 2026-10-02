@@ -929,8 +929,8 @@ dispatch event and reads the existing terminal-agent subject and token label
 bootstrap variables. Its exact `operator.privileged-operation-bootstrap` set
 grants only terminal-agent policy proposal plus repository-owner policy
 read/cancel/approve/revoke. After the initial Director-approved attempt proved that
-the existing self-preflight authority was not an immutable-ID policy
-administrator rule, the Director explicitly approved adding
+the existing self-preflight authority was not an immutable-ID admin
+rule, the Director explicitly approved adding
 `authz_policy_grant.write` to that same exact-ID rule. The set grants no secret
 operation action, execute action, summary read, product/runtime action, or
 workflow identity. Missing repository-owner or terminal-agent selectors fail request
