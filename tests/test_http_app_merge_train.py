@@ -29,7 +29,7 @@ from control_plane.merge_admission import (
     MergeAdmissionDeniedError,
     MergeAdmissionEvaluation,
 )
-from control_plane.merge_train import MergeTrainDryRunSnapshot
+from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from control_plane.merge_train_controller_run_once import MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION
 from control_plane.merge_train_github import MergeTrainGitHubError
@@ -1419,6 +1419,7 @@ class FastApiMergeTrainStackCollapseRunOnceTests(unittest.IsolatedAsyncioTestCas
                     if record.record_id == plan_record_id
                 ).plan,
                 branch_client=_FakeMergeTrainGitHubClient(transport=object()),
+                child_readiness_reasons=lambda _pull_request_number: (),
                 updated_at="2026-05-13T21:02:00Z",
             )
             executed_plan_record = build_merge_train_stack_collapse_plan_record(
@@ -3641,6 +3642,61 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(RecordingStackMergeClient.stack_merges, [])
         self.assertEqual({record.plan.status for record in stack_records}, {"planned"})
+
+    async def test_reports_child_held_just_before_its_merge(self) -> None:
+        class HeldAtMergeClient(_FakeMergeTrainGitHubClient):
+            stack_merges: list[int] = []
+
+            def read_pull_request_snapshot(
+                self, *, repository: str, pull_request_number: int
+            ) -> MergeTrainPullRequestSnapshot:
+                pull_request = super().read_pull_request_snapshot(
+                    repository=repository, pull_request_number=pull_request_number
+                )
+                return pull_request.model_copy(update={"is_draft": True})
+
+            def merge_stack_child_into_parent(self, **kwargs: Any) -> str:
+                self.stack_merges.append(kwargs["child_pull_request_number"])
+                return super().merge_stack_child_into_parent(**kwargs)
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _FakeStackedMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    HeldAtMergeClient,
+                ),
+            ):
+                await _post_merge_train_controller_run_once(app, request_payload)
+                refused_response = await _post_merge_train_controller_run_once(app, request_payload)
+
+        refused_result = refused_response.json()["result"]
+        self.assertEqual(refused_result["controller_action"], "stack_unsupported")
+        self.assertEqual(
+            refused_result["blocking_reason"]["message"],
+            "stacked pull request #2 is not ready for the train: draft pull request",
+        )
+        self.assertEqual(HeldAtMergeClient.stack_merges, [])
 
     async def test_advances_stacked_batch_flow(self) -> None:
         class CollapsedRootWithIndependentPrSnapshotReader(

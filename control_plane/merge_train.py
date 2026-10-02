@@ -1,4 +1,4 @@
-from typing import Literal, Protocol
+from typing import Callable, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
 
@@ -36,6 +36,12 @@ class MergeTrainMergeClient(Protocol):
         head_sha: str,
         merge_method: MergeTrainMergeMethod,
     ) -> str: ...
+
+
+class MergeTrainPullRequestReader(Protocol):
+    def read_pull_request_snapshot(
+        self, *, repository: str, pull_request_number: int
+    ) -> "MergeTrainPullRequestSnapshot": ...
 
 
 class MergeTrainSnapshotReader(Protocol):
@@ -627,6 +633,23 @@ def merge_train_stack_child_readiness_reasons(
         f"stacked pull request #{pull_request.number} is not ready for the train: {reason}"
         for reason in queue_entry.ineligible_reasons
     )
+
+
+def merge_train_stack_child_readiness_check(
+    *,
+    reader: MergeTrainPullRequestReader,
+    repository: str,
+    repository_policy: MergeTrainRepositoryPolicy,
+) -> Callable[[int], tuple[str, ...]]:
+    def readiness_reasons(pull_request_number: int) -> tuple[str, ...]:
+        return merge_train_stack_child_readiness_reasons(
+            repository_policy=repository_policy,
+            pull_request=reader.read_pull_request_snapshot(
+                repository=repository, pull_request_number=pull_request_number
+            ),
+        )
+
+    return readiness_reasons
 
 
 def _unsupported_stack_result(
