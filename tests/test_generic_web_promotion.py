@@ -36,8 +36,13 @@ from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployRequest,
     GenericWebDeployResult,
 )
+from control_plane.workflows.generic_web_deploy_provider import (
+    GenericWebProviderDeploymentObservation,
+    GenericWebResolvedDeployTarget,
+)
 from control_plane.workflows.generic_web_promotion import (
     GenericWebProdPromotionRequest,
+    GenericWebProdPromotionResult,
     execute_generic_web_prod_promotion,
 )
 from control_plane.workflows.generic_web_promotion_workflow import (
@@ -1005,6 +1010,216 @@ class GenericWebProdPromotionTests(unittest.TestCase):
 
         self.assertIn("requires current source environment inventory", str(caught.exception))
         self.assertEqual(store.deployments, {})
+        self.assertEqual(store.promotions, {})
+
+
+_PREVIOUS_ARTIFACT = f"ghcr.io/cbusillo/sellyouroutboard@sha256:{'f' * 64}"
+_PREVIOUS_DEPLOYMENT = "deployment-syo-prod-previous"
+
+
+class _ProductionProvider:
+    """A provider whose single target runs the last artifact it deployed."""
+
+    provider_id = "dokploy"
+    delegated_executor = "control-plane.dokploy"
+
+    def __init__(self, *, fail_artifact: str = "") -> None:
+        self.fail_artifact = fail_artifact
+        self.running: RuntimeIdentity | None = None
+        self.deployed_artifacts: list[str] = []
+
+    def resolve_deploy_target(
+        self,
+        *,
+        lane: ProductLaneProfile,
+        normalized_artifact_id: str,
+        request_source_git_ref: str,
+        request_deploy_reference: str = "",
+        request_timeout_seconds: int | None,
+        **_kwargs: object,
+    ) -> GenericWebResolvedDeployTarget:
+        return GenericWebResolvedDeployTarget(
+            ship_request=ShipRequest(
+                artifact_id=normalized_artifact_id,
+                deploy_reference=request_deploy_reference,
+                context=lane.context,
+                instance=lane.instance,
+                source_git_ref=request_source_git_ref,
+                target_name="syo-prod-app",
+                target_type="application",
+                provider_id=self.provider_id,
+                target_category="application",
+                provider_target_type="application",
+                deploy_mode="dokploy-application-api",
+                verify_health=False,
+                destination_health=HealthcheckEvidence(),
+            ),
+            resolved_target=ResolvedTargetEvidence(
+                target_type="application", target_id="app-123", target_name="syo-prod-app"
+            ),
+            deploy_timeout_seconds=request_timeout_seconds or 600,
+        )
+
+    def execute_artifact_deploy(
+        self,
+        *,
+        runtime_identity: RuntimeIdentity,
+        before_provider_mutation: Callable[[str], None],
+        effect_started: Callable[[], None],
+        **_kwargs: object,
+    ) -> None:
+        before_provider_mutation("deploy_trigger")
+        effect_started()
+        self.deployed_artifacts.append(runtime_identity.artifact_id)
+        self.running = runtime_identity
+        if runtime_identity.artifact_id == self.fail_artifact:
+            raise click.ClickException("provider reported the deployment as failed")
+
+    @staticmethod
+    def observe_artifact_deploy(**_kwargs: object) -> GenericWebProviderDeploymentObservation:
+        return GenericWebProviderDeploymentObservation(
+            outcome="present",
+            deployment_status="done",
+            deployment_id="provider-deployment",
+            started_at="2026-05-01T21:00:00Z",
+            finished_at="2026-05-01T21:01:00Z",
+        )
+
+    def healthcheck(self, **_kwargs: object) -> HealthcheckPass:
+        running = self.running
+        if running is None or running.artifact_id != _PREVIOUS_ARTIFACT:
+            raise click.ClickException("https://www.sellyouroutboard.com/api/health returned 503")
+        return HealthcheckPass(payload={"runtime_identity": running.model_dump(mode="json")})
+
+
+def _store_with_production(
+    *, previous_deploy_reference: str = f"ghcr.io/cbusillo/sellyouroutboard:sha-{'e' * 40}"
+) -> _GenericWebPromotionStore:
+    store = _GenericWebPromotionStore(_profile())
+    store.write_environment_inventory(_testing_inventory())
+    previous = _deployment_record(
+        artifact_id=_PREVIOUS_ARTIFACT, deploy_reference=previous_deploy_reference
+    ).model_copy(update={"record_id": _PREVIOUS_DEPLOYMENT, "source_git_ref": "previous"})
+    store.write_deployment_record(previous)
+    store.write_environment_inventory(
+        _testing_inventory(
+            instance="prod",
+            artifact_identity=previous.artifact_identity,
+            source_git_ref="previous",
+            deployment_record_id=_PREVIOUS_DEPLOYMENT,
+            promotion_record_id="promotion-previous-release",
+            promoted_from_instance="testing",
+        )
+    )
+    return store
+
+
+class GenericWebProdPromotionRollbackTests(unittest.TestCase):
+    def setUp(self) -> None:
+        stub_verified_promotion_backup(self, "control_plane.workflows.generic_web_promotion")
+        self.enterContext(
+            patch(
+                "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
+                return_value=None,
+            )
+        )
+
+    @staticmethod
+    def _promote(
+        store: _GenericWebPromotionStore,
+        provider: _ProductionProvider,
+        *,
+        provider_operation_title: str = "Launchplane operation promotion",
+        deployment_record_id: str = "deployment-promotion-syo-prod",
+        provider_effect_checkpoint: Callable[[str], None] | None = None,
+    ) -> GenericWebProdPromotionResult:
+        with patch(
+            "control_plane.workflows.generic_web_promotion.wait_for_runtime_identity_healthcheck_with_retry",
+            side_effect=provider.healthcheck,
+        ):
+            return execute_generic_web_prod_promotion(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=_request(),
+                deploy_provider=provider,
+                provider_operation_title=provider_operation_title,
+                deployment_record_id=deployment_record_id,
+                provider_effect_checkpoint=provider_effect_checkpoint,
+            )
+
+    def test_failed_health_check_returns_production_to_the_previous_deployment(self) -> None:
+        store = _store_with_production()
+        provider = _ProductionProvider()
+        checkpoint = Mock()
+
+        result = self._promote(store, provider, provider_effect_checkpoint=checkpoint)
+
+        self.assertEqual(
+            provider.deployed_artifacts,
+            ["ghcr.io/cbusillo/sellyouroutboard@sha256:abc123", _PREVIOUS_ARTIFACT],
+        )
+        assert provider.running is not None
+        self.assertEqual(provider.running.artifact_id, _PREVIOUS_ARTIFACT)
+        self.assertEqual(result.promotion_status, "fail")
+        self.assertEqual(result.destination_health_status, "fail")
+        self.assertEqual(result.rollback_status, "pass")
+        self.assertEqual(result.rollback_target_deployment_record_id, _PREVIOUS_DEPLOYMENT)
+        self.assertEqual(
+            result.rollback_deployment_record_id, "deployment-promotion-syo-prod-rollback"
+        )
+        self.assertIn("returned 503", result.error_message)
+        promotion = store.promotions[result.promotion_record_id]
+        self.assertEqual(promotion.destination_health.status, "fail")
+        self.assertEqual(promotion.rollback.status, "pass")
+        self.assertEqual(promotion.rollback.target_deployment_record_id, _PREVIOUS_DEPLOYMENT)
+        self.assertEqual(
+            promotion.rollback.deployment_record_id, "deployment-promotion-syo-prod-rollback"
+        )
+        self.assertIn("health check failed", promotion.rollback.detail)
+        self.assertEqual(promotion.rollback_health.status, "pass")
+        inventory = store.inventories[("sellyouroutboard-testing", "prod")]
+        self.assertEqual(inventory.deployment_record_id, "deployment-promotion-syo-prod-rollback")
+        assert inventory.artifact_identity is not None
+        self.assertEqual(inventory.artifact_identity.artifact_id, _PREVIOUS_ARTIFACT)
+        self.assertEqual(inventory.promotion_record_id, "promotion-previous-release")
+        self.assertIn(
+            "rollback_deploy_trigger", [call.args[0] for call in checkpoint.call_args_list]
+        )
+
+    def test_failed_destination_deploy_returns_production_to_the_previous_deployment(
+        self,
+    ) -> None:
+        store = _store_with_production()
+        provider = _ProductionProvider(
+            fail_artifact="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123"
+        )
+
+        result = self._promote(store, provider)
+
+        assert provider.running is not None
+        self.assertEqual(provider.running.artifact_id, _PREVIOUS_ARTIFACT)
+        self.assertEqual(result.deployment_status, "fail")
+        self.assertEqual(result.rollback_status, "pass")
+        promotion = store.promotions[result.promotion_record_id]
+        self.assertIn("Destination deploy failed", promotion.rollback.detail)
+        self.assertEqual(promotion.rollback.target_deployment_record_id, _PREVIOUS_DEPLOYMENT)
+
+    def test_promotion_is_refused_before_changing_production_without_a_rollback_target(
+        self,
+    ) -> None:
+        store = _store_with_production(previous_deploy_reference="")
+        provider = _ProductionProvider()
+
+        with self.assertRaisesRegex(click.ClickException, "refused before changing production"):
+            self._promote(store, provider)
+        with self.assertRaisesRegex(click.ClickException, "refused before changing production"):
+            execute_generic_web_prod_promotion(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=_request(dry_run=True),
+            )
+
+        self.assertEqual(provider.deployed_artifacts, [])
         self.assertEqual(store.promotions, {})
 
 

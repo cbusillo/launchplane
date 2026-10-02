@@ -15,6 +15,12 @@ import click
 from control_plane.agent_operator_contract import write_agent_operator_contract
 from control_plane.cli_shared import DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS
 from control_plane.owner_control_contract import write_owner_control_contract
+from control_plane.merge_train_scheduler import (
+    DEFAULT_MERGE_TRAIN_SCHEDULER_INTERVAL_SECONDS,
+    MergeTrainScheduledTargetResult,
+    run_merge_train_scheduler_loop,
+    run_merge_train_scheduler_pass,
+)
 from control_plane.outbox_worker import (
     DEFAULT_OUTBOX_WORKER_ERROR_BACKOFF_SECONDS,
     DEFAULT_OUTBOX_WORKER_LEASE_SECONDS,
@@ -489,6 +495,101 @@ def service_outbox_workers_run(
             error_backoff_seconds=error_backoff_seconds,
             max_consecutive_errors=max_consecutive_errors,
             notification_drivers=public_ingress_notification_drivers(record_store=record_store),
+        )
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        signal.signal(signal.SIGINT, previous_sigint)
+    click.echo(json.dumps({"status": "stopped"}, indent=2, sort_keys=True))
+
+
+@service.group("merge-train-workers")
+def service_merge_train_workers() -> None:
+    """Run the merge train for every scheduler-enabled policy target on a timer."""
+
+
+@service_merge_train_workers.command("run-once")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane shared-service core records.",
+)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Launchplane repo root used to resolve merge train credentials.",
+)
+def service_merge_train_workers_run_once(
+    state_dir: Path,
+    database_url: str,
+    control_plane_root: Path | None,
+) -> None:
+    if not database_url.strip():
+        raise click.ClickException(
+            "Merge train workers require --database-url or LAUNCHPLANE_DATABASE_URL."
+        )
+    results = run_merge_train_scheduler_pass(
+        record_store=_store(state_dir=state_dir, database_url=database_url),
+        control_plane_root=control_plane_root or _control_plane_root(),
+    )
+    click.echo(json.dumps([asdict(result) for result in results], indent=2, sort_keys=True))
+
+
+@service_merge_train_workers.command("run")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane shared-service core records.",
+)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Launchplane repo root used to resolve merge train credentials.",
+)
+@click.option(
+    "--interval-seconds",
+    type=int,
+    default=DEFAULT_MERGE_TRAIN_SCHEDULER_INTERVAL_SECONDS,
+    show_default=True,
+    help="Seconds between the starts of two scheduled passes.",
+)
+def service_merge_train_workers_run(
+    state_dir: Path,
+    database_url: str,
+    control_plane_root: Path | None,
+    interval_seconds: int,
+) -> None:
+    if not database_url.strip():
+        raise click.ClickException(
+            "Merge train workers require --database-url or LAUNCHPLANE_DATABASE_URL."
+        )
+    stop_event = Event()
+
+    def _request_stop(_signum: int, _frame: object) -> None:
+        stop_event.set()
+
+    def _log_pass(results: tuple[MergeTrainScheduledTargetResult, ...]) -> None:
+        # One line per pass, so the container log shows the train's cadence.
+        click.echo(json.dumps([asdict(result) for result in results], sort_keys=True))
+
+    previous_sigterm = signal.signal(signal.SIGTERM, _request_stop)
+    previous_sigint = signal.signal(signal.SIGINT, _request_stop)
+    try:
+        run_merge_train_scheduler_loop(
+            record_store=_store(state_dir=state_dir, database_url=database_url),
+            control_plane_root=control_plane_root or _control_plane_root(),
+            interval_seconds=interval_seconds,
+            stop_event=stop_event,
+            pass_callback=_log_pass,
         )
     finally:
         signal.signal(signal.SIGTERM, previous_sigterm)

@@ -1,25 +1,9 @@
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
-from types import ModuleType
 from typing import Any
 from unittest import TestCase
 
-
-def _load_feedback_module() -> ModuleType:
-    module_path = (
-        Path(__file__).resolve().parents[1] / "scripts" / "merge_train_controller_feedback.py"
-    )
-    spec = importlib.util.spec_from_file_location("merge_train_controller_feedback", module_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-feedback = _load_feedback_module()
+from control_plane import merge_train_controller_feedback as feedback
 
 
 class MergeTrainControllerFeedbackTests(TestCase):
@@ -70,7 +54,7 @@ class MergeTrainControllerFeedbackTests(TestCase):
 
         self.assertEqual(1, len(payloads))
         self.assertEqual("waiting", payloads[0]["event"])
-        self.assertIn("waiting", payloads[0]["message"])
+        self.assertIn("waiting", str(payloads[0]["message"]))
 
     def test_build_feedback_payloads_marks_merged_landing_plan_completed(self) -> None:
         response: dict[str, Any] = {
@@ -114,7 +98,7 @@ class MergeTrainControllerFeedbackTests(TestCase):
 
         self.assertEqual([7, 8], [payload["pull_request_number"] for payload in payloads])
         self.assertEqual({"stale_policy"}, {payload["event"] for payload in payloads})
-        self.assertIn("stale", payloads[0]["message"])
+        self.assertIn("stale", str(payloads[0]["message"]))
 
     def test_completed_batch_feedback_links_every_original_to_the_shared_pr(self) -> None:
         payloads = feedback.build_feedback_payloads(
@@ -136,7 +120,9 @@ class MergeTrainControllerFeedbackTests(TestCase):
         )
         self.assertEqual([payload["pull_request_number"] for payload in payloads], [7, 8])
         self.assertTrue(all(payload["event"] == "completed" for payload in payloads))
-        self.assertTrue(all("protected batch PR #99" in payload["message"] for payload in payloads))
+        self.assertTrue(
+            all("protected batch PR #99" in str(payload["message"]) for payload in payloads)
+        )
 
     def test_build_feedback_payloads_reports_admission_block_detail(self) -> None:
         response: dict[str, Any] = {
@@ -159,7 +145,7 @@ class MergeTrainControllerFeedbackTests(TestCase):
 
         self.assertEqual(1, len(payloads))
         self.assertEqual("blocked", payloads[0]["event"])
-        self.assertIn("Fresh merge readiness evidence", payloads[0]["message"])
+        self.assertIn("Fresh merge readiness evidence", str(payloads[0]["message"]))
 
     def test_build_feedback_payloads_skips_actions_without_pr_numbers(self) -> None:
         response: dict[str, Any] = {

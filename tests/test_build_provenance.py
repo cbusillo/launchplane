@@ -11,6 +11,7 @@ from control_plane.build_provenance import (
     VerifiedBuildArtifact,
     record_verified_build_artifact,
     verify_build_artifact,
+    verify_generic_web_build,
 )
 from control_plane.contracts.artifact_identity import BuildPurpose
 from tests.support.artifact_manifests import artifact_manifest_v2
@@ -216,6 +217,58 @@ class BuildProvenanceTests(unittest.TestCase):
         record_verified_build_artifact(record_store=record_store, verified=verified)
 
         record_store.write_artifact_manifest.assert_called_once_with(verified.manifest)
+
+
+def _generic_web_manifest(**changes: object) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "kind": "generic-web",
+        "source_commit": COMMIT,
+        "image": {"repository": IMAGE_REPOSITORY, "digest": "sha256:" + "c" * 64},
+        **changes,
+    }
+
+
+class GenericWebBuildProvenanceTests(unittest.TestCase):
+    def verify(self, github: FakeGitHub) -> str:
+        return verify_generic_web_build(
+            transport=github,
+            repository=REPOSITORY,
+            repository_id=REPOSITORY_ID,
+            commit=COMMIT,
+            purpose="release",
+            image_repository=IMAGE_REPOSITORY,
+        ).image_reference
+
+    def test_accepts_the_image_a_main_push_build_reports(self) -> None:
+        github = FakeGitHub(runs=[_run()], manifest=_generic_web_manifest())
+
+        self.assertEqual(self.verify(github), f"{IMAGE_REPOSITORY}@sha256:{'c' * 64}")
+
+    def test_refuses_a_manifest_that_does_not_prove_this_build(self) -> None:
+        odoo_manifest = artifact_manifest_v2(
+            image_repository=IMAGE_REPOSITORY, tenant_source_repository=REPOSITORY
+        ).model_dump(mode="json")
+        for manifest in (
+            _generic_web_manifest(source_commit="1" * 40),
+            _generic_web_manifest(
+                image={"repository": "ghcr.io/example/other", "digest": "sha256:" + "c" * 64}
+            ),
+            _generic_web_manifest(image={"repository": IMAGE_REPOSITORY, "digest": "latest"}),
+            odoo_manifest,
+        ):
+            with self.subTest(manifest=manifest), self.assertRaises(BuildProvenanceError):
+                self.verify(FakeGitHub(runs=[_run()], manifest=manifest))
+
+    def test_shares_the_run_checks_of_an_odoo_build(self) -> None:
+        github = FakeGitHub(
+            runs=[_run()],
+            first_parents={TIP: MERGED_BRANCH_COMMIT, MERGED_BRANCH_COMMIT: ""},
+            manifest=_generic_web_manifest(),
+        )
+
+        with self.assertRaisesRegex(BuildProvenanceError, "first-parent"):
+            self.verify(github)
 
 
 if __name__ == "__main__":

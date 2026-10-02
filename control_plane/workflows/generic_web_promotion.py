@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Callable
 from typing import Literal, Protocol, cast
@@ -24,6 +25,11 @@ from control_plane.contracts.deploy_reference import (
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetType
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.generic_web_rollback import (
+    GenericWebRollbackDeployPlan,
+    GenericWebRollbackPlanRequest,
+    build_generic_web_rollback_plan,
+)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -35,6 +41,7 @@ from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
     PromotionRecord,
     ReleaseStatus,
+    RollbackExecutionEvidence,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.workflows.generic_web_deploy import (
@@ -144,6 +151,9 @@ class GenericWebProdPromotionResult(BaseModel):
     release_status: ReleaseStatus = "skipped"
     release_tag: str = ""
     release_url: str = ""
+    rollback_status: ReleaseStatus = "skipped"
+    rollback_target_deployment_record_id: str = ""
+    rollback_deployment_record_id: str = ""
     target_name: str = ""
     target_id: str = ""
     target_category: DeployTargetCategory = "unknown"
@@ -297,6 +307,11 @@ def execute_generic_web_prod_promotion(
         request=request,
         context=destination_lane.context,
     )
+    rollback_target = _resolve_rollback_target(
+        record_store=record_store,
+        request=request,
+        destination_lane=destination_lane,
+    )
 
     if request.dry_run:
         return GenericWebProdPromotionResult(
@@ -315,6 +330,7 @@ def execute_generic_web_prod_promotion(
             destination_health_status=destination_health.status,
             release_status="pending" if request.release_tag else "skipped",
             release_tag=request.release_tag,
+            rollback_target_deployment_record_id=rollback_target.deployment_record_id,
             dry_run=True,
         )
 
@@ -397,6 +413,8 @@ def execute_generic_web_prod_promotion(
         record_store=record_store,
         deployment_record_id=deploy_result.deployment_record_id,
     )
+    promotion_deploy_status: ReleaseStatus = deploy_result.deploy_status
+    failure = ""
     if deploy_result.deploy_status == "pass":
         try:
             destination_health = _verify_health_evidence_with_identity(
@@ -405,42 +423,35 @@ def execute_generic_web_prod_promotion(
             )
         except click.ClickException as error:
             destination_health = _mark_health_failed(destination_health)
-            _write_deployment_health(
-                record_store=record_store,
-                deployment_record=deployment_record,
-                destination_health=destination_health,
-            )
-            final_record = _build_promotion_record(
-                request=request,
-                promotion_record_id=promotion_record_id,
-                context=destination_lane.context,
-                source_health=source_health,
-                backup_gate=backup_gate,
-                destination_health=destination_health,
-                deployment_record=deployment_record,
-                deployment_status="fail",
-                target_name=deploy_result.target_name,
-                target_type=_promotion_target_type(
-                    deploy_result_target_type=(
-                        deploy_result.provider_target_type or deploy_result.target_category
-                    ),
-                    deployment_record=deployment_record,
-                ),
-                deployment_record_id=deploy_result.deployment_record_id,
-            )
-            record_store.write_promotion_record(final_record)
-            return _result_from_record(
-                request=request,
-                record=final_record,
-                deployment_record=deployment_record,
-                inventory_record_id="",
-                target_id=deploy_result.target_id,
-                dry_run=False,
-                error_message=str(error),
+            promotion_deploy_status = "fail"
+            failure = f"Destination health check failed: {error}"
+        if not failure and destination_health.status == "fail":
+            failure = "Destination health check failed: " + (
+                _health_failure_detail(destination_health) or "unhealthy"
             )
     else:
         destination_health = _mark_health_skipped(destination_health)
+        failure = f"Destination deploy failed: {deploy_result.error_message or 'no detail'}"
 
+    rollback = _RollbackOutcome()
+    if failure:
+        # Restore production before writing evidence, so a failed record write
+        # cannot leave production on the failed artifact.
+        rollback = _roll_back_production(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            profile=profile,
+            lane=destination_lane,
+            request=request,
+            rollback_target=rollback_target,
+            failure=failure,
+            production_changed=deploy_result.deploy_status == "pass"
+            or deploy_result.provider_effect_attempted,
+            deploy_provider=deploy_provider,
+            provider_operation_title=provider_operation_title,
+            deployment_record_id=deploy_result.deployment_record_id,
+            provider_effect_checkpoint=provider_effect_checkpoint,
+        )
     deployment_record = _write_deployment_health(
         record_store=record_store,
         deployment_record=deployment_record,
@@ -454,7 +465,7 @@ def execute_generic_web_prod_promotion(
         backup_gate=backup_gate,
         destination_health=destination_health,
         deployment_record=deployment_record,
-        deployment_status=deploy_result.deploy_status,
+        deployment_status=promotion_deploy_status,
         target_name=deploy_result.target_name,
         target_type=_promotion_target_type(
             deploy_result_target_type=deploy_result.provider_target_type
@@ -462,13 +473,12 @@ def execute_generic_web_prod_promotion(
             deployment_record=deployment_record,
         ),
         deployment_record_id=deploy_result.deployment_record_id,
-    )
+    ).model_copy(update={"rollback": rollback.evidence, "rollback_health": rollback.health})
     record_store.write_promotion_record(final_record)
+    if rollback.error is not None:
+        raise rollback.error
     inventory_record_id = ""
-    if deployment_record.deploy.status == "pass" and destination_health.status in {
-        "pass",
-        "skipped",
-    }:
+    if not failure:
         inventory = build_environment_inventory(
             deployment_record=deployment_record,
             updated_at=utc_now_timestamp(),
@@ -484,8 +494,7 @@ def execute_generic_web_prod_promotion(
         inventory_record_id=inventory_record_id,
         target_id=deploy_result.target_id,
         dry_run=False,
-        error_message=deploy_result.error_message
-        or _health_failure_detail(final_record.destination_health),
+        error_message=rollback.evidence.detail or failure,
     )
     if final_result.promotion_status != "pass" or not request.release_tag:
         return final_result
@@ -531,6 +540,216 @@ def _resolve_backup_gate(
         promotion_action=GENERIC_WEB_PROMOTION_BACKUP_ACTION,
         backup_record_id=request.backup_record_id,
     )
+
+
+@dataclass(frozen=True)
+class _RollbackTarget:
+    deployment_record_id: str = ""
+    planned_deploy: GenericWebRollbackDeployPlan | None = None
+    previous_inventory: EnvironmentInventory | None = None
+    unavailable_reason: str = ""
+
+
+@dataclass(frozen=True)
+class _RollbackOutcome:
+    evidence: RollbackExecutionEvidence = field(default_factory=RollbackExecutionEvidence)
+    health: HealthcheckEvidence = field(default_factory=HealthcheckEvidence)
+    error: Exception | None = None
+
+
+def _resolve_rollback_target(
+    *,
+    record_store: GenericWebPromotionStore,
+    request: GenericWebProdPromotionRequest,
+    destination_lane: ProductLaneProfile,
+) -> _RollbackTarget:
+    """Pick the deployment production runs now, before the promotion replaces it.
+
+    The deploy rewrites the lane's inventory as soon as the provider succeeds, so
+    the rollback target must be read before any production change. A promotion
+    whose current production deployment cannot be redeployed is refused here.
+    """
+    try:
+        previous_inventory = record_store.read_environment_inventory(
+            context_name=destination_lane.context,
+            instance_name=destination_lane.instance,
+        )
+    except FileNotFoundError:
+        return _RollbackTarget(
+            unavailable_reason="production had no recorded deployment before this promotion"
+        )
+    plan = build_generic_web_rollback_plan(
+        record_store=record_store,
+        request=GenericWebRollbackPlanRequest(
+            product=request.product,
+            instance=destination_lane.instance,
+            rollback_deployment_record_id=previous_inventory.deployment_record_id,
+            timeout_seconds=request.timeout_seconds,
+        ),
+    )
+    if plan.planned_deploy is not None:
+        return _RollbackTarget(
+            deployment_record_id=plan.rollback_deployment_record_id,
+            planned_deploy=plan.planned_deploy,
+            previous_inventory=previous_inventory,
+        )
+    if {blocker.code for blocker in plan.blockers} == {"health_evidence_failed"}:
+        # Production is already unhealthy; refusing would block the fix.
+        return _RollbackTarget(
+            deployment_record_id=plan.rollback_deployment_record_id,
+            unavailable_reason=(
+                "production's deployment before this promotion had already failed its health check"
+            ),
+        )
+    raise click.ClickException(
+        "Generic web prod promotion was refused before changing production: the "
+        f"deployment production runs now ({plan.rollback_deployment_record_id}) cannot be "
+        "restored automatically: " + "; ".join(blocker.message for blocker in plan.blockers)
+    )
+
+
+def _roll_back_production(
+    *,
+    control_plane_root: Path,
+    record_store: GenericWebPromotionStore,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    request: GenericWebProdPromotionRequest,
+    rollback_target: _RollbackTarget,
+    failure: str,
+    production_changed: bool,
+    deploy_provider: GenericWebDeployProvider | None,
+    provider_operation_title: str,
+    deployment_record_id: str,
+    provider_effect_checkpoint: Callable[[str], None] | None,
+) -> _RollbackOutcome:
+    target_id = rollback_target.deployment_record_id
+    planned_deploy = rollback_target.planned_deploy
+    if not production_changed:
+        return _RollbackOutcome(
+            evidence=RollbackExecutionEvidence(
+                detail=f"{failure} Production was not changed, so no rollback was needed.",
+                target_deployment_record_id=target_id,
+            )
+        )
+    if planned_deploy is None:
+        return _RollbackOutcome(
+            evidence=RollbackExecutionEvidence(
+                detail=f"{failure} No automatic rollback: {rollback_target.unavailable_reason}.",
+                target_deployment_record_id=target_id,
+            )
+        )
+    started_at = utc_now_timestamp()
+    try:
+        deploy_result = execute_generic_web_deploy(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            request=GenericWebDeployRequest(
+                product=planned_deploy.product,
+                instance=planned_deploy.instance,
+                artifact_id=planned_deploy.artifact_id,
+                deploy_reference=planned_deploy.deploy_reference,
+                source_git_ref=planned_deploy.source_git_ref,
+                timeout_seconds=planned_deploy.timeout_seconds,
+                no_cache=planned_deploy.no_cache,
+            ),
+            profile=profile,
+            lane=lane,
+            deploy_provider=deploy_provider,
+            provider_operation_title=(
+                f"{provider_operation_title} rollback" if provider_operation_title else ""
+            ),
+            deployment_record_id=f"{deployment_record_id}-rollback",
+            provider_effect_checkpoint=_rollback_phase_checkpoint(provider_effect_checkpoint),
+        )
+    except Exception as error:  # noqa: BLE001 - recorded on the promotion, then re-raised.
+        return _RollbackOutcome(
+            evidence=RollbackExecutionEvidence(
+                attempted=True,
+                status="fail",
+                detail=f"{failure} Rollback to {target_id} did not complete: {error}",
+                target_deployment_record_id=target_id,
+                started_at=started_at,
+                finished_at=utc_now_timestamp(),
+            ),
+            error=error,
+        )
+    if deploy_result.deploy_status != "pass":
+        return _RollbackOutcome(
+            evidence=RollbackExecutionEvidence(
+                attempted=True,
+                status="fail",
+                detail=(
+                    f"{failure} Rollback deploy of {target_id} failed: "
+                    f"{deploy_result.error_message or 'no detail'}"
+                ),
+                target_deployment_record_id=target_id,
+                deployment_record_id=deploy_result.deployment_record_id,
+                started_at=started_at,
+                finished_at=utc_now_timestamp(),
+            )
+        )
+    rollback_record = _read_deployment_record(
+        record_store=record_store,
+        deployment_record_id=deploy_result.deployment_record_id,
+    )
+    rollback_health = _health_evidence_for_lane(
+        lane=lane,
+        request=request,
+        health_path=profile.health_path,
+        status="pending",
+    )
+    health_error = ""
+    try:
+        rollback_health = _verify_health_evidence_with_identity(
+            rollback_health,
+            expected_runtime_identity=rollback_record.runtime_identity,
+        )
+    except click.ClickException as error:
+        rollback_health = _mark_health_failed(rollback_health)
+        health_error = str(error)
+    rollback_record = _write_deployment_health(
+        record_store=record_store,
+        deployment_record=rollback_record,
+        destination_health=rollback_health,
+    )
+    healthy = rollback_health.status in {"pass", "skipped"}
+    if healthy and rollback_target.previous_inventory is not None:
+        # The restored artifact is the earlier release; keep its promotion lineage.
+        record_store.write_environment_inventory(
+            build_environment_inventory(
+                deployment_record=rollback_record,
+                updated_at=utc_now_timestamp(),
+                promotion_record_id=rollback_target.previous_inventory.promotion_record_id,
+                promoted_from_instance=rollback_target.previous_inventory.promoted_from_instance,
+            )
+        )
+    detail = f"{failure} Rolled production back to {target_id}."
+    if not healthy:
+        detail = (
+            f"{failure} Rolled production back to {target_id}, but it failed its health "
+            f"check: {health_error or _health_failure_detail(rollback_health) or 'unhealthy'}"
+        )
+    return _RollbackOutcome(
+        evidence=RollbackExecutionEvidence(
+            attempted=True,
+            status="pass" if healthy else "fail",
+            detail=detail,
+            target_deployment_record_id=target_id,
+            deployment_record_id=rollback_record.record_id,
+            started_at=started_at,
+            finished_at=utc_now_timestamp(),
+        ),
+        health=rollback_health,
+    )
+
+
+def _rollback_phase_checkpoint(
+    checkpoint: Callable[[str], None] | None,
+) -> Callable[[str], None] | None:
+    if checkpoint is None:
+        return None
+    return lambda phase: checkpoint(f"rollback_{phase}")
 
 
 def _resolve_source_inventory_inputs(
@@ -1135,6 +1354,9 @@ def _result_from_record(
         source_health_status=record.source_health.status,
         destination_health_status=record.destination_health.status,
         release_tag=request.release_tag,
+        rollback_status=record.rollback.status,
+        rollback_target_deployment_record_id=record.rollback.target_deployment_record_id,
+        rollback_deployment_record_id=record.rollback.deployment_record_id,
         target_name=target_fields.target_name,
         target_id=target_fields.target_id,
         target_category=target_fields.target_category,
