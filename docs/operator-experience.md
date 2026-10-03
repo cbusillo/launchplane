@@ -298,7 +298,7 @@ read-only list requests. Only descriptor read denials advance to another tab;
 authentication, service failures, and cancellation stay visible. An explicit
 tab or descriptor link keeps its selection and names that plan type in a denial.
 If no supported type is readable, the page says so and leaves the tabs available.
-Direct operation links read only the requested review.
+Refresh stays on the opened tab. Direct operation links read only the requested review.
 
 The transitional Engineering privileged-operation route consumes the
 server-computed semantic review projection for its list cards and activity

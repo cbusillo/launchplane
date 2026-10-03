@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 // Production API adapter against local HTTP fixtures; all requests must be reads.
-test("readable initial tab, explicit denial, and recovery", async ({ page }, testInfo) => {
+test("readable initial tab, refresh, explicit denial, and recovery", async ({ page }, testInfo) => {
   const calls: string[] = [];
   const mutations: string[] = [];
   const unexpected: string[] = [];
@@ -39,6 +39,11 @@ test("readable initial tab, explicit denial, and recovery", async ({ page }, tes
   await expect(mergeTab).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByText("No changes are waiting for review")).toBeVisible();
   expect([...new Set(calls)]).toEqual(["managed-secret-reencryption", "managed-authz-policy-set", "managed-merge-train-policy-import"]);
+  const beforeRefresh = calls.length;
+  await page.getByRole("button", { name: "Refresh plans", exact: true }).click();
+  await expect.poll(() => calls.length).toBeGreaterThan(beforeRefresh);
+  await expect(page.getByText("No changes are waiting for review")).toBeVisible();
+  expect(calls.slice(beforeRefresh)).toEqual(["managed-merge-train-policy-import"]);
   await page.getByRole("button", { name: "Secret rotation", exact: true }).click();
   await expect(page.getByText("You do not have access to secret rotation plans.")).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("explicit-secret-denial.png"), fullPage: true });
@@ -47,6 +52,17 @@ test("readable initial tab, explicit denial, and recovery", async ({ page }, tes
   await expect(page.getByText("No changes are waiting for review")).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("readable-merge-policy.png"), fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  const beforeLink = calls.length;
+  await page.goto("/ui/engineering/privileged-operations?descriptor_id=managed-secret-reencryption");
+  await expect(page.getByText("You do not have access to secret rotation plans.")).toBeVisible();
+  expect(new Set(calls.slice(beforeLink))).toEqual(new Set(["managed-secret-reencryption"]));
+  await page.route("**/v1/privileged-operations/plans*", route => route.fulfill({
+    status: 403,
+    json: { error: { code: "authorization_denied", message: "No read access." } },
+  }));
+  await page.goto("/ui/engineering/privileged-operations");
+  await expect(page.getByText("No readable plan types", { exact: true })).toBeVisible();
+  await expect(mergeTab).toHaveAttribute("aria-pressed", "false");
   expect(mutations).toEqual([]);
   expect(unexpected).toEqual([]);
 });

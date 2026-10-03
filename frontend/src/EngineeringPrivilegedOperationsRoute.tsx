@@ -69,10 +69,11 @@ function DefaultPrivilegedOperationsRoute({
     useState<PrivilegedOperationDescriptorId | null>(
       selectedPlanType(query.get("descriptor_id")),
     );
+  const openedDescriptorId = useRef<PrivilegedOperationDescriptorId | null>(null);
   const loader = useCallback(
     async (
       signal: AbortSignal,
-      _reason: EngineeringLoadReason,
+      reason: EngineeringLoadReason,
     ): Promise<SelectedOperationPlans> => {
       if (fixtureMode && operationId !== null) {
         await fixtureDelay(signal);
@@ -94,13 +95,18 @@ function DefaultPrivilegedOperationsRoute({
           },
         };
       }
-      return loadSelectedOperationPlans(selectedDescriptorId, signal, async descriptorId => {
+      const selection = selectedDescriptorId ??
+        (reason === "refresh" ? openedDescriptorId.current : null);
+      const result = await loadSelectedOperationPlans(selection, signal, async descriptorId => {
         if (fixtureMode) {
           await fixtureDelay(signal);
           return privilegedOperationFixture(fixtureMode, descriptorId, reviewFixture);
         }
         return readPrivilegedOperationPlans(signal, descriptorId);
       });
+      signal.throwIfAborted();
+      openedDescriptorId.current = result.descriptorId;
+      return result;
     },
     [selectedDescriptorId, fixtureMode, operationId, reviewFixture],
   );
@@ -270,8 +276,9 @@ function AgentProductSetupCandidateCard({
 }) {
   const loader = useCallback(
     async (signal: AbortSignal): Promise<AgentProductSetupChoice[]> => {
+      if (fixtureMode) await fixtureDelay(signal);
       const profiles = fixtureMode
-        ? (await fixtureDelay(signal), agentProductSetupProfilesFixture())
+        ? agentProductSetupProfilesFixture()
         : (await listProductProfiles(signal)).profiles;
       return profiles
         .map((profile) => ({
