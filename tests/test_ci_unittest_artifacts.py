@@ -95,6 +95,59 @@ class UnittestArtifactWorkflowTests(unittest.TestCase):
                         self.assertEqual(list(results.iterdir()), [])
                     self.assertEqual((old_results / "shard-0.json").read_text(), "old shard")
 
+    def test_commands_use_the_artifact_directories(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            env = _environment(root)
+            uv = root / "uv"
+            uv.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "${ARGUMENTS_FILE}"\n')
+            uv.chmod(0o755)
+            env["PATH"] = f"{root}{os.pathsep}{env['PATH']}"
+            env["ARGUMENTS_FILE"] = str(root / "arguments")
+            env["UNITTEST_SHARD_COUNT"] = "2"
+            env["UNITTEST_MAX_TESTS_PER_TARGET"] = "20"
+            env["UNITTEST_MAX_SECONDS_PER_TARGET"] = "30"
+            for job, step_name in (
+                ("test_timing_snapshot", "Plan unittest shards"),
+                ("test_shards", "Run unit test shard"),
+                ("test", "Aggregate unittest timings"),
+            ):
+                with self.subTest(job=job):
+                    if job == "test_timing_snapshot":
+                        _run_step(self.workflow, job, "Freeze unittest timing snapshot", env)
+                        snapshot = _artifact_path(
+                            self.workflow, job, "Upload unittest timing snapshot", env
+                        )
+                    else:
+                        _run_step(self.workflow, job, "Prepare unittest artifact directories", env)
+                        snapshot = _artifact_path(
+                            self.workflow, job, "Download unittest timing snapshot", env
+                        )
+                    _run_step(
+                        self.workflow, job, step_name, env, folded=job != "test_timing_snapshot"
+                    )
+                    arguments = Path(env["ARGUMENTS_FILE"]).read_text().splitlines()
+                    options = {
+                        argument: arguments[index + 1]
+                        for index, argument in enumerate(arguments)
+                        if argument.startswith("--")
+                    }
+                    if job == "test_timing_snapshot":
+                        self.assertEqual(options["--timings-file"], str(snapshot / "history.json"))
+                        self.assertTrue((snapshot / "plan.json").exists())
+                    else:
+                        self.assertEqual(options["--plan-file"], str(snapshot / "plan.json"))
+                        if job == "test_shards":
+                            result = _artifact_path(
+                                self.workflow, job, "Upload unittest timings", env
+                            )
+                            self.assertEqual(options["--timings-output"], str(result))
+                        else:
+                            results = _artifact_path(
+                                self.workflow, job, "Download unittest timings", env
+                            )
+                            self.assertEqual(options["--results-dir"], str(results))
+
 
 def _environment(root: Path) -> dict[str, str]:
     (root / "github-env").touch()
@@ -108,10 +161,16 @@ def _environment(root: Path) -> dict[str, str]:
     }
 
 
-def _run_step(workflow: Workflow, job: str, name: str, env: dict[str, str]) -> None:
+def _run_step(
+    workflow: Workflow, job: str, name: str, env: dict[str, str], *, folded: bool = False
+) -> None:
     step = workflow.step_named(job, name)
-    assert step is not None
-    subprocess.run(["bash", "-c", step.run], env=env, check=True, capture_output=True)
+    if step is None:
+        raise AssertionError(f"missing workflow step: {job}/{name}")
+    program = step.run.replace("${{ matrix.shard_index }}", "0")
+    if folded:
+        program = " ".join(program.splitlines())
+    subprocess.run(["bash", "-c", program], env=env, check=True, capture_output=True)
     for line in Path(env["GITHUB_ENV"]).read_text().splitlines():
         key, value = line.split("=", 1)
         env[key] = value
@@ -119,9 +178,11 @@ def _run_step(workflow: Workflow, job: str, name: str, env: dict[str, str]) -> N
 
 def _artifact_path(workflow: Workflow, job: str, name: str, env: dict[str, str]) -> Path:
     step = workflow.step_named(job, name)
-    assert step is not None
+    if step is None:
+        raise AssertionError(f"missing workflow step: {job}/{name}")
     path = step.with_values["path"]
-    assert isinstance(path, str)
+    if not isinstance(path, str):
+        raise AssertionError(f"artifact path is not a string: {job}/{name}")
     path = re.sub(r"\$\{\{ env\.(\w+) \}\}", lambda match: env[match[1]], path)
     path = path.replace("${{ runner.temp }}", env["RUNNER_TEMP"])
     path = path.replace("${{ matrix.shard_index }}", "0")

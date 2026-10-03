@@ -93,13 +93,14 @@ of truth.
 
 CI plans once. The `test_timing_snapshot` job writes `plan.json` next to the
 frozen timings. Each shard runs its slice with `unittest-shard run --plan-file`,
-and `aggregate --plan-file` checks coverage against that same plan. Every job creates fresh temporary directories for snapshot and shard-result
-artifacts. Downloading into a reused directory leaves files absent from the
-artifact in place: residual `history.json` changed target splitting on some
-self-hosted runners, so shards that planned for themselves overlapped or missed
-tests (#2618). Fresh directories also prevent a failed shard from uploading an
-earlier result and keep aggregate inputs limited to the downloaded artifacts. Without `--plan-file`, `run` and
-`aggregate` still discover and plan locally.
+and `aggregate --plan-file` checks coverage against that same plan. Every job
+creates fresh temporary directories for snapshot and shard-result artifacts.
+Downloading into a reused directory leaves files absent from the artifact in
+place: residual `history.json` changed target splitting on some self-hosted
+runners, so shards that planned for themselves overlapped or missed tests
+(#2618). Fresh directories also prevent a failed shard from uploading an earlier
+result and keep aggregate inputs limited to the downloaded artifacts. Without
+`--plan-file`, `run` and `aggregate` still discover and plan locally.
 
 For pushes to `main` and `launchplane/train/**`, the `verified-tree` job can
 reuse a completed, successful GitHub Actions `ci-gate` on the exact pushed
