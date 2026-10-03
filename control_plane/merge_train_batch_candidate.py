@@ -238,7 +238,10 @@ def _execute_plan_mode(
         repository=request.repository,
         base_branch=request.base_branch,
     )
-    dry_run_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
+    # Plans become batch candidates, so every labelled member needs Client review.
+    dry_run_result = build_merge_train_dry_run_result(
+        policy=policy, snapshot=snapshot, batch_landing=True
+    )
     selected_pr = dry_run_result.selected_pr
     if selected_pr is not None and merge_train_snapshot_has_stack_topology(
         snapshot=snapshot, dry_run_result=dry_run_result

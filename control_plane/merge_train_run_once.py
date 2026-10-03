@@ -4,6 +4,7 @@ from typing import Callable, Protocol, cast
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.merge_train_policy import (
+    MergeTrainMergeMethod,
     MergeTrainPolicy,
     MergeTrainRepositoryPolicy,
 )
@@ -68,6 +69,31 @@ class MergeTrainRunOnceResult:
     run_record: MergeTrainRunRecord
 
 
+class _ClientReviewedMergeClient:
+    """Merge only after Client review is re-read on the head about to land."""
+
+    def __init__(self, client: GitHubMergeTrainClient) -> None:
+        self._client = client
+
+    def merge_pull_request(
+        self,
+        *,
+        repository: str,
+        pull_request_number: int,
+        head_sha: str,
+        merge_method: MergeTrainMergeMethod,
+    ) -> str:
+        self._client.require_current_client_review(
+            repository=repository, pull_request_number=pull_request_number, head_sha=head_sha
+        )
+        return self._client.merge_pull_request(
+            repository=repository,
+            pull_request_number=pull_request_number,
+            head_sha=head_sha,
+            merge_method=merge_method,
+        )
+
+
 def execute_merge_train_run_once(
     *,
     request: MergeTrainRunOnceEnvelope,
@@ -109,7 +135,7 @@ def execute_merge_train_run_once(
             clients=MergeTrainWorkerClients(
                 label_client=github_client,
                 branch_client=github_client,
-                merge_client=github_client,
+                merge_client=_ClientReviewedMergeClient(github_client),
             ),
         )
         route_result["worker_step_result"] = worker_step_result.model_dump(mode="json")

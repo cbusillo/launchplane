@@ -1591,7 +1591,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         review_reader = GitHubMergeTrainSnapshotReader(
             transport=self.transport, branch_refresh_store=self._branch_refresh_store
         )
-        if require_client_review and review_reader._owner_review_required(
+        if require_client_review and review_reader.client_review_required(
             labels=_labels(pull_request.get("labels")), repository=repository_path
         ):
             review_status = _owner_review_status(
@@ -1722,6 +1722,37 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 return None
             return head_sha, parent_shas[1]
         return None
+
+    def require_current_client_review(
+        self, *, repository: str, pull_request_number: int, head_sha: str
+    ) -> None:
+        """Re-read Client review just before a direct merge; a changed decision is stale."""
+        repository_path = _repository_path(repository)
+        pull_request = _json_object(
+            self.transport.request(
+                method="GET", path=f"/repos/{repository_path}/pulls/{pull_request_number}"
+            ),
+            "GitHub pull request response",
+        )
+        review_reader = GitHubMergeTrainSnapshotReader(
+            transport=self.transport, branch_refresh_store=self._branch_refresh_store
+        )
+        if not review_reader.client_review_required(
+            labels=_labels(pull_request.get("labels")), repository=repository_path
+        ):
+            return
+        review_status = _owner_review_status(
+            _list_commit_statuses(
+                transport=self.transport,
+                repository_path=repository_path,
+                encoded_head_sha=quote(head_sha, safe=""),
+            )
+        )
+        if review_status != "pass":
+            raise MergeTrainGitHubStaleHeadError(
+                f"Pull request #{pull_request_number} no longer has current-head Client review.",
+                status_code=409,
+            )
 
     def merge_pull_request(
         self,
@@ -2214,7 +2245,7 @@ class GitHubMergeTrainSnapshotReader:
             if str(user.get("type") or "") == "Bot"
             else None
         )
-        owner_review_required = self._owner_review_required(
+        owner_review_required = self.client_review_required(
             labels=labels, repository=base_repository
         )
         return MergeTrainPullRequestSnapshot(
@@ -2503,7 +2534,7 @@ class GitHubMergeTrainSnapshotReader:
             raise
         return "repo_admin" if str(payload.get("permission") or "") == "admin" else "unknown"
 
-    def _owner_review_required(self, *, labels: tuple[str, ...], repository: str) -> bool:
+    def client_review_required(self, *, labels: tuple[str, ...], repository: str) -> bool:
         review_labels: set[str] = set()
         list_profiles = getattr(self._branch_refresh_store, "list_product_profile_records", None)
         if callable(list_profiles):

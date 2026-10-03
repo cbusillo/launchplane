@@ -275,7 +275,10 @@ Every batch member is checked during planning and again before the provider
 landing effect. The controller, standalone candidate planning and landing, and
 run-once (including scheduled Level 1 runs) all read the product profiles and
 refuse with `client_review_profiles_unavailable` when they cannot. Standalone
-planning reports a waiting or blocked queue without building a candidate.
+planning applies the same every-member check as the controller and reports a
+waiting or blocked queue without building a candidate. Run-once re-reads the
+review on the head it is about to merge and treats a changed decision as a
+stale head.
 Successful review still requires all other current-head checks.
 
 Only an actor allowed to enqueue may put a pull request in the train: a trusted

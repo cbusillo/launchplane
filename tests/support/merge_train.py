@@ -89,6 +89,11 @@ class _FakeMergeTrainGitHubClient:
             cast(GitHubMergeTrainClient, self), repository=repository, base_branch=base_branch
         )
 
+    @staticmethod
+    def require_current_client_review(**_: object) -> None:
+        # The fake pull requests carry no Client review label.
+        return None
+
     def read_pull_request_snapshot(
         self, *, repository: str, pull_request_number: int
     ) -> MergeTrainPullRequestSnapshot:
