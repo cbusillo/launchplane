@@ -326,9 +326,11 @@ def service() -> None:
     "--database-url",
     envvar=_DATABASE_URL_ENV_KEYS,
     default=None,
-    help="Postgres connection string for Launchplane shared-service core records.",
+    hidden=True,
 )
+@click.pass_context
 def service_serve(
+    context: click.Context,
     state_dir: Path,
     policy_file: Path,
     host: str,
@@ -336,9 +338,14 @@ def service_serve(
     audience: str,
     database_url: str | None,
 ) -> None:
+    if context.get_parameter_source("database_url") == click.core.ParameterSource.COMMANDLINE:
+        raise click.ClickException(
+            "Launchplane service refuses --database-url in process arguments. "
+            "Set LAUNCHPLANE_DATABASE_URL in the service environment instead."
+        )
     if database_url is None or not database_url.strip():
         raise click.ClickException(
-            "Launchplane service refuses startup without --database-url or "
+            "Launchplane service refuses startup without "
             "LAUNCHPLANE_DATABASE_URL. Filesystem state is local-only."
         )
     if audience is None or not audience.strip():

@@ -20,6 +20,8 @@ class OwnerTestNotesActionTests(unittest.TestCase):
             ("## Owner test notes\n\n## Tests\nPassed.", False),
             ("## Owner test notes\n$(touch should-not-exist) `false` ${{ secrets.EXAMPLE }}", True),
             ("## Owner test notes\nOne\n## Owner test notes\nTwo", True),
+            ("## Client test notes\nNothing for the Client to test", True),
+            ("```\n## Client test notes\nExample only\n```", False),
         )
         with TemporaryDirectory() as directory:
             event_path = Path(directory) / "event.json"

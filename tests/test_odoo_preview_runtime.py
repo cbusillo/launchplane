@@ -45,6 +45,7 @@ from control_plane.workflows.odoo_preview_runtime import (
     observe_odoo_preview_dokploy_apply,
     odoo_preview_target_is_quiescent,
     _preview_runtime_bindings,
+    _preview_refresh_environment_values,
     _rollback_created_runtime,
     _wait_for_smoke_check,
 )
@@ -1657,6 +1658,29 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(len(deploy_operations), 1)
         self.assertEqual(deploy_operations[0].path, "/api/compose.redeploy")
 
+    def test_preview_refresh_overrides_inherited_instance_names(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(target=_target()),
+                endpoint_spec=_endpoint_spec(),
+            )
+        )
+        for inherited_instance in ("", "local", "dev", "testing", "prod", "production"):
+            with self.subTest(inherited_instance=inherited_instance):
+                request = OdooPreviewDokployApplyRequest(
+                    dry_run_plan=dry_run,
+                    manifest=artifact_manifest_v2(),
+                    environment_values={
+                        **_environment_values(),
+                        "PLATFORM_INSTANCE": inherited_instance,
+                    },
+                )
+                rendered = _preview_refresh_environment_values(request=request)
+                self.assertEqual(rendered["PLATFORM_INSTANCE"], "preview")
+                self.assertEqual(
+                    request.environment_values["PLATFORM_INSTANCE"], inherited_instance
+                )
+
     def test_apply_refresh_creates_updates_deploys_and_smokes_compose(self) -> None:
         manifest = artifact_manifest_v2(odoo_install_modules=("cm_website",))
         dry_run = build_odoo_preview_dokploy_dry_run(
@@ -1769,6 +1793,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertIn(".tls.certresolver=letsencrypt", sync_kwargs["compose_file"])
         update_env.assert_called_once()
         env_map = dokploy_api.parse_dokploy_env_text(update_env.call_args.kwargs["env_text"])
+        self.assertEqual(env_map["PLATFORM_INSTANCE"], "preview")
         self.assertEqual(
             env_map["ODOO_INSTALL_MODULES"],
             "launchplane_settings,disable_odoo_online,cm_website",
@@ -2263,7 +2288,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_api.update_dokploy_target_env",
-            ),
+            ) as update_env,
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_compose.ensure_compose_web_domain_route",
                 return_value="domain-cm-pr-45",
@@ -2299,7 +2324,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 request=OdooPreviewDokployApplyRequest(
                     dry_run_plan=dry_run,
                     image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
-                    environment_values=_environment_values(),
+                    environment_values={**_environment_values(), "PLATFORM_INSTANCE": "testing"},
                 ),
             )
 
@@ -2307,6 +2332,8 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(result.compose_id, "compose-cm-pr-45")
         self.assertEqual(result.domain_id, "domain-cm-pr-45")
         self.assertFalse(result.created_compose)
+        env_map = dokploy_api.parse_dokploy_env_text(update_env.call_args.kwargs["env_text"])
+        self.assertEqual(env_map["PLATFORM_INSTANCE"], "preview")
         self.assertNotIn("smoke_check", [step.name for step in result.steps])
         delete_domain.assert_not_called()
         delete_compose.assert_not_called()

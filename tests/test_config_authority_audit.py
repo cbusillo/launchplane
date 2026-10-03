@@ -5179,6 +5179,17 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("[self-hosted,]", "pass"),
             ('["self-hosted"]', "pass"),
             ("self-hosted", "pass"),
+            ('"self-hosted"', "pass"),
+            ("'ubuntu-latest'", "pass"),
+            ('"[self-hosted]"', "fail"),
+            ("'[\"self-hosted\"]'", "fail"),
+            ('"\\"self-hosted\\""', "fail"),
+            ("|\n      [self-hosted]", "fail"),
+            ('>-\n      ["self-hosted"]', "fail"),
+            ("|-\n      self-hosted", "pass"),
+            ("\n      - self-hosted\n      - 'ubuntu-latest'", "pass"),
+            ("\n      - '[self-hosted]'", "fail"),
+            ("\n      - '[\"self-hosted\"]'", "fail"),
             ("[self-hosted, tenant-runner]", "fail"),
             ("[tenant-runner]", "fail"),
             ("[]", "fail"),
@@ -5191,7 +5202,11 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 _init_repo(root)
                 workflow = root / ".github" / "workflows" / "build.yml"
                 workflow.parent.mkdir(parents=True)
-                workflow.write_text("name: Build\n", encoding="utf-8")
+                workflow.write_text(
+                    "name: Build\non: push\njobs:\n  build:\n"
+                    "    runs-on: [self-hosted]\n    steps:\n      - run: echo build\n",
+                    encoding="utf-8",
+                )
                 _commit_all(root)
                 _git(root, "branch", "-M", "main")
                 _checkout_branch(root, "feature/build-runner")

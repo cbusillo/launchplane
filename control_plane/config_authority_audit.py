@@ -2182,6 +2182,10 @@ def _toml_candidates(text: str) -> tuple[list[tuple[int, str, object]], str]:
     return [(1, key, value) for key, value in _flatten_mapping(parsed)], ""
 
 
+class _YamlRunnerScalar(str):
+    """A job runner label, never a serialized runner selector."""
+
+
 def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
     candidates: list[tuple[int, str, object]] = []
     lines = text.splitlines()
@@ -2252,7 +2256,7 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
             else:
                 list_key = _yaml_list_candidate_key(context_stack)
                 if list_key:
-                    candidates.append((line_number, list_key, list_value))
+                    candidates.append((line_number, list_key, _YamlRunnerScalar(list_value)))
                 index += 1
             continue
         empty_match = YAML_EMPTY_MAPPING_PATTERN.match(line)
@@ -2338,11 +2342,16 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
                 index = next_index
                 continue
             if block_value:
-                candidates.append((line_number, key, block_value))
+                block_candidate = (
+                    _YamlRunnerScalar(block_value) if yaml_key == "runs-on" else block_value
+                )
+                candidates.append((line_number, key, block_candidate))
             index = next_index
             continue
         if value:
             scalar_value = _unquote(value)
+            if yaml_key == "runs-on" and value.startswith(("'", '"')):
+                scalar_value = _YamlRunnerScalar(scalar_value)
             if yaml_key == "uses" and _is_github_checkout_action_reference(scalar_value):
                 checkout_uses_indent = indent
             if yaml_key == "uses" and _is_launchplane_dependency_health_action_reference(
@@ -2634,7 +2643,11 @@ def _build_finding(
     classification = "allowed" if allow_reason else "needs_classification"
     severity = "info" if allow_reason else _severity(rule_id=rule_id, key=key)
     evidence = _redacted_evidence(key=key, value=value)
-    value_hash = _stable_hash(value)
+    # A scalar label and a flow selector with the same text are different authority.
+    hash_value = (
+        {"yaml_runner_scalar": str(value)} if isinstance(value, _YamlRunnerScalar) else value
+    )
+    value_hash = _stable_hash(hash_value)
     finding_id = _finding_id(
         path=source_file.relative_path,
         line=line,
@@ -3315,6 +3328,8 @@ def _is_workflow_mechanic_key_value(*, key: str, value: object) -> bool:
     key_text = key.upper().replace(".", "_").replace("-", "_")
     value_text = _string_value(value).strip()
     if key_text == "RUNS_ON":
+        if isinstance(value, _YamlRunnerScalar):
+            return value_text in WORKFLOW_RUNS_ON_MECHANIC_VALUES
         return value_text in WORKFLOW_RUNS_ON_MECHANIC_VALUES or _is_runs_on_mechanic_selector(
             value_text
         )

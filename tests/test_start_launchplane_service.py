@@ -180,7 +180,7 @@ fi
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             self.assertIn("--policy-file", captured_args)
             self.assertIn(str(policy_path), captured_args)
-            self.assertIn("--database-url", captured_args)
+            self.assertNotIn("--database-url", captured_args)
             self.assertEqual(policy_path.read_text(encoding="utf-8"), "schema_version = 1\n")
         finally:
             policy_path.unlink(missing_ok=True)
@@ -209,7 +209,7 @@ fi
         self.assertEqual(result.returncode, 1, msg=result.stderr)
         self.assertIn("refuses startup without LAUNCHPLANE_DATABASE_URL", result.stderr)
 
-    def test_forwards_database_url_for_hosted_startup(self) -> None:
+    def test_keeps_database_url_out_of_hosted_startup_arguments(self) -> None:
         policy_path = Path("/tmp/launchplane-authz.toml")
         policy_path.unlink(missing_ok=True)
 
@@ -244,8 +244,8 @@ fi
 
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             self.assertNotIn("stamp", captured_args)
-            self.assertIn("--database-url", captured_args)
-            self.assertIn("postgresql+psycopg://launchplane:test@db/launchplane", captured_args)
+            self.assertNotIn("--database-url", captured_args)
+            self.assertNotIn("postgresql+psycopg://launchplane:test@db/launchplane", captured_args)
         finally:
             policy_path.unlink(missing_ok=True)
 
