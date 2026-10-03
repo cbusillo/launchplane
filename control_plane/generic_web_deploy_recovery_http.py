@@ -653,9 +653,11 @@ async def _inspect_generic_web_deploy_recovery(
                 request_source_git_ref=recovery_request.original_deploy.deploy.source_git_ref,
                 request_timeout_seconds=recovery_request.original_deploy.deploy.timeout_seconds,
                 request_no_cache=recovery_request.original_deploy.deploy.no_cache,
+                # The fingerprint check tied this deploy to Launchplane's reservation.
                 normalized_artifact_id=normalize_generic_web_artifact_id(
                     profile=profile,
                     artifact_id=recovery_request.original_deploy.deploy.artifact_id,
+                    recorded=True,
                 ),
                 request_deploy_reference=recovery_request.original_deploy.deploy.deploy_reference,
                 lane=authoritative_lane,
@@ -756,6 +758,7 @@ async def _inspect_generic_web_deploy_recovery(
                 profile=profile,
                 lane=authoritative_lane,
                 trace_id=trace_id,
+                recorded_artifact=True,
             )
             provider_inspection = adapter.inspect(
                 provider_operation_key=provider_operation_key,

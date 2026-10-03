@@ -249,6 +249,37 @@ class GenericWebDeployRecoveryCloseOutTests(unittest.TestCase):
         self.assertNotIn(reservation.scope, serialized)
         self.assertNotIn(reservation.idempotency_key, serialized)
 
+    def test_a_deploy_reserved_before_the_image_repository_moved_still_recovers(self) -> None:
+        original_deploy = _original_deploy()
+        with TemporaryDirectory() as temporary_directory_name:
+            harness = _RecoveryHarness(Path(temporary_directory_name))
+            reservation = harness.reserve(
+                idempotency_key="close-out-moved", original_deploy=original_deploy
+            )
+            moved = _product_profile_payload()
+            moved["image"] = {"repository": "ghcr.io/cbusillo/sellyouroutboard-next"}
+            harness.store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(moved)
+            )
+            provider = _RuntimeCloseOutProvider((_runtime(), _runtime()))
+            dry_status, dry_payload = harness.dry_run(
+                provider,
+                original_deploy=original_deploy,
+                idempotency_key=reservation.idempotency_key,
+            )
+            apply_status, apply_payload = harness.apply(
+                provider,
+                original_deploy=original_deploy,
+                idempotency_key=reservation.idempotency_key,
+                digest=dry_payload.get("recovery_digest", ""),
+            )
+            harness.store.close()
+
+        self.assertEqual(dry_status, 200, dry_payload)
+        self.assertEqual(dry_payload["proposed_action"], "close_out_observed")
+        self.assertEqual(apply_status, 202, apply_payload)
+        self.assertEqual(apply_payload["reservation_state"], "completed")
+
     def test_each_runtime_mismatch_holds_and_apply_refuses(self) -> None:
         cases = {
             "target configured for another digest": _runtime(target=_OTHER_DIGEST_IMAGE),

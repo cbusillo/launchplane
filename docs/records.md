@@ -936,6 +936,19 @@ product page rather than a whole-record write: the admin supplies a GitHub
 login, Launchplane resolves and stores the immutable numeric GitHub id, and no
 other profile field changes.
 
+The profile `image.repository` is where a product publishes its images. A
+product publishes to the GHCR package named after its repository, with that
+repository's workflow token. Move a profile there with
+`POST /v1/product-profiles/{product}/image-repository` rather than a
+whole-record write. The dry run shows the repository before and after, and what
+each lane runs now. Apply must name the starting repository the dry run showed,
+and no other profile field changes. The profile's repository applies to
+artifacts a caller supplies: a deploy, a testing deploy, a promotion request.
+An immutable image Launchplane already recorded on a deployment, an inventory or
+a deploy reservation stays valid after the move, so rollback, deploy recovery
+and promotion evidence still work. Promotion refuses a testing lane that runs an
+image outside the current repository.
+
 Expected-config metadata changes use
 `POST /v1/product-profiles/expected-config/apply`. The request carries
 `mode: "dry-run"` or `mode: "apply"`, a product key, a reason, runtime key or
