@@ -315,7 +315,9 @@ def _evaluate(**updates: object) -> MergeReadinessResult:
 
 def _historical_required_readiness() -> MergeReadinessResult:
     return MergeReadinessResult.model_validate_json(
-        Path("tests/fixtures/merge-readiness-required.json").read_text(encoding="utf-8")
+        (Path(__file__).parent / "fixtures" / "merge-readiness-required.json").read_text(
+            encoding="utf-8"
+        )
     )
 
 

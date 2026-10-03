@@ -489,7 +489,9 @@ class MergeTrainPolicyTests(unittest.TestCase):
 
     def test_historical_required_policy_preserves_payload_and_digest(self) -> None:
         payload = json.loads(
-            Path("tests/fixtures/merge-train-policy-required.json").read_text(encoding="utf-8")
+            (Path(__file__).parent / "fixtures" / "merge-train-policy-required.json").read_text(
+                encoding="utf-8"
+            )
         )
         record = MergeTrainPolicyRecord.model_validate(payload)
         self.assertEqual(record.policy.policies[0].engineering_review_mode, "required")
@@ -523,7 +525,9 @@ class MergeTrainPolicyTests(unittest.TestCase):
         )
 
         record = MergeTrainPolicyRecord.model_validate_json(
-            Path("tests/fixtures/merge-train-policy-required.json").read_text(encoding="utf-8")
+            (Path(__file__).parent / "fixtures" / "merge-train-policy-required.json").read_text(
+                encoding="utf-8"
+            )
         )
         for mode in ("dry_run", "apply"):
             with (

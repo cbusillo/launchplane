@@ -7,8 +7,9 @@ It authorizes no effect. The live adapter uses the same evaluation for guarded
 landing and the engineering governance view.
 
 Current readiness checks the required technical checks at the exact candidate
-SHA, advisory engineering-review observations, current policy fingerprints, candidate and rolling-base provenance, and the
-controller lease plus expected effect SHA. Missing evidence stays unknown;
+SHA, advisory engineering-review observations, current policy fingerprints,
+candidate and rolling-base provenance, and the controller lease plus expected
+effect SHA. Missing evidence stays unknown;
 contradictory evidence blocks the attempt. Each landing re-reads these inputs.
 
 Retired Client acceptance and change-impact policies do not participate. Live

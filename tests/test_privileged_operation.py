@@ -1168,9 +1168,9 @@ class PrivilegedOperationStorageTests(unittest.TestCase):
 
     def test_historical_required_review_operation_round_trips_across_stores(self) -> None:
         payload = json.loads(
-            Path("tests/fixtures/privileged-operation-required-review.json").read_text(
-                encoding="utf-8"
-            )
+            (
+                Path(__file__).parent / "fixtures" / "privileged-operation-required-review.json"
+            ).read_text(encoding="utf-8")
         )
         record = PrivilegedOperationRecord.model_validate(payload)
         self.assertEqual(record.model_dump(mode="json"), payload)

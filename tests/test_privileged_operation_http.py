@@ -1963,7 +1963,9 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(Path(directory))
             legacy = MergeTrainPolicyRecord.model_validate_json(
-                Path("tests/fixtures/merge-train-policy-required.json").read_text(encoding="utf-8")
+                (Path(__file__).parent / "fixtures" / "merge-train-policy-required.json").read_text(
+                    encoding="utf-8"
+                )
             )
             store.write_merge_train_policy_record(legacy)
             store.write_repository_inventory_record(_ordinary_merge_target_inventory())

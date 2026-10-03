@@ -490,9 +490,9 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
         for mode in ("advisory", "required"):
             with self.subTest(mode=mode):
                 legacy_record = MergeTrainPolicyRecord.model_validate_json(
-                    Path("tests/fixtures/merge-train-policy-required.json").read_text(
-                        encoding="utf-8"
-                    )
+                    (
+                        Path(__file__).parent / "fixtures" / "merge-train-policy-required.json"
+                    ).read_text(encoding="utf-8")
                 )
                 legacy_payload = legacy_record.model_dump(mode="json")
                 legacy_payload["policy"]["policies"][0]["repository"] = REPOSITORY

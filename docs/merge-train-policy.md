@@ -234,6 +234,9 @@ Each repository policy contains:
   `merge_train_engineering_review_mode_retired` until that replacement.
   Historical privileged-operation requests remain readable; planning and
   executing a policy import reject retired required-review candidates.
+  A pending legacy import must be cancelled and replaced with an advisory
+  candidate. Retrying its original required-mode preparation is rejected;
+  the operation remains available through the operation list and detail reads.
 - `provider_delivery_protection_expectation`: Optional exact provider-protection
   expectation for ordinary guarded delivery. Absence preserves legacy policy
   bytes and digests and supplies no ordinary readiness capability. Only the
