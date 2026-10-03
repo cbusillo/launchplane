@@ -204,8 +204,9 @@ export type AuthorizationCandidatePolicyProvenance = {
 };
 
 export type AuthorizationCandidatePrepareEnvelope = {
-    candidate_id: 'ordinary-agent-delivery-administration' | 'administrator-product-evidence-read' | 'ordinary-agent-enrollment-requester';
+    candidate_id: 'ordinary-agent-delivery-administration' | 'administrator-product-evidence-read' | 'ordinary-agent-enrollment-requester' | 'agent-product-setup';
     intent: 'add' | 'remove';
+    products?: Array<string>;
     source_event_id: string;
 };
 
@@ -363,6 +364,7 @@ export type DeploymentRecordOutput = {
     destination_health: HealthcheckEvidence;
     failure: DeploymentFailure | null;
     instance: string;
+    integration_key_readback: IntegrationKeyReadbackEvidence | null;
     no_cache: boolean;
     post_deploy_update: PostDeployUpdateEvidence;
     record_id: string;
@@ -779,6 +781,17 @@ export type InspectionSetupRuntimeMetadata = {
     app_id: string | null;
     recorded_at: string | null;
     state: 'not_evaluated' | 'metadata_recorded' | 'record_missing' | 'record_unreadable' | 'record_ambiguous' | 'app_id_missing' | 'app_id_invalid' | 'unavailable';
+};
+
+export type IntegrationKeyReadbackEvidence = {
+    checked_binding_keys: Array<string>;
+    findings: Array<IntegrationKeyReadbackFinding>;
+    status: 'pass' | 'reported' | 'fail' | 'unavailable' | 'skipped';
+};
+
+export type IntegrationKeyReadbackFinding = {
+    binding_key: string;
+    code: string;
 };
 
 export type LaunchplaneAuthzPolicyOutput = {
@@ -2434,7 +2447,7 @@ export type PrivilegedOperationSemanticReview = {
     rollback: PrivilegedOperationSemanticReviewRollback;
     safety_class: 'secret_backed' | 'policy_admin';
     schema_version: number;
-    title: 'Managed-secret re-encryption review' | 'Managed authorization policy review' | 'Review agent delivery administration' | 'Review administrator product evidence access' | 'Review client delivery access' | 'Review terminal client connection requests' | 'Review removing terminal client connection requests' | 'Managed merge-train policy review' | 'Review agent delivery setup' | 'Review stopping agent delivery';
+    title: 'Managed-secret re-encryption review' | 'Managed authorization policy review' | 'Review agent delivery administration' | 'Review administrator product evidence access' | 'Review agent product setup access' | 'Review removing agent product setup access' | 'Review client delivery access' | 'Review terminal client connection requests' | 'Review removing terminal client connection requests' | 'Managed merge-train policy review' | 'Review agent delivery setup' | 'Review stopping agent delivery';
 };
 
 export type PrivilegedOperationSemanticReviewActivityEntry = {
@@ -3587,9 +3600,11 @@ export type ProductSecretBindingSummary = {
     binding_key: string;
     binding_type: string;
     context: string;
+    declared_secret_class: 'prod_only' | 'testing' | 'preview' | 'non_prod' | 'shared_safe' | null;
     instance: string;
     integration: string;
     secret_id: string;
+    sharing_reason: SecretSharingReason | null;
     status: string;
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported' | 'disabled';
     updated_at: string;
@@ -3939,7 +3954,7 @@ export type RuntimeIdentity = {
 export type RuntimeKeySafetyFinding = {
     binding_id: string;
     binding_key: string;
-    code: 'ambiguous_binding' | 'binding_disabled' | 'binding_missing' | 'context_not_allowed' | 'instance_not_allowed' | 'secret_class_not_allowed' | 'unclassified_binding' | 'unknown_environment_class';
+    code: 'ambiguous_binding' | 'binding_disabled' | 'binding_missing' | 'context_not_allowed' | 'instance_not_allowed' | 'secret_class_not_allowed' | 'sharing_reason_missing' | 'unclassified_binding' | 'unknown_environment_class';
     detail: string;
     secret_class: string;
     secret_id: string;
@@ -3962,8 +3977,17 @@ export type SecretBinding = {
     integration: string;
     schema_version: number;
     secret_id: string;
+    sharing_reason: SecretSharingReason | null;
     status: 'configured' | 'disabled';
     updated_at: string;
+};
+
+export type SecretSharingReason = {
+    evidence: string;
+    kind: 'dev_store' | 'read_only_source' | 'pre_live' | 'site_shared';
+    reason: string;
+    recorded_at: string;
+    recorded_by: string;
 };
 
 export type StructuredHealthEvidence = {
@@ -5892,6 +5916,7 @@ export type ApplyProductEnvironmentConfigData = {
         managed_secrets?: Array<ProductEnvironmentManagedSecretInput>;
         mode: 'dry-run' | 'apply';
         reason?: string;
+        retired_provider_keys?: Array<string>;
         runtime_settings?: {
             [key: string]: string | number | number | boolean;
         };

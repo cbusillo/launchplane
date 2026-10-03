@@ -55,7 +55,7 @@ from control_plane.contracts.promotion_record import (
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity
-from control_plane.contracts.secret_record import SecretBinding
+from control_plane.contracts.secret_record import SecretBinding, SecretSharingReason
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from tests.support.artifact_manifests import artifact_manifest_v2
@@ -1116,6 +1116,47 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
 
         self.assertEqual(detail.managed_secrets[0].status, "disabled")
         self.assertEqual(detail.managed_secrets[0].trust_state, "disabled")
+
+    def test_product_environment_detail_shows_why_a_production_key_is_shared(self) -> None:
+        reason = SecretSharingReason(
+            kind="read_only_source",
+            reason="Testing imports from the production account.",
+            evidence="The Client confirmed a read-only token on 2026-10-02.",
+            recorded_by="operator@example.com",
+            recorded_at="2026-10-02T00:00:00Z",
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{database_path}")
+            store.ensure_schema()
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _site_profile_payload(preview_enabled=False, preview_context="")
+            )
+            store.write_product_profile_record(profile)
+            store.write_secret_binding(
+                SecretBinding(
+                    binding_id="binding-1",
+                    secret_id="secret-1",
+                    integration="runtime_environment",
+                    binding_key="REPAIRSHOPR_API_TOKEN",
+                    context="example-site-testing",
+                    instance="testing",
+                    declared_secret_class="shared_safe",
+                    sharing_reason=reason,
+                    created_at="2026-10-02T00:00:00Z",
+                    updated_at="2026-10-02T00:00:00Z",
+                )
+            )
+
+            detail = build_product_environment_detail(
+                record_store=store,
+                product=profile.product,
+                environment="testing",
+                action_allowed=lambda *_: False,
+            )
+
+        self.assertEqual(detail.managed_secrets[0].declared_secret_class, "shared_safe")
+        self.assertEqual(detail.managed_secrets[0].sharing_reason, reason)
 
     def test_odoo_prod_detail_names_the_artifact_a_default_rollback_redeploys(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

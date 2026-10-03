@@ -19,7 +19,9 @@ from control_plane.http_routes.support import (
 )
 from control_plane.production_backup_authority import (
     ProductionBackupAuthorityConflictError,
+    ProductionBackupAuthorityScopeError,
     ProductionBackupAuthoritySequenceError,
+    lane_bound_target_revision_refusal,
     ProductionBackupAuthorityWriteEnvelope,
     ProductionBackupAuthorityWriteResult,
     plan_production_backup_authority_write,
@@ -31,7 +33,11 @@ from control_plane.production_backup_migration import (
     LegacyProductionBackupMigrationStore,
     build_legacy_production_backup_authority_envelope,
 )
-from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    LaunchplaneIdentity,
+    LocalOperatorIdentity,
+)
 from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -285,6 +291,18 @@ def _execute_write(
         return replay
     try:
         authority_store = require_production_backup_authority_store(record_store)
+        if isinstance(identity, LocalOperatorIdentity):
+            target_refusal = lane_bound_target_revision_refusal(
+                policy_records=authority_store.list_production_backup_policy_records(),
+                envelope=envelope,
+            )
+            if target_refusal:
+                raise dependencies.http_error(
+                    status_code=403,
+                    trace_id=current_trace_id,
+                    code="local_operator_lane_scope_required",
+                    message=target_refusal,
+                )
         plan = plan_production_backup_authority_write(
             record_store=authority_store,
             envelope=envelope,
@@ -331,7 +349,25 @@ def _execute_write(
                 trace_id=current_trace_id,
                 result=locked_result,
             ).model_dump(mode="json"),
+            # Re-checked on the locked policy records, so a concurrent policy
+            # change can't slip between the check above and the write.
+            revision_guard=(
+                (
+                    lambda policy_records: lane_bound_target_revision_refusal(
+                        policy_records=policy_records, envelope=envelope
+                    )
+                )
+                if isinstance(identity, LocalOperatorIdentity)
+                else None
+            ),
         )
+    except ProductionBackupAuthorityScopeError as error:
+        raise dependencies.http_error(
+            status_code=403,
+            trace_id=current_trace_id,
+            code="local_operator_lane_scope_required",
+            message=str(error),
+        ) from error
     except (
         ProductionBackupAuthorityConflictError,
         ProductionBackupAuthoritySequenceError,

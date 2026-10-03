@@ -17,6 +17,30 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 
 DelegatedExecutor = str
+IntegrationKeyReadbackStatus = Literal["pass", "reported", "fail", "unavailable", "skipped"]
+
+
+class IntegrationKeyReadbackFinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    binding_key: str
+    code: str
+
+
+class IntegrationKeyReadbackEvidence(BaseModel):
+    """Key safety of the integration keys a deploy delivered to its lane.
+
+    Names and finding codes only, never values. ``reported`` means every key is
+    allowed but a shared_safe production key has no recorded sharing reason;
+    ``fail`` means a key breaks the lane's key-safety rules. Both are recorded,
+    not enforced, after the deploy.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: IntegrationKeyReadbackStatus = "skipped"
+    checked_binding_keys: tuple[str, ...] = ()
+    findings: tuple[IntegrationKeyReadbackFinding, ...] = ()
 
 
 class ResolvedTargetEvidence(BaseModel):
@@ -86,6 +110,7 @@ class DeploymentRecord(BaseModel):
     bootstrap: BootstrapEvidence = Field(default_factory=BootstrapEvidence)
     post_deploy_update: PostDeployUpdateEvidence = Field(default_factory=PostDeployUpdateEvidence)
     destination_health: HealthcheckEvidence = Field(default_factory=HealthcheckEvidence)
+    integration_key_readback: IntegrationKeyReadbackEvidence | None = None
     failure: DeploymentFailure | None = None
 
     @model_validator(mode="after")

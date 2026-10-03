@@ -583,6 +583,81 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "runtime_key_safety_failed")
         self.assertEqual(store.secret_bindings, {})
 
+    def test_product_config_refuses_shared_safe_integration_key_without_reason(self) -> None:
+        store = _FakeProductConfigStore()
+
+        with self.assertRaises(control_plane_product_config.ProductConfigError) as raised:
+            _apply_declared_class_secret(
+                store,
+                secret={
+                    "name": "repairshopr-api-token",
+                    "binding_key": "REPAIRSHOPR_API_TOKEN",
+                    "secret_class": "shared_safe",
+                },
+                mode="dry-run",
+            )
+
+        self.assertEqual(raised.exception.code, "runtime_key_safety_failed")
+        self.assertEqual(store.secret_bindings, {})
+
+    def test_product_config_records_why_a_shared_integration_key_is_on_testing(self) -> None:
+        store = _FakeProductConfigStore()
+
+        payload = _apply_declared_class_secret(
+            store,
+            secret={
+                "name": "repairshopr-api-token",
+                "binding_key": "REPAIRSHOPR_API_TOKEN",
+                "secret_class": "shared_safe",
+                "sharing_reason": {
+                    "kind": "read_only_source",
+                    "reason": "Testing imports from the production account.",
+                    "evidence": "The Client confirmed a read-only token on 2026-10-02.",
+                },
+            },
+        )
+
+        secret_payloads = cast("list[dict[str, object]]", payload["secrets"])
+        self.assertEqual(
+            cast("dict[str, str]", secret_payloads[0]["sharing_reason"])["kind"],
+            "read_only_source",
+        )
+        secret_binding = next(iter(store.secret_bindings.values()))
+        assert secret_binding.sharing_reason is not None
+        self.assertEqual(secret_binding.sharing_reason.kind, "read_only_source")
+        self.assertEqual(secret_binding.sharing_reason.recorded_by, "operator@example.com")
+        self.assertTrue(secret_binding.sharing_reason.recorded_at)
+
+    def test_product_config_rejects_an_invalid_sharing_reason(self) -> None:
+        for secret, message in (
+            (
+                {"sharing_reason": {"kind": "dev_store", "reason": "r", "evidence": "e"}},
+                "set secret_class too",
+            ),
+            (
+                {
+                    "secret_class": "shared_safe",
+                    "sharing_reason": {"kind": "read_only_source", "reason": "Imports only."},
+                },
+                "reason and evidence are required",
+            ),
+            (
+                {
+                    "secret_class": "shared_safe",
+                    "sharing_reason": {"kind": "borrowed", "reason": "r", "evidence": "e"},
+                },
+                "kind must be one of",
+            ),
+        ):
+            with self.subTest(secret=secret):
+                store = _FakeProductConfigStore()
+
+                with self.assertRaises(control_plane_product_config.ProductConfigError) as raised:
+                    _apply_declared_class_secret(store, secret=secret, mode="dry-run")
+
+                self.assertIn(message, str(raised.exception))
+                self.assertEqual(store.secret_bindings, {})
+
     def test_product_config_apply_rejects_invalid_declared_secret_class(self) -> None:
         for secret, message in (
             ({"secret_class": "production"}, "secret_class must be one of"),

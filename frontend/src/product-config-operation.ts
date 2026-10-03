@@ -53,15 +53,47 @@ export function productConfigSelectionKey(keys: readonly string[]): string {
   return [...keys].sort().join("\u0000");
 }
 
-export function productConfigRuntimeDraftKey(
-  keys: readonly string[],
+export interface SiteSettingDraft {
+  key: string;
+  value: string;
+}
+
+export interface RuntimeSettingsChange {
+  runtime_settings: Record<string, string>;
+  retired_provider_keys: string[];
+}
+
+// Declared keys, the site's own settings, and provider keys to retire, as one request.
+export function productConfigRuntimeChange(
+  selectedKeys: readonly string[],
   values: Readonly<Record<string, string>>,
-): string {
-  return JSON.stringify(
-    [...keys]
-      .sort()
-      .map((key) => [key, values[key] ?? ""]),
-  );
+  siteSettings: readonly SiteSettingDraft[],
+  retiredKeysText: string,
+): RuntimeSettingsChange {
+  const entries: [string, string][] = [
+    ...selectedKeys.map((key): [string, string] => [key, values[key] ?? ""]),
+    ...siteSettings
+      .map((setting): [string, string] => [setting.key.trim(), setting.value])
+      .filter(([key]) => key),
+  ];
+  const runtimeSettings: Record<string, string> = {};
+  for (const [key, value] of entries.sort(([left], [right]) => left.localeCompare(right))) {
+    if (key in runtimeSettings) {
+      throw new Error(`${key} appears more than once.`);
+    }
+    runtimeSettings[key] = value;
+  }
+  const retiredKeys = [
+    ...new Set(retiredKeysText.split(/[\s,]+/).map((key) => key.trim()).filter(Boolean)),
+  ].sort();
+  return { runtime_settings: runtimeSettings, retired_provider_keys: retiredKeys };
+}
+
+export function productConfigRuntimeChangeKey(change: RuntimeSettingsChange): string {
+  return JSON.stringify([
+    Object.entries(change.runtime_settings),
+    change.retired_provider_keys,
+  ]);
 }
 
 export function productConfigDraftLocked(

@@ -60,6 +60,23 @@ class MergeTrainBatchEntry(BaseModel):
         return self
 
 
+class MergeTrainBatchHeldOutEntry(BaseModel):
+    """A queued pull request left out of candidates while its head is unchanged."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pull_request_number: int = Field(gt=0)
+    head_sha: str
+    reason: Literal["entry_conflict"] = "entry_conflict"
+
+    @model_validator(mode="after")
+    def _validate_held_out_entry(self) -> "MergeTrainBatchHeldOutEntry":
+        self.head_sha = _normalize_required_value(
+            self.head_sha, "merge train held-out entry requires head_sha"
+        )
+        return self
+
+
 class MergeTrainBatchCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -75,6 +92,7 @@ class MergeTrainBatchCandidate(BaseModel):
     candidate_sha256: str = ""
     status: MergeTrainBatchCandidateStatus = "planned"
     entries: tuple[MergeTrainBatchEntry, ...]
+    held_out: tuple[MergeTrainBatchHeldOutEntry, ...] = ()
     stack_collapse_root: MergeTrainStackCollapseRootProof | None = None
     structural_provenance: MergeTrainStructuralProvenance | None = None
     required_checks_status: Literal["unknown", "pending", "pass", "fail"] = "unknown"
@@ -455,6 +473,7 @@ def build_merge_train_batch_candidate(
     created_at: str,
     stack_collapse_root: MergeTrainStackCollapseRootProof | None = None,
     ordinary_job_binding: OrdinaryAgentJobBinding | None = None,
+    held_out: tuple[MergeTrainBatchHeldOutEntry, ...] = (),
 ) -> MergeTrainBatchCandidate:
     if dry_run_result.intended_next_action not in ("merge", "idle"):
         raise ValueError("merge train batch candidate requires a queue without blocking actions")
@@ -504,6 +523,7 @@ def build_merge_train_batch_candidate(
         ),
         status="planned",
         entries=tuple(entries),
+        held_out=held_out,
         stack_collapse_root=stack_collapse_root,
         created_at=created_at,
         updated_at=created_at,

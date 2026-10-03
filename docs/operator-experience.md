@@ -494,9 +494,12 @@ execute against cached authorization evidence.
 
 The browser writes through
 `POST /v1/products/{product}/environments/{environment}/config/apply`. The
-service resolves the stored product profile and lane from the path, accepts only
-profile-declared runtime keys or managed-secret bindings, and supplies the
-context, instance, scope, and source label itself. A managed-secret selection
+service resolves the stored product profile and lane from the path and supplies
+the context, instance, scope, and source label itself. Managed secrets must be
+profile-declared bindings. The runtime-settings form also records the site's
+own settings the profile does not declare, which must be plain settings rather
+than credentials, and retires provider keys the lane no longer uses; both go
+through the same dry-run and apply. A managed-secret selection
 includes both its displayed integration and binding key so repeated binding-key
 names remain unambiguous; the server resolves that pair against the stored
 profile rather than trusting it as target authority. The browser does not send a

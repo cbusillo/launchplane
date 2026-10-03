@@ -55,7 +55,8 @@ from control_plane.contracts.route_binding_record import EnvironmentRouteBinding
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
-from control_plane.contracts.secret_record import SecretBinding
+from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretClass
+from control_plane.contracts.secret_record import SecretBinding, SecretSharingReason
 from control_plane.drivers.registry import (
     build_driver_context_view,
     effective_driver_actions,
@@ -294,6 +295,8 @@ class ProductSecretBindingSummary(BaseModel):
     status: str
     updated_at: str
     trust_state: ProductSecretBindingTrustState
+    declared_secret_class: RuntimeSecretClass | None = None
+    sharing_reason: SecretSharingReason | None = None
 
 
 class ProductTargetSummary(BaseModel):
@@ -949,9 +952,9 @@ def _product_config_input_blockers(
     blockers: list[str] = []
     if not prerequisites.storage_ready:
         blockers.append("DB-backed product configuration storage is unavailable.")
-    if item_count == 0:
-        label = "runtime settings" if input_kind == "runtime_settings" else "managed secrets"
-        blockers.append(f"Product profile does not declare {label} for this environment.")
+    # A site's own runtime settings need no declaration; managed secrets still do.
+    if input_kind == "managed_secrets" and item_count == 0:
+        blockers.append("Product profile does not declare managed secrets for this environment.")
     if input_kind == "managed_secrets":
         if not prerequisites.secret_key_ready:
             blockers.append("Managed-secret write encryption is unavailable.")
@@ -2503,6 +2506,8 @@ def _secret_binding_summary(binding: SecretBinding) -> ProductSecretBindingSumma
         status=binding.status,
         updated_at=binding.updated_at,
         trust_state="recorded" if binding.status == "configured" else "disabled",
+        declared_secret_class=binding.declared_secret_class,
+        sharing_reason=binding.sharing_reason,
     )
 
 
