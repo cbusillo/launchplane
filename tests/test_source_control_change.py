@@ -22,8 +22,11 @@ def _fingerprint(patch: str, blob: str, **options: bool) -> object:
 
 class ChangeFingerprintTests(unittest.TestCase):
     def test_only_changed_lines_mode_ignores_moved_hunks_and_context(self) -> None:
+        accepted = _fingerprint(_PATCH, "a" * 40, changed_lines_only=True)
+
+        self.assertIsNotNone(accepted)
         self.assertEqual(
-            _fingerprint(_PATCH, "a" * 40, changed_lines_only=True),
+            accepted,
             _fingerprint(_MOVED_PATCH, "c" * 40, changed_lines_only=True),
         )
 
