@@ -166,6 +166,64 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
+    def _environment_read_app(self, *, products: tuple[str, ...]) -> FastAPI:
+        """No secret actions: the standing environment read for ``products`` only."""
+        profile_rule = _local_operator_policy(actions=("product_profile.read",)).local_operators[0]
+        config_rule = (
+            _local_operator_policy(actions=("product_config.plan", "product_config.apply"))
+            .local_operators[0]
+            .model_copy(update={"instances": ("testing",)})
+        )
+        read_rule = (
+            _local_operator_policy(actions=("product_environment.read",), products=products)
+            .local_operators[0]
+            .model_copy(update={"instances": ("prod", "testing")})
+        )
+        return create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(
+                schema_version=2, local_operators=(profile_rule, config_rule, read_rule)
+            ),
+            record_store_factory=lambda: self.store,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="test-operator-token",
+                local_operator_subject="local-owner-agent",
+                local_operator_token_label="local-owner-write",
+            ),
+        )
+
+    async def test_standing_environment_read_lists_metadata_and_names_copy_source(self) -> None:
+        app = self._environment_read_app(products=("example-site",))
+        response = await _asgi_request(
+            app,
+            "GET",
+            "/v1/products/example-site/secret-bindings",
+            headers={"Authorization": "Bearer test-operator-token"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        binding = response.json()["bindings"][0]
+        self.assertEqual(binding["binding_key"], "REPAIRSHOPR_TOKEN")
+        self.assertEqual(binding["version_id"], self.source.current_version_id)
+        self.assertNotIn("source-only-test-token", response.text)
+
+        response = await self.post(app=app)
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertNotIn("source-only-test-token", response.text)
+
+    async def test_environment_read_on_another_product_neither_lists_nor_copies(self) -> None:
+        app = self._environment_read_app(products=("other-site",))
+        response = await _asgi_request(
+            app,
+            "GET",
+            "/v1/products/example-site/secret-bindings",
+            headers={"Authorization": "Bearer test-operator-token"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["bindings"], [])
+        response = await self.post(app=app)
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
     async def test_plain_value_request_does_not_add_copy_fields_to_legacy_response(self) -> None:
         response = await self.post(
             {**self.source_payload, "mode": "dry-run", "reason": "Ordinary rotation"}

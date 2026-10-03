@@ -633,7 +633,12 @@ runtime secret bindings: name, binding key, scope, context, instance, declared
 class, sharing reason and current version ID. It reads no ciphertext or value,
 excludes global and worker/service stores, and requires product-profile read
 access. It returns only bindings covered by the caller's existing `secret.list`
-access, so an empty result does not prove absence outside that access. Preview
+access, or by its `product_environment.read` on that product and the binding's
+lane (its whole context for a site-shared binding), so an empty result does not
+prove absence outside that access. Binding metadata is a record like the rest of
+a product environment, and reading is never a stop, so the Director's agents
+read it through the same standing environment read across products
+(cbusillo/repairshopr_api#103). Preview
 and removed-lane bindings and contexts shared ambiguously between products are
 excluded.
 
@@ -676,9 +681,13 @@ a source and writing testing do not authorize this production-lane write.
 
 Every copy requires a declared class and an allowlisted sharing reason with
 reason and evidence, in addition to normal runtime key safety. The caller needs
-existing `secret.read` access to the resolved source record's scope (whole
-context for a site-shared source, exact instance for a lane source) and
-destination product-config access; the route creates no grant. The resolved
+read access to the resolved source record's scope (whole context for a
+site-shared source, exact instance for a lane source), either existing
+`secret.read` or `product_environment.read` on the source's product, and
+destination product-config access; the route creates no grant. The copy is
+still a write, authorized by the destination's `product_config.apply`; naming a
+source only needs the source to be readable, and its value never reaches the
+caller. The resolved
 scope is authorized before decryption. Launchplane does not verify token
 permissions: a person verifies them and records who, when and what they checked.
 
