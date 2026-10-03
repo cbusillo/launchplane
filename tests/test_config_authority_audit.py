@@ -5246,6 +5246,15 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("      group: >-\n        tenant-group\n      labels: self-hosted\n", "fail"),
             ("      group: self-hosted\n      labels: self-hosted\n", "fail"),
             ("      group: ${{ vars.TENANT_GROUP }}\n      labels: self-hosted\n", "fail"),
+            (
+                "      group: ${{ inputs.runner_group || 'tenant-group' }}\n"
+                "      labels: self-hosted\n",
+                "fail",
+            ),
+            (
+                "      group: ${{ inputs.runner_group }}-tenant-group\n      labels: self-hosted\n",
+                "fail",
+            ),
             (" {group: tenant-group, labels: self-hosted}\n", "fail"),
             ("      group: ${{ inputs.runner_group }}\n      labels: self-hosted\n", "pass"),
             (" [self-hosted, ubuntu-latest]\n", "pass"),

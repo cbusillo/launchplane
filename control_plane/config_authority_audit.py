@@ -3337,11 +3337,9 @@ def _is_workflow_mechanic_key_value(*, key: str, value: object) -> bool:
         )
     if key_text == "ID_TOKEN" and value_text == "write":
         return True
-    if (
-        key_text in {"GROUP", "RUNS_ON_GROUP"}
-        and "${{ inputs." in value_text
-        and "${{ vars." not in value_text
-    ):
+    if key_text == "RUNS_ON_GROUP":
+        return _is_github_direct_input_reference(value)
+    if key_text == "GROUP" and "${{ inputs." in value_text and "${{ vars." not in value_text:
         return True
     if key_text == "PATH" and re.fullmatch(r"[A-Za-z0-9_.-]+\.json", value_text):
         return True
