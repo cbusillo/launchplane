@@ -12,7 +12,8 @@ class ProductReviewCarry(BaseModel):
     """Where a carried acceptance came from: the Client decided on another head.
 
     `merge_train_base_refresh`: the merge train only merged the base branch into the
-    pull request, and the pull request's change against its base is byte-identical.
+    pull request, and the pull request's change against its base adds and removes
+    the same lines.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -31,7 +32,7 @@ class ProductReviewCarry(BaseModel):
 
 
 class ProductReviewDecisionRecord(BaseModel):
-    """One Owner decision about one pull request preview.
+    """One Client decision about one pull request preview.
 
     The decision is a recorded opinion: it never merges or deploys anything.
     """

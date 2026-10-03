@@ -18,22 +18,24 @@ function item(number, notes) {
 test("groups identical test notes, keeps missing notes separate, and collapses nothing-to-test changes", () => {
   const framework = "Click around the testing site and confirm pages load.";
   const grouped = groupReleaseItems([
-    item(1, "Nothing for the owner to test. CI only."),
+    item(1, "Nothing for the Client to test. CI only."),
     item(2, framework),
     item(3, ""),
     item(4, `${framework}\n`),
     item(5, "nothing for the owner to test"),
     item(6, ""),
+    item(7, "Nothing for the owner to test. Written before the role words changed."),
   ]);
 
   assert.deepEqual(
     grouped.checks.map(check => [check.notes, check.items.map(entry => entry.pull_request_number)]),
     [[framework, [2, 4]], ["", [3]], ["", [6]]],
   );
-  assert.deepEqual(grouped.nothingToTest.map(entry => entry.pull_request_number), [1, 5]);
+  assert.deepEqual(grouped.nothingToTest.map(entry => entry.pull_request_number), [1, 5, 7]);
 });
 
 test("shows only the reason after the nothing-to-test marker", () => {
-  assert.equal(untestedReason("Nothing for the owner to test. Automated dependency update."), "Automated dependency update.");
-  assert.equal(untestedReason("Nothing for the owner to test"), "");
+  assert.equal(untestedReason("Nothing for the Client to test. Automated dependency update."), "Automated dependency update.");
+  assert.equal(untestedReason("Nothing for the Client to test"), "");
+  assert.equal(untestedReason("Nothing for the owner to test: CI only."), "CI only.");
 });
