@@ -165,7 +165,9 @@ Classification uses the PR diff from its base, a main push from its previous
 commit, and a train candidate from main. Renames include both old and new paths.
 Schedules and missing diff evidence retain absolute blocking audits, and a
 failed classification job fails `ci-gate`. Tree reuse still applies to push
-events; fresh scheduled CI remains the calendar-driven advisory signal.
+events. Daily fresh CI is supplied separately by PR #2893; this reporting
+change must land after or with that schedule so newly discovered advisories
+have a blocking signal independent of unrelated pull requests.
 
 The container-build CI jobs also run
 `bash scripts/qualify-ordinary-agent-compose.sh <built-test-image>`. This
