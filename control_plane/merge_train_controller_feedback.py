@@ -296,6 +296,11 @@ def _held_out_messages(*, result: dict[str, Any], base_branch: str) -> list[tupl
 
 
 def _pull_request_numbers(result: dict[str, Any]) -> list[int]:
+    if _string(result.get("controller_action")) in WAITING_ACTIONS:
+        selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))
+        number = selected.get("number")
+        if isinstance(number, int) and number > 0:
+            return [number]
     containers = (
         _as_dict(result.get("landing_plan")).get("entries"),
         _as_dict(result.get("candidate")).get("entries"),

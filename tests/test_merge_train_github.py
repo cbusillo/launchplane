@@ -2886,7 +2886,9 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 profile = SimpleNamespace(
                     is_active=True,
                     repository="cbusillo/sellyouroutboard",
-                    owner=SimpleNamespace(review_label="client-check"),
+                    owner=SimpleNamespace(
+                        review_label=label if label != "unrelated" else "client-check"
+                    ),
                 )
                 store = SimpleNamespace(list_product_profile_records=lambda: (profile,))
                 snapshot = GitHubMergeTrainSnapshotReader(
@@ -2898,6 +2900,37 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 ]
                 self.assertTrue(status_paths)
                 self.assertTrue(all("/commits/head-42/" in path for path in status_paths))
+
+    def test_review_label_without_matching_active_profile_creates_no_wait(self) -> None:
+        for profiles in (
+            (),
+            (
+                SimpleNamespace(
+                    is_active=False,
+                    repository="cbusillo/sellyouroutboard",
+                    owner=SimpleNamespace(review_label="owner-review"),
+                ),
+            ),
+            (
+                SimpleNamespace(
+                    is_active=True,
+                    repository="cbusillo/sellyouroutboard",
+                    owner=SimpleNamespace(review_label="client-check"),
+                ),
+            ),
+        ):
+            with self.subTest(profiles=profiles):
+                reader = GitHubMergeTrainSnapshotReader(
+                    transport=RecordingMergeTrainGitHubTransport(responses=()),
+                    branch_refresh_store=cast(
+                        Any, SimpleNamespace(list_product_profile_records=lambda: profiles)
+                    ),
+                )
+                self.assertFalse(
+                    reader._owner_review_required(
+                        labels=("owner-review",), repository="cbusillo/sellyouroutboard"
+                    )
+                )
 
     def test_snapshot_reader_builds_pull_request_snapshots_from_base_rooted_graph(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(

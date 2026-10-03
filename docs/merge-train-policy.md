@@ -259,6 +259,13 @@ reported as `trusted_automation` in controller dry-run output. The default list
 is empty, so existing owner/admin-only policies remain fail-closed and unchanged.
 Logins are diagnostic labels, not policy identity, because logins can be renamed.
 
+PRs labelled for Client review require the newest `launchplane/owner-review`
+commit status on their current head. Missing status is pending, even if check
+runs already passed; pending or failed review cannot admit the PR. Only active product profiles' configured review labels mark this
+boundary; an unrelated label on a repository without such a profile creates no
+review requirement. Every batch member is checked during planning and again
+before the provider landing effect. Successful review still requires all other current-head checks.
+
 Only an actor allowed to enqueue may put a pull request in the train: a trusted
 automation identity, or an actor whose role is in `allowed_actor_roles` (by
 default the repository owner and its admins). Pull-request write access
@@ -453,10 +460,12 @@ identity before waiting on checks, so a pending or failed check cannot hide a
 new source head. A manually closed batch PR is not automatically reopened.
 Change or remove the queued source entries to build a replacement; an unchanged
 failed candidate remains visibly failed rather than being rebuilt in a loop.
-It is never rebuilt, but a candidate that failed on check evidence is re-read at
-its recorded SHA on each controller call, so re-running the failed check lets it
-continue once the re-run is no longer failing. A multi-entry batch whose batch
-PR was closed on failure is not re-read, because that PR is never reopened.
+A candidate that failed on check evidence may be re-read at its recorded SHA,
+so re-running the failed check lets it continue once the re-run is no longer
+failing. A multi-entry batch whose batch PR was closed is never reopened. It
+has one narrow rebuild exception: a changed generated batch body, confirmed
+closed and unmerged binding, and a persisted unused retry budget, as described
+under `candidate_failed` below.
 
 The landing plan binds `candidate_pull_request_number` into its immutable
 digest. The controller evaluates every constituent before appending the first
@@ -1286,9 +1295,3 @@ Live worker reads build the same `MergeTrainDryRunSnapshot` contract from
 GitHub pull requests for the policy repository/base branch. The reader only uses
 GET requests, preserves unknown mergeability or check evidence as `unknown` or
 `pending`, and fails closed when required pull request fields are missing.
-
-PRs labelled for Client review require the newest `launchplane/owner-review`
-commit status on their current head. Missing status is pending, even if check
-runs already passed; pending or failed review cannot admit the PR. The default
-review label and active product profiles' configured review labels mark this
-boundary. Successful review still requires all other current-head checks.

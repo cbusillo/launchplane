@@ -1881,7 +1881,10 @@ def _advance_active_candidate_record(
             mutate=request.mutate,
         )
         if reflow_result is not None:
-            if request.mutate:
+            if request.mutate and reflow_result.get("controller_action") in {
+                "plan_candidate",
+                "observe_candidate",
+            }:
                 lease.checkpoint(
                     active_action="reflow_candidate",
                     active_phase="replacement_recorded",
@@ -2127,6 +2130,7 @@ def _reflow_stale_candidate_record(
     dry_run_result = build_merge_train_dry_run_result(
         policy=policy,
         snapshot=candidate_snapshot,
+        batch_landing=candidate_record.ordinary_job_binding is None,
     )
     candidate_matches_queue = _merge_train_candidate_matches_dry_run_queue(
         candidate=candidate_record.candidate,
@@ -2173,6 +2177,20 @@ def _reflow_stale_candidate_record(
         )
         result["superseded_merge_train_batch_candidate_record_id"] = candidate_record.record_id
         return result
+    if candidate_record.ordinary_job_binding is None and any(
+        pr.owner_review_required and pr.required_checks_status != "pass"
+        for pr in dry_run_result.queue
+        if pr.eligible
+    ):
+        return {
+            "repository": request.repository,
+            "base_branch": request.base_branch,
+            "mode": "dry-run",
+            "controller_action": dry_run_result.intended_next_action,
+            "merge_train_batch_candidate_record_id": candidate_record.record_id,
+            "dry_run_result": dry_run_result.model_dump(mode="json"),
+            "candidate": candidate_record.candidate.model_dump(mode="json"),
+        }
     return None
 
 
@@ -3086,7 +3104,10 @@ def try_reflow_failed_merge_train_candidate(
         snapshot=snapshot,
         batch_landing=active_candidate_record.ordinary_job_binding is None,
     )
-    if dry_run_result.intended_next_action == "wait_for_checks":
+    if (
+        dry_run_result.intended_next_action == "wait_for_checks"
+        and active_candidate_record.ordinary_job_binding is None
+    ):
         return {
             "repository": repository,
             "base_branch": base_branch,
@@ -3127,10 +3148,15 @@ def try_reflow_failed_merge_train_candidate(
             )
             if not retry_used:
                 reason = "closed_batch_body_unchanged_or_unavailable"
-                if failed.required_checks_status == "fail" and changed_closed_batch_body(
-                    client=github_client, candidate=failed
-                ):
-                    reason = "closed_batch_body_changed"
+                if failed.required_checks_status == "fail":
+                    try:
+                        changed_body = changed_closed_batch_body(
+                            client=github_client, candidate=failed
+                        )
+                    except (MergeTrainGitHubError, MergeAdmissionDeniedError):
+                        changed_body = False
+                    if changed_body:
+                        reason = "closed_batch_body_changed"
             if reason != "closed_batch_body_changed":
                 return {
                     "repository": repository,
@@ -3210,7 +3236,14 @@ def try_reflow_failed_merge_train_candidate(
         created_at=recorded_at,
         held_out=probe.held_out,
     )
-    if queue_unchanged and active_candidate_record.candidate.candidate_sha:
+    if (
+        active_candidate_record.candidate.candidate_sha
+        and _merge_train_candidate_matches_dry_run_queue(
+            candidate=active_candidate_record.candidate,
+            dry_run_result=probe.dry_run_result,
+            base_sha=probe.snapshot.base_sha,
+        )
+    ):
         # A separate ref prevents rediscovery of the failed closed batch PR.
         batch_id = candidate.batch_id + "-body-retry"
         candidate = MergeTrainBatchCandidate.model_validate(

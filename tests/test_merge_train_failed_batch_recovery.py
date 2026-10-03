@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
@@ -126,6 +126,53 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 "batch_body_retry_already_used",
             )
 
+    def test_later_labelled_member_waits_before_batch_planning(self) -> None:
+        for status in ("pending", "fail"):
+            with self.subTest(status=status):
+                snapshot = self.snapshot.model_copy(
+                    update={
+                        "pull_requests": (
+                            self.snapshot.pull_requests[0],
+                            self.snapshot.pull_requests[1].model_copy(
+                                update={
+                                    "owner_review_required": True,
+                                    "required_checks_status": status,
+                                }
+                            ),
+                        )
+                    }
+                )
+                result = build_merge_train_dry_run_result(
+                    policy=self.policy, snapshot=snapshot, batch_landing=True
+                )
+                self.assertEqual(
+                    result.intended_next_action,
+                    "wait_for_checks" if status == "pending" else "block",
+                )
+                assert result.selected_pr is not None
+                self.assertEqual(result.selected_pr.number, snapshot.pull_requests[1].number)
+                with self.assertRaises(ValueError):
+                    build_merge_train_batch_candidate(
+                        dry_run_result=result,
+                        base_sha=snapshot.base_sha,
+                        policy_sha256="digest",
+                        created_at="2026-10-03T12:00:00Z",
+                    )
+
+    def test_unavailable_body_evidence_reports_failure_without_retry(self) -> None:
+        from control_plane.merge_train_github import MergeTrainGitHubError
+
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "control_plane.merge_train_controller_run_once.changed_closed_batch_body",
+                side_effect=MergeTrainGitHubError("provider unavailable", status_code=503),
+            ),
+        ):
+            result = self._reflow(FilesystemRecordStore(state_dir=Path(directory)), self.candidate)
+        self.assertEqual(result["controller_action"], "candidate_failed")
+        self.assertEqual(result["recovery_reason"], "closed_batch_body_unchanged_or_unavailable")
+
     def test_unchanged_body_keeps_the_failure_stopped(self) -> None:
         with TemporaryDirectory() as directory:
             result = self._reflow(FilesystemRecordStore(state_dir=Path(directory)), self.candidate)
@@ -171,6 +218,13 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     result["dry_run_result"]["intended_next_action"], "wait_for_checks"
+                )
+                from control_plane.merge_train_controller_feedback import build_feedback_payloads
+
+                feedback = build_feedback_payloads(response={"result": result})
+                self.assertEqual(
+                    [item["pull_request_number"] for item in feedback],
+                    [self.snapshot.pull_requests[0].number],
                 )
                 self.assertFalse(
                     any(
