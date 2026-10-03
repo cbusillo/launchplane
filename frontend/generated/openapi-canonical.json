@@ -3804,6 +3804,16 @@
             "title": "Instance",
             "type": "string"
           },
+          "integration_key_readback": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IntegrationKeyReadbackEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "no_cache": {
             "default": false,
             "title": "No Cache",
@@ -3918,6 +3928,16 @@
           "instance": {
             "title": "Instance",
             "type": "string"
+          },
+          "integration_key_readback": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IntegrationKeyReadbackEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "no_cache": {
             "default": false,
@@ -11871,6 +11891,61 @@
           }
         },
         "title": "InspectionSetupRuntimeMetadata",
+        "type": "object"
+      },
+      "IntegrationKeyReadbackEvidence": {
+        "additionalProperties": false,
+        "description": "Key safety of the integration keys a deploy delivered to its lane.\n\nNames and finding codes only, never values. ``reported`` means every key is\nallowed but a shared_safe production key has no recorded sharing reason;\n``fail`` means a key breaks the lane's key-safety rules. Both are recorded,\nnot enforced, after the deploy.",
+        "properties": {
+          "checked_binding_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Checked Binding Keys",
+            "type": "array"
+          },
+          "findings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/IntegrationKeyReadbackFinding"
+            },
+            "title": "Findings",
+            "type": "array"
+          },
+          "status": {
+            "default": "skipped",
+            "enum": [
+              "pass",
+              "reported",
+              "fail",
+              "unavailable",
+              "skipped"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "title": "IntegrationKeyReadbackEvidence",
+        "type": "object"
+      },
+      "IntegrationKeyReadbackFinding": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_key": {
+            "title": "Binding Key",
+            "type": "string"
+          },
+          "code": {
+            "title": "Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding_key",
+          "code"
+        ],
+        "title": "IntegrationKeyReadbackFinding",
         "type": "object"
       },
       "JsonValue": {},
@@ -32632,6 +32707,24 @@
             "title": "Context",
             "type": "string"
           },
+          "declared_secret_class": {
+            "anyOf": [
+              {
+                "enum": [
+                  "prod_only",
+                  "testing",
+                  "preview",
+                  "non_prod",
+                  "shared_safe"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Declared Secret Class"
+          },
           "instance": {
             "title": "Instance",
             "type": "string"
@@ -32643,6 +32736,16 @@
           "secret_id": {
             "title": "Secret Id",
             "type": "string"
+          },
+          "sharing_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SecretSharingReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "status": {
             "title": "Status",
@@ -38885,6 +38988,7 @@
               "context_not_allowed",
               "instance_not_allowed",
               "secret_class_not_allowed",
+              "sharing_reason_missing",
               "unclassified_binding",
               "unknown_environment_class"
             ],
@@ -39322,6 +39426,16 @@
             "title": "Secret Id",
             "type": "string"
           },
+          "sharing_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SecretSharingReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "status": {
             "default": "configured",
             "enum": [
@@ -39345,6 +39459,54 @@
           "updated_at"
         ],
         "title": "SecretBinding",
+        "type": "object"
+      },
+      "SecretSharingReason": {
+        "additionalProperties": false,
+        "description": "Why a production integration key may sit on one non-production lane.\n\nThe kinds are the lane integration allowances' (``dev_store``,\n``read_only_source``, ``pre_live``) plus ``site_shared`` for a key the site's\nstable lanes share on purpose. ``evidence`` says who verified the key's\npermissions, when, and what they saw. Launchplane cannot check a token's\npermissions; a person does and records it here.",
+        "properties": {
+          "evidence": {
+            "title": "Evidence",
+            "type": "string"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "dev_store",
+                  "read_only_source",
+                  "pre_live"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "site_shared",
+                "type": "string"
+              }
+            ],
+            "title": "Kind"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "recorded_at": {
+            "default": "",
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "recorded_by": {
+            "default": "",
+            "title": "Recorded By",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "reason",
+          "evidence"
+        ],
+        "title": "SecretSharingReason",
         "type": "object"
       },
       "SecretStatusAuditEvent": {

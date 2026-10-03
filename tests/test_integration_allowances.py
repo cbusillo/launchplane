@@ -13,6 +13,7 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetShopifyPolicy,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.secret_record import SecretBinding, SecretSharingReason
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.integration_allowances import (
     INTEGRATION_ALLOWANCES_APPLY_ROUTE,
@@ -22,6 +23,7 @@ from control_plane.integration_allowances import (
     IntegrationAllowancesStale,
     apply_integration_allowances_plan,
     build_integration_allowances_plan,
+    read_integration_allowances,
 )
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -345,6 +347,51 @@ class IntegrationAllowancesPlanTests(unittest.TestCase):
                         actor="operator",
                     )
                 self.assertEqual(raised.exception.code, code)
+
+    def test_read_lists_the_lanes_integration_keys_and_why_they_are_shared(self) -> None:
+        reason = SecretSharingReason(
+            kind="read_only_source",
+            reason="Testing imports from the production account.",
+            evidence="The Client confirmed a read-only token on 2026-10-02.",
+            recorded_by="operator@example.com",
+            recorded_at=_TIMESTAMP,
+        )
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            _seed_target(store)
+            for binding_key, context, instance, update in (
+                (
+                    "REPAIRSHOPR_API_TOKEN",
+                    _CONTEXT,
+                    "testing",
+                    {"declared_secret_class": "shared_safe", "sharing_reason": reason},
+                ),
+                ("CONTACT_ALERT_DISCORD_WEBHOOK_URL", _CONTEXT, "testing", {}),
+                ("STRIPE_SECRET_KEY", _CONTEXT, "", {}),
+                ("SHOPIFY_ACCESS_TOKEN", _CONTEXT, "prod", {}),
+            ):
+                store.write_secret_binding(
+                    SecretBinding(
+                        binding_id=f"binding-{binding_key.lower()}-{instance or 'site'}",
+                        secret_id=f"secret-{binding_key.lower()}",
+                        integration="runtime_environment",
+                        binding_key=binding_key,
+                        context=context,
+                        instance=instance,
+                        created_at=_TIMESTAMP,
+                        updated_at=_TIMESTAMP,
+                    ).model_copy(update=update)
+                )
+
+            result = read_integration_allowances(
+                record_store=store, product=_PRODUCT, context=_CONTEXT, instance="testing"
+            )
+
+        self.assertEqual(
+            [key.binding_key for key in result.integration_keys], ["REPAIRSHOPR_API_TOKEN"]
+        )
+        self.assertEqual(result.integration_keys[0].declared_secret_class, "shared_safe")
+        self.assertEqual(result.integration_keys[0].sharing_reason, reason)
 
     def test_missing_target_record_is_refused(self) -> None:
         with TemporaryDirectory() as directory:
