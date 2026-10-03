@@ -133,8 +133,8 @@ reservation. The webhook request never waits on a deploy.
     a new bounded run;
     reopening the PR resumes normal preview reconciliation.
     For a legacy preview without runtime target evidence, the refusal remains:
-    an operator must establish whether its provider target still exists before
-    retirement. After fixing the underlying evidence/configuration, an operator
+    an admin must establish whether its provider target still exists before
+    retirement. After fixing the underlying evidence/configuration, an admin
     can request fresh destroy inputs through `POST /v1/drivers/odoo/preview-apply-inputs`
     and apply a ready plan through `POST /v1/drivers/odoo/preview-apply`, or use
     `POST /v1/drivers/generic-web/preview-destroy` for a generic-web preview.
