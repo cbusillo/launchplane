@@ -5,6 +5,7 @@ from typing import Protocol, cast
 from urllib.parse import urlsplit
 
 import click
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -30,6 +31,7 @@ from control_plane.product_retirement import (
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
     ProviderMutationRejectedError,
+    ProviderMutationUnknownError,
     ProviderObservation,
     ProviderOperationLease,
 )
@@ -182,6 +184,7 @@ def observe_no_target_absence(
             host=host, token=token, target_type="application", target_id=target_id
         )
         name = str(payload.get("name") or "").strip()
+        app_name = str(payload.get("appName") or "").strip()
         if not name or str(payload.get("applicationId") or payload.get("id") or "") != target_id:
             raise ProductRetirementBlockedError(
                 "Provider inventory application evidence is incomplete."
@@ -204,6 +207,9 @@ def observe_no_target_absence(
         if (
             name == bound.dokploy_target.target_name
             or name.startswith(str(scope["preview_prefix"]))
+            or app_name == bound.dokploy_target.target_name
+            or app_name.startswith(bound.dokploy_target.target_name + "-")
+            or app_name.startswith(str(scope["preview_prefix"]))
             # A bare repository without reliable owner evidence is a potential match.
             or any(repository in value or value == repository_name for value in repository_values)
             or image == image_repository
@@ -301,6 +307,10 @@ class NoTargetProductRetirementAdapter(DokployProductRetirementAdapter):
             cast(NoTargetRetirementStore, self._record_store).commit_no_target_retirement(
                 bound=bound, terminal=terminal
             )
+        except SQLAlchemyError as error:
+            raise ProviderMutationUnknownError(
+                "No-target retirement database completion is unconfirmed; retry the same Idempotency-Key."
+            ) from error
         except (ValueError, OSError, click.ClickException, TimeoutError) as error:
             raise ProviderMutationRejectedError(error) from error
         return ProviderMutationOutcome(

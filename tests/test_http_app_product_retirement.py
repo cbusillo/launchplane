@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from fastapi import FastAPI
+from sqlalchemy.exc import OperationalError
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -200,6 +201,28 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     "reviewed_plan_sha256": plan["result"]["plan_sha256"],
                     "confirmation": "retire product example-site instance prod with no target",
                 }
+                with patch.object(
+                    store,
+                    "commit_no_target_retirement",
+                    side_effect=OperationalError(
+                        "fixture statement", {}, RuntimeError("fixture failure")
+                    ),
+                ):
+                    unconfirmed = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=self.headers,
+                        payload=apply_payload,
+                    )
+                self.assertEqual(unconfirmed.status_code, 409, unconfirmed.text)
+                self.assertEqual(store.read_preview_record("stale-preview").state, "failed")
+                self.assertTrue(
+                    any(
+                        record.outcome == "reconcile_required"
+                        for record in store.list_product_retirement_records(product="example-site")
+                    )
+                )
                 response = await _asgi_request(
                     app,
                     "POST",
@@ -357,6 +380,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
         for payload in (
             {"applicationId": "orphan", "name": "example-site-prod"},
             {"applicationId": "orphan", "name": "example-site-preview-pr-7"},
+            {"applicationId": "orphan", "name": "renamed", "appName": "example-site-prod-old"},
             {
                 "applicationId": "orphan",
                 "name": "renamed",
