@@ -2885,6 +2885,8 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                         _label_events(),
                         _combined_status(statuses=statuses),
                         {"check_runs": [_check_run("completed", "success")]},
+                        _conversation_rule(),
+                        [],  # no active branch rules
                     )
                 )
                 profile = SimpleNamespace(
