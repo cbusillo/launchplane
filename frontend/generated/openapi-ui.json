@@ -8566,35 +8566,6 @@
         "title": "DeploymentEvidence",
         "type": "object"
       },
-      "DeploymentFailure": {
-        "additionalProperties": false,
-        "description": "Why a deploy failed: a code, Launchplane's fixed description of it, and the\nenv-key names it is about. Never provider, script or exception text.",
-        "properties": {
-          "code": {
-            "title": "Code",
-            "type": "string"
-          },
-          "description": {
-            "title": "Description",
-            "type": "string"
-          },
-          "keys": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Keys",
-            "type": "array"
-          }
-        },
-        "required": [
-          "code",
-          "description",
-          "keys"
-        ],
-        "title": "DeploymentFailure",
-        "type": "object"
-      },
       "DeploymentRecord-Output": {
         "additionalProperties": false,
         "properties": {
@@ -8639,7 +8610,7 @@
           "failure": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/DeploymentFailure"
+                "$ref": "#/components/schemas/RecordFailure"
               },
               {
                 "type": "null"
@@ -28957,6 +28928,11 @@
             "title": "Error Code",
             "type": "string"
           },
+          "error_description": {
+            "default": "",
+            "title": "Error Description",
+            "type": "string"
+          },
           "evidence": {
             "additionalProperties": {
               "type": "string"
@@ -28986,6 +28962,7 @@
         "required": [
           "backup_record_id",
           "error_code",
+          "error_description",
           "evidence",
           "operation_id",
           "operation_status",
@@ -29023,6 +29000,16 @@
           },
           "destination_health": {
             "$ref": "#/components/schemas/HealthcheckEvidence"
+          },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecordFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "from_instance": {
             "title": "From Instance",
@@ -29063,6 +29050,7 @@
           "deploy",
           "deployment_record_id",
           "destination_health",
+          "failure",
           "from_instance",
           "post_deploy_update",
           "record_id",
@@ -29310,6 +29298,35 @@
           "updated_at"
         ],
         "title": "ProviderTargetRecord",
+        "type": "object"
+      },
+      "RecordFailure": {
+        "additionalProperties": false,
+        "description": "Why a deploy or promotion failed: a code, Launchplane's fixed description\nof it, and the env-key names it is about. Never provider, script or\nexception text.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Keys",
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "description",
+          "keys"
+        ],
+        "title": "RecordFailure",
         "type": "object"
       },
       "ReleaseChecklist": {

@@ -42,6 +42,7 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
     ReleaseStatus,
     RollbackExecutionEvidence,
+    promotion_failure,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.workflows.generic_web_deploy import (
@@ -349,7 +350,7 @@ def execute_generic_web_prod_promotion(
             target_name=_fallback_target_name(request=request, lane=destination_lane),
             target_type="application",
             deployment_record_id="",
-        )
+        ).model_copy(update={"failure": promotion_failure("source_health_failed")})
         record_store.write_promotion_record(failed_record)
         return _result_from_record(
             request=request,
@@ -415,6 +416,7 @@ def execute_generic_web_prod_promotion(
     )
     promotion_deploy_status: ReleaseStatus = deploy_result.deploy_status
     failure = ""
+    failure_code = ""
     if deploy_result.deploy_status == "pass":
         try:
             destination_health = _verify_health_evidence_with_identity(
@@ -425,13 +427,16 @@ def execute_generic_web_prod_promotion(
             destination_health = _mark_health_failed(destination_health)
             promotion_deploy_status = "fail"
             failure = f"Destination health check failed: {error}"
+            failure_code = "destination_health_failed"
         if not failure and destination_health.status == "fail":
             failure = "Destination health check failed: " + (
                 _health_failure_detail(destination_health) or "unhealthy"
             )
+            failure_code = "destination_health_failed"
     else:
         destination_health = _mark_health_skipped(destination_health)
         failure = f"Destination deploy failed: {deploy_result.error_message or 'no detail'}"
+        failure_code = "destination_deploy_failed"
 
     rollback = _RollbackOutcome()
     if failure:
@@ -473,7 +478,15 @@ def execute_generic_web_prod_promotion(
             deployment_record=deployment_record,
         ),
         deployment_record_id=deploy_result.deployment_record_id,
-    ).model_copy(update={"rollback": rollback.evidence, "rollback_health": rollback.health})
+    ).model_copy(
+        update={
+            "rollback": rollback.evidence,
+            "rollback_health": rollback.health,
+            # The failure's message stays in the synchronous result; the record
+            # keeps its code and Launchplane's description of it.
+            "failure": promotion_failure(failure_code) if failure_code else None,
+        }
+    )
     record_store.write_promotion_record(final_record)
     if rollback.error is not None:
         raise rollback.error

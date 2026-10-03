@@ -4037,6 +4037,15 @@ are removed only after provider absence is verified; runtime deletion events
 and preserved managed-secret references remain audit evidence. The profile is
 never deleted and becomes `retired` with previews disabled.
 
+`GET /v1/product-retirements/{record_id}` reads one retirement record's
+structured outcome with `operations.read` on the Launchplane product for the
+record's context and instance: ids, mode, outcome, times, lifecycle before and
+after, provider-effect flags and the error code. The reason, the error message,
+provider observations and authority snapshots are not returned.
+`GET /v1/detached-application-retirements/{record_id}` does the same for a
+detached application with `operations.read` on the Launchplane service context,
+without provider names.
+
 ## Detached application retirement
 
 `POST /v1/detached-application-retirement` is a separate bounded operation for
