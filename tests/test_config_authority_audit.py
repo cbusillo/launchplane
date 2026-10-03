@@ -5239,6 +5239,69 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 self.assertEqual(payload["gate"]["status"], expected_status, result.output)
                 self.assertEqual(result.exit_code == 0, expected_status == "pass")
 
+    def test_cli_product_repo_gate_preserves_nested_runner_group_authority(self) -> None:
+        for selector, expected_status in (
+            ("      group: tenant-group\n      labels: self-hosted\n", "fail"),
+            ("      labels: self-hosted\n      group: 'tenant-group'\n", "fail"),
+            ("      group: >-\n        tenant-group\n      labels: self-hosted\n", "fail"),
+            ("      group: self-hosted\n      labels: self-hosted\n", "fail"),
+            ("      group: ${{ vars.TENANT_GROUP }}\n      labels: self-hosted\n", "fail"),
+            (" {group: tenant-group, labels: self-hosted}\n", "fail"),
+            ("      group: ${{ inputs.runner_group }}\n      labels: self-hosted\n", "pass"),
+            (" [self-hosted, ubuntu-latest]\n", "pass"),
+        ):
+            with self.subTest(selector=selector), TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                _init_repo(root)
+                workflow = root / ".github" / "workflows" / "build.yml"
+                workflow.parent.mkdir(parents=True)
+                workflow.write_text("name: Build\n", encoding="utf-8")
+                _commit_all(root)
+                _git(root, "branch", "-M", "main")
+                _checkout_branch(root, "feature/runner-group")
+                workflow.write_text(
+                    "name: Build\n"
+                    "on: workflow_dispatch\n"
+                    "jobs:\n"
+                    "  build:\n"
+                    "    runs-on:"
+                    + ("\n" if selector.startswith("      ") else "")
+                    + selector
+                    + "    concurrency:\n"
+                    "      group: build-${{ inputs.build_id }}\n"
+                    "    steps:\n"
+                    "      - run: echo build\n",
+                    encoding="utf-8",
+                )
+                _commit_all(root)
+                result = CliRunner().invoke(
+                    CLI_MAIN,
+                    [
+                        "service",
+                        "audit-config-authority",
+                        "--control-plane-root",
+                        str(root),
+                        "--mode",
+                        "changed-files-gate",
+                        "--fail-on-findings",
+                        "--gate-profile",
+                        "product-repo",
+                    ],
+                )
+                payload = json.loads(result.output.split("Error:", 1)[0])
+                self.assertEqual(payload["gate"]["status"], expected_status, result.output)
+                self.assertEqual(result.exit_code == 0, expected_status == "pass", result.output)
+                if "tenant-group" in selector and selector.startswith("      "):
+                    self.assertTrue(
+                        any(
+                            finding["key"] == "runs-on.group"
+                            and finding["rule_id"] == "runtime_config_authority"
+                            and finding["classification"] == "needs_classification"
+                            for finding in _findings(payload)
+                        ),
+                        result.output,
+                    )
+
     def test_cli_product_repo_gate_runs_on_selector_allows_only_mechanic_labels(self) -> None:
         for runs_on, expected_status in (
             ('["self-hosted"]', "pass"),

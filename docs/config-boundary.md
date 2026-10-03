@@ -305,7 +305,11 @@ runtime runner labels remain findings. Quoted or block-scalar job `runs-on`
 values and each block-sequence member are single labels: `"[self-hosted]"`
 is a custom label and remains a finding, while `[self-hosted]` is a sequence
 of allowed mechanics. Reusable-workflow `runs_on` inputs retain their serialized
-JSON-selector contract, including `'["self-hosted"]'`. The `product-repo` profile also
+JSON-selector contract, including `'["self-hosted"]'`. Block mapping job
+`runs-on.group` retains its runner context: literal custom groups and arbitrary
+repository-variable groups remain findings even with allowed runner labels.
+Existing input-supplied group mechanics remain supported; inline mapping
+selectors remain fail-closed. The `product-repo` profile also
 rejects test fixtures that carry Launchplane lifecycle authority such as authz,
 runtime-environment, provider target, target-id, managed-secret, route-batch, or
 topology material. Product repos should use this changed-file gate to reject
