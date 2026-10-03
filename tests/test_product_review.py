@@ -450,7 +450,7 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(read.status_code, 200)
         self.assertFalse(read.json()["owner_set"])
         self.assertFalse(read.json()["can_decide"])
-        self.assertEqual(read.json()["cannot_decide_reason"], "No Owner set for this product")
+        self.assertEqual(read.json()["cannot_decide_reason"], "No Client set for this product")
         self.assertEqual(write.status_code, 409)
         self.assertEqual(
             self.store.list_product_review_decision_records(

@@ -1,4 +1,4 @@
-"""Owner-supplied credentials are encrypted submissions, never runtime bindings."""
+"""Client-supplied credentials are encrypted submissions, never runtime bindings."""
 
 import hashlib
 import json
@@ -18,7 +18,7 @@ OWNER_SUBMISSION_INTEGRATION = "owner_secret_submission"
 
 
 class OwnerSecretSubmissionUnavailable(ValueError):
-    """The requested submission must be refreshed before operator application."""
+    """The requested submission must be refreshed before admin application."""
 
 
 def requested_owner_secrets(
@@ -122,7 +122,7 @@ def store_owner_secret_submission(
         event_type="rotated" if existing else "created",
         recorded_at=now,
         actor=actor,
-        detail="Owner submitted a requested credential; no runtime binding was changed.",
+        detail="Client submitted a requested credential; no runtime binding was changed.",
         metadata={
             "product": profile.product,
             "request_revision": revision,
@@ -175,15 +175,15 @@ def resolve_owner_secret_submission(
     requirement: ProductSecretConfigRequirement,
     version_id: str,
 ) -> str:
-    """Called only after the existing operator config authorization succeeds."""
+    """Called only after the existing admin config authorization succeeds."""
     if requirement not in requested_owner_secrets(profile, lane) or not profile.owner.is_set:
         raise OwnerSecretSubmissionUnavailable(
-            "This credential is not requested from the current Owner."
+            "This credential is not requested from the current Client."
         )
     record = owner_submission_record(store, profile=profile, lane=lane, requirement=requirement)
     if record is None or record.status != "configured" or record.current_version_id != version_id:
         raise OwnerSecretSubmissionUnavailable(
-            "The Owner submission changed; refresh and run a new dry-run."
+            "The Client submission changed; refresh and run a new dry-run."
         )
     version = store.read_secret_version(version_id)
     if (
@@ -191,6 +191,6 @@ def resolve_owner_secret_submission(
         or owner_submission_receipt(store, record, owner_github_id=profile.owner.github_id) is None
     ):
         raise OwnerSecretSubmissionUnavailable(
-            "The Owner submission does not match the requested credential."
+            "The Client submission does not match the requested credential."
         )
     return secrets._decrypt_secret_value(version.ciphertext, version.key_id)
