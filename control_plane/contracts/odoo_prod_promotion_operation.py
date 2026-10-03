@@ -210,7 +210,7 @@ class OdooProdPromotionOperationRecord(BaseModel):
         ):
             raise ValueError("Odoo prod promotion authorization target must match operation.")
         if self.authorization.grant != "policy_administrator":
-            raise ValueError("Only the policy administrator may queue an Odoo prod promotion.")
+            raise ValueError("Only the admin may queue an Odoo prod promotion.")
         validate_release_operation_state(self, label="Odoo prod promotion")
         return self
 

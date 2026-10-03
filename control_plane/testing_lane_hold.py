@@ -1,6 +1,6 @@
 """Supported, audited reads and writes of a testing lane's staff-testing hold.
 
-While site staff test on a product's testing lane, the site operator holds it:
+While site staff test on a product's testing lane, an admin holds it:
 the event-driven reconcile records its testing deploy as held and does not
 deploy, and the worker cancels a reconcile deploy it queued just before the
 hold. The hold lives on the lane's tracked Dokploy target record. Writes follow

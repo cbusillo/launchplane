@@ -1313,7 +1313,7 @@ def _execute_prod_backup_restore_operation(
             if not _is_prod_backup_restore_verification_replay(operation):
                 raise RuntimeError(
                     "Odoo production backup restore with prior result evidence requires "
-                    "operator reconciliation."
+                    "admin reconciliation."
                 )
             result = execute_odoo_prod_backup_restore_verification_replay(
                 control_plane_root=control_plane_root_path,
@@ -1957,7 +1957,7 @@ def _reconcile_deploy_is_held(
     record_store: OdooStableOperationWorkerStore,
     operation: OdooStableTargetReplacementOperationRecord,
 ) -> bool:
-    """Only Launchplane's own reconcile deploys wait on a hold; an operator's deploy runs."""
+    """Only Launchplane's own reconcile deploys wait on a hold; an admin's deploy runs."""
     authorization = operation.authorization
     if authorization is None or authorization.grant != "launchplane_reconcile":
         return False

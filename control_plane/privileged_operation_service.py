@@ -538,8 +538,8 @@ def _build_privileged_operation_semantic_review(
         is_terminal_enrollment_requester_removal = is_terminal_enrollment_requester_request(
             record.request, intent="remove"
         )
-        # The agent wording names the operator's agent, so it is used only when
-        # every rule binds the service's configured local operator identity.
+        # The agent wording names the Director's agent, so it is used only when
+        # every rule binds the service's configured local_operator identity.
         operator = configured_local_operator_identity
         setup_grants = (
             agent_product_setup_request_grants(record.request, intent="add")
@@ -570,7 +570,7 @@ def _build_privileged_operation_semantic_review(
             )
             setup_products = ", ".join(grant[0] for grant in setup_grants or ())
             authz_change_summary = (
-                "Allow the operator's agent, on these products only: "
+                "Allow the Director's agent, on these products only: "
                 f"{setup_products}. On each it may plan and apply settings and secrets on "
                 "the testing lane, create the testing lane's Dokploy compose target in a new "
                 "provider project (create only), and write the production backup policy that promotion's backup gate "
@@ -579,7 +579,7 @@ def _build_privileged_operation_semantic_review(
                 "remains until a separately governed removal; the Approve-by deadline only "
                 "bounds this plan."
                 if is_agent_product_setup
-                else "Remove the operator's agent's product setup access. Other agent "
+                else "Remove the Director's agent's product setup access. Other agent "
                 "access, including its read access, is not changed."
             )
         elif is_ordinary_agent_delivery_policy:

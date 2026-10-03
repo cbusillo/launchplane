@@ -108,7 +108,7 @@ class PathCheckInputs:
     testing_reconcile_plan: dict[str, object] | None | Unread = None
     promotion_allowed: bool | Unread = False
     promotion_action: str = ""
-    # An Odoo prod release is queued only by the signed-in policy administrator.
+    # An Odoo prod release is queued only by the signed-in admin.
     promotion_needs_administrator: bool = False
     release_review: ReleaseReviewStatus | Unread | None = None
     backup_authority: ProductionBackupAuthorityReadModel | Unread | None = None
@@ -282,7 +282,7 @@ def _promotion_grant_step(inputs: PathCheckInputs) -> PathCheckStep:
             "promotion_grant",
             "blocked",
             "promotion_needs_signed_in_administrator",
-            "Only the signed-in policy administrator can queue this product's prod release.",
+            "Only the signed-in admin can queue this product's prod release.",
             "owner_approval",
         )
     return _step(
@@ -436,7 +436,7 @@ def read_path_check_inputs(
     profile: LaunchplaneProductProfileRecord,
     record_store: object,
     action_allowed: ActionAllowed,
-    caller_is_policy_administrator: Callable[[], bool],
+    caller_is_admin: Callable[[], bool],
     read_release_review: Callable[[], ReleaseReviewStatus],
     generated_at: str,
     caller_can_use_generic_rollback: bool = False,
@@ -474,7 +474,7 @@ def read_path_check_inputs(
                 prod_lane=prod_lane,
                 record_store=record_store,
                 action_allowed=action_allowed,
-                caller_is_policy_administrator=caller_is_policy_administrator,
+                caller_is_admin=caller_is_admin,
                 caller_can_use_generic_rollback=caller_can_use_generic_rollback,
             ),
         )
@@ -490,9 +490,9 @@ def read_path_check_inputs(
             bool | Unread,
             _read(
                 "authorization_unread",
-                # The queued Odoo release checks the signed-in policy administrator,
+                # The queued Odoo release checks the signed-in admin,
                 # not an action grant; generic-web checks the dispatch action.
-                caller_is_policy_administrator
+                caller_is_admin
                 if odoo
                 else lambda: action_allowed(promotion_action, prod_lane.context, instances),
             ),
@@ -593,13 +593,13 @@ def _read_rollback_steps(
     prod_lane: ProductLaneProfile,
     record_store: object,
     action_allowed: ActionAllowed,
-    caller_is_policy_administrator: Callable[[], bool],
+    caller_is_admin: Callable[[], bool],
     caller_can_use_generic_rollback: bool,
 ) -> tuple[PathCheckStep, ...]:
     steps: list[PathCheckStep] = []
     odoo = profile.driver_id == "odoo"
     if odoo:
-        allowed = _read("authorization_unread", caller_is_policy_administrator)
+        allowed = _read("authorization_unread", caller_is_admin)
         if isinstance(allowed, Unread):
             steps.append(_unread("rollback_grant", allowed))
         else:
@@ -608,7 +608,7 @@ def _read_rollback_steps(
                     "rollback_grant",
                     "clear" if allowed else "blocked",
                     "caller_may_rollback" if allowed else "rollback_needs_signed_in_administrator",
-                    "Only the signed-in policy administrator can queue an Odoo prod rollback.",
+                    "Only the signed-in admin can queue an Odoo prod rollback.",
                     "owner_approval",
                 )
             )

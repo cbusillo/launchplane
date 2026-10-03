@@ -68,7 +68,7 @@ def product_onboarding() -> None:
     "--input-file",
     type=click.Path(path_type=Path, exists=True, dir_okay=False),
     required=True,
-    help="Operator-approved JSON bundle containing runtime_env and secrets.",
+    help="Admin-approved JSON bundle containing runtime_env and secrets.",
 )
 @click.option("--actor", default="cli", show_default=True)
 @click.option("--source-label", default="product-config-apply", show_default=True)
@@ -117,7 +117,7 @@ def product_config_apply(
     "--manifest-file",
     type=click.Path(path_type=Path, exists=True, dir_okay=False),
     required=True,
-    help="Operator-approved JSON product onboarding manifest.",
+    help="Admin-approved JSON product onboarding manifest.",
 )
 @click.option("--updated-at", default="", help="Override manifest updated_at timestamp.")
 @_direct_db_mutation_acknowledgement_option

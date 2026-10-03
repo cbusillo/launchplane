@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from control_plane.authz_grant_service import (
     AuthzManagedPolicyDiff,
     AuthzManagedPolicyReconcileEnvelope,
-    authz_policy_administrator_quorum_satisfied,
+    authz_admin_quorum_satisfied,
 )
 from control_plane.service_auth import (
     authz_policy_allows_immutable_github_id_administration,
@@ -194,7 +194,7 @@ def authz_policy_operation_activation_evidence(
         "strict_human_administrator_count": len(
             strict_immutable_github_human_administrator_ids(candidate_policy)
         ),
-        "quorum_satisfied": authz_policy_administrator_quorum_satisfied(policy=candidate_policy),
+        "quorum_satisfied": authz_admin_quorum_satisfied(policy=candidate_policy),
         "solo_administration_active": diff.solo_administration_active,
         "applying_admin_retained": authz_policy_allows_immutable_github_id_administration(
             policy=candidate_policy,

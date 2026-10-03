@@ -6,7 +6,7 @@ import click
 DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
 DIRECT_DB_MUTATION_MESSAGE = (
     "Direct local DB mutation is restricted after the Launchplane service boundary. "
-    "Use the deployed service route or operator workflow for shared/production changes, "
+    "Use the deployed service route or admin workflow for shared/production changes, "
     "or pass --allow-direct-db-mutation only for explicit local/bootstrap repair."
 )
 

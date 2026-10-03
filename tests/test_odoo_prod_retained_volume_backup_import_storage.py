@@ -395,7 +395,7 @@ class OdooProdRetainedVolumeBackupImportStorageTests(unittest.TestCase):
         self.assertEqual(stored.status, "reconciliation_required")
         self.assertEqual(stored.phase, "provider_import_started")
         self.assertEqual(stored.error_code, "operation_reconciliation_required")
-        self.assertIn("operator reconciliation", stored.error_message)
+        self.assertIn("admin reconciliation", stored.error_message)
 
 
 if __name__ == "__main__":

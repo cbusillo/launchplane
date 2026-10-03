@@ -1,6 +1,6 @@
 """Supported, audited writes for Odoo instance-override addon settings.
 
-Shopify is the first addon. The operator declares a lane's store key, API version
+Shopify is the first addon. The admin declares a lane's store key, API version
 and ``test_store`` flag as literals, and points the API token and webhook key at
 existing managed secret bindings. Plaintext secret values never enter this path.
 Each binding must be the one the lane's runtime delivery puts in its container, or

@@ -5068,7 +5068,7 @@ class FilesystemRecordStore:
                             "error_code": "operation_reconciliation_required",
                             "error_message": (
                                 f"Odoo stable bootstrap operation lease expired in "
-                                f"phase {record.phase!r}; provider state requires operator "
+                                f"phase {record.phase!r}; provider state requires admin "
                                 "reconciliation before the lane can be released."
                             ),
                         }
@@ -5412,7 +5412,7 @@ class FilesystemRecordStore:
                             "error_code": "operation_reconciliation_required",
                             "error_message": (
                                 f"Odoo stable target replacement operation lease expired in "
-                                f"phase {record.phase!r}; provider state requires operator "
+                                f"phase {record.phase!r}; provider state requires admin "
                                 "reconciliation before the lane can be released."
                             ),
                         }
@@ -5766,7 +5766,7 @@ class FilesystemRecordStore:
                             "error_code": "operation_reconciliation_required",
                             "error_message": (
                                 "Odoo production backup restore lease expired in "
-                                f"phase {record.phase!r}; provider state requires operator "
+                                f"phase {record.phase!r}; provider state requires admin "
                                 "reconciliation before the lane can be released."
                             ),
                         }
@@ -6163,7 +6163,7 @@ class FilesystemRecordStore:
                             "error_code": "operation_reconciliation_required",
                             "error_message": (
                                 "Odoo retained-volume backup import lease expired in "
-                                f"phase {record.phase!r}; provider state requires operator "
+                                f"phase {record.phase!r}; provider state requires admin "
                                 "reconciliation before the lane can be released."
                             ),
                         }

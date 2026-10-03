@@ -345,7 +345,7 @@ def service_serve(
         raise click.ClickException(
             "Launchplane service refuses startup without --audience or "
             "LAUNCHPLANE_SERVICE_AUDIENCE. The service audience is explicit "
-            "operator/process wiring."
+            "admin/process wiring."
         )
     serve_launchplane_service(
         state_dir=state_dir,
@@ -1875,7 +1875,7 @@ def service_export_openapi(output: Path) -> None:
     "--output",
     type=click.Path(path_type=Path),
     required=True,
-    help="Write the public-safe Launchplane agent/operator contract to this path.",
+    help="Write the public-safe Launchplane agent/admin contract to this path.",
 )
 @click.option(
     "--source-sha",

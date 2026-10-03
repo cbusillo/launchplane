@@ -1299,7 +1299,7 @@ def _launchplane_preview_enablement_item_request_summary(
         return "Launchplane explicitly requested this preview without relying on the GitHub label."
     if state == "paused":
         return (
-            "Launchplane is intentionally holding this preview in place until operators resume it."
+            "Launchplane is intentionally holding this preview in place until an admin resumes it."
         )
     return "Launchplane still has preview evidence from an earlier request even though no current GitHub label is present."
 

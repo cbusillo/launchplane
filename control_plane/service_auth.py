@@ -404,7 +404,7 @@ def configured_terminal_agent_identity(
 def configured_local_operator_identity(
     config: BearerIdentityConfig,
 ) -> LocalOperatorIdentity | None:
-    """Return the configured local operator identity without exposing its bearer secret."""
+    """Return the configured local_operator identity without exposing its bearer secret."""
     if not config.local_operator_token.strip():
         return None
     try:
@@ -1267,7 +1267,7 @@ class LaunchplaneAuthzPolicy(BaseModel):
         )
 
     def names_administrator(self, identity: GitHubHumanIdentity) -> bool:
-        """Whether this person is the policy administrator: the one kind of rule that
+        """Whether this person is the admin: the one kind of rule that
         can already change any grant, named by immutable GitHub id.
 
         A narrower rule that merely carries the admin role (one read action, one

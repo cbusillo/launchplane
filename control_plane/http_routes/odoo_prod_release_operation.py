@@ -1,10 +1,10 @@
-"""Routes the signed-in policy administrator uses to release an Odoo prod lane.
+"""Routes the signed-in admin uses to release an Odoo prod lane.
 
 A promotion can run for most of an hour and a rollback for many minutes. A browser
 request that long times out through ingress and looks uncertain, and a retry would
 start a second run. These routes check what the run checks up front, queue one
 durable operation per lane for the Odoo stable-lane worker, and return at once; the
-operator's release panel polls the read routes.
+admin's release panel polls the read routes.
 
 Only the person the active policy names as administrator may queue or cancel one:
 no automated identity gets the right to change a production site this way. The
@@ -209,7 +209,7 @@ def register_odoo_prod_release_operation_routes(
             )
         return record_store
 
-    def require_policy_administrator(
+    def require_admin(
         identity: LaunchplaneIdentity, store: PostgresRecordStore, trace_id: str
     ) -> None:
         try:
@@ -228,10 +228,7 @@ def register_odoo_prod_release_operation_routes(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message=(
-                    "Only the signed-in policy administrator can queue or cancel an Odoo "
-                    "prod release."
-                ),
+                message="Only the signed-in admin can queue or cancel an Odoo prod release.",
             )
 
     def capture_administrator_authorization(
@@ -351,7 +348,7 @@ def register_odoo_prod_release_operation_routes(
     ) -> OdooProdPromotionOperationResponse:
         trace_id = common.next_trace_id()
         store = require_operation_store(record_store, trace_id)
-        require_policy_administrator(identity, store, trace_id)
+        require_admin(identity, store, trace_id)
         run = request.run
         try:
             product = resolve_odoo_prod_promotion_product_route(
@@ -438,7 +435,7 @@ def register_odoo_prod_release_operation_routes(
     ) -> OdooProdRollbackOperationResponse:
         trace_id = common.next_trace_id()
         store = require_operation_store(record_store, trace_id)
-        require_policy_administrator(identity, store, trace_id)
+        require_admin(identity, store, trace_id)
         rollback = request.rollback
         try:
             product = resolve_odoo_prod_rollback_product_route(
@@ -626,9 +623,7 @@ def register_odoo_prod_release_operation_routes(
         record_store: Annotated[object, Depends(common.get_record_store)],
     ) -> OdooProdPromotionOperationResponse:
         trace_id = common.next_trace_id()
-        require_policy_administrator(
-            identity, require_operation_store(record_store, trace_id), trace_id
-        )
+        require_admin(identity, require_operation_store(record_store, trace_id), trace_id)
         scoped_operation(
             read=lambda store, key: store.read_odoo_prod_promotion_operation_record(key),
             action=ODOO_PROD_PROMOTION_RUN_ACTION,
@@ -660,9 +655,7 @@ def register_odoo_prod_release_operation_routes(
         record_store: Annotated[object, Depends(common.get_record_store)],
     ) -> OdooProdRollbackOperationResponse:
         trace_id = common.next_trace_id()
-        require_policy_administrator(
-            identity, require_operation_store(record_store, trace_id), trace_id
-        )
+        require_admin(identity, require_operation_store(record_store, trace_id), trace_id)
         scoped_operation(
             read=lambda store, key: store.read_odoo_prod_rollback_operation_record(key),
             action=ODOO_PROD_ROLLBACK_ACTION,

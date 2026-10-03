@@ -61,7 +61,7 @@ def administrator_enrollment_challenge_sha256(challenge: str) -> str:
 
 
 class AdministratorEnrollmentRecord(BaseModel):
-    """Inert evidence for a separately gated policy-administrator enrollment."""
+    """Inert evidence for a separately gated admin enrollment."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 

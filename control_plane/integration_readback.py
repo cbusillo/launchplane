@@ -252,7 +252,7 @@ _validate_catalog(INTEGRATION_FAMILIES)
 # Runs in the script-runner container with the lane's database credentials. Every
 # query returns only key names, counts or booleans: values are compared inside
 # PostgreSQL. Table names and predicates come from the fixed catalog above, never
-# from records or operator input.
+# from records or admin input.
 INTEGRATION_READBACK_PROGRAM = """import base64
 import json
 import os

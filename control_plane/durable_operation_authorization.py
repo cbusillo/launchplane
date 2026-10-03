@@ -175,7 +175,7 @@ def capture_durable_operation_authorization(
     authorized_at: str,
 ) -> DurableOperationAuthorization:
     policy_schema_version = _durable_policy_schema_version(policy_record)
-    administrator_authorization = _policy_administrator_authorization(
+    administrator_authorization = _admin_authorization(
         identity=identity,
         action=action,
         product=product,
@@ -231,7 +231,7 @@ def capture_explicit_action_durable_operation_authorization(
     """Capture authority only from a rule that names the requested action."""
 
     policy_schema_version = _durable_policy_schema_version(policy_record)
-    administrator_authorization = _policy_administrator_authorization(
+    administrator_authorization = _admin_authorization(
         identity=identity,
         action=action,
         product=product,
@@ -288,7 +288,7 @@ def _durable_policy_schema_version(
             )
 
 
-def _policy_administrator_authorization(
+def _admin_authorization(
     *,
     identity: LaunchplaneIdentity,
     action: str,
@@ -299,7 +299,7 @@ def _policy_administrator_authorization(
     policy_schema_version: Literal[2, 3],
     authorized_at: str,
 ) -> DurableOperationAuthorization | None:
-    """The policy administrator's own grant, or None for everyone else.
+    """The admin's own grant, or None for everyone else.
 
     Only a signed-in person the active policy names as administrator by immutable
     GitHub id gets it; the worker re-checks that naming before acting.

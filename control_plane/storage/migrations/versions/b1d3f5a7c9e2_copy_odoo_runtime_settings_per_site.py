@@ -8,7 +8,7 @@ settings stay for the paths that still read them.
 
 The downgrade leaves the copies in place: each equals the global value it came
 from, so every resolver returns the same environment with or without them, and a
-site value the operator has since changed must not be removed.
+site value an admin has since changed must not be removed.
 
 Revision ID: b1d3f5a7c9e2
 Revises: a5d7f9b1c3e6
