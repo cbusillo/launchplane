@@ -225,7 +225,7 @@ def plan_external_route_binding_reconcile(
                     code="external_route_authority_change",
                     detail=(
                         "DB-backed product or provider-target authority changed; apply will "
-                        "replace the current operator-owned external binding under CAS."
+                        "replace the current admin-set external binding under CAS."
                     ),
                 ),
             ),
@@ -309,7 +309,7 @@ def _plan_external_relinquish(
             RouteBindingReconcileFinding(
                 code="external_route_authority_relinquish",
                 detail=(
-                    "Apply will disable the operator-owned external binding so managed "
+                    "Apply will disable the admin-set external binding so managed "
                     "reconcile can establish replacement authority after provider mutation."
                 ),
             ),

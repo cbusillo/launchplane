@@ -18,7 +18,7 @@ OWNER_SUBMISSION_INTEGRATION = "owner_secret_submission"
 
 
 class OwnerSecretSubmissionUnavailable(ValueError):
-    """The requested submission must be refreshed before operator application."""
+    """The requested submission must be refreshed before admin application."""
 
 
 def requested_owner_secrets(
@@ -175,7 +175,7 @@ def resolve_owner_secret_submission(
     requirement: ProductSecretConfigRequirement,
     version_id: str,
 ) -> str:
-    """Called only after the existing operator config authorization succeeds."""
+    """Called only after the existing admin config authorization succeeds."""
     if requirement not in requested_owner_secrets(profile, lane) or not profile.owner.is_set:
         raise OwnerSecretSubmissionUnavailable(
             "This credential is not requested from the current Owner."

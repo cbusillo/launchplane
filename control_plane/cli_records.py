@@ -26,7 +26,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 
 _LOCAL_REHEARSAL_ONLY_MESSAGE = (
     "Core-record write commands are local-rehearsal only after the Launchplane "
-    "service boundary. Use the deployed service route or operator workflow for "
+    "service boundary. Use the deployed service route or admin workflow for "
     "shared/production evidence ingress."
 )
 

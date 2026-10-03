@@ -1380,7 +1380,7 @@ class LaunchplanePreviewGenerationRow(Base):
 
 
 # Manager preview approval is retired and nothing reads or writes these rows.
-# The table stays mapped so existing rows are kept until the operator decides
+# The table stays mapped so existing rows are kept until the Director decides
 # whether to drop them.
 class LaunchplaneManagerPreviewApprovalEventRow(Base):
     __tablename__ = "launchplane_manager_preview_approval_events"
@@ -3016,7 +3016,7 @@ class LaunchplaneOrdinaryAgentLifecycleAuditRow(Base):
 
 # Repository human role policies (manager and delegate roles) are retired and
 # nothing reads or writes these rows. The table stays mapped so existing rows
-# are kept until the operator decides whether to drop them.
+# are kept until the Director decides whether to drop them.
 class LaunchplaneRepositoryHumanRolePolicyRow(Base):
     __tablename__ = "launchplane_repository_human_role_policies"
     __table_args__ = (
@@ -3076,7 +3076,7 @@ class LaunchplaneRepositoryHumanRolePolicyRow(Base):
 
 
 # The technical human waiver is retired and nothing reads or writes these rows.
-# The table stays mapped so existing rows are kept until the operator decides
+# The table stays mapped so existing rows are kept until the Director decides
 # whether to drop them.
 class LaunchplaneTenantTechnicalHumanWaiverEventRow(Base):
     __tablename__ = "launchplane_tenant_technical_human_waiver_events"
@@ -9328,7 +9328,7 @@ class PostgresRecordStore(HumanSessionStore):
                             "error_code": "operation_reconciliation_required",
                             "error_message": (
                                 f"Odoo stable bootstrap operation lease expired in "
-                                f"phase {record.phase!r}; provider state requires operator "
+                                f"phase {record.phase!r}; provider state requires admin "
                                 "reconciliation before the lane can be released."
                             ),
                         }
@@ -9759,7 +9759,7 @@ class PostgresRecordStore(HumanSessionStore):
                             "error_code": "operation_reconciliation_required",
                             "error_message": (
                                 f"Odoo stable target replacement operation lease expired in "
-                                f"phase {record.phase!r}; provider state requires operator "
+                                f"phase {record.phase!r}; provider state requires admin "
                                 "reconciliation before the lane can be released."
                             ),
                         }
@@ -10282,7 +10282,7 @@ class PostgresRecordStore(HumanSessionStore):
                             "error_code": "operation_reconciliation_required",
                             "error_message": (
                                 "Odoo production backup restore lease expired in "
-                                f"phase {record.phase!r}; provider state requires operator "
+                                f"phase {record.phase!r}; provider state requires admin "
                                 "reconciliation before the lane can be released."
                             ),
                         }
@@ -10592,7 +10592,7 @@ class PostgresRecordStore(HumanSessionStore):
         """Requeue an operation whose lease expired before any provider effect; hold the rest.
 
         Past the safe phases the operation may have changed prod, so it waits as
-        ``reconciliation_required`` for an operator instead of running again.
+        ``reconciliation_required`` for an admin instead of running again.
         """
 
         statement = select(row_type).where(
@@ -11422,7 +11422,7 @@ class PostgresRecordStore(HumanSessionStore):
                             "error_code": "operation_reconciliation_required",
                             "error_message": (
                                 "Odoo retained-volume backup import lease expired in "
-                                f"phase {record.phase!r}; provider state requires operator "
+                                f"phase {record.phase!r}; provider state requires admin "
                                 "reconciliation before the lane can be released."
                             ),
                         }

@@ -215,7 +215,7 @@ class OdooProdBackupRestoreStorageTests(unittest.TestCase):
             self.assertEqual(stored.status, "reconciliation_required")
             self.assertEqual(stored.phase, "database_restore_started")
             self.assertEqual(stored.error_code, "operation_reconciliation_required")
-            self.assertIn("operator reconciliation", stored.error_message)
+            self.assertIn("admin reconciliation", stored.error_message)
 
     def test_filesystem_store_requeues_terminal_verification_failure_atomically(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -80,7 +80,7 @@ def redact_untrusted_text(
     fallback: str,
     maximum_length: int = _MAX_SAFE_DETAIL_LENGTH,
 ) -> str:
-    """Return bounded text safe for records, API responses, and operator output."""
+    """Return bounded text safe for records, API responses, and admin output."""
 
     if maximum_length < 4:
         raise ValueError("maximum_length must be at least 4")

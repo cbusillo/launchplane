@@ -300,7 +300,7 @@ def product_profiles() -> None:
     "--request-file",
     type=click.Path(path_type=Path, exists=True, dir_okay=False),
     required=True,
-    help="Managed reconciliation request JSON produced from operator-managed desired state.",
+    help="Managed reconciliation request JSON produced from admin-managed desired state.",
 )
 @click.option(
     "--idempotency-key",
@@ -351,7 +351,7 @@ def authz_policies_repository_scope_evidence(database_url: str, request_file: st
     scope_request = _load_authz_repository_scope_request(Path(request_file))
     click.echo(
         "Evidence source: configured PostgreSQL credentials; this does not prove that the "
-        "operator is authorized by the active policy.",
+        "admin is authorized by the active policy.",
         err=True,
     )
     try:

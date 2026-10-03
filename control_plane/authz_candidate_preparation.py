@@ -1053,7 +1053,7 @@ def compile_agent_product_setup_candidate(
     products: tuple[str, ...],
     record_store: object,
 ) -> tuple[Literal["planned", "already_satisfied"], ManagedAuthzPolicySetProposalInput | None]:
-    """Compile the closed product setup set for the service-configured local operator."""
+    """Compile the closed product setup set for the service-configured `local_operator` identity."""
     state, existing_grants = _agent_product_setup_rule_state(current_policy)
     if state == "conflict":
         raise AuthorizationCandidatePreparationError(
@@ -1077,7 +1077,7 @@ def compile_agent_product_setup_candidate(
         ):
             raise AuthorizationCandidatePreparationError(
                 "candidate_principal_unavailable",
-                "No exact configured local operator identity is available.",
+                "No exact configured local_operator identity is available.",
             )
         selected = _require_agent_product_setup_lanes(record_store=record_store, products=products)
         desired_rules = tuple(
@@ -1094,7 +1094,7 @@ def compile_agent_product_setup_candidate(
             if existing_grants[0][2:] != (identity.subject, identity.token_label):
                 raise AuthorizationCandidatePreparationError(
                     "candidate_set_conflict",
-                    "The agent product setup set belongs to a different local operator identity.",
+                    "The agent product setup set belongs to a different local_operator identity.",
                 )
             if existing_grants == tuple(
                 (product, context, identity.subject, identity.token_label)

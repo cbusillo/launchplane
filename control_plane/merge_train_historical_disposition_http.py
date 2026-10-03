@@ -1,4 +1,4 @@
-"""Explicit legacy-operator HTTP orchestration for historical disposition."""
+"""Explicit legacy admin HTTP orchestration for historical disposition."""
 
 from pathlib import Path
 

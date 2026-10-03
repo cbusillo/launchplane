@@ -1998,7 +1998,7 @@ class FastApiOdooOperationStatusReadTests(unittest.IsolatedAsyncioTestCase):
                     "lease_expires_at": "",
                     "heartbeat_at": "",
                     "error_code": "operation_reconciliation_required",
-                    "error_message": "Provider state requires operator reconciliation.",
+                    "error_message": "Provider state requires admin reconciliation.",
                 }
             )
             record_store.write_odoo_stable_bootstrap_operation_record(reconciliation_required)
