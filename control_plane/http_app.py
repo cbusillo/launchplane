@@ -24308,7 +24308,9 @@ def create_launchplane_fastapi_app(
             ) from error
 
         recorded_at = utc_now_timestamp()
-        monitor_result = run_public_ingress_monitor_once(
+        # The confirmation wait must not hold the event loop.
+        monitor_result = await run_in_threadpool(
+            run_public_ingress_monitor_once,
             record_store=monitor_store,
             checked_at=recorded_at,
             timeout_seconds=monitor_request.timeout_seconds,

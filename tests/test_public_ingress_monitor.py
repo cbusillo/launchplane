@@ -1789,6 +1789,44 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(store.incidents[0].status, "open")
         self.assertEqual(store.incidents[0].failure_code, "wrong_runtime_identity")
 
+    def test_runtime_identity_reprobe_records_the_confirming_failure(self) -> None:
+        expected_identity = _identity()
+        observed_identity = expected_identity.model_copy(
+            update={"deployment_record_id": "deploy-other"}
+        )
+        store = _Store((_profile(),))
+        store.lane_summaries[("example-site", "prod")] = _lane_summary(expected_identity)
+        health_responses = [
+            HttpObservation(
+                status_code=200,
+                final_url="https://example.test/healthz",
+                redirect_count=0,
+                payload={"runtime_identity": observed_identity.model_dump(mode="json")},
+            ),
+            HttpObservation(
+                status_code=503,
+                final_url="https://example.test/healthz",
+                redirect_count=0,
+            ),
+        ]
+
+        def failing_reprobe_get(url: str, _timeout: int) -> HttpObservation:
+            if url.endswith("/healthz"):
+                return health_responses.pop(0)
+            return HttpObservation(status_code=200, final_url=url, redirect_count=0)
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:10:00Z",
+            http_get=failing_reprobe_get,
+            runtime_identity_confirmation_delay_seconds=30,
+            sleep=lambda _seconds: None,
+        )
+
+        self.assertEqual(result.fail_count, 1)
+        self.assertEqual(store.records[0].failure_code, "health_status_error")
+        self.assertEqual(store.incidents[0].failure_code, "health_status_error")
+
     def test_runtime_identity_reprobe_reads_expected_identity_again(self) -> None:
         previous_identity = _identity()
         deployed_identity = previous_identity.model_copy(
