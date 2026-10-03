@@ -977,9 +977,11 @@ See [Client acceptance](owner-acceptance.md).
 The manager-preview selector, wrapper job and
 `LAUNCHPLANE_AUTHZ_MANAGER_PREVIEW_APPROVAL_MANAGED_SET_JSON` reference are
 removed under #2006. Before this wiring removal lands, a production-authorized
-session must contract `operator.manager-preview-approval` through the reviewed
-policy path and record the empty-set readback. Source cleanup performs no live
-contraction. The Director deletes that GitHub managed-set secret by hand after
+session must contract `operator.manager-preview-approval` through the existing
+`reconcile-manager-preview-approval` wrapper job (review `dry_run`, then apply
+with its reviewed digest) and record the empty-set readback on #2006. Keep the
+source cleanup PR draft until that readback is recorded. Source cleanup
+performs no live contraction. The Director deletes that GitHub managed-set secret by hand after
 contraction. The signed trusted-maintenance webhook and its independent
 `LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET` remain in use.
 
