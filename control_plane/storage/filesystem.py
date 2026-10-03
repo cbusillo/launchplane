@@ -243,6 +243,7 @@ from control_plane.production_backup_authority import (
 )
 from control_plane.storage.product_authority_bundle import (
     SecretCopySourceConflictError,
+    SecretRecordConflictError,
     require_bundle_context_owner,
     ProductAuthorityBundle,
     ProviderTargetWrite,
@@ -512,6 +513,14 @@ class FilesystemRecordStore:
                     or current_binding != expected_source.binding
                 ):
                     raise SecretCopySourceConflictError("Secret copy source changed before commit.")
+            for secret_id in bundle.absent_secret_ids:
+                try:
+                    self._read_model_locked(SecretRecord, "launchplane_secrets", secret_id)
+                except FileNotFoundError:
+                    continue
+                raise SecretRecordConflictError(
+                    "A secret adopted from the provider was recorded before commit."
+                )
             stage_id = f"{_utc_now_timestamp().replace(':', '').replace('-', '')}-{time.time_ns()}"
             stage_dir = self._product_authority_bundle_stage_root() / stage_id
             records_dir = stage_dir / "records"

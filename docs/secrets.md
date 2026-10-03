@@ -706,3 +706,49 @@ audit records the source secret and version IDs.
 Completed retries replay before resolving or decrypting the source. Request,
 response and audit metadata contain no secret value; subsequent live runtime
 sync or deployment remains a separate operation.
+
+## Adopting a provider-only credential
+
+A lane's credential can live only in its provider env, for example a Dokploy
+compose env set before Launchplane managed the lane. To store it as a managed
+secret without anyone handling the value, use `adopt_from_provider` instead of
+`value` (cbusillo/launchplane#2863):
+
+```json
+{
+  "binding_key": "INTEGRATION_TOKEN",
+  "adopt_from_provider": true,
+  "secret_class": "shared_safe",
+  "sharing_reason": {
+    "kind": "read_only_source",
+    "reason": "Read-only API access",
+    "evidence": "Client verified read-only permissions on <date>"
+  }
+}
+```
+
+The service reads the lane's current provider env itself, takes the value of
+the key named by `binding_key`, and stores it for that same lane. The entry must
+be lane-exact in `runtime_environment` with a declared class; the sharing reason
+follows the usual class rules. The value never appears in the request, response
+or audit metadata; the audit event records `value_source: provider_env`.
+
+Adoption only moves a value that lives on the provider alone. Dry run and apply
+both refuse, with a fixed message and no value:
+
+- `provider_secret_missing`: the key is absent or empty in the provider env.
+- `provider_secret_already_recorded`: a Launchplane record already supplies the
+  key for the lane (a runtime setting, the tracked target's env, or a managed
+  secret), or the destination secret already exists under another binding key,
+  so adoption never replaces a recorded value.
+
+Adoption only ever creates a secret. If the destination secret is recorded
+between planning and commit, the commit stops with a 409
+`provider_secret_already_recorded` and writes nothing; review a fresh dry run.
+Apply needs a prior matching dry run, and reads the provider again, so a value
+changed on the provider after the dry run is the one stored. Authorization is the
+lane's `product_config.plan` and `product_config.apply`. Nothing is synced or
+deployed: the provider copy stays in place and already holds the same value, and
+a later live-target runtime sync delivers it from the managed secret. A
+production secret adopted as `shared_safe` with a sharing reason can then be
+copied to testing by reference, as described above.

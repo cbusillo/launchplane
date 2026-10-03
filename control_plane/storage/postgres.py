@@ -665,6 +665,7 @@ from control_plane.storage import landing_authority
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
     SecretCopySourceConflictError,
+    SecretRecordConflictError,
     ProductProfileConflictError,
     require_bundle_context_owner,
     ProductAuthorityBundle,
@@ -6117,6 +6118,18 @@ class PostgresRecordStore(HumanSessionStore):
                     or SecretBinding.model_validate(binding_row.payload) != expected_source.binding
                 ):
                     raise SecretCopySourceConflictError("Secret copy source changed before commit.")
+            for secret_id in bundle.absent_secret_ids:
+                if (
+                    session.scalar(
+                        select(LaunchplaneSecretRow)
+                        .where(LaunchplaneSecretRow.secret_id == secret_id)
+                        .with_for_update()
+                    )
+                    is not None
+                ):
+                    raise SecretRecordConflictError(
+                        "A secret adopted from the provider was recorded before commit."
+                    )
             for delete_item in bundle.delete_runtime_environments:
                 row = session.scalar(
                     self._runtime_environment_statement(
@@ -6224,7 +6237,20 @@ class PostgresRecordStore(HumanSessionStore):
                     self._secret_version_row(version),
                     step_name="write_secret_version",
                 )
+            absent_secret_ids = frozenset(bundle.absent_secret_ids)
             for secret_record in bundle.secret_records:
+                if secret_record.secret_id in absent_secret_ids:
+                    # Create-only: no lock covers an absent row, so insert and let a
+                    # concurrent writer's committed row fail it on the primary key.
+                    session.add(self._secret_row(secret_record))
+                    try:
+                        session.flush()
+                    except IntegrityError as error:
+                        raise SecretRecordConflictError(
+                            "A secret adopted from the provider was recorded before commit."
+                        ) from error
+                    self._after_product_authority_bundle_step("write_secret_record")
+                    continue
                 self._merge_authority_row(
                     session, self._secret_row(secret_record), step_name="write_secret_record"
                 )
