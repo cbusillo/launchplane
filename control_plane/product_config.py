@@ -260,6 +260,15 @@ def plan_product_config_authority_bundle(
         copy_expectations.append(SecretCopySourceExpectation(record=record, binding=binding))
 
     existing_runtime_records = record_store.list_runtime_environment_records()
+    adopted_secret_values = _resolve_provider_secret_adoptions(
+        secrets=secrets,
+        recorded_keys=_lane_recorded_runtime_keys(
+            existing_records=existing_runtime_records,
+            context_name=context_name,
+            instance_name=instance_name,
+        ),
+        lane_provider_env_reader=lane_provider_env_reader,
+    )
     retired_provider_keys = runtime_input.get("retired_provider_keys")
     adoption = _plan_provider_key_adoption(
         existing_records=existing_runtime_records,
@@ -317,11 +326,12 @@ def plan_product_config_authority_bundle(
         )
         if apply_changes:
             try:
-                plaintext_value = (
-                    product_secret_copy.copy_source_value(copy_sources[index])
-                    if index in copy_sources
-                    else str(secret["value"])
-                )
+                if index in copy_sources:
+                    plaintext_value = product_secret_copy.copy_source_value(copy_sources[index])
+                elif index in adopted_secret_values:
+                    plaintext_value = adopted_secret_values[index]
+                else:
+                    plaintext_value = str(secret["value"])
             except product_secret_copy.ProductSecretCopyError as error:
                 raise ProductConfigError(str(error), code=error.code) from error
             secret_plan = _plan_product_config_secret_write(
@@ -348,6 +358,9 @@ def plan_product_config_authority_bundle(
                             "copy_from_version_id": copy_sources[index].version_id,
                         }
                     )
+            if index in adopted_secret_values:
+                for event in secret_plan["secret_audit_events"]:
+                    event.metadata.update({"value_source": "provider_env"})
             secret_versions.extend(secret_plan["secret_versions"])
             secret_records.extend(secret_plan["secret_records"])
             secret_bindings.extend(secret_plan["secret_bindings"])
@@ -554,10 +567,25 @@ def _plan_provider_key_adoption(
             "Provider key adoption needs the service's read of the lane's provider env.",
             code="provider_env_unavailable",
         )
-    context_name = str(runtime_input["context"])
-    instance_name = str(runtime_input["instance"])
-    # Keys the lane's own records already supply are delivered from those records.
-    recorded_keys = frozenset(
+    return provider_key_adoption.plan_provider_key_adoption(
+        keys=adopt_keys,
+        provider=lane_provider_env_reader(),
+        recorded_keys=_lane_recorded_runtime_keys(
+            existing_records=existing_records,
+            context_name=str(runtime_input["context"]),
+            instance_name=str(runtime_input["instance"]),
+        ),
+    )
+
+
+def _lane_recorded_runtime_keys(
+    *,
+    existing_records: tuple[RuntimeEnvironmentRecord, ...],
+    context_name: str,
+    instance_name: str,
+) -> frozenset[str]:
+    """Keys the lane's own runtime records already supply; the deploy delivers those."""
+    return frozenset(
         key
         for record in existing_records
         if (record.scope == "context" and record.context == context_name)
@@ -568,11 +596,51 @@ def _plan_provider_key_adoption(
         )
         for key in record.env
     )
-    return provider_key_adoption.plan_provider_key_adoption(
-        keys=adopt_keys,
-        provider=lane_provider_env_reader(),
-        recorded_keys=recorded_keys,
-    )
+
+
+def _resolve_provider_secret_adoptions(
+    *,
+    secrets: tuple[dict[str, object], ...],
+    recorded_keys: frozenset[str],
+    lane_provider_env_reader: LaneProviderEnvReader | None,
+) -> dict[int, str]:
+    """Each adopted secret's value from the lane's provider env, by input index.
+
+    Only a value that lives on the provider alone is adopted: a key a Launchplane
+    record already supplies for the lane (a runtime setting, the tracked target's
+    env, or a managed secret) is refused, so adoption never replaces a recorded
+    value. Both modes check, so a dry run shows a refusal before apply. Refusals
+    carry fixed messages; no value leaves this function except to the secret write.
+    """
+    adopted_indexes = [
+        index for index, secret in enumerate(secrets) if secret.get("adopt_from_provider")
+    ]
+    if not adopted_indexes:
+        return {}
+    if lane_provider_env_reader is None:
+        raise ProductConfigError(
+            "Provider secret adoption needs the service's read of the lane's provider env.",
+            code="provider_env_unavailable",
+        )
+    provider = lane_provider_env_reader()
+    values: dict[int, str] = {}
+    for index in adopted_indexes:
+        key = str(secrets[index]["binding_key"])
+        if key in recorded_keys or key in provider.recorded_keys:
+            raise ProductConfigError(
+                "A secret named for provider adoption is already supplied by a Launchplane "
+                "record for this lane.",
+                code="provider_secret_already_recorded",
+            )
+        value = provider.env.get(key, "")
+        if not value.strip():
+            raise ProductConfigError(
+                "A secret named for provider adoption is missing or empty in the lane's "
+                "provider env.",
+                code="provider_secret_missing",
+            )
+        values[index] = value
+    return values
 
 
 def _normalize_product_config_runtime_env(raw_env: object) -> dict[str, ScalarValue]:
@@ -615,7 +683,17 @@ def _product_config_secret_inputs(
         if not name:
             raise ProductConfigError(f"Product config secret #{index} requires name.")
         copy_from = raw_secret.get("copy_from")
-        if copy_from is not None:
+        adopt_from_provider = raw_secret.get("adopt_from_provider")
+        if adopt_from_provider is not None:
+            if adopt_from_provider is not True:
+                raise ProductConfigError(
+                    f"Product config secret #{index} adopt_from_provider must be true."
+                )
+            if plaintext_value is not None or copy_from is not None:
+                raise ProductConfigError(
+                    "A secret adopted from the provider cannot also supply a value or copy_from."
+                )
+        elif copy_from is not None:
             if plaintext_value is not None:
                 raise ProductConfigError("Secret copy cannot also supply a value.")
             try:
@@ -694,6 +772,15 @@ def _product_config_secret_inputs(
                 "Secret copy requires a lane-exact runtime secret, declared class, "
                 "sharing reason and evidence."
             )
+        if adopt_from_provider is not None and (
+            validated_scope != "context_instance"
+            or integration != control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
+            or secret_class is None
+        ):
+            raise ProductConfigError(
+                "A secret adopted from the provider must be a lane-exact runtime secret "
+                "with a declared class."
+            )
         normalized.append(
             {
                 "scope": validated_scope,
@@ -702,6 +789,7 @@ def _product_config_secret_inputs(
                 "binding_key": binding_key,
                 "value": plaintext_value,
                 **({"copy_from": copy_from} if copy_from is not None else {}),
+                **({"adopt_from_provider": True} if adopt_from_provider is not None else {}),
                 "context": secret_context,
                 "instance": secret_instance,
                 "description": str(raw_secret.get("description", "") or "").strip(),
