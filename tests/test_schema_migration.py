@@ -1436,7 +1436,7 @@ class SchemaMigrationTests(unittest.TestCase):
             database_url = f"sqlite+pysqlite:///{database_path}"
             config = alembic_config(database_url)
 
-            command.upgrade(config, "c1d2e3f4a5b6")
+            command.upgrade(config, "49a61248b8c5")
             engine = create_engine(database_url)
             try:
                 inspector = inspect(engine)

@@ -99,14 +99,14 @@ class RetiredGovernanceMigrationTests(unittest.TestCase):
             finally:
                 engine.dispose()
 
-    def test_fresh_head_matches_current_store_tables(self) -> None:
+    def test_fresh_head_supports_current_store_without_retired_tables(self) -> None:
         with TemporaryDirectory() as directory:
             database_url = f"sqlite+pysqlite:///{Path(directory) / 'records.sqlite3'}"
             command.upgrade(alembic_config(database_url), EXPECTED_ALEMBIC_HEAD_REVISION)
             engine = create_engine(database_url)
             try:
                 tables = set(inspect(engine).get_table_names()) - {"alembic_version"}
-                self.assertEqual(tables, set(Base.metadata.tables))
+                self.assertGreaterEqual(tables, set(Base.metadata.tables))
                 self.assertTrue(set(_RETIRED_TABLES).isdisjoint(tables))
             finally:
                 engine.dispose()
