@@ -1945,6 +1945,46 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("GH_TOKEN", evidence_json)
         self.assertNotIn("launchplane-merge-train", evidence_json)
 
+    async def test_ordinary_merge_target_rejects_required_review_intent(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_merge_train_policy_record(build_test_merge_train_policy_record())
+            app = self._app(store=store, policy=_policy())
+            payload = _ordinary_merge_target_payload("ui:ordinary-target:required")
+            cast(dict[str, object], payload["intent"])["engineering_review_mode"] = "required"
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    "/v1/privileged-operations/merge-train-targets/prepare", json=payload
+                )
+            self.assertEqual(response.status_code, 422, response.text)
+            self.assertEqual(store.list_privileged_operation_records(limit=10), ())
+
+    async def test_ordinary_merge_target_explains_required_policy_replacement(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            legacy = MergeTrainPolicyRecord.model_validate_json(
+                (Path(__file__).parent / "fixtures" / "merge-train-policy-required.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            store.write_merge_train_policy_record(legacy)
+            store.write_repository_inventory_record(_ordinary_merge_target_inventory())
+            app = self._app(store=store, policy=_policy())
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    "/v1/privileged-operations/merge-train-targets/prepare",
+                    json=_ordinary_merge_target_payload("ui:ordinary-target:legacy-policy"),
+                )
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(
+                response.json()["detail"]["code"], "merge_train_engineering_review_mode_retired"
+            )
+            self.assertEqual(store.list_privileged_operation_records(limit=10), ())
+            self.assertEqual(
+                store.read_merge_train_policy_record(legacy.record_id).policy_sha256,
+                legacy.policy_sha256,
+            )
+
     async def test_ordinary_merge_target_inputs_and_prepare_preserve_inert_route(self) -> None:
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(Path(directory))

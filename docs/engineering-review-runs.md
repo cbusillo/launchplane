@@ -9,11 +9,11 @@ and `enforcement_effect=none`; no gate consumer reads an approved result as
 admission evidence.
 
 Guarded merge admission may project the engineering-review facet and its policy
-fingerprint for diagnostics, but repository merge-train policy defaults
-`engineering_review_mode` to `advisory`. Missing, stale, failed, or unknown
-shadow review evidence cannot worsen aggregate merge readiness. Enforced
-fail-closed behavior requires a deliberate DB-backed merge-train policy change
-to `engineering_review_mode = "required"`.
+fingerprint for diagnostics. Missing, stale, failed, or unknown shadow review
+evidence cannot worsen aggregate merge readiness. Required engineering-review
+merge authority is retired by the overall DIRECTION.md. New policies accept
+only `advisory`; historical policy values and digests remain readable without
+restoring that gate.
 
 ## Server authority
 
