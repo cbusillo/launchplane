@@ -151,6 +151,22 @@ Do not add tests that merely restate a copied value or mirror the implementation
 No local command replaces CI's runner isolation, artifact retention, or required
 status checks.
 
+Python dependency audits and runtime-image vulnerability scans run on every
+CI path. They block changes to dependency manifests, lockfiles, image recipes
+or the scan workflow; otherwise their outcome is reported in the job summary
+and failed scans raise warning annotations with details in the scan logs.
+Python inputs are `pyproject.toml`, `uv.lock` and requirements files. Image
+inputs also include Dockerfiles, `.dockerignore` and frontend dependency
+manifests. Application-source edits alone do not make an inherited advisory
+block an unrelated fix. Lint, types, image builds and Compose qualification
+remain blocking. Fork PRs use the same classification on hosted runners.
+
+Classification uses the PR diff from its base, a main push from its previous
+commit, and a train candidate from main. Renames include both old and new paths.
+Schedules and missing diff evidence retain absolute blocking audits, and a
+failed classification job fails `ci-gate`. Tree reuse still applies to push
+events; fresh scheduled CI remains the calendar-driven advisory signal.
+
 The container-build CI jobs also run
 `bash scripts/qualify-ordinary-agent-compose.sh <built-test-image>`. This
 exercises the checked-in ordinary-worker replica expression with an isolated
