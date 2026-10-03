@@ -312,6 +312,14 @@ class NoTargetProductRetirementAdapter(DokployProductRetirementAdapter):
                 "No-target retirement database completion is unconfirmed; retry the same Idempotency-Key."
             ) from error
         except (ValueError, OSError, click.ClickException, TimeoutError) as error:
+            # A previously uncertain commit may become visible after observe's read.
+            committed = self.observe("", "", "")
+            if committed.outcome == "present":
+                return ProviderMutationOutcome(
+                    response_status_code=202,
+                    response_payload=committed.response_payload,
+                    provider_effect_performed=False,
+                )
             raise ProviderMutationRejectedError(error) from error
         return ProviderMutationOutcome(
             response_status_code=202,

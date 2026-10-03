@@ -15,6 +15,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.product_retirement import (
     ProductRetirementProviderObservation,
     ProductRetirementRequest,
+    ProductRetirementRecord,
     provider_identifier_sha256,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -24,7 +25,7 @@ from control_plane.http_app import (
     idempotency_request_fingerprint,
     idempotency_scope,
 )
-from control_plane.product_retirement import build_provider_observation
+from control_plane.product_retirement import BoundProductRetirement, build_provider_observation
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.product_reconcile import ProductReconcileTarget
 from control_plane.product_reconcile import request_product_reconcile_sweep
@@ -254,6 +255,111 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(inventory.call_count, inventory_reads_before_replay)
                 delete.assert_not_called()
             store.close()
+
+    async def test_no_target_committed_connection_error_adopts_terminal_result(self) -> None:
+        for delayed_visibility in (False, True):
+            with (
+                self.subTest(delayed_visibility=delayed_visibility),
+                TemporaryDirectory() as directory,
+            ):
+                store = self._no_target_store(Path(directory))
+                app = self._app(
+                    store, actions=("product_retirement.plan", "product_retirement.apply")
+                )
+                payload = {**_plan_payload(), "no_target": True, "expected_target_sha256": ""}
+                with (
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "test"),
+                    ),
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_api.search_dokploy_applications",
+                        return_value=(),
+                    ) as inventory,
+                ):
+                    plan_response = await _asgi_request(
+                        app, "POST", "/v1/product-retirement", headers=self.headers, payload=payload
+                    )
+                    plan = plan_response.json()
+                    apply_payload = {
+                        **payload,
+                        "mode": "apply",
+                        "reviewed_plan_record_id": plan["records"]["product_retirement_plan_id"],
+                        "reviewed_plan_sha256": plan["result"]["plan_sha256"],
+                        "confirmation": "retire product example-site instance prod with no target",
+                    }
+                    real_commit = store.commit_no_target_retirement
+
+                    def commit_then_disconnect(
+                        *, bound: BoundProductRetirement, terminal: ProductRetirementRecord
+                    ) -> None:
+                        real_commit(bound=bound, terminal=terminal)
+                        raise OperationalError(
+                            "fixture COMMIT", {}, RuntimeError("connection lost")
+                        )
+
+                    with patch.object(
+                        store, "commit_no_target_retirement", side_effect=commit_then_disconnect
+                    ):
+                        unconfirmed = await _asgi_request(
+                            app,
+                            "POST",
+                            "/v1/product-retirement",
+                            headers=self.headers,
+                            payload=apply_payload,
+                        )
+                    self.assertEqual(unconfirmed.status_code, 409, unconfirmed.text)
+                    retired = next(
+                        record
+                        for record in store.list_product_retirement_records(product="example-site")
+                        if record.outcome == "retired"
+                    )
+                    reads_before_retry = inventory.call_count
+                    real_list = store.list_product_retirement_records
+                    first_read = True
+
+                    def visible_records(
+                        *,
+                        product: str = "",
+                        actor: str = "",
+                        mode: str = "",
+                        idempotency_key: str = "",
+                        limit: int | None = None,
+                    ) -> tuple[ProductRetirementRecord, ...]:
+                        nonlocal first_read
+                        records = real_list(
+                            product=product,
+                            actor=actor,
+                            mode=mode,
+                            idempotency_key=idempotency_key,
+                            limit=limit,
+                        )
+                        if delayed_visibility and first_read:
+                            first_read = False
+                            return tuple(
+                                record for record in records if record.outcome != "retired"
+                            )
+                        return records
+
+                    with patch.object(
+                        store, "list_product_retirement_records", side_effect=visible_records
+                    ):
+                        replay = await _asgi_request(
+                            app,
+                            "POST",
+                            "/v1/product-retirement",
+                            headers=self.headers,
+                            payload=apply_payload,
+                        )
+                    self.assertEqual(replay.status_code, 202, replay.text)
+                    self.assertEqual(
+                        replay.json()["records"]["product_retirement_record_id"], retired.record_id
+                    )
+                    self.assertEqual(inventory.call_count, reads_before_retry)
+                    self.assertEqual(
+                        store.read_product_profile_record("example-site").lifecycle_state, "retired"
+                    )
+                store.close()
 
     async def test_no_target_empty_preview_context_is_not_shared_authority(self) -> None:
         with TemporaryDirectory() as directory:
