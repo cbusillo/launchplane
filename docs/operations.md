@@ -737,14 +737,13 @@ The first implemented service command is:
 ```bash
 uv run launchplane service serve \
   --state-dir ./state \
-  --database-url "$LAUNCHPLANE_DATABASE_URL" \
   --policy-file ./bootstrap-policy.toml \
   --audience "$LAUNCHPLANE_SERVICE_AUDIENCE"
 ```
 
 The service needs an explicit minimal bootstrap policy input, but the repo no
 longer tracks the live policy. Product and workflow grants should be represented
-as DB-backed authz policy records. Omitting `--database-url` always fails closed,
+as DB-backed authz policy records. Omitting `LAUNCHPLANE_DATABASE_URL` always fails closed,
 including loopback local development, rather than using file-backed JSON state
 as authority. The GitHub OIDC audience is explicit admin/process wiring;
 production code must not default it to a live domain.
@@ -1934,6 +1933,10 @@ The Launchplane service entrypoint runs
 startup migration through a PostgreSQL advisory lock and advances only to the
 image's explicit migration target. This keeps hosted service startup fail-closed
 on schema drift while preserving expand/contract rollout and rollback boundaries.
+Compose supplies the database URL through its service environment file. The
+entrypoint keeps it in the environment for migration and HTTP startup;
+`launchplane service serve` refuses `--database-url` arguments without printing
+their values. Set `LAUNCHPLANE_DATABASE_URL` in the service environment instead.
 The self-deploy workflow should not run shared database migrations from the
 GitHub runner. Its deployed-runtime smoke requires the observed database
 revision to appear in the image's reported compatible-revision set before the
