@@ -176,6 +176,17 @@ class RunnerLaneServiceRetireTests(unittest.TestCase):
                     f"{{ path={self.registration}/lane-1/bin/runsvc.sh-other ; argv[]=runner ; }}"
                 )
             },
+            {
+                "UNIT_EXEC_START": (
+                    f"{{ path={self.registration}/lane-1/bin/runsvc.sh ;x ; argv[]=runner ; }}"
+                )
+            },
+            {
+                "UNIT_EXEC_START": (
+                    f"{{ path={self.registration}/lane-1/bin/runsvc.sh ; argv[]=runner ; }} "
+                    "{ path=/elsewhere/runsvc.sh ; argv[]=runner ; }"
+                )
+            },
         ):
             with self.subTest(changes=changes):
                 self.assert_refused_without_mutation(changes)

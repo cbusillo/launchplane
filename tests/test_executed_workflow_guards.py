@@ -142,6 +142,7 @@ class ExecutedWorkflowGuardTests(unittest.TestCase):
             ("wrong confirmation", "operation-1", False),
             ("APPLY LAUNCHPLANE ROUTE BINDING RECONCILE", "", False),
             ("APPLY LAUNCHPLANE ROUTE BINDING RECONCILE", "   ", False),
+            ("APPLY LAUNCHPLANE ROUTE BINDING RECONCILE", " \t\n ", False),
         ):
             with self.subTest(confirmation=confirmation, key=key):
                 result = self.run_step(
