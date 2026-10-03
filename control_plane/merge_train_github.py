@@ -617,6 +617,8 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         base_branch: str,
         base_sha: str,
         queue: tuple[MergeTrainQueueEntry, ...],
+        probe_ref: str,
+        checkpoint: Callable[[int | None], None] | None = None,
     ) -> tuple[MergeTrainBatchHeldOutEntry, ...]:
         """Find queued heads that do not merge cleanly onto the heads ahead of them.
 
@@ -626,12 +628,19 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         queue order. A conflicting merge writes no commit, so the probe records
         that head and continues. The probe ref is deleted afterwards; the
         canonical train ref and pull request branches are never written.
+
+        `probe_ref` belongs to one controller lease acquisition, so a pass that
+        lost its lease cannot reset or delete another pass's probe. `checkpoint`
+        runs before the ref is reset and before each merge, with the pull
+        request about to merge; it renews the lease and raises once the lease
+        is lost, which stops the probe and still deletes its own ref.
         """
         lineage = MergeTrainEffectLineage(
             repository=repository, base_branch=base_branch, batch_id="conflict-probe"
         )
-        probe_ref = merge_train_conflict_probe_ref(repository=repository, base_branch=base_branch)
         effect_executor = self.semantic_effect_executor
+        if checkpoint is not None:
+            checkpoint(None)
         effect_executor.prepare_candidate_ref(
             CandidateRefPrepareEffect(lineage=lineage, candidate_ref=probe_ref, base_sha=base_sha)
         )
@@ -640,6 +649,8 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         probe_sha = base_sha
         try:
             for queue_entry in queue:
+                if checkpoint is not None:
+                    checkpoint(queue_entry.number)
                 try:
                     merge_outcome = effect_executor.merge_candidate_head(
                         CandidateHeadMergeEffect(
@@ -667,7 +678,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     CandidateRefDeleteEffect(lineage=lineage, candidate_ref=probe_ref)
                 )
             except MergeTrainGitHubError as error:
-                # The next probe resets the same ref, so a leftover one is harmless.
+                # A leftover probe ref has no authority; nothing reads it again.
                 logger.warning(
                     "Conflict probe ref cleanup failed for %s (GitHub status %s).",
                     probe_ref,
@@ -2694,13 +2705,17 @@ def merge_train_construction_ref(candidate_ref: str) -> str:
     return "refs/heads/launchplane/construct/" + sha256(candidate_ref.encode("utf-8")).hexdigest()
 
 
-def merge_train_conflict_probe_ref(*, repository: str, base_branch: str) -> str:
-    """Locate the train's conflict probe in the construction namespace.
+def merge_train_conflict_probe_ref(
+    *, repository: str, base_branch: str, lease_owner: str, lease_acquired_at: str
+) -> str:
+    """Locate a conflict probe in the construction namespace.
 
-    One probe ref per train: the controller lease serializes probes, and a
-    leftover ref is reset by the next probe.
+    The ref is unique to one controller lease acquisition. A pass that outlived
+    its lease cannot reset or delete the probe of the pass that adopted it.
     """
-    probe_identity = f"conflict-probe:{repository.lower()}:{base_branch}"
+    probe_identity = (
+        f"conflict-probe:{repository.lower()}:{base_branch}:{lease_owner}:{lease_acquired_at}"
+    )
     return "refs/heads/launchplane/construct/" + sha256(probe_identity.encode()).hexdigest()
 
 

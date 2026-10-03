@@ -996,7 +996,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
     def test_conflict_probe_holds_out_a_head_that_conflicts_with_heads_ahead(self) -> None:
         repository = "example/merge-train-repo"
-        probe_ref = merge_train_conflict_probe_ref(repository=repository, base_branch="main")
+        probe_ref = _probe_ref(repository)
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 {"ref": probe_ref, "object": {"sha": "base-main"}},
@@ -1013,6 +1013,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             base_branch="main",
             base_sha="base-main",
             queue=tuple(_queue_entry(number) for number in (92, 97, 118, 119)),
+            probe_ref=probe_ref,
         )
 
         self.assertEqual(
@@ -1043,9 +1044,8 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
     def test_conflict_probe_deletes_its_ref_when_github_fails(self) -> None:
         repository = "example/merge-train-repo"
-        probe_branch = merge_train_conflict_probe_ref(
-            repository=repository, base_branch="main"
-        ).removeprefix("refs/heads/")
+        probe_ref = _probe_ref(repository)
+        probe_branch = probe_ref.removeprefix("refs/heads/")
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 {},
@@ -1060,12 +1060,70 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 base_branch="main",
                 base_sha="base-main",
                 queue=(_queue_entry(1), _queue_entry(2)),
+                probe_ref=probe_ref,
             )
 
         self.assertEqual(raised.exception.status_code, 502)
         self.assertEqual(
             (transport.requests[-1].method, transport.requests[-1].path),
             ("DELETE", f"/repos/example/merge-train-repo/git/refs/heads/{probe_branch}"),
+        )
+
+    def test_conflict_probe_ref_is_unique_to_a_lease_acquisition(self) -> None:
+        refs = {
+            merge_train_conflict_probe_ref(
+                repository="example/merge-train-repo",
+                base_branch="main",
+                lease_owner=owner,
+                lease_acquired_at=acquired_at,
+            )
+            for owner, acquired_at in (
+                ("controller-a", "2026-10-02T21:00:00Z"),
+                ("controller-b", "2026-10-02T21:00:00Z"),
+                ("controller-a", "2026-10-02T21:05:00Z"),
+            )
+        }
+
+        self.assertEqual(len(refs), 3)
+
+    def test_conflict_probe_stops_when_its_lease_is_lost_and_deletes_only_its_ref(
+        self,
+    ) -> None:
+        repository = "example/merge-train-repo"
+        probe_ref = _probe_ref(repository)
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                {},
+                _merge_commit("probe-after-1", "tree-1"),
+                None,  # Delete the probe ref.
+            )
+        )
+        checkpoints: list[int | None] = []
+
+        def checkpoint(pull_request_number: int | None) -> None:
+            checkpoints.append(pull_request_number)
+            if pull_request_number == 2:
+                raise RuntimeError("lease lost")
+
+        with self.assertRaisesRegex(RuntimeError, "lease lost"):
+            GitHubMergeTrainClient(transport=transport).probe_batch_entry_conflicts(
+                repository=repository,
+                base_branch="main",
+                base_sha="base-main",
+                queue=(_queue_entry(1), _queue_entry(2), _queue_entry(3)),
+                probe_ref=probe_ref,
+                checkpoint=checkpoint,
+            )
+
+        self.assertEqual(checkpoints, [None, 1, 2])
+        probe_branch = probe_ref.removeprefix("refs/heads/")
+        self.assertEqual(
+            [(request.method, request.path) for request in transport.requests],
+            [
+                ("POST", "/repos/example/merge-train-repo/git/refs"),
+                ("POST", "/repos/example/merge-train-repo/merges"),
+                ("DELETE", f"/repos/example/merge-train-repo/git/refs/heads/{probe_branch}"),
+            ],
         )
 
     def test_build_batch_candidate_records_github_204_as_no_op_step(self) -> None:
@@ -3337,6 +3395,15 @@ def _git_commit(sha: str, tree_sha: str, *, parents: tuple[str, ...] = ()) -> di
         "tree": {"sha": tree_sha},
         "parents": [{"sha": parent} for parent in parents],
     }
+
+
+def _probe_ref(repository: str) -> str:
+    return merge_train_conflict_probe_ref(
+        repository=repository,
+        base_branch="main",
+        lease_owner="controller-a",
+        lease_acquired_at="2026-10-02T21:00:00Z",
+    )
 
 
 def _queue_entry(number: int) -> MergeTrainQueueEntry:

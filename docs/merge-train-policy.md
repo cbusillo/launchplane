@@ -549,11 +549,14 @@ GitHub computes a pull request's mergeability only against its base, so two
 queued pull requests can each be clean and still conflict with each other.
 Before a mutating pass plans a candidate with more than one entry, the
 controller runs a conflict probe: it resets a dedicated ref in the
-`launchplane/construct/` namespace, one per train, to the base SHA and merges
-each queued head in queue order. A head that does not merge cleanly onto the
-heads accepted before it writes no commit; the probe records it and continues.
-The probe ref is then deleted; a leftover one is reset by the next probe. It
-never writes the canonical train ref or a pull request branch. A probe costs
+`launchplane/construct/` namespace to the base SHA and merges each queued head
+in queue order. A head that does not merge cleanly onto the heads accepted
+before it writes no commit; the probe records it and continues. The probe ref
+is unique to the controller's lease acquisition, and the probe renews the lease
+before each merge. A pass that lost its lease stops before its next merge,
+deletes only its own ref, and cannot touch the probe of the pass that adopted
+the train. The probe ref is deleted afterwards. It never writes the canonical
+train ref or a pull request branch. A probe costs
 one ref write, one merge per queued pull request, and one delete.
 
 The candidate is planned from the heads that merged cleanly. Each conflicting

@@ -1837,6 +1837,7 @@ def _advance_active_candidate_record(
                 },
             )
         reflow_result = try_reflow_failed_merge_train_candidate(
+            lease=lease,
             github_client=github_client,
             candidate_store=candidate_store,
             active_candidate_record=active_candidate_record,
@@ -2818,19 +2819,6 @@ def _advance_from_live_snapshot(
             "dry_run_result": dry_run_result.model_dump(mode="json"),
         }
 
-    probes_conflicts = lease.record.ordinary_job_binding is None
-    if request.mutate and probes_conflicts and _conflict_probe_queue(dry_run_result):
-        lease.checkpoint(
-            active_action="plan_candidate",
-            active_phase="probe_entry_conflicts",
-            active_record_id="",
-            active_pull_request_number=None,
-            step_payload={
-                "probe_ref": merge_train_conflict_probe_ref(
-                    repository=request.repository, base_branch=request.base_branch
-                )
-            },
-        )
     probe = _probe_queue_entry_conflicts(
         github_client=github_client,
         policy=policy,
@@ -2838,7 +2826,8 @@ def _advance_from_live_snapshot(
         dry_run_result=dry_run_result,
         held_out=held_out,
         mutate=request.mutate,
-        enabled=probes_conflicts,
+        enabled=lease.record.ordinary_job_binding is None,
+        lease=lease,
     )
     if probe.dry_run_result.intended_next_action != "merge":
         return {
@@ -2930,6 +2919,7 @@ def try_reflow_failed_merge_train_candidate(
     recorded_at: str,
     trace_id: str,
     mutate: bool,
+    lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object] | None:
     try:
         snapshot = github_client.read_merge_train_snapshot(
@@ -2996,6 +2986,7 @@ def try_reflow_failed_merge_train_candidate(
         held_out=held_out,
         mutate=mutate,
         enabled=active_candidate_record.ordinary_job_binding is None,
+        lease=lease,
     )
     if probe.dry_run_result.intended_next_action != "merge":
         return None
@@ -3283,6 +3274,7 @@ def _probe_queue_entry_conflicts(
     held_out: tuple[MergeTrainBatchHeldOutEntry, ...],
     mutate: bool,
     enabled: bool,
+    lease: MergeTrainControllerLeaseContext,
 ) -> _ConflictProbeOutcome:
     """Hold out queued pull requests that conflict with the ones ahead of them.
 
@@ -3306,11 +3298,30 @@ def _probe_queue_entry_conflicts(
             unchanged,
             report={"status": "will_run", "pull_request_numbers": probed_pull_request_numbers},
         )
+    probe_ref = merge_train_conflict_probe_ref(
+        repository=dry_run_result.repository,
+        base_branch=dry_run_result.base_branch,
+        lease_owner=lease.owner,
+        lease_acquired_at=lease.acquisition_token,
+    )
+    active_record_id = lease.record.active_record_id
+
+    def checkpoint_probe(pull_request_number: int | None) -> None:
+        lease.checkpoint(
+            active_action="plan_candidate",
+            active_phase="probe_entry_conflicts",
+            active_record_id=active_record_id,
+            active_pull_request_number=pull_request_number,
+            step_payload={"probe_ref": probe_ref},
+        )
+
     conflicts = github_client.probe_batch_entry_conflicts(
         repository=dry_run_result.repository,
         base_branch=dry_run_result.base_branch,
         base_sha=snapshot.base_sha,
         queue=queue,
+        probe_ref=probe_ref,
+        checkpoint=checkpoint_probe,
     )
     report: dict[str, object] = {
         "status": "ran",

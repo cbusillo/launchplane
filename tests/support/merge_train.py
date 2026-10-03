@@ -148,6 +148,8 @@ class _FakeMergeTrainGitHubClient:
         base_branch: str,
         base_sha: str,
         queue: tuple[MergeTrainQueueEntry, ...],
+        probe_ref: str,
+        checkpoint: Callable[[int | None], None] | None = None,
     ) -> tuple[MergeTrainBatchHeldOutEntry, ...]:
         return ()
 
