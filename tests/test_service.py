@@ -2429,7 +2429,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(unmarked_status_code, 202, unmarked_payload)
         self.assertNotIn("@site-owner", unmarked_payload["result"]["comment_markdown"])
-        self.assertNotIn("Owner review", unmarked_payload["result"]["comment_markdown"])
+        self.assertNotIn("Client review", unmarked_payload["result"]["comment_markdown"])
 
     def test_preview_pr_feedback_ready_requires_active_preview_url(self) -> None:
         with (

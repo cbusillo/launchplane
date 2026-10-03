@@ -34,8 +34,8 @@ PRODUCT_REVIEW_ROUTE = "/v1/product-review"
 PRODUCT_REVIEW_DECISIONS_ROUTE = "/v1/product-review/decisions"
 PRODUCT_REVIEW_FEEDBACK_RETRY_ROUTE = "/v1/product-review/feedback/retry"
 
-_NO_OWNER_REASON = "No Owner set for this product"
-_NOT_OWNER_REASON = "You are not this product's Owner."
+_NO_OWNER_REASON = "No Client set for this product"
+_NOT_OWNER_REASON = "You are not this product's Client."
 _NO_PREVIEW_REASON = "No preview is ready for this pull request yet."
 
 
@@ -330,7 +330,7 @@ def register_product_review_routes(
         response_model=ProductReviewResponse,
         tags=["product-review"],
         operation_id="read_product_review",
-        summary="Read the Owner review page for one pull request",
+        summary="Read the Client review page for one pull request",
         responses={
             status: {"model": common.error_response_model} for status in (401, 403, 404, 503)
         },
@@ -342,7 +342,7 @@ def register_product_review_routes(
         response_model=ProductReviewResponse,
         tags=["product-review"],
         operation_id="retry_product_review_feedback",
-        summary="Retry delivery of a saved Owner decision without recording a new decision",
+        summary="Retry delivery of a saved Client decision without recording a new decision",
         responses={
             status: {"model": common.error_response_model} for status in (401, 403, 404, 409, 503)
         },
@@ -354,7 +354,7 @@ def register_product_review_routes(
         response_model=ProductReviewResponse,
         tags=["product-review"],
         operation_id="write_product_review_decision",
-        summary="Record the product Owner's accept or request-changes decision",
+        summary="Record the product Client's accept or request-changes decision",
         responses={
             status: {"model": common.error_response_model} for status in (401, 403, 409, 503)
         },
