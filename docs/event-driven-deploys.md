@@ -118,6 +118,19 @@ reservation. The webhook request never waits on a deploy.
   - Read the PR state again after taking the preview's reservation and just
     before the provider apply; if it closed or moved its head, the reservation is released with no provider effect and the
     reconcile runs again.
+  - A refused or failed destroy is attempted at most three times for the same
+    preview lifecycle record, context, and destroy reason. Busy operations and
+    moved PRs do not consume attempts. Later events and sweeps record a held
+    destroy with reason `preview_destroy_retry_limit` and complete the request
+    without calling the destroy path. The plan retains `destroy_failed_attempts`,
+    `last_failed_error_code`, `last_failed_error_summary`, and
+    `destroy_retry_stop_reason`; the preview is not marked destroyed or removed.
+    A changed lifecycle record or destroy reason permits a new bounded run;
+    reopening the PR resumes normal preview reconciliation.
+    For a legacy preview without runtime target evidence, the refusal remains:
+    an operator must establish whether its provider target still exists before
+    retirement. This retry limit supplies no evidence-free destroy or record
+    deletion route, and does not authorize live retirement.
   - **Odoo:** the apply or destroy issues the same service plan as the preview
     inputs route and runs it through `run_odoo_preview_apply_operation`, under
     reservation scope `launchplane-reconcile:<product>`. Its key is the PR,

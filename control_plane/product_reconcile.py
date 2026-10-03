@@ -184,6 +184,7 @@ PRODUCT_RECONCILE_SWEEP_SECONDS = 30 * 60
 PRODUCT_RECONCILE_LEASE_SECONDS = 20 * 60
 RECONCILE_SOURCE = "launchplane-reconcile"
 TESTING_DEPLOY_MAX_FAILED_ATTEMPTS = 3
+PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS = 3
 TESTING_DEPLOY_MAX_ATTEMPT_CHAIN = 20
 PREVIEW_APPLY_TIMEOUT_SECONDS = 600
 # A generic-web refresh waits for the deploy and then for health, each up to this
@@ -1048,8 +1049,38 @@ def reconcile_preview_target(
         return ReconcileOutcome(plan)
     if control_plane_root is None:
         raise ProductReconcileError("A preview reconcile needs the control-plane root.")
+    previous = previous_plan or {}
+    failed_attempts = 0
+    if plan["action"] == "destroy":
+        retry_key = _fingerprint(
+            {
+                "lifecycle": decision.lifecycle_token,
+                "context": plan["context"],
+                "reason": plan["reason"],
+            }
+        )
+        if previous.get("destroy_retry_key") == retry_key:
+            count = previous.get("destroy_failed_attempts", 0)
+            if isinstance(count, int) and not isinstance(count, bool):
+                failed_attempts = max(0, count)
+        plan.update(destroy_retry_key=retry_key, destroy_failed_attempts=failed_attempts)
+        if failed_attempts >= PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS:
+            plan.update(
+                held=True,
+                reason="preview_destroy_retry_limit",
+                last_failed_error_code=previous.get(
+                    "last_failed_error_code", "preview_apply_failed"
+                ),
+                last_failed_error_summary=previous.get("last_failed_error_summary", ""),
+                destroy_retry_stop_reason=(
+                    f"Preview destroy failed {failed_attempts} times; Launchplane stops retrying "
+                    "until the preview lifecycle record or destroy reason changes. "
+                    "The preview remains recorded; retirement requires an operator."
+                ),
+            )
+            return ReconcileOutcome(plan)
     if not odoo:
-        return _run_generic_web_preview_operation(
+        outcome = _run_generic_web_preview_operation(
             record_store=record_store,
             profile=profile,
             transport=transport,
@@ -1057,18 +1088,22 @@ def reconcile_preview_target(
             pull_request_number=pull_request_number,
             control_plane_root=control_plane_root,
             preview_hooks=preview_hooks,
-            previous_plan=previous_plan or {},
+            previous_plan=previous,
             lease_held=lease_held,
         )
-    return _run_preview_operation(
-        record_store=record_store,
-        profile=profile,
-        transport=transport,
-        decision=decision,
-        pull_request_number=pull_request_number,
-        control_plane_root=control_plane_root,
-        preview_hooks=preview_hooks,
-    )
+    else:
+        outcome = _run_preview_operation(
+            record_store=record_store,
+            profile=profile,
+            transport=transport,
+            decision=decision,
+            pull_request_number=pull_request_number,
+            control_plane_root=control_plane_root,
+            preview_hooks=preview_hooks,
+        )
+    if plan["action"] == "destroy" and outcome.error:
+        plan["destroy_failed_attempts"] = failed_attempts + 1
+    return outcome
 
 
 def _plan_preview_target(

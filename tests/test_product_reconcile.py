@@ -68,6 +68,7 @@ from control_plane.contracts.merge_train_policy import MergeTrainPolicy, MergeTr
 from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.product_reconcile import (
     PLAN_BLOCKER_DESCRIPTIONS,
+    PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS,
     TESTING_FAILURE_DESCRIPTIONS,
     PreviewProviderHooks,
     ProductReconcileError,
@@ -1377,6 +1378,83 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(self.provider.applied, [("refresh", 5), ("destroy", 5), ("refresh", 5)])
         self.assertEqual(self.store.list_preview_records()[0].state, "active")
 
+    def test_blocked_destroy_stops_across_sweeps_and_resumes_after_record_changes(self) -> None:
+        self.write_preview()
+        self.github.pull_request["state"] = "closed"
+        before = self.snapshot()
+        original = self.provider.build_inputs
+
+        def blocked_inputs(
+            *,
+            profile: LaunchplaneProductProfileRecord,
+            request: OdooPreviewApplyInputsRequest,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            result = original(profile=profile, request=request)
+            result["status"] = "blocked"
+            return result
+
+        with patch.object(self.provider, "build_inputs", side_effect=blocked_inputs) as inputs:
+            for attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS):
+                self.request("preview", 5)
+                with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                    failed = self.run_once()
+                self.assertEqual(failed.state, "failed")
+                self.assertEqual(failed.last_plan["destroy_failed_attempts"], attempt + 1)
+                self.assertEqual(failed.last_plan["last_failed_error_code"], "preview_plan_blocked")
+            for _sweep in range(2):
+                self.request("preview", 5)
+                stopped = self.run_once()
+                self.assertEqual(stopped.state, "done")
+                self.assertTrue(stopped.last_plan["held"])
+                self.assertEqual(stopped.last_plan["reason"], "preview_destroy_retry_limit")
+                view = product_reconcile_request_view(stopped)
+                self.assertIn("stops retrying", str(view.last_plan["destroy_retry_stop_reason"]))
+                self.assertEqual(
+                    view.last_plan["last_failed_error_summary"],
+                    record_failure_summary("preview_plan_blocked"),
+                )
+            self.assertEqual(inputs.call_count, PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.provider.applied, [])
+
+        # A supported record repair changes the lifecycle; a fresh bounded run may succeed.
+        preview = self.store.list_preview_records()[0]
+        self.store.write_preview_record(
+            preview.model_copy(update={"updated_at": "2026-09-30T10:00:00Z"})
+        )
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["preview_result_status"], "pass")
+        self.assertEqual(self.provider.applied, [("destroy", 5)])
+
+    def test_reopened_pr_is_not_held_by_an_exhausted_destroy(self) -> None:
+        self.write_preview()
+        self.github.pull_request["state"] = "closed"
+        with patch.object(self.provider, "build_inputs", side_effect=ValueError("refused")):
+            for _attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS):
+                self.request("preview", 5)
+                with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                    self.run_once()
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["reason"], "preview_destroy_retry_limit")
+        self.github.pull_request["state"] = "open"
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["reason"], "already_serving")
+
+    def test_busy_destroy_does_not_consume_a_failure_attempt(self) -> None:
+        self.write_preview()
+        self.github.pull_request["state"] = "closed"
+        with patch(
+            "control_plane.product_reconcile.run_odoo_preview_apply_operation",
+        ) as operation:
+            operation.return_value.status = "target_busy"
+            self.request("preview", 5)
+            busy = self.run_once()
+        self.assertEqual(busy.state, "pending")
+        self.assertEqual(busy.last_plan["destroy_failed_attempts"], 0)
+        self.assertEqual(self.reconcile()["preview_result_status"], "pass")
+
     def test_preview_plan_records_the_credentials_the_preview_leaves_out(self) -> None:
         self.provider.omitted_integration_credential_keys = ("ODOO_SMTP_PASSWORD",)
         self.github.add_run(50, PR_HEAD, event="pull_request")
@@ -1624,6 +1702,25 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
         )
         self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
         self.assertEqual(self.driver.changes, [("refresh", 5), ("destroy", 5)])
+
+    def test_refused_destroy_stops_without_removing_the_generic_web_preview(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.reconcile()
+        self.github.pull_request["state"] = "closed"
+        before = self.snapshot()
+        with patch(
+            "control_plane.generic_web_preview_http.execute_generic_web_preview_destroy",
+            side_effect=ValueError("target evidence missing"),
+        ) as destroy:
+            for _attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS):
+                self.request("preview", 5)
+                with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                    self.assertEqual(self.run_once().state, "failed")
+            self.request("preview", 5)
+            self.assertEqual(self.reconcile()["reason"], "preview_destroy_retry_limit")
+            self.assertEqual(destroy.call_count, PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS)
+        self.assertEqual(self.snapshot(), before)
 
     def test_a_new_push_replaces_the_preview_it_serves(self) -> None:
         self.github.add_run(50, PR_HEAD, event="pull_request")
