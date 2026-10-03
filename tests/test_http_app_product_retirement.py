@@ -26,6 +26,11 @@ from control_plane.http_app import (
     idempotency_scope,
 )
 from control_plane.product_retirement import BoundProductRetirement, build_provider_observation
+from control_plane.product_retirement import ProductRetirementBlockedError
+from control_plane.product_retirement_no_target import (
+    bind_no_target_retirement,
+    observe_no_target_absence,
+)
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.product_reconcile import ProductReconcileTarget
 from control_plane.product_reconcile import request_product_reconcile_sweep
@@ -540,6 +545,87 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     )
                 self.assertEqual(response.status_code, 409, response.text)
                 self.assertEqual(store.list_product_retirement_records(product="example-site"), ())
+                store.close()
+
+    def test_no_target_normalized_app_names_block_renamed_or_ambiguous_applications(self) -> None:
+        for target_name, preview_prefix, app_name, blocked in (
+            ("Example Site PROD", "Example Preview", "example-site-prod-abc123", True),
+            ("Example Site PROD", "Example Preview", "example-site-prod", True),
+            ("Example Site PROD", "Example Preview", "example-preview-pr-7-abc123", True),
+            ("Example  Site PROD", "Example Preview", "example--site-prod-abc123", True),
+            ("Example.Site_PROD", "Example Preview", "example.site_prod-abc123", True),
+            # A neighbouring application can share the base: ambiguity must refuse.
+            ("Example Site PROD", "Example Preview", "example-site-prod-other-site", True),
+            ("Example Site PROD", "Example Preview", "example-site-production-abc123", False),
+            ("Example.Site_PROD", "Example Preview", "example-site-prod-abc123", False),
+            ("Example Site PROD", "Example Preview", "example-previewing-abc123", False),
+        ):
+            with self.subTest(app_name=app_name), TemporaryDirectory() as directory:
+                store = self._no_target_store(Path(directory))
+                target = store.read_dokploy_target_record(
+                    context_name="example-site", instance_name="prod"
+                )
+                store.write_dokploy_target_record(
+                    target.model_copy(update={"target_name": target_name})
+                )
+                profile = store.read_product_profile_record("example-site")
+                store.write_product_profile_record(
+                    profile.model_copy(
+                        update={
+                            "preview": profile.preview.model_copy(
+                                update={"app_name_prefix": preview_prefix}
+                            )
+                        }
+                    )
+                )
+                bound = bind_no_target_retirement(
+                    record_store=store,
+                    request=ProductRetirementRequest.model_validate(
+                        {**_plan_payload(), "no_target": True, "expected_target_sha256": ""}
+                    ),
+                )
+                with (
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "test"),
+                    ),
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_api.search_dokploy_applications",
+                        return_value=({"applicationId": "orphan"},),
+                    ),
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_api.fetch_dokploy_target_payload",
+                        return_value={
+                            "applicationId": "orphan",
+                            "name": "renamed",
+                            "appName": app_name,
+                            "repository": "unrelated-site",
+                            "dockerImage": "ghcr.io/another/unrelated:latest",
+                        },
+                    ),
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_api.fetch_dokploy_application_domains",
+                        return_value=({"host": "unrelated.invalid"},),
+                    ),
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_api.dokploy_request",
+                        side_effect=AssertionError("Unexpected provider request"),
+                    ),
+                ):
+                    if blocked:
+                        with self.assertRaises(ProductRetirementBlockedError):
+                            observe_no_target_absence(
+                                control_plane_root=Path(directory), bound=bound, observed_at=NOW
+                            )
+                    else:
+                        observation = observe_no_target_absence(
+                            control_plane_root=Path(directory), bound=bound, observed_at=NOW
+                        )
+                        self.assertEqual(observation.state, "absent")
+                self.assertEqual(
+                    store.read_product_profile_record("example-site").lifecycle_state, "active"
+                )
+                self.assertEqual(store.read_preview_record("stale-preview").state, "failed")
                 store.close()
 
     def _store(self, root: Path, *, database_url: str = "") -> PostgresRecordStore:

@@ -3635,6 +3635,20 @@ application/domain reads must show no stable name, preview prefix, repository,
 image repository, or known domain belonging to the product. Missing, malformed,
 unauthorized or incomplete provider evidence blocks planning and apply.
 
+The proof also checks normalized `appName` bases for stable and preview names:
+trim, replace each literal space with a hyphen, and lowercase, preserving dots,
+underscores and repeated spaces as repeated hyphens. Dokploy's
+[`cleanAppName` / `buildAppName` source](https://github.com/Dokploy/dokploy/blob/48504fde4eb210056f7d9f80406f9692a1a7ea8a/packages/server/src/db/schema/utils.ts)
+defines this transformation and adds a random suffix to supplied bases;
+[`updateApplication`](https://github.com/Dokploy/dokploy/blob/48504fde4eb210056f7d9f80406f9692a1a7ea8a/packages/server/src/services/application.ts)
+preserves `appName` when the display name changes. An exact normalized stable
+base or its hyphen-delimited extension, or a normalized preview prefix, blocks
+absence even with unrelated repository, image and domain evidence. Shared-base
+ambiguity refuses retirement; resolve the provider/configuration identity before
+retrying. There is no override. This is not general punctuation-removing
+slugification; current Dokploy create validation also rejects spaces in supplied
+`appName` values, so this proof conservatively covers historical normalized names.
+
 The plan binds the profile, configuration and stale preview records. Apply
 repeats the provider proof, rechecks those records under database locks, refuses
 a running product reconciler, and atomically marks the previews destroyed and
