@@ -3,10 +3,14 @@ from __future__ import annotations
 from functools import lru_cache
 
 
+# Creates one lane's Dokploy compose target; granted per context and instance.
+DOKPLOY_TARGET_LANE_SETUP_ACTION = "dokploy_target.lane_setup"
+
 _NON_DESCRIPTOR_INSTANCE_SCOPED_AUTHZ_ACTIONS = frozenset(
     {
         "backup_gate.write",
         "deployment.read",
+        DOKPLOY_TARGET_LANE_SETUP_ACTION,
         "every_code_feedback_resume.request",
         "every_code_feedback_resume.execute",
         "generic_web_deploy_recovery_provider_evidence.read",

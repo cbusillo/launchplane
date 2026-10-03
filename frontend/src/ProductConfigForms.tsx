@@ -5,8 +5,10 @@ import {
   Eye,
   KeyRound,
   LoaderCircle,
+  Plus,
   RotateCcw,
   ShieldCheck,
+  X,
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
@@ -20,8 +22,11 @@ import {
   productConfigFailureCertainty,
   productConfigManagedSecretIdentity,
   productConfigOperationFailure,
-  productConfigRuntimeDraftKey,
+  productConfigRuntimeChange,
+  productConfigRuntimeChangeKey,
   productConfigSelectionKey,
+  type RuntimeSettingsChange,
+  type SiteSettingDraft,
 } from "./product-config-operation";
 import {
   useBrowserOperationController,
@@ -59,6 +64,8 @@ export function RuntimeSettingsChangePanel({
   const availability = config.write_availability.runtime_settings;
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [values, setValues] = useState<Record<string, string>>({});
+  const [siteSettings, setSiteSettings] = useState<SiteSettingDraft[]>([]);
+  const [retiredKeysText, setRetiredKeysText] = useState("");
   const [reason, setReason] = useState("");
   const [localError, setLocalError] = useState("");
   const [planResult, setPlanResult] = useState<ProductConfigApplyResponse | null>(null);
@@ -77,8 +84,25 @@ export function RuntimeSettingsChangePanel({
     config.environment,
     fixtureMode,
   );
-  const draftKey = productConfigRuntimeDraftKey(selectedKeys, values);
-  const planMatchesDraft = Boolean(planResult && plannedDraftKey === draftKey);
+  let draftChange: RuntimeSettingsChange | null = null;
+  let draftError = "";
+  try {
+    draftChange = productConfigRuntimeChange(selectedKeys, values, siteSettings, retiredKeysText);
+  } catch (error) {
+    draftError = error instanceof Error ? error.message : "The runtime settings draft is invalid.";
+  }
+  const draftKey = draftChange ? productConfigRuntimeChangeKey(draftChange) : "";
+  const draftEmpty =
+    !draftChange ||
+    (!Object.keys(draftChange.runtime_settings).length &&
+      !draftChange.retired_provider_keys.length);
+  const planMatchesDraft = Boolean(planResult && draftKey && plannedDraftKey === draftKey);
+
+  function draftEdited() {
+    setLocalError("");
+    setPlanResult(null);
+    setConfirmed(false);
+  }
   const operationBusy = isOperationBusy(planOperation.state) || isOperationBusy(applyOperation.state);
   const draftLocked = productConfigDraftLocked(planOperation.state, applyOperation.state);
 
@@ -88,8 +112,12 @@ export function RuntimeSettingsChangePanel({
       setLocalError("Enter a reason before running the dry-run.");
       return;
     }
-    if (!selectedKeys.length) {
-      setLocalError("Select at least one runtime setting.");
+    if (!draftChange) {
+      setLocalError(draftError);
+      return;
+    }
+    if (draftEmpty) {
+      setLocalError("Select, add, or retire at least one runtime setting.");
       return;
     }
     if (applyOperation.state.requiresIdempotencyContinuity) {
@@ -101,14 +129,11 @@ export function RuntimeSettingsChangePanel({
     setPlanResult(null);
     setPlannedDraftKey("");
     setConfirmed(false);
-    const runtimeSettings = Object.fromEntries(
-      selectedKeys.map((key) => [key, values[key] ?? ""]),
-    );
     const response = await planOperation.run({
       schema_version: 1,
       mode: "dry-run",
       reason: reason.trim(),
-      runtime_settings: runtimeSettings,
+      ...draftChange,
     });
     if (response) {
       setPlanResult(response);
@@ -118,7 +143,7 @@ export function RuntimeSettingsChangePanel({
 
   async function applyChanges() {
     setLocalError("");
-    if (!planMatchesDraft) {
+    if (!planMatchesDraft || !draftChange) {
       setLocalError("Runtime settings changed after the dry-run. Run a new dry-run first.");
       return;
     }
@@ -130,16 +155,13 @@ export function RuntimeSettingsChangePanel({
       setLocalError("Confirm the reviewed scope and consequences before apply.");
       return;
     }
-    const runtimeSettings = Object.fromEntries(
-      selectedKeys.map((key) => [key, values[key] ?? ""]),
-    );
     setApplyResult(null);
     const response = await applyOperation.run({
       schema_version: 1,
       mode: "apply",
       reason: reason.trim(),
       confirmation: availability.apply.confirmation_text,
-      runtime_settings: runtimeSettings,
+      ...draftChange,
     });
     if (response) {
       setApplyResult(response);
@@ -155,6 +177,8 @@ export function RuntimeSettingsChangePanel({
     }
     setSelectedKeys([]);
     setValues({});
+    setSiteSettings([]);
+    setRetiredKeysText("");
     setReason("");
     setLocalError("");
     setPlanResult(null);
@@ -166,7 +190,7 @@ export function RuntimeSettingsChangePanel({
   return (
     <ProductConfigPanel
       availability={availability}
-      description="Select only the declared keys you intend to change. Existing values stay server-side and are never loaded into this form."
+      description="Change declared keys, record the site's own settings, or retire provider keys. Existing values stay server-side and are never loaded into this form."
       icon={<ClipboardCheck />}
       title="Plan runtime setting changes"
     >
@@ -199,15 +223,40 @@ export function RuntimeSettingsChangePanel({
             />
           ))}
         </div>
+        <SiteSettingsInput
+          settings={siteSettings}
+          onChange={(settings) => {
+            draftEdited();
+            setSiteSettings(settings);
+          }}
+        />
+        <label className="product-config-reason">
+          Provider keys to retire
+          <textarea
+            autoComplete="off"
+            onChange={(event) => {
+              draftEdited();
+              setRetiredKeysText(event.target.value);
+            }}
+            placeholder="One key per line"
+            rows={3}
+            value={retiredKeysText}
+          />
+          <small>
+            Retired keys are removed from the provider at the next deploy. Declared and driver
+            settings cannot be retired.
+          </small>
+        </label>
         <ReasonField reason={reason} onChange={setReason} />
       </fieldset>
       <OperationNotice state={planOperation.state} label="Dry-run" />
       <OperationNotice state={applyOperation.state} label="Apply" />
       {localError ? <InlineFormError message={localError} /> : null}
+      {!localError && draftError ? <InlineFormError message={draftError} /> : null}
       <div className="product-config-actions">
         <button
           className="button"
-          disabled={!availability.plan.enabled || draftLocked || !selectedKeys.length}
+          disabled={!availability.plan.enabled || draftLocked || draftEmpty}
           onClick={() => void planChanges()}
           type="button"
         >
@@ -621,6 +670,70 @@ function RuntimeSettingInput({
   );
 }
 
+function SiteSettingsInput({
+  onChange,
+  settings,
+}: {
+  onChange: (settings: SiteSettingDraft[]) => void;
+  settings: SiteSettingDraft[];
+}) {
+  function update(index: number, change: Partial<SiteSettingDraft>) {
+    onChange(settings.map((setting, position) => (position === index ? { ...setting, ...change } : setting)));
+  }
+  return (
+    <>
+      {settings.length ? (
+        <div className="product-config-fields">
+          {settings.map((setting, index) => (
+            <div className="product-config-field" data-selected={true} key={index}>
+              <label htmlFor={`site-setting-${index}-key`}>
+                Setting name
+                <input
+                  autoComplete="off"
+                  id={`site-setting-${index}-key`}
+                  onChange={(event) => update(index, { key: event.target.value })}
+                  placeholder="SETTING_NAME"
+                  type="text"
+                  value={setting.key}
+                />
+              </label>
+              <label htmlFor={`site-setting-${index}-value`}>
+                Setting value
+                <input
+                  autoComplete="off"
+                  id={`site-setting-${index}-value`}
+                  onChange={(event) => update(index, { value: event.target.value })}
+                  placeholder="A plain setting, not a credential"
+                  type="text"
+                  value={setting.value}
+                />
+              </label>
+              <button
+                aria-label={`Remove ${setting.key || "this setting"}`}
+                className="button"
+                onClick={() => onChange(settings.filter((_, position) => position !== index))}
+                type="button"
+              >
+                <X />
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <div className="product-config-actions">
+        <button
+          className="button"
+          onClick={() => onChange([...settings, { key: "", value: "" }])}
+          type="button"
+        >
+          <Plus />
+          Add a site setting
+        </button>
+      </div>
+    </>
+  );
+}
+
 function ManagedSecretInput({
   inputRef,
   onSelected,
@@ -799,6 +912,10 @@ function ProductConfigEvidence({
 }) {
   const result = response.result;
   const changedKeys = result.runtime_environment.changed_keys;
+  const retiredBefore = new Set(result.runtime_environment.retired_provider_keys_before ?? []);
+  const newlyRetiredKeys = (result.runtime_environment.retired_provider_keys_after ?? []).filter(
+    (key) => !retiredBefore.has(key),
+  );
   return (
     <section className="product-config-evidence" aria-label={label}>
       <header>
@@ -821,6 +938,12 @@ function ProductConfigEvidence({
         <div className="evidence-key-list">
           <strong>Changed runtime keys</strong>
           <ul>{changedKeys.map((key) => <li key={key}><code>{key}</code></li>)}</ul>
+        </div>
+      ) : null}
+      {newlyRetiredKeys.length ? (
+        <div className="evidence-key-list">
+          <strong>Provider keys retired</strong>
+          <ul>{newlyRetiredKeys.map((key) => <li key={key}><code>{key}</code></li>)}</ul>
         </div>
       ) : null}
       {result.secrets.length ? (

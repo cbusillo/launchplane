@@ -10,6 +10,11 @@ RuntimeEnvironmentClass = Literal["prod", "testing", "preview", "dev", "unknown"
 RuntimeSecretClass = Literal["prod_only", "testing", "preview", "non_prod", "shared_safe"]
 RuntimeKeySafetyStatus = Literal["pass", "fail"]
 RuntimeKeySafetyPolicyStatus = Literal["active", "superseded"]
+# How an evaluation treats a production integration key declared shared_safe on a
+# non-production lane with no recorded sharing reason. Writes refuse it; deploy
+# and read-back paths report it, so keys bound before reasons existed keep working
+# for one release (launchplane#2768).
+UnreasonedSharedIntegrationKeyMode = Literal["refuse", "report"]
 RuntimeKeySafetyFindingCode = Literal[
     "ambiguous_binding",
     "binding_disabled",
@@ -17,6 +22,7 @@ RuntimeKeySafetyFindingCode = Literal[
     "context_not_allowed",
     "instance_not_allowed",
     "secret_class_not_allowed",
+    "sharing_reason_missing",
     "unclassified_binding",
     "unknown_environment_class",
 ]
@@ -186,6 +192,8 @@ class RuntimeKeySafetyEvaluation(BaseModel):
     target: RuntimeKeySafetyTarget
     checked_binding_keys: tuple[str, ...]
     findings: tuple[RuntimeKeySafetyFinding, ...] = ()
+    # Findings reported without failing the evaluation.
+    reported: tuple[RuntimeKeySafetyFinding, ...] = ()
 
     @model_validator(mode="after")
     def _validate_evaluation(self) -> "RuntimeKeySafetyEvaluation":

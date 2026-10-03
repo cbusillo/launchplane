@@ -3,7 +3,7 @@
 Status: issue #2605. The receiver, the reconciler, its acting on testing and
 previews, and the staff-testing hold on the testing lane are built. Its pull
 request feedback is built (#2659). Generic-web testing lanes deploy from the
-reconciler too (#2742); generic-web previews do not yet (#2740). Depends on
+reconciler too (#2742), and so do generic-web previews (#2740). Depends on
 [artifact provenance](artifact-provenance.md).
 
 A product repository never calls Launchplane. Launchplane hears GitHub's
@@ -117,11 +117,26 @@ reservation. The webhook request never waits on a deploy.
   - Read the PR state again after taking the preview's reservation and just
     before the provider apply; if it closed or moved its head, the reservation is released with no provider effect and the
     reconcile runs again.
-  - The apply or destroy issues the same service plan as the preview inputs
-    route and runs it through `run_odoo_preview_apply_operation`, under
+  - **Odoo:** the apply or destroy issues the same service plan as the preview
+    inputs route and runs it through `run_odoo_preview_apply_operation`, under
     reservation scope `launchplane-reconcile:<product>`. Its key is the PR,
     the verified build's run id and attempt (or `destroy`), and the preview's
     current lifecycle state, so a repeated reconcile replays it.
+  - **Generic-web:** the build is verified with `verify_generic_web_build`
+    (`purpose` `preview`), and the refresh or destroy runs in-process as the
+    generic-web preview refresh and destroy routes do, driver extensions
+    (VeriReel) included. The lease on the PR's reconcile request makes it the
+    only writer; the worker renews that lease every third of its length while
+    the reconcile runs, so a refresh longer than one lease keeps it, and a
+    worker that stops loses it; a refresh that crashed is planned and run again, as a re-run
+    of the product's old preview workflow was. The refresh waits until the
+    preview's health endpoint reports the expected build, and the reconcile
+    then records that as the generation's verification, so the preview serves
+    it. A generation without that record serves nothing, so a refresh the
+    worker stopped in the middle of runs again. A build run whose refresh failed
+    is not retried until the PR has a new build run (a push, or a re-run of its
+    Build workflow). Driver and provider text goes to the worker log only; the
+    plan and the PR comment carry statuses.
 
 Each target keeps one reconcile request with its state, attempt count, last
 plan and last error. `GET /v1/product-profiles/{product}/reconcile-requests`
@@ -274,3 +289,9 @@ The site's `odoo-preview.yml`, `odoo-testing-deploy.yml`,
 Also the profile's stored `repository_id` and `repository_owner_id` copies and
 `POST /v1/product-profiles/repository-identity/apply`, now that the repository
 inventory is read directly.
+
+For SellYourOutboard and VeriReel (#2740): each repository's
+`launchplane-preview.yml` and `launchplane-preview-notice.yml`, replaced by its
+own `.github/workflows/build.yml`, then its `preview` label. Product-run preview
+verification went with `launchplane-preview.yml`; Launchplane's own health check
+of the expected build is what marks the preview ready, as for Odoo.

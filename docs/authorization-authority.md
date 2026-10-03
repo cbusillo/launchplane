@@ -648,6 +648,100 @@ administration set retains its own stop-before-removal requirements. Neither
 intent reads denied product data through an alternate route; normal product
 reads use their existing authorization after any approved installation.
 
+### Preparing Agent Product Setup
+
+The Access policy workbench can prepare the closed `agent-product-setup`
+candidate (launchplane#2766). It lets the Director's agent set up named
+products' testing lanes and production backup policy. The agent's helpers dry-run
+each write first; product config and backup authority also bind apply to the
+reviewed digest, while Dokploy target setup relies on its confirmation, reason
+and idempotency key.
+It replaces the earlier "operate" card, which #2750 removed.
+
+For each selected product the isolated `operator.agent-product-setup` managed
+set holds exactly three `local_operators` rules, all for one subject and token
+label and the product's one lane context:
+
+| Rule id | Product | Lane | Actions |
+|---|---|---|---|
+| `<product>.testing-config` | the product | `testing` | `product_config.plan`, `product_config.apply` |
+| `<product>.prod-backup-policy` | the product | `prod` | `production_backup_authority.write` |
+| `<product>.testing-target` | the product | `testing` | `dokploy_target.lane_setup` |
+
+The set deliberately leaves out:
+
+- `product_profile.write`. It also lets the holder override release review,
+  and a production release needs the Client's acceptance. The Director sets the
+  Client and `production_use` in the Client panel.
+- `product_onboarding.apply`. It is checked on product `launchplane` with no
+  product or lane scope, so it would reach every product. Adding the lane record
+  stays with Launchplane's own onboarding workflow.
+- `dokploy_target.setup`. It is checked on product and context `launchplane`,
+  so it reaches every product's Dokploy targets. `dokploy_target.lane_setup` is
+  the lane-scoped alternative (see the Dokploy target setup section in
+  `service-boundary.md`): it is checked on the product that owns the lane's
+  context, creates only that lane's compose in a new provider project and
+  environment, and can't adopt, re-point, replace or prune a target.
+
+Product config applies from a `local_operators` caller, which is how this set
+is used, also refuse (`local_operator_lane_scope_required`) a context that is
+not the named product's alone, and a context- or global-scoped secret written
+through an instance request: those would change what another product or
+another lane, such as production, resolves. Backup authority applies from a
+`local_operators` caller likewise refuse a submitted target revision the
+submitted policy doesn't use, or one another product's active backup policy
+uses; backup targets are global records, so revising one would change another
+product's backup. Referencing a shared target without revising it stays
+allowed. The check runs again inside the locked write against the locked policy
+records, so a concurrent policy change can't slip in between. A `local_operators`
+caller may set a testing hold but not lift one: lifting requests a testing
+reconcile, which can deploy.
+
+What it can reach on a live product: the testing lane's settings and secrets,
+the testing lane's new compose target, and production's backup policy. The
+backup policy is the gate promotions rely on, so its apply is bound to the
+reviewed dry-run digest. It cannot deploy, promote, roll back, run a
+backup, change the Client or release review, or touch another product. Live
+products are therefore listed and accepted.
+
+Preparation uses the same managed `authz_policy_operation.propose` authority and
+fresh immutable-ID administrator checks as the other candidates. The browser
+supplies only the candidate, the add/remove intent, an idempotent source event,
+and, for add, the product identifiers chosen with checkboxes. The server
+validates every selected id again: each must name an existing product profile
+whose lanes share exactly one lowercase context, other than `launchplane`
+(compared case-insensitively), that no other product's lanes or historical
+contexts use; an empty selection is refused; the list is deduplicated and
+sorted. Products and contexts
+are never hard-coded. The selection replaces the products the set already
+covers.
+
+The principal is never supplied by the browser. The server uses the service's
+configured `local_operator` identity (`LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT` and
+`LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL`, active only when the `local_operator`
+token is configured). That is the only identity the service authenticates as a
+`local_operator`, so it is the identity the Director's agent uses. Add refuses
+(`authorization_candidate_principal_unavailable`) when no identity is configured
+or either value contains a glob character. The plan binds the reviewed subject
+and token label; a later configuration change does not rebind it.
+
+Adding again with the same products is already satisfied. A set held by another
+identity, in another principal collection, missing a rule, or with any other
+shape is a conflict that preparation does not adopt or repair. Replay
+recognizes only the exact shape, the configured identity, the same normalized
+product list, and contexts that the product records still confirm as each
+product's own. The review uses the agent wording only when every rule binds the
+service's configured `local_operator` identity and the product records confirm
+every rule's context; any other same-shape proposal gets the generic
+managed-policy review.
+
+Removal proposes an empty fragment for only this set and does not need the
+configured identity. Review names the selected products, what the rules reach,
+and that the access stands until a separately governed removal. Preparation
+creates a plan for review and changes nothing until approval, current-policy
+checks, worker execution, CAS and read-back install it. Installing it is a
+grant, so it is a Director decision.
+
 ### Inspecting Pilot Preparation Inputs
 
 The Agent delivery workbench offers **Check setup prerequisites** when preparing

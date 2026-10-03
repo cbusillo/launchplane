@@ -22,12 +22,14 @@ from control_plane.product_operational_readiness_service import (
 )
 from control_plane.production_backup_authority import (
     ProductionBackupAuthorityConflictError,
+    ProductionBackupAuthorityScopeError,
     ProductionBackupAuthorityWriteEnvelope,
+    lane_bound_target_revision_refusal,
     plan_production_backup_authority_write,
     resolve_production_backup_authority,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
 from tests.support.auth import _identity
 
 
@@ -543,3 +545,70 @@ class ProductionBackupAuthorityProjectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LaneBoundTargetRevisionTests(unittest.TestCase):
+    def test_locked_write_rechecks_the_guard_and_writes_nothing_on_refusal(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{(Path(directory) / 'lp.sqlite3').as_posix()}"
+            )
+            store.ensure_schema()
+            dry = _dry_run_envelope()
+            reviewed = store.apply_production_backup_authority(dry)
+            envelope = ProductionBackupAuthorityWriteEnvelope.model_validate(
+                dry.model_dump(mode="json")
+                | {"mode": "apply", "reviewed_authority_digest": reviewed.authority_digest}
+            )
+            seen: list[int] = []
+
+            def refuse(policy_records: tuple[object, ...]) -> str:
+                seen.append(len(policy_records))
+                return "A submitted target is used by another product's backup policy."
+
+            with self.assertRaises(ProductionBackupAuthorityScopeError):
+                store.compare_and_apply_production_backup_authority(
+                    envelope=envelope,
+                    mutation=DbOnlyMutationRequest(
+                        scope="local-operator:test",
+                        route_path="/v1/production-backup-authority/apply",
+                        idempotency_key="lane-bound-target-refusal",
+                        request_fingerprint="lane-bound-target-refusal",
+                        lease_owner="trace-lane-bound",
+                        response_status_code=200,
+                        response_trace_id="trace-lane-bound",
+                        response_payload={},
+                    ),
+                    response_payload_builder=lambda result: {},
+                    revision_guard=refuse,
+                )
+            self.assertEqual(seen, [0])
+            self.assertEqual(store.list_production_backup_target_records(), ())
+            self.assertEqual(store.list_production_backup_policy_records(), ())
+            store.close()
+
+    def test_refusal_names_foreign_and_shared_targets_only(self) -> None:
+        envelope = _dry_run_envelope()
+        self.assertEqual(
+            lane_bound_target_revision_refusal(policy_records=(), envelope=envelope), ""
+        )
+        other = _policy().model_dump(mode="json")
+        other.update(
+            {
+                "product": "other-product",
+                "context": "other-product",
+                "record_id": "",
+                "policy_id": "",
+                "policy_digest": "",
+            }
+        )
+        other_policy = ProductionBackupPolicyRecord.model_validate(other)
+        self.assertIn(
+            "another product",
+            lane_bound_target_revision_refusal(policy_records=(other_policy,), envelope=envelope),
+        )
+        no_targets = envelope.model_copy(update={"targets": ()})
+        self.assertEqual(
+            lane_bound_target_revision_refusal(policy_records=(other_policy,), envelope=no_targets),
+            "",
+        )

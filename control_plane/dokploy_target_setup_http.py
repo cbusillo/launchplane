@@ -283,6 +283,7 @@ def execute_dokploy_target_setup(
     control_plane_root_path: Path,
     record_store: PostgresRecordStore,
     request: DokployTargetSetupEnvelope,
+    required_context_owner: tuple[str, str] | None = None,
 ) -> dict[str, object]:
     apply_changes = request.mode == "apply"
     ensure_dokploy_target_setup_context_is_not_historical(
@@ -408,6 +409,7 @@ def execute_dokploy_target_setup(
             apply=apply_changes,
             mutate_provider=mutate_dokploy_payload_for_target_setup,
             fetch_target_payload=fetch_dokploy_target_payload_for_setup,
+            required_context_owner=required_context_owner,
         )
     route_domain_ids = (
         list(result.route_domain_ids)
