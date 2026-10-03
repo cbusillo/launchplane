@@ -349,7 +349,10 @@ from control_plane.merge_admission import (
     require_merge_admission_record_store,
 )
 from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator
-from control_plane.merge_train_branch_refresh import optional_merge_train_branch_refresh_store
+from control_plane.merge_train_branch_refresh import (
+    optional_merge_train_branch_refresh_store,
+    require_merge_train_client_review_read_store,
+)
 from control_plane.governance_projection import LiveGovernanceCurrentReadinessProvider
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerAdoptionRejectedError,
@@ -5977,7 +5980,10 @@ def create_launchplane_fastapi_app(
                 record_store
             )
             controller_state_store = require_merge_train_controller_state_record_store(record_store)
-        except TypeError as error:
+            review_store = require_merge_train_client_review_read_store(
+                record_store, route="Merge train batch candidate"
+            )
+        except (TypeError, MergeAdmissionDeniedError) as error:
             raise _launchplane_http_error(
                 status_code=503,
                 trace_id=trace_id,
@@ -6017,6 +6023,7 @@ def create_launchplane_fastapi_app(
                     recorded_at=lease.record.updated_at,
                     batch_store=batch_store,
                     stack_collapse_store=stack_collapse_store,
+                    review_store=review_store,
                     mutation_checkpoint=checkpoint_candidate_mutation,
                 )
                 response = accepted_evidence_response(
@@ -10937,12 +10944,15 @@ def create_launchplane_fastapi_app(
             )
         try:
             run_record_store = require_merge_train_run_record_store(record_store)
+            review_store = require_merge_train_client_review_read_store(
+                record_store, route="Merge train run-once"
+            )
             controller_state_store = (
                 require_merge_train_controller_state_record_store(record_store)
                 if merge_train_request.mutate
                 else None
             )
-        except TypeError as error:
+        except (TypeError, MergeAdmissionDeniedError) as error:
             raise _launchplane_http_error(
                 status_code=503,
                 trace_id=trace_id,
@@ -10977,6 +10987,7 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 recorded_at=utc_now_timestamp(),
                 run_record_store=run_record_store,
+                review_store=review_store,
                 controller_state_store=controller_state_store,
                 before_release=store_run_once_idempotency_before_release,
             )

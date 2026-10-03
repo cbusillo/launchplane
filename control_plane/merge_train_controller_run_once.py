@@ -71,7 +71,7 @@ from control_plane.merge_train_batch_landing import (
 from control_plane.merge_train_branch_refresh import (
     MergeTrainBranchRefreshWriteStore,
     merge_train_branch_refresh_recorder,
-    optional_merge_train_branch_refresh_read_store,
+    require_merge_train_client_review_read_store,
 )
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
@@ -352,14 +352,9 @@ def execute_merge_train_controller_run_once(
         token=token,
         api_base_url=request.github_api_base_url,
     )
-    review_store = optional_merge_train_branch_refresh_read_store(
-        branch_refresh_store or candidate_store
+    review_store = require_merge_train_client_review_read_store(
+        branch_refresh_store or candidate_store, route="Controller"
     )
-    if not callable(getattr(review_store, "list_product_profile_records", None)):
-        raise MergeAdmissionDeniedError(
-            "Controller requires a readable Client-review profile store.",
-            reason_code="client_review_profiles_unavailable",
-        )
     github_client = GitHubMergeTrainClient(
         transport=transport,
         effect_executor=effect_executor,

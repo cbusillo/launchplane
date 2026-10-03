@@ -30,8 +30,7 @@ from control_plane.merge_admission import (
     MergeAdmissionEvaluator,
     MergeAdmissionRecordStore,
 )
-from control_plane.merge_train_branch_refresh import optional_merge_train_branch_refresh_read_store
-from control_plane.merge_admission import MergeAdmissionDeniedError
+from control_plane.merge_train_branch_refresh import require_merge_train_client_review_read_store
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     MergeTrainGitHubError,
@@ -291,12 +290,9 @@ def _execute_land_mode(
     candidate_record = latest_merge_train_batch_candidate_progress_record(candidate_matches)
     if candidate_record is None:
         raise ValueError("merge train landing requires its exact active candidate record")
-    review_store = optional_merge_train_branch_refresh_read_store(candidate_store)
-    if not callable(getattr(review_store, "list_product_profile_records", None)):
-        raise MergeAdmissionDeniedError(
-            "Batch landing requires a readable Client-review profile store.",
-            reason_code="client_review_profiles_unavailable",
-        )
+    review_store = require_merge_train_client_review_read_store(
+        candidate_store, route="Batch landing"
+    )
     github_client = GitHubMergeTrainClient(
         transport=UrllibMergeTrainGitHubTransport(
             token=token,
