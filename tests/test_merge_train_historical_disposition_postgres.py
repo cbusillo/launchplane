@@ -1014,10 +1014,6 @@ class NativeHistoricalDispositionPostgresTests(unittest.TestCase):
                 store.close()
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class HistoricalFollowupFixtureTests(unittest.TestCase):
     def test_followup_orders_after_the_successor_even_past_the_old_fixture_date(self) -> None:
         with TemporaryDirectory() as directory:
@@ -1028,7 +1024,13 @@ class HistoricalFollowupFixtureTests(unittest.TestCase):
                     successor_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
                     candidate_time = datetime.fromisoformat(candidate.updated_at)
                     landing_time = datetime.fromisoformat(landing.updated_at)
+                    self.assertGreater(candidate.updated_at, timestamp)
+                    self.assertGreater(landing.updated_at, candidate.updated_at)
                     self.assertGreater(candidate_time, successor_time)
                     self.assertGreater(landing_time, candidate_time)
                     self.assertEqual(candidate.candidate.updated_at, candidate.updated_at)
                     self.assertEqual(landing.landing_plan.created_at, landing.updated_at)
+
+
+if __name__ == "__main__":
+    unittest.main()
