@@ -89,6 +89,7 @@ from tests.http_app_test_support import (
     _write_recent_operations_records,
     _write_secret_status_records,
 )
+from tests.support.openapi import openapi_document, openapi_response
 from tests.support.http import get as http_get
 from tests.support.http import request as http_request
 from tests.support.operational_records import (
@@ -315,13 +316,7 @@ class FastApiDeploymentPromotionReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("read_promotion_record", payload["error"]["message"])
 
     async def test_openapi_includes_deployment_and_promotion_read_contracts(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=_record_read_policy(action="deployment.read", context="example-site"),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         openapi = response.json()
@@ -448,13 +443,7 @@ class FastApiEnvironmentInventoryReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("read_environment_inventory", payload["error"]["message"])
 
     async def test_openapi_includes_inventory_read_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=_record_read_policy(action="inventory.read", context="example-site"),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         openapi = response.json()
@@ -563,13 +552,7 @@ class FastApiRecentOperationsReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("list_environment_inventory", payload["error"]["message"])
 
     async def test_openapi_includes_recent_operations_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=_record_read_policy(action="operations.read", context="example-site"),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         openapi = response.json()
@@ -873,13 +856,7 @@ class FastApiSecretStatusReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"]["code"], "not_found")
 
     async def test_openapi_includes_secret_status_contracts(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=_record_read_policy(action="secret.list", context="example-site"),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         openapi = response.json()
@@ -1110,13 +1087,7 @@ class FastApiBackupGateEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"]["code"], "idempotency_key_reused")
 
     async def test_openapi_includes_backup_gate_evidence_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_backup_gate_write_identity()),
-            authz_policy=_backup_gate_write_policy(context="example-site"),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         openapi = response.json()
@@ -1412,13 +1383,7 @@ class FastApiPublicIngressMonitorTests(unittest.IsolatedAsyncioTestCase):
         run_monitor.assert_not_called()
 
     async def test_openapi_includes_public_ingress_monitor_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_public_ingress_monitor_identity()),
-            authz_policy=_public_ingress_monitor_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         openapi = response.json()
@@ -1779,13 +1744,7 @@ class FastApiPromotionEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"]["code"], "idempotency_key_reused")
 
     async def test_openapi_includes_promotion_evidence_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_promotion_write_identity()),
-            authz_policy=_promotion_write_policy(context="example-site"),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         openapi = response.json()
@@ -2092,13 +2051,7 @@ class FastApiPreviewGenerationEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(preview_count, 1)
 
     async def test_openapi_includes_preview_generation_evidence_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_preview_generation_write_identity()),
-            authz_policy=_preview_generation_write_policy(context="example-site"),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         openapi = response.json()
@@ -2378,13 +2331,7 @@ class FastApiPreviewDestroyedEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(preview_count, 1)
 
     async def test_openapi_includes_preview_destroyed_evidence_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_preview_destroyed_write_identity()),
-            authz_policy=_preview_destroyed_write_policy(context="example-site"),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         openapi = response.json()
@@ -2736,13 +2683,7 @@ class FastApiRunnerHostHygieneAuditReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "invalid_query")
 
     def test_openapi_includes_runner_host_hygiene_audit_read_contracts(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
-            authz_policy=_runner_host_hygiene_audit_read_policy(),
-            record_store_factory=object,
-        )
-
-        openapi = app.openapi()
+        openapi = openapi_document()
 
         list_route = openapi["paths"]["/v1/evidence/runner-host-hygiene/audits"]["get"]
         self.assertEqual(list_route["operationId"], "list_runner_host_hygiene_audit_records")
@@ -3020,13 +2961,7 @@ class FastApiRunnerHostHygieneAuditEvidenceTests(unittest.IsolatedAsyncioTestCas
     async def test_openapi_includes_runner_host_hygiene_audit_evidence_contract(
         self,
     ) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
-            authz_policy=_runner_host_hygiene_audit_write_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         openapi = response.json()
@@ -3316,13 +3251,7 @@ class FastApiRunnerLaneRegistrationAuditEvidenceTests(unittest.IsolatedAsyncioTe
     async def test_openapi_includes_runner_lane_registration_audit_evidence_contract(
         self,
     ) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_runner_lane_registration_audit_write_identity()),
-            authz_policy=_runner_lane_registration_audit_write_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         openapi = response.json()
@@ -3945,13 +3874,7 @@ class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"]["code"], "idempotency_key_reused")
 
     async def test_openapi_includes_deployment_evidence_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_deployment_write_identity()),
-            authz_policy=_deployment_write_policy(context="example-site"),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         openapi = response.json()
