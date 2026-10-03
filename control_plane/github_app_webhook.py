@@ -198,7 +198,10 @@ def _target_shapes(
             )
             return tuple(("preview", number) for number in numbers if number is not None)
         return ()
-    if event_name == "pull_request" and action in _PREVIEW_PULL_REQUEST_ACTIONS:
+    retargeted = action == "edited" and _mapping(_mapping(payload, "changes"), "base") is not None
+    if event_name == "pull_request" and (action in _PREVIEW_PULL_REQUEST_ACTIONS or retargeted):
+        # A retarget adds no commit, so only this event says again whether an
+        # acceptance carried on the old base still applies.
         number = _positive_int(payload, "number")
         return (("preview", number),) if number is not None else ()
     return ()

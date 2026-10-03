@@ -22,9 +22,10 @@ again:
 - a completed `workflow_run` of the product's `.github/workflows/build.yml`
   from a `push`: the product's **testing** target;
 - a completed build from a `pull_request`, or a PR opened, reopened,
-  synchronized, labeled, unlabeled or closed: that PR's **preview** target.
-  Label events only matter for the Client mention below; no label creates or
-  removes a preview.
+  synchronized, labeled, unlabeled, closed or retargeted to another base: that
+  PR's **preview** target. Label events only matter for the Client mention
+  below, and a retarget only re-checks an acceptance carried on the old base;
+  neither creates or removes a preview.
 
 Launchplane re-reads every fact it acts on through the GitHub API with the
 product's read-only build-provenance token (`verify_build_artifact`). A
