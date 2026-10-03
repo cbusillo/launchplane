@@ -467,8 +467,8 @@ class OrdinaryLandingControllerTests(unittest.TestCase):
         )
         with patch(
             "control_plane.merge_train_controller_run_once."
-            "latest_merge_train_stack_collapse_plan_record_for_completed_landing",
-            return_value=collapse_record,
+            "stack_collapse_records_for_completed_landing",
+            return_value=(collapse_record,),
         ):
             with self.assertRaisesRegex(MergeTrainControllerRequestError, "stack collapse"):
                 _finish_landed_merge_train_batch(

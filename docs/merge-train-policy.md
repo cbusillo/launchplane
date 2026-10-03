@@ -955,7 +955,20 @@ Controller actions have these retry/stop semantics:
   or keeps its head when joining a multi-PR merge batch, a root
   with failed checks or conflicts reports `block`, and a root that left the
   queue lets the other ready pull requests proceed. A refreshed root still
-  disposes of its stack's children when it lands.
+  disposes of its stack's children when it lands. A mutating pass retires all
+  progress records of an inapplicable wait when the root head changes or the
+  root leaves the open snapshot, recording the reason in the record source.
+  Dry runs leave records unchanged. A root that returns at its collapsed head
+  can resume its retired wait when its visible children still have the stored
+  heads. A root waiting on checks or ready for admission then skips another
+  collapse; other states continue through ordinary queue handling. Retirement preserves the collapse history:
+  landing reconciles every collapsed root whose landed head equals or descends
+  from its collapsed head, including retired waits. If a root was collapsed
+  again, its newest applicable plan supplies the current child-head expectations.
+  Each stack and child has
+  its own persisted checkpoint, so an interruption resumes unfinished children
+  without repeating completed stacks. The response's singular fields report
+  the newest plan; all reconciled plans remain in the stored collapse history.
 - `admit_collapsed_root`: The collapsed root PR is ready to enter the batch
   candidate path. Mutate once, then call again.
 - `stack_unsupported`: A stack exists but is not a supported same-repo linear
