@@ -248,14 +248,10 @@ def plan_product_config_authority_bundle(
                 reference=product_secret_copy.ProductSecretCopyFrom.model_validate(
                     secret["copy_from"]
                 ),
+                authorizer=secret_copy_source_authorizer,
             )
         except product_secret_copy.ProductSecretCopyError as error:
-            raise ProductConfigError(str(error), code="secret_copy_refused") from error
-        if secret_copy_source_authorizer is not None and not secret_copy_source_authorizer(record):
-            raise ProductConfigError(
-                "The caller cannot read the resolved secret copy source.",
-                code="authorization_denied",
-            )
+            raise ProductConfigError(str(error), code=error.code) from error
         if copy_profile is not None and profile != copy_profile:
             raise ProductConfigError("Product changed during secret copy planning.")
         copy_profile = profile
@@ -327,7 +323,7 @@ def plan_product_config_authority_bundle(
                     else str(secret["value"])
                 )
             except product_secret_copy.ProductSecretCopyError as error:
-                raise ProductConfigError(str(error), code="secret_copy_refused") from error
+                raise ProductConfigError(str(error), code=error.code) from error
             secret_plan = _plan_product_config_secret_write(
                 record_store=record_store,
                 scope=cast(SecretScope, str(secret["scope"])),

@@ -679,16 +679,18 @@ reason and evidence, in addition to normal runtime key safety. The caller needs
 existing `secret.read` access to the resolved source record's scope (whole
 context for a site-shared source, exact instance for a lane source) and
 destination product-config access; the route creates no grant. The resolved
-scope is authorized before decryption. Launchplane does not verify token permissions: a
-person verifies them and records who, when and what they checked.
+scope is authorized before decryption. Launchplane does not verify token
+permissions: a person verifies them and records who, when and what they checked.
 
 Use the normal product-config dry run first, then apply the same reviewed
 request with its idempotency key. The source version ID pins the review; a
 rotation requires reading metadata and reviewing a fresh request. Dry runs
 resolve metadata without decrypting. Apply decrypts inside the service and
 writes a separately encrypted destination secret atomically, leaving the source
-unchanged. Product ownership, profile and source record/binding changes before
-commit abort the copy. The audit records the source secret and version IDs.
+unchanged. Product ownership and source record/binding changes before commit
+abort the copy. The database-backed service also aborts if the product profile changes;
+filesystem rehearsal bundles do not fence other profile-field changes. The
+audit records the source secret and version IDs.
 Completed retries replay before resolving or decrypting the source. Request,
 response and audit metadata contain no secret value; subsequent live runtime
 sync or deployment remains a separate operation.

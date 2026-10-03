@@ -271,6 +271,12 @@ def product_config_service_error(
     error_code = error.code
     error_message = "Product config request failed validation."
     status_code = 400
+    if error_code == "secret_copy_refused":
+        # Copy planning emits fixed messages with no caller input or secret data.
+        error_message = str(error)
+    if error_code == "secret_copy_source_changed":
+        status_code = 409
+        error_message = "The secret copy source changed. Read metadata and review a fresh dry-run."
     if error_code == "authorization_denied":
         status_code = 403
         error_message = "The caller cannot read the resolved secret copy source."

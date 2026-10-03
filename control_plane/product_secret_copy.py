@@ -1,6 +1,6 @@
 """Product-owned runtime secret references and metadata, never plaintext reads."""
 
-from typing import Protocol
+from typing import Callable, Protocol
 
 import click
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -37,6 +37,10 @@ class ProductSecretCopyFrom(BaseModel):
 
 class ProductSecretCopyError(ValueError):
     """A reference is outside the product's store, unavailable, or stale."""
+
+    def __init__(self, message: str, *, code: str = "secret_copy_refused") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class ProductSecretBindingMetadata(BaseModel):
@@ -82,6 +86,7 @@ def resolve_copy_source(
     target_instance: str,
     binding_key: str,
     reference: ProductSecretCopyFrom,
+    authorizer: Callable[[SecretRecord], bool] | None = None,
 ) -> tuple[LaunchplaneProductProfileRecord, SecretBinding, SecretRecord, SecretVersion]:
     profile = require_product_lanes(
         store,
@@ -102,6 +107,11 @@ def resolve_copy_source(
     if len(selected) != 1:
         raise ProductSecretCopyError("Secret copy source is missing or ambiguous.")
     binding, record = selected[0]
+    if authorizer is not None and not authorizer(record):
+        raise ProductSecretCopyError(
+            "The caller cannot read the resolved secret copy source.",
+            code="authorization_denied",
+        )
     if (
         binding.declared_secret_class is not None
         and binding.declared_secret_class
@@ -115,7 +125,10 @@ def resolve_copy_source(
             "Secret copy source class does not allow the destination lane."
         )
     if record.current_version_id != reference.version_id:
-        raise ProductSecretCopyError("Secret copy source changed; read metadata and review again.")
+        raise ProductSecretCopyError(
+            "Secret copy source changed; read metadata and review again.",
+            code="secret_copy_source_changed",
+        )
     try:
         version = store.read_secret_version(reference.version_id)
     except FileNotFoundError as error:
@@ -130,7 +143,8 @@ def copy_source_value(version: SecretVersion) -> str:
         return secrets._decrypt_secret_value(version.ciphertext, version.key_id)
     except click.ClickException as error:
         raise ProductSecretCopyError(
-            "Secret copy source cannot be decrypted by the service."
+            "Secret copy source cannot be decrypted by the service.",
+            code="secret_configuration_required",
         ) from error
 
 

@@ -200,7 +200,12 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
                 response = await self.post(payload)
                 self.assertEqual(
                     response.status_code,
-                    403 if change.get("scope") == "context" else 400,
+                    403
+                    if change.get("scope") == "context"
+                    else 409
+                    if change.get("copy_from")
+                    == {"context": "example-site", "instance": "prod", "version_id": "old-version"}
+                    else 400,
                     response.text,
                 )
                 self.assertFalse(
@@ -220,8 +225,8 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
             source_label="test",
         )
         response = await self.post({**self.payload, "mode": "apply"}, key="stale-copy")
-        self.assertEqual(response.status_code, 400, response.text)
-        self.assertEqual(response.json()["error"]["code"], "secret_copy_refused")
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], "secret_copy_source_changed")
         self.assertFalse(
             any(item.instance == "testing" for item in self.store.list_secret_records())
         )
@@ -387,8 +392,21 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
             "_decrypt_secret_value",
             side_effect=AssertionError("Refused copy must not decrypt"),
         ):
-            denied = await self.post(payload, app=narrow_reader)
-        self.assertEqual(denied.status_code, 403, denied.text)
+            for version_id in (shared.current_version_id, "old-version"):
+                requested = {
+                    **payload,
+                    "secrets": [
+                        {
+                            **payload["secrets"][0],
+                            "copy_from": {
+                                **payload["secrets"][0]["copy_from"],
+                                "version_id": version_id,
+                            },
+                        }
+                    ],
+                }
+                denied = await self.post(requested, app=narrow_reader)
+                self.assertEqual(denied.status_code, 403, denied.text)
         self.assertEqual(denied.json()["error"]["code"], "authorization_denied")
         self.assertEqual((await self.post(payload)).status_code, 202)
         response = await self.post({**payload, "mode": "apply"}, key="shared-source")
@@ -530,3 +548,18 @@ assert secrets._decrypt_secret_value(version.ciphertext, version.key_id) == 'sou
             timeout=20,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    async def test_undecryptable_source_is_a_service_fault_without_destination_writes(self) -> None:
+        with patch.dict(
+            os.environ, {secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "other-test-master-key"}
+        ):
+            dry_run = await self.post()
+            self.assertEqual(dry_run.status_code, 202, dry_run.text)
+            response = await self.post(
+                {**self.payload, "mode": "apply"}, key="unavailable-source-key"
+            )
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["error"]["code"], "secret_configuration_required")
+        self.assertFalse(
+            any(item.instance == "testing" for item in self.store.list_secret_records())
+        )
