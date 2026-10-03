@@ -93,6 +93,7 @@ from control_plane.workflows.odoo_prod_retained_volume_backup_import import (
 )
 from control_plane.workflows.odoo_stable_target_replacement import (
     OdooStableTargetReplacementStore,
+    TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE,
     OdooTargetReplacementStageError,
     execute_odoo_stable_target_replacement_apply,
 )
@@ -1571,7 +1572,15 @@ def _execute_prod_promotion_operation(
         client_release_grant_allows=lambda authorization: client_release_grant_allows(
             record_store, authorization
         ),
-        boundary_effects=frozenset({ODOO_LOGICAL_BACKUP_EFFECT, ODOO_PROD_DEPLOY_EFFECT}),
+        # Authority is read again just before the deploy first writes to the provider,
+        # so a hold or newer decision during plan preparation still stops it.
+        boundary_effects=frozenset(
+            {
+                ODOO_LOGICAL_BACKUP_EFFECT,
+                ODOO_PROD_DEPLOY_EFFECT,
+                TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE,
+            }
+        ),
         run=run,
         terminal=terminal,
     )

@@ -492,6 +492,62 @@ class OdooProdReleaseBoundaryTests(unittest.TestCase):
                 ("validated", "logical_backup_started", "logical_backup_completed"),
             )
 
+    def test_authority_removed_while_the_deploy_prepares_stops_its_first_write(self) -> None:
+        narrowed = _policy_record(
+            LaunchplaneAuthzPolicy.model_validate(
+                {
+                    **_ADMINISTRATOR_POLICY.model_dump(mode="json", exclude_none=True),
+                    "github_humans": [],
+                }
+            ),
+            revision=2,
+        )
+        current_policy = [_policy_record(_ADMINISTRATOR_POLICY)]
+        writes: list[str] = []
+
+        def deploy(**kwargs: object) -> object:
+            checkpoint = cast(Callable[[str], None], kwargs["provider_effect_checkpoint"])
+            current_policy[0] = narrowed
+            checkpoint("target_replacement_raw_source")
+            writes.append("raw_source")
+            raise AssertionError("The deploy must not write after its authority is removed.")
+
+        with TemporaryDirectory() as directory:
+            store = _store(directory)
+            operation = _operation()
+            store.create_odoo_prod_promotion_operation_record_if_no_active_lane(operation)
+            run_module = "control_plane.workflows.odoo_prod_promotion_run."
+            with (
+                patch(
+                    run_module + "admit_odoo_prod_promotion_run",
+                    return_value=OdooProdPromotionOperationHttpTests._admission(),
+                ),
+                patch(
+                    run_module + "execute_odoo_prod_backup_gate",
+                    return_value=OdooProdBackupGateResult(
+                        context="cm",
+                        instance="prod",
+                        backup_record_id="backup-1",
+                        backup_status="pass",
+                    ),
+                ),
+                patch(run_module + "execute_odoo_prod_promotion", side_effect=deploy),
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker."
+                    "read_active_authz_policy_record",
+                    side_effect=lambda _store: current_policy[0],
+                ),
+            ):
+                run_odoo_stable_operation_worker_once(
+                    record_store=cast(object, store),  # type: ignore[arg-type]
+                    control_plane_root_path=Path("."),
+                    lease_owner="worker-a",
+                )
+
+            finished = store.read_odoo_prod_promotion_operation_record(operation.operation_id)
+            self.assertEqual(writes, [])
+            self.assertEqual(finished.error_code, "operation_authorization_administrator_revoked")
+
     def test_worker_rolls_back_to_the_target_fixed_at_enqueue(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(directory)

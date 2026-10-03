@@ -1935,8 +1935,9 @@ backfill or authorization change.
   that queued Odoo prod promotions and rollbacks accept only this grant or a
   Client release grant. A guard
   normally checks once before the first provider effect; a queued promotion
-  re-reads it again before its deploy starts, so a revocation during the logical
-  backup stops the deploy.
+  re-reads it again before its deploy starts and just before the deploy first
+  writes to the provider, so a revocation during the logical backup or the
+  deploy's preparation stops the deploy.
   A reconcile grant has caller identity type `launchplane_reconcile` with the
   fixed subject `launchplane-reconciler` and carries no managed rule or policy
   fields; neither form accepts the other's identity. Only the reconciler builds
