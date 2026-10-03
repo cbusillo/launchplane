@@ -517,6 +517,7 @@ def land_protected_batch(
                 expected_base_ref=plan.base_branch,
                 expected_base_sha=base_sha,
                 expected_base_tree_sha=base_tree_sha,
+                require_client_review=True,
             )
         candidate = client.observe_batch_candidate_checks(
             candidate=admission_guard.candidate_record.candidate
@@ -562,6 +563,7 @@ def land_protected_batch(
                     expected_base_ref=plan.base_branch,
                     expected_base_sha=base_sha,
                     expected_base_tree_sha=base_tree_sha,
+                    require_client_review=True,
                 )
                 if checkpoint is not None:
                     checkpoint(plan, entry, "merge_entry")
@@ -584,6 +586,7 @@ def land_protected_batch(
                     expected_base_ref=plan.base_branch,
                     expected_base_sha=base_sha,
                     expected_base_tree_sha=base_tree_sha,
+                    require_client_review=True,
                 )
             final_batch = _read_batch_pull_request(client, plan)
             if final_batch.get("merged") is True or final_batch.get("state") != "open":

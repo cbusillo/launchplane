@@ -1062,6 +1062,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 expected_base_ref=landing_plan.base_branch,
                 expected_base_sha=current_base_sha,
                 expected_base_tree_sha=current_base_tree_sha,
+                require_client_review=True,
             )
             admission_guard.reconcile_existing_no_effect(
                 entry=entry,
@@ -1540,6 +1541,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         expected_base_ref: str,
         expected_base_sha: str,
         expected_base_tree_sha: str,
+        require_client_review: bool = False,
     ) -> bool:
         pull_request = _json_object(
             self.transport.request(
@@ -1589,7 +1591,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         review_reader = GitHubMergeTrainSnapshotReader(
             transport=self.transport, branch_refresh_store=self._branch_refresh_store
         )
-        if review_reader._owner_review_required(
+        if require_client_review and review_reader._owner_review_required(
             labels=_labels(pull_request.get("labels")), repository=repository_path
         ):
             review_status = _owner_review_status(

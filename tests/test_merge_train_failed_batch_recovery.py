@@ -159,6 +159,62 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             self.assertEqual(result["reason_code"], "unchanged_batch_after_conflict_probe")
             self.assertEqual(len(store.list_merge_train_batch_candidate_records()), 1)
 
+    def test_active_batch_reports_later_review_wait_even_when_that_pr_is_behind(self) -> None:
+        from control_plane.merge_train_controller_run_once import (
+            _reflow_stale_candidate_record,
+            MergeTrainControllerRunOnceEnvelope,
+        )
+
+        snapshot = self.snapshot.model_copy(
+            update={
+                "pull_requests": (
+                    self.snapshot.pull_requests[0],
+                    self.snapshot.pull_requests[1].model_copy(
+                        update={
+                            "owner_review_required": True,
+                            "required_checks_status": "pending",
+                            "branch_update_required": True,
+                        }
+                    ),
+                )
+            }
+        )
+        record = build_merge_train_batch_candidate_record(
+            candidate=self.candidate.model_copy(
+                update={"status": "passed", "required_checks_status": "pass"}
+            ),
+            source="test",
+            updated_at="2026-10-03T12:00:00Z",
+        )
+        client = Mock()
+        client.read_merge_train_snapshot.return_value = snapshot
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            store.write_merge_train_batch_candidate_record(record)
+            result = _reflow_stale_candidate_record(
+                request=MergeTrainControllerRunOnceEnvelope(
+                    repository=snapshot.repository, base_branch=snapshot.base_branch, mutate=True
+                ),
+                policy=self.policy,
+                policy_sha256="policy-digest",
+                repository_policy=self.policy.policies[0],
+                transport=self.provider,
+                github_client=client,
+                candidate_store=store,
+                stack_collapse_store=store,
+                candidate_record=record,
+                trace_id="test",
+                recorded_at="2026-10-03T12:01:00Z",
+                lease=Mock(),
+            )
+            assert result is not None
+            self.assertEqual(result["controller_action"], "wait_for_checks")
+            self.assertEqual(
+                cast(dict[str, Any], result["dry_run_result"])["selected_pr"]["number"], snapshot.pull_requests[1].number
+            )
+            self.assertEqual(store.list_merge_train_batch_candidate_records()[0].status, "active")
+            client.build_batch_candidate.assert_not_called()
+
     def test_standalone_landing_route_requires_and_passes_profile_reader(self) -> None:
         from types import SimpleNamespace
         from control_plane.merge_admission import MergeAdmissionDeniedError

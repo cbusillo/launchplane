@@ -336,6 +336,17 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
             all(value == "batch_not_dispatched" for value in self.guard.outcomes.values())
         )
 
+    def test_unlanded_retirement_proof_does_not_require_client_acceptance(self) -> None:
+        state = {"value": "pending"}
+        self._require_client_review_for_second_member(state)
+        base = self.client.verify_unlanded_batch(
+            landing_plan=self.guard.landing_plan_record.landing_plan
+        )
+        self.assertEqual(base[0], self.provider.base_sha)
+        self.assertFalse(self.provider.merge_calls)
+        with self.assertRaises(MergeAdmissionDeniedError):
+            self.land()
+
     def test_creation_reuses_the_bound_candidate_pr_without_rewriting_sources(self) -> None:
         number = self.client.ensure_batch_pull_request(
             candidate=self.guard.candidate_record.candidate
