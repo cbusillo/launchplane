@@ -33,6 +33,9 @@ export type BrowserOperationPhase =
   | "uncertain"
   | "cancelled";
 
+// "settled" requires route-specific evidence that the same-key request did not commit.
+export type BrowserOperationFailureCertainty = "definitive" | "uncertain" | "settled";
+
 export interface BrowserOperationFailure {
   code: string;
   message: string;
@@ -236,11 +239,11 @@ export function completeBrowserOperation(
 export function failBrowserOperation(
   current: BrowserOperationState,
   failure: BrowserOperationFailure,
-  certainty: "definitive" | "uncertain",
+  certainty: BrowserOperationFailureCertainty,
 ): BrowserOperationState {
   requireActiveOperation(current);
   const remainsUncertain =
-    certainty === "uncertain" || current.requiresIdempotencyContinuity;
+    certainty !== "settled" && (certainty === "uncertain" || current.requiresIdempotencyContinuity);
   return {
     ...current,
     failure,

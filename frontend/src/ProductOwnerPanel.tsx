@@ -2,6 +2,7 @@ import { Eye, LoaderCircle, RotateCcw, Save, UserCheck, UserX } from "lucide-rea
 import { useEffect, useState } from "react";
 
 import { applyProductImageRepository, applyProductProductionUse, applyProductOwner, LaunchplaneApiError, readProductProfile } from "./api";
+import type { BrowserOperationFailureCertainty } from "./browser-operation";
 import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
 import {
   productConfigFailureCertainty,
@@ -386,7 +387,8 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
   }
   const operationOptions = { execute, failureCertainty: productConfigFailureCertainty, failureFor: productConfigOperationFailure };
   const previewOperation = useBrowserOperationController({ ...operationOptions, scope: `${product}:${field}:plan` });
-  const applyOperation = useBrowserOperationController({ ...operationOptions, scope: `${product}:${field}:apply` });
+  const applyOperation = useBrowserOperationController({ ...operationOptions,
+    failureCertainty: profileApplyFailureCertainty, scope: `${product}:${field}:apply` });
   const busy = isOperationBusy(previewOperation.state) || isOperationBusy(applyOperation.state);
   const locked = busy || applyOperation.state.requiresIdempotencyContinuity;
   const matches = reviewed?.key === draftKey;
@@ -487,4 +489,13 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
       </div>
     </section>
   );
+}
+
+function profileApplyFailureCertainty(error: unknown, dispatched: boolean): BrowserOperationFailureCertainty {
+  // Both profile routes check the same-key DB mutation before evaluating staleness.
+  // A committed request replays; an active/unknown reservation never returns stale.
+  if (dispatched && error instanceof LaunchplaneApiError && error.statusCode === 409 && error.code === "stale") {
+    return "settled";
+  }
+  return productConfigFailureCertainty(error, dispatched);
 }

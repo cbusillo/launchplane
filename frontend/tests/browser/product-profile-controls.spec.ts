@@ -30,7 +30,7 @@ for (const field of ["Image repository", "Production use"]) {
 
 // Mock the HTTP boundary, so failures exercise the production API adapter.
 for (const field of ["image", "production"] as const) {
-  for (const outcome of ["uncertain", "stale", "mismatch"] as const) {
+  for (const outcome of ["uncertain", "uncertain-stale", "stale", "mismatch"] as const) {
     test(`${field} Apply handles ${outcome} evidence`, async ({ page }) => {
       await page.goto("/ui/products/atlas-commerce?fixture=products");
       const { products, fixtureIdentity } = await page.evaluate(async () => {
@@ -56,7 +56,10 @@ for (const field of ["image", "production"] as const) {
         const body = route.request().postDataJSON();
         if (body.mode === "apply") {
           requests.push({ body, key: route.request().headers()["idempotency-key"] });
-          if (outcome === "stale") {
+          if (outcome === "uncertain-stale" && requests.length === 1) {
+            await route.abort("failed"); return;
+          }
+          if (outcome === "stale" || outcome === "uncertain-stale") {
             await route.fulfill({ status: 409, json: { trace_id: "stale", error: { code: "stale", message: "Review a new dry run." } } }); return;
           }
           if (outcome !== "mismatch") stored = after;
@@ -76,7 +79,16 @@ for (const field of ["image", "production"] as const) {
       await panel.getByLabel("Change reason").fill("Confirm the reviewed profile change.");
       await panel.getByRole("button", { name: "Dry run", exact: true }).click();
       await panel.getByRole("button", { name: "Apply", exact: true }).click();
-      if (outcome === "stale") {
+      if (outcome === "uncertain-stale") {
+        await expect(panel.getByRole("button", { name: "Retry Apply" })).toBeEnabled();
+        await page.reload();
+        panel = page.getByRole("region", { name: title, exact: true });
+        await panel.getByRole("button", { name: "Retry Apply" }).click();
+        await expect(panel.getByRole("button", { name: "Apply", exact: true })).toBeDisabled();
+        await expect(panel.getByRole("button", { name: "Dry run", exact: true })).toBeEnabled();
+        await expect(panel.getByLabel("Change reason")).toBeEnabled();
+        expect(requests[1]).toEqual(requests[0]);
+      } else if (outcome === "stale") {
         await expect(panel.getByRole("button", { name: "Apply", exact: true })).toBeDisabled();
         await expect(panel.getByRole("button", { name: "Dry run", exact: true })).toBeEnabled();
         await panel.getByRole("button", { name: "Dry run", exact: true }).click();

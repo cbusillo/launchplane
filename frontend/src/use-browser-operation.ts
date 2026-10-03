@@ -13,6 +13,7 @@ import {
   retryBrowserOperation,
   type BrowserOperationEnvelope,
   type BrowserOperationFailure,
+  type BrowserOperationFailureCertainty,
   type BrowserOperationOptions,
   type BrowserOperationState,
 } from "./browser-operation";
@@ -32,7 +33,7 @@ interface BrowserOperationControllerOptions<TPayload, TResponse> {
   failureCertainty: (
     error: unknown,
     dispatched: boolean,
-  ) => "definitive" | "uncertain";
+  ) => BrowserOperationFailureCertainty;
   failureFor: (error: unknown) => BrowserOperationFailure;
   scope: string;
 }
