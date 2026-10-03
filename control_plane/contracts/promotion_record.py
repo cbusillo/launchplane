@@ -1,3 +1,4 @@
+import re
 from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -175,6 +176,49 @@ class RollbackExecutionEvidence(BaseModel):
         return self
 
 
+# An env-key name, such as one a check is about. Names only, never values.
+_FAILURE_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+_FAILURE_KEYS_MAX = 32
+
+
+class RecordFailure(BaseModel):
+    """Why a deploy or promotion failed: a code, Launchplane's fixed description
+    of it, and the env-key names it is about. Never provider, script or
+    exception text."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    description: str
+    keys: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_failure(self) -> "RecordFailure":
+        self.code = self.code.strip()
+        if not self.code:
+            raise ValueError("record failure requires code")
+        names = {key for key in self.keys if _FAILURE_KEY_PATTERN.match(key)}
+        self.keys = tuple(sorted(names))[:_FAILURE_KEYS_MAX]
+        return self
+
+
+# What each generic-web promotion failure code means, in Launchplane's words.
+PROMOTION_FAILURE_DESCRIPTIONS: dict[str, str] = {
+    "source_health_failed": (
+        "The source lane's health check did not pass, so the promotion stopped before deploying."
+    ),
+    "destination_deploy_failed": "Deploying the artifact to the destination lane failed.",
+    "destination_health_failed": (
+        "The destination lane's health check did not pass after the deploy."
+    ),
+}
+
+
+def promotion_failure(code: str) -> RecordFailure:
+    """The promotion failure for ``code``, which must be a described code."""
+    return RecordFailure(code=code, description=PROMOTION_FAILURE_DESCRIPTIONS[code])
+
+
 class PromotionRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -193,6 +237,7 @@ class PromotionRecord(BaseModel):
     destination_health: HealthcheckEvidence = Field(default_factory=HealthcheckEvidence)
     rollback: RollbackExecutionEvidence = Field(default_factory=RollbackExecutionEvidence)
     rollback_health: HealthcheckEvidence = Field(default_factory=HealthcheckEvidence)
+    failure: RecordFailure | None = None
 
     @model_validator(mode="after")
     def _validate_promotion_path(self) -> "PromotionRecord":

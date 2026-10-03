@@ -3813,6 +3813,16 @@
           "destination_health": {
             "$ref": "#/components/schemas/HealthcheckEvidence"
           },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecordFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "instance": {
             "title": "Instance",
             "type": "string"
@@ -3938,6 +3948,16 @@
           "destination_health": {
             "$ref": "#/components/schemas/HealthcheckEvidence"
           },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecordFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "instance": {
             "title": "Instance",
             "type": "string"
@@ -4044,6 +4064,105 @@
           "record"
         ],
         "title": "DeploymentRecordResponse",
+        "type": "object"
+      },
+      "DetachedApplicationRetirementOutcomeView": {
+        "additionalProperties": false,
+        "properties": {
+          "completed_at": {
+            "title": "Completed At",
+            "type": "string"
+          },
+          "error_code": {
+            "title": "Error Code",
+            "type": "string"
+          },
+          "free_text_omitted": {
+            "const": true,
+            "default": true,
+            "title": "Free Text Omitted",
+            "type": "boolean"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "plan_record_id": {
+            "title": "Plan Record Id",
+            "type": "string"
+          },
+          "protected_targets_unchanged": {
+            "title": "Protected Targets Unchanged",
+            "type": "boolean"
+          },
+          "provider_absence_verified": {
+            "title": "Provider Absence Verified",
+            "type": "boolean"
+          },
+          "provider_effect_attempted": {
+            "title": "Provider Effect Attempted",
+            "type": "boolean"
+          },
+          "provider_effect_performed": {
+            "title": "Provider Effect Performed",
+            "type": "boolean"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "recorded_at": {
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "requested_at": {
+            "title": "Requested At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_id",
+          "plan_record_id",
+          "mode",
+          "outcome",
+          "requested_at",
+          "recorded_at",
+          "completed_at",
+          "provider_effect_attempted",
+          "provider_effect_performed",
+          "provider_absence_verified",
+          "error_code",
+          "protected_targets_unchanged"
+        ],
+        "title": "DetachedApplicationRetirementOutcomeView",
+        "type": "object"
+      },
+      "DetachedApplicationRetirementRecordResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "record": {
+            "$ref": "#/components/schemas/DetachedApplicationRetirementOutcomeView"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "record"
+        ],
+        "title": "DetachedApplicationRetirementRecordResponse",
         "type": "object"
       },
       "DetachedApplicationRetirementRequest": {
@@ -23017,6 +23136,62 @@
         "title": "OwnerSecretInputResponse",
         "type": "object"
       },
+      "PathCheckStep": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "fix": {
+            "default": "none",
+            "enum": [
+              "none",
+              "code",
+              "grant",
+              "owner_approval",
+              "client_acceptance",
+              "by_hand",
+              "wait"
+            ],
+            "title": "Fix",
+            "type": "string"
+          },
+          "record_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Record Ids",
+            "type": "array"
+          },
+          "state": {
+            "enum": [
+              "clear",
+              "blocked",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "step_id": {
+            "title": "Step Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "step_id",
+          "state",
+          "code",
+          "description"
+        ],
+        "title": "PathCheckStep",
+        "type": "object"
+      },
       "PostDeployUpdateEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -30664,6 +30839,81 @@
         "title": "ProductOwnerSecretInput",
         "type": "object"
       },
+      "ProductPathCheck": {
+        "additionalProperties": false,
+        "properties": {
+          "blocked_count": {
+            "title": "Blocked Count",
+            "type": "integer"
+          },
+          "path": {
+            "enum": [
+              "testing",
+              "promote"
+            ],
+            "title": "Path",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "clear",
+              "blocked",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/PathCheckStep"
+            },
+            "title": "Steps",
+            "type": "array"
+          },
+          "unknown_count": {
+            "title": "Unknown Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "product",
+          "path",
+          "state",
+          "blocked_count",
+          "unknown_count",
+          "steps"
+        ],
+        "title": "ProductPathCheck",
+        "type": "object"
+      },
+      "ProductPathCheckResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "check": {
+            "$ref": "#/components/schemas/ProductPathCheck"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "check"
+        ],
+        "title": "ProductPathCheckResponse",
+        "type": "object"
+      },
       "ProductPreviewProfile": {
         "additionalProperties": false,
         "properties": {
@@ -32251,6 +32501,125 @@
         "title": "ProductReconcileRequestsResponse",
         "type": "object"
       },
+      "ProductRetirementOutcomeView": {
+        "additionalProperties": false,
+        "properties": {
+          "completed_at": {
+            "title": "Completed At",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "error_code": {
+            "title": "Error Code",
+            "type": "string"
+          },
+          "free_text_omitted": {
+            "const": true,
+            "default": true,
+            "title": "Free Text Omitted",
+            "type": "boolean"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "lifecycle_after": {
+            "title": "Lifecycle After",
+            "type": "string"
+          },
+          "lifecycle_before": {
+            "title": "Lifecycle Before",
+            "type": "string"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "plan_record_id": {
+            "title": "Plan Record Id",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "provider_absence_verified": {
+            "title": "Provider Absence Verified",
+            "type": "boolean"
+          },
+          "provider_effect_attempted": {
+            "title": "Provider Effect Attempted",
+            "type": "boolean"
+          },
+          "provider_effect_performed": {
+            "title": "Provider Effect Performed",
+            "type": "boolean"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "recorded_at": {
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "requested_at": {
+            "title": "Requested At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_id",
+          "plan_record_id",
+          "mode",
+          "outcome",
+          "requested_at",
+          "recorded_at",
+          "completed_at",
+          "provider_effect_attempted",
+          "provider_effect_performed",
+          "provider_absence_verified",
+          "error_code",
+          "product",
+          "context",
+          "instance",
+          "lifecycle_before",
+          "lifecycle_after"
+        ],
+        "title": "ProductRetirementOutcomeView",
+        "type": "object"
+      },
+      "ProductRetirementRecordResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "record": {
+            "$ref": "#/components/schemas/ProductRetirementOutcomeView"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "record"
+        ],
+        "title": "ProductRetirementRecordResponse",
+        "type": "object"
+      },
       "ProductRetirementRequest": {
         "additionalProperties": false,
         "properties": {
@@ -33673,6 +34042,11 @@
             "title": "Error Code",
             "type": "string"
           },
+          "error_description": {
+            "default": "",
+            "title": "Error Description",
+            "type": "string"
+          },
           "evidence": {
             "additionalProperties": {
               "type": "string"
@@ -34155,6 +34529,16 @@
           "destination_health": {
             "$ref": "#/components/schemas/HealthcheckEvidence"
           },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecordFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "from_instance": {
             "title": "From Instance",
             "type": "string"
@@ -34225,6 +34609,16 @@
           },
           "destination_health": {
             "$ref": "#/components/schemas/HealthcheckEvidence"
+          },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecordFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "from_instance": {
             "title": "From Instance",
@@ -35117,6 +35511,34 @@
           "recent_previews"
         ],
         "title": "RecentOperationsResponse",
+        "type": "object"
+      },
+      "RecordFailure": {
+        "additionalProperties": false,
+        "description": "Why a deploy or promotion failed: a code, Launchplane's fixed description\nof it, and the env-key names it is about. Never provider, script or\nexception text.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Keys",
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "description"
+        ],
+        "title": "RecordFailure",
         "type": "object"
       },
       "ReleaseChecklist": {
@@ -49430,6 +49852,108 @@
           }
         },
         "summary": "Plan or apply audited detached Dokploy application retirement"
+      }
+    },
+    "/v1/detached-application-retirements/{record_id}": {
+      "get": {
+        "operationId": "read_detached_application_retirement_record",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "record_id",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Record Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetachedApplicationRetirementRecordResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read one detached application retirement record's structured outcome"
       }
     },
     "/v1/dokploy-targets/inspect": {
@@ -78132,6 +78656,108 @@
         "summary": "Plan or apply audited generic-web product retirement"
       }
     },
+    "/v1/product-retirements/{record_id}": {
+      "get": {
+        "operationId": "read_product_retirement_record",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "record_id",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Record Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductRetirementRecordResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read one product retirement record's structured outcome"
+      }
+    },
     "/v1/product-review": {
       "get": {
         "operationId": "read_product_review",
@@ -81474,6 +82100,111 @@
           }
         },
         "summary": "Read persisted Odoo website bootstrap settings"
+      }
+    },
+    "/v1/products/{product}/path-check": {
+      "get": {
+        "operationId": "read_product_path_check",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "enum": [
+                "testing",
+                "promote"
+              ],
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductPathCheckResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Report every step that stands between the caller and the end of a path"
       }
     },
     "/v1/promotions/{record_id}": {

@@ -10,6 +10,7 @@ from control_plane.contracts.promotion_record import (
     DeploymentEvidence,
     HealthcheckEvidence,
     PostDeployUpdateEvidence,
+    RecordFailure,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 
@@ -89,6 +90,7 @@ class DeploymentRecord(BaseModel):
     post_deploy_update: PostDeployUpdateEvidence = Field(default_factory=PostDeployUpdateEvidence)
     destination_health: HealthcheckEvidence = Field(default_factory=HealthcheckEvidence)
     integration_key_readback: IntegrationKeyReadbackEvidence | None = None
+    failure: RecordFailure | None = None
 
     @model_validator(mode="after")
     def _validate_record(self) -> "DeploymentRecord":

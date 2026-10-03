@@ -33,6 +33,12 @@ without host coordinates, SSH material or raw provider output. Passing evidence
 includes policy revision/digest, target record IDs/digests, snapshot identity,
 PBS archive identity (including guest kind/ID), and timestamps. Host and storage
 coordinates are not exposed.
+A failed operation returns its error code and Launchplane's fixed description of
+it (`error_description`, from
+`control_plane/contracts/production_backup_failures.py`), never the provider's
+message. The read also shows operations an older VeriReel driver path queued
+without a shared-gate binding; those read as `backup_failed`, and only the
+evidence keys the provider writes are returned.
 Partial captures fail and retain the evidence already collected, with a bounded
 error code. The worker persists capture intent and verified progress as it goes;
 lease-expiry recovery retains that evidence and reports an unknown effect rather

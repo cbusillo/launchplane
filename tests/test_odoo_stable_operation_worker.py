@@ -1069,6 +1069,46 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             self.assertEqual(operation.error_message, "provider unavailable")
             self.assertEqual(operation.error_code, "unexpected.runtime_error")
 
+    def test_worker_copies_a_failed_deploy_checks_code_keys_and_description(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_odoo_stable_target_replacement_operation_record(
+                OdooStableTargetReplacementOperationRecord.model_validate(_replacement_payload())
+            )
+            result = OdooStableTargetReplacementApplyResult(
+                product="odoo-tenant-cm",
+                context="cm",
+                instance="testing",
+                strategy="recreate-in-place",
+                deployment_record_id="deployment-cm-testing",
+                deploy_status="fail",
+                error_message="Missing ODOO_DB_HOST on db.internal.",
+                error_code="deploy_blocked.compose_keys_missing",
+                error_detail_keys=("ODOO_DB_HOST",),
+            )
+
+            with patch(
+                "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_stable_target_replacement_apply",
+                return_value=result,
+            ):
+                run_odoo_stable_operation_worker_once(
+                    record_store=store, control_plane_root_path=root, lease_owner="worker-a"
+                )
+
+            operation = store.read_odoo_stable_target_replacement_operation_record(
+                "operation-cm-testing"
+            )
+        self.assertEqual(operation.status, "fail")
+        self.assertEqual(operation.error_code, "deploy_blocked.compose_keys_missing")
+        self.assertEqual(operation.error_detail_keys, ("ODOO_DB_HOST",))
+        self.assertEqual(
+            operation.error_description,
+            "The compose template requires settings that neither the site's records nor the "
+            "target provide.",
+        )
+        self.assertEqual(operation.deployment_record_id, "deployment-cm-testing")
+
     def test_worker_records_the_key_names_a_blocked_plan_names(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
