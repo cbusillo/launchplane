@@ -48,8 +48,10 @@ ODOO_STABLE_TARGET_REPLACEMENT_TERMINAL_OPERATION_STATUSES: frozenset[
 
 
 # An env-key identifier, such as one a Launchplane compose template references.
-# Key names, never values: safe to copy onto product-readable records.
-_ERROR_DETAIL_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+# Key names, never values: safe to copy onto product-readable records. The length
+# matches what a runtime environment record accepts, so override secret names such
+# as ODOO_OVERRIDE_SECRET__CONFIG_PARAM__REPAIRSHOPR__SYNC_DB__PASSWORD are kept.
+_ERROR_DETAIL_KEY_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
 ERROR_DETAIL_KEYS_MAX = 32
 
 

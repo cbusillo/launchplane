@@ -4461,6 +4461,17 @@ class OdooTargetReplacementFailureStageTests(unittest.TestCase):
             self._raise_in_stage(denial)
         self.assertIs(kept.exception, denial)
 
+    def test_stage_error_keeps_long_env_key_names_and_drops_anything_else(self) -> None:
+        long_key = "ODOO_OVERRIDE_SECRET__CONFIG_PARAM__REPAIRSHOPR__SYNC_DB__PASSWORD"
+        longest_key = "K" * 128
+        error = OdooTargetReplacementStageError(
+            "deploy_blocked.runtime_key_safety_refused",
+            "Runtime key-safety gate failed for live target sync.",
+            (long_key, longest_key, "K" * 129, "lower_case", "HOST=db.example.com", ""),
+        )
+
+        self.assertEqual(error.detail_keys, tuple(sorted((long_key, longest_key))))
+
     def test_every_stage_code_has_a_testing_failure_description(self) -> None:
         for code in (
             "plan_build_failed",
