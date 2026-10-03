@@ -413,6 +413,32 @@ class ReleaseGitHubTests(unittest.TestCase):
             "### #1\nCheck cart.\n#### Phone\nSmall screen\n```\n# Example\nopen fence\n```",
         )
 
+    def test_longer_fences_keep_shorter_fences_and_headings_as_example_text(self) -> None:
+        body = (
+            "## Owner test notes\nCheck the menu.\n````md\n```\n## Not a boundary\n```\n"
+            "````\nThen the footer.\n## Other\nLeak"
+        )
+        notes = owner_test_notes(body)
+        self.assertEqual(notes, body.split("\n", 1)[1].rsplit("\n## Other", 1)[0])
+        nested = nest_owner_test_notes("Show:\n~~~~\n~~~\n# Example", min_heading_level=4)
+        self.assertEqual(
+            owner_test_notes(f"## Owner test notes\n{nested}\n## Other\nLeak"),
+            "Show:\n~~~~\n~~~\n# Example\n~~~~",
+        )
+
+    def test_indented_headings_are_boundaries_and_are_demoted(self) -> None:
+        self.assertEqual(
+            owner_test_notes("   ## Owner test notes\nCheck cart.\n ## Other\nLeak"),
+            "Check cart.",
+        )
+        nested = nest_owner_test_notes(
+            "Check cart.\n ## Mobile checkout\nPay.", min_heading_level=4
+        )
+        self.assertEqual(
+            owner_test_notes(f"## Owner test notes\n### #1\n{nested}\n## Other\nLeak"),
+            "### #1\nCheck cart.\n #### Mobile checkout\nPay.",
+        )
+
     def test_incomplete_comparison_fails_closed(self) -> None:
         for comparison in (
             {"status": "diverged", "total_commits": 1, "commits": []},

@@ -10,15 +10,26 @@ from control_plane.contracts.release_review import ReleaseReviewItem
 GitHubRead = Callable[[str], object]
 
 
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_HEADING = re.compile(r"^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
+
+
 def _markdown_lines(body: str) -> Iterator[tuple[str, re.Match[str] | None, str]]:
-    """Yield each line, its heading match outside fenced code, and the open fence."""
+    """Yield each line, its heading match outside fenced code, and the open fence.
+
+    Fences follow CommonMark: three or more backticks or tildes, closed only by
+    the same character repeated at least as many times with nothing after it.
+    """
     fence = ""
     for line in body.splitlines():
-        stripped = line.lstrip()
-        if stripped.startswith(("```", "~~~")):
-            marker = stripped[:3]
-            fence = "" if fence == marker else marker if not fence else fence
-        heading = re.match(r"^(#{1,6})\s+(.+?)\s*#*\s*$", line) if not fence else None
+        fence_match = _FENCE.match(line)
+        if fence_match:
+            marker, rest = fence_match[1], fence_match[2]
+            if not fence and not (marker[0] == "`" and "`" in rest):
+                fence = marker
+            elif fence and marker[0] == fence[0] and len(marker) >= len(fence) and not rest.strip():
+                fence = ""
+        heading = _HEADING.match(line) if not fence else None
         yield line, heading, fence
 
 
@@ -52,7 +63,8 @@ def nest_owner_test_notes(notes: str, *, min_heading_level: int) -> str:
     fence = ""
     for line, heading, fence in _markdown_lines(notes):
         if heading:
-            line = "#" * min(6, len(heading[1]) + shift) + line[len(heading[1]) :]
+            hashes = "#" * min(6, len(heading[1]) + shift)
+            line = line[: heading.start(1)] + hashes + line[heading.end(1) :]
         lines.append(line)
     if fence:
         lines.append(fence)
