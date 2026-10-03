@@ -523,11 +523,10 @@ def read_historical_completion_snapshot(
         stacks = store.list_merge_train_stack_collapse_plan_records(
             repository=repository,
             base_branch=base_branch,
-            status="active",
             root_pull_request_number=entry.pull_request_number,
-            limit=1,
+            limit=None,
         )
-        if stacks:
+        if any(record.status == "active" or "; retired:" in record.source for record in stacks):
             raise HistoricalCompletionAssessmentFailure("unsupported", "stack_batch_unsupported")
     return HistoricalCompletionSnapshot(
         controller=controller, policy=policy, landing=landing, candidate=candidate

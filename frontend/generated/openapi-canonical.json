@@ -32661,6 +32661,7 @@
             "type": "string"
           },
           "expected_target_sha256": {
+            "default": "",
             "title": "Expected Target Sha256",
             "type": "string"
           },
@@ -32676,6 +32677,11 @@
             ],
             "title": "Mode",
             "type": "string"
+          },
+          "no_target": {
+            "default": false,
+            "title": "No Target",
+            "type": "boolean"
           },
           "product": {
             "title": "Product",
@@ -32709,7 +32715,6 @@
         "required": [
           "product",
           "instance",
-          "expected_target_sha256",
           "reason",
           "related_issue"
         ],

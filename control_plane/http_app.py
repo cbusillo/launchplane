@@ -21278,11 +21278,25 @@ def create_launchplane_fastapi_app(
                     )
                 )
             try:
-                observation = control_plane_product_retirement.observe_tracked_dokploy_application(
-                    control_plane_root=resolved_control_plane_root,
-                    target_id=bound.provider_target.target_id,
-                    observed_at=requested_at,
-                )
+                if retirement_request.no_target:
+                    from control_plane.product_retirement_no_target import observe_no_target_absence
+
+                    observation = await asyncio.to_thread(
+                        observe_no_target_absence,
+                        control_plane_root=resolved_control_plane_root,
+                        bound=bound,
+                        observed_at=requested_at,
+                    )
+                else:
+                    if bound.provider_target is None:
+                        raise RuntimeError("Tracked retirement requires a provider target.")
+                    observation = (
+                        control_plane_product_retirement.observe_tracked_dokploy_application(
+                            control_plane_root=resolved_control_plane_root,
+                            target_id=bound.provider_target.target_id,
+                            observed_at=requested_at,
+                        )
+                    )
                 plan = control_plane_product_retirement.build_product_retirement_plan_record(
                     request=retirement_request,
                     identity=actor_identity,
@@ -21334,12 +21348,20 @@ def create_launchplane_fastapi_app(
             route_path=_PRODUCT_RETIREMENT_ROUTE,
             idempotency_key=normalized_key,
             trace_id=trace_id,
-            check_replay=True,
-            request_payload=retirement_request.model_dump(mode="json"),
+            # The durable runner owns no-target replay and uncertain-commit reconciliation.
+            check_replay=not retirement_request.no_target,
+            request_payload=retirement_request.model_dump(
+                mode="json", exclude={"no_target"} if not retirement_request.no_target else set()
+            ),
         )
         if replayed_response is not None:
             return replayed_response
-        adapter = control_plane_product_retirement.DokployProductRetirementAdapter(
+        adapter_type = control_plane_product_retirement.DokployProductRetirementAdapter
+        if retirement_request.no_target:
+            from control_plane.product_retirement_no_target import NoTargetProductRetirementAdapter
+
+            adapter_type = NoTargetProductRetirementAdapter
+        adapter = adapter_type(
             control_plane_root=resolved_control_plane_root,
             record_store=retirement_store,
             request=retirement_request,

@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from fastapi import FastAPI
+from sqlalchemy.exc import OperationalError
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -13,13 +14,26 @@ from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_retirement import (
     ProductRetirementProviderObservation,
+    ProductRetirementRequest,
+    ProductRetirementRecord,
     provider_identifier_sha256,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.dokploy.api import DokployRequestFailed
-from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.product_retirement import build_provider_observation
-from control_plane.service_auth import LaunchplaneAuthzPolicy, LocalOperatorPolicyRule
+from control_plane.http_app import (
+    create_launchplane_fastapi_app,
+    idempotency_request_fingerprint,
+    idempotency_scope,
+)
+from control_plane.product_retirement import BoundProductRetirement, build_provider_observation
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.product_reconcile import ProductReconcileTarget
+from control_plane.product_reconcile import request_product_reconcile_sweep
+from control_plane.service_auth import (
+    LaunchplaneAuthzPolicy,
+    LocalOperatorPolicyRule,
+    LocalOperatorIdentity,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _asgi_request, _local_operator_bearer_config
@@ -98,9 +112,439 @@ def _apply_payload(plan_response: dict[str, object]) -> dict[str, object]:
 
 
 class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
-    def _store(self, root: Path) -> PostgresRecordStore:
+    def _no_target_store(
+        self, root: Path, *, database_url: str = "", previews: bool = True
+    ) -> PostgresRecordStore:
+        store = self._store(root, database_url=database_url)
+        profile = store.read_product_profile_record("example-site")
+        store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "lanes": tuple(lane for lane in profile.lanes if lane.instance == "prod"),
+                    "preview": profile.preview.model_copy(
+                        update={
+                            "enabled": previews,
+                            "context": profile.preview.context if previews else "",
+                        }
+                    ),
+                }
+            )
+        )
+        store.delete_provider_target_record(
+            expected_record=store.read_provider_target_record(
+                context_name="example-site", instance_name="prod"
+            )
+        )
+        store.delete_dokploy_target_id_record(
+            expected_record=store.read_dokploy_target_id_record(
+                context_name="example-site", instance_name="prod"
+            )
+        )
+        if not previews:
+            return store
+        store.write_preview_record(
+            PreviewRecord(
+                preview_id="stale-preview",
+                context="example-site-preview",
+                anchor_repo="example-site",
+                anchor_pr_number=1,
+                anchor_pr_url="https://github.com/every/example-site/pull/1",
+                preview_label="launchplane-preview",
+                canonical_url="https://pr-1.example.invalid",
+                state="failed",
+                created_at=NOW,
+                updated_at=NOW,
+                eligible_at=NOW,
+            )
+        )
+        store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="context",
+                context="example-site-preview",
+                instance="",
+                env={"PREVIEW_BASE_URL": "https://preview.example.invalid"},
+                updated_at=NOW,
+            )
+        )
+        return store
+
+    async def test_no_target_retirement_closes_previews_without_provider_writes_and_replays(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._no_target_store(Path(directory))
+            app = self._app(store, actions=("product_retirement.plan", "product_retirement.apply"))
+            payload = {**_plan_payload(), "no_target": True, "expected_target_sha256": ""}
+            with (
+                patch(
+                    "control_plane.product_retirement_no_target.dokploy_source.read_dokploy_config",
+                    return_value=("https://provider.invalid", "test"),
+                ),
+                patch(
+                    "control_plane.product_retirement_no_target.dokploy_api.search_dokploy_applications",
+                    return_value=(),
+                ) as inventory,
+                patch(
+                    "control_plane.product_retirement.dokploy_api.delete_dokploy_application"
+                ) as delete,
+            ):
+                plan_response = await _asgi_request(
+                    app, "POST", "/v1/product-retirement", headers=self.headers, payload=payload
+                )
+                self.assertEqual(plan_response.status_code, 202, plan_response.text)
+                plan = json.loads(plan_response.text)
+                self.assertEqual(store.read_preview_record("stale-preview").state, "failed")
+                runtime_before = store.list_runtime_environment_records()
+                apply_payload = {
+                    **payload,
+                    "mode": "apply",
+                    "reviewed_plan_record_id": plan["records"]["product_retirement_plan_id"],
+                    "reviewed_plan_sha256": plan["result"]["plan_sha256"],
+                    "confirmation": "retire product example-site instance prod with no target",
+                }
+                with patch.object(
+                    store,
+                    "commit_no_target_retirement",
+                    side_effect=OperationalError(
+                        "fixture statement", {}, RuntimeError("fixture failure")
+                    ),
+                ):
+                    unconfirmed = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=self.headers,
+                        payload=apply_payload,
+                    )
+                self.assertEqual(unconfirmed.status_code, 409, unconfirmed.text)
+                self.assertEqual(store.read_preview_record("stale-preview").state, "failed")
+                self.assertTrue(
+                    any(
+                        record.outcome == "reconcile_required"
+                        for record in store.list_product_retirement_records(product="example-site")
+                    )
+                )
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/product-retirement",
+                    headers=self.headers,
+                    payload=apply_payload,
+                )
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertEqual(
+                    json.loads(response.text)["result"]["closed_preview_ids"], ["stale-preview"]
+                )
+                self.assertTrue(json.loads(response.text)["result"]["provider_absence_verified"])
+                self.assertEqual(store.read_preview_record("stale-preview").state, "destroyed")
+                profile = store.read_product_profile_record("example-site")
+                self.assertEqual(profile.lifecycle_state, "retired")
+                self.assertFalse(profile.preview.enabled)
+                self.assertEqual(store.list_runtime_environment_records(), runtime_before)
+                self.assertEqual(request_product_reconcile_sweep(store, NOW), ())
+                inventory_reads_before_replay = inventory.call_count
+                replay = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/product-retirement",
+                    headers=self.headers,
+                    payload=apply_payload,
+                )
+                self.assertEqual(replay.json()["result"], response.json()["result"])
+                self.assertEqual(replay.json()["records"], response.json()["records"])
+                self.assertEqual(inventory.call_count, inventory_reads_before_replay)
+                delete.assert_not_called()
+            store.close()
+
+    async def test_no_target_committed_connection_error_adopts_terminal_result(self) -> None:
+        for delayed_visibility in (False, True):
+            with (
+                self.subTest(delayed_visibility=delayed_visibility),
+                TemporaryDirectory() as directory,
+            ):
+                store = self._no_target_store(Path(directory))
+                app = self._app(
+                    store, actions=("product_retirement.plan", "product_retirement.apply")
+                )
+                payload = {**_plan_payload(), "no_target": True, "expected_target_sha256": ""}
+                with (
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "test"),
+                    ),
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_api.search_dokploy_applications",
+                        return_value=(),
+                    ) as inventory,
+                ):
+                    plan_response = await _asgi_request(
+                        app, "POST", "/v1/product-retirement", headers=self.headers, payload=payload
+                    )
+                    plan = plan_response.json()
+                    apply_payload = {
+                        **payload,
+                        "mode": "apply",
+                        "reviewed_plan_record_id": plan["records"]["product_retirement_plan_id"],
+                        "reviewed_plan_sha256": plan["result"]["plan_sha256"],
+                        "confirmation": "retire product example-site instance prod with no target",
+                    }
+                    real_commit = store.commit_no_target_retirement
+
+                    def commit_then_disconnect(
+                        *, bound: BoundProductRetirement, terminal: ProductRetirementRecord
+                    ) -> None:
+                        real_commit(bound=bound, terminal=terminal)
+                        raise OperationalError(
+                            "fixture COMMIT", {}, RuntimeError("connection lost")
+                        )
+
+                    with patch.object(
+                        store, "commit_no_target_retirement", side_effect=commit_then_disconnect
+                    ):
+                        unconfirmed = await _asgi_request(
+                            app,
+                            "POST",
+                            "/v1/product-retirement",
+                            headers=self.headers,
+                            payload=apply_payload,
+                        )
+                    self.assertEqual(unconfirmed.status_code, 409, unconfirmed.text)
+                    retired = next(
+                        record
+                        for record in store.list_product_retirement_records(product="example-site")
+                        if record.outcome == "retired"
+                    )
+                    reads_before_retry = inventory.call_count
+                    real_list = store.list_product_retirement_records
+                    first_read = True
+
+                    def visible_records(
+                        *,
+                        product: str = "",
+                        actor: str = "",
+                        mode: str = "",
+                        idempotency_key: str = "",
+                        limit: int | None = None,
+                    ) -> tuple[ProductRetirementRecord, ...]:
+                        nonlocal first_read
+                        records = real_list(
+                            product=product,
+                            actor=actor,
+                            mode=mode,
+                            idempotency_key=idempotency_key,
+                            limit=limit,
+                        )
+                        if delayed_visibility and first_read:
+                            first_read = False
+                            return tuple(
+                                record for record in records if record.outcome != "retired"
+                            )
+                        return records
+
+                    with patch.object(
+                        store, "list_product_retirement_records", side_effect=visible_records
+                    ):
+                        replay = await _asgi_request(
+                            app,
+                            "POST",
+                            "/v1/product-retirement",
+                            headers=self.headers,
+                            payload=apply_payload,
+                        )
+                    self.assertEqual(replay.status_code, 202, replay.text)
+                    self.assertEqual(
+                        replay.json()["records"]["product_retirement_record_id"], retired.record_id
+                    )
+                    self.assertEqual(inventory.call_count, reads_before_retry)
+                    self.assertEqual(
+                        store.read_product_profile_record("example-site").lifecycle_state, "retired"
+                    )
+                store.close()
+
+    async def test_no_target_empty_preview_context_is_not_shared_authority(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._no_target_store(Path(directory), previews=False)
+            profile = store.read_product_profile_record("example-site")
+            store.write_product_profile_record(
+                profile.model_copy(
+                    update={
+                        "product": "another-site",
+                        "repository": "every/another-site",
+                        "lanes": tuple(
+                            lane.model_copy(update={"context": "another-site"})
+                            for lane in profile.lanes
+                        ),
+                    }
+                )
+            )
+            app = self._app(store, actions=("product_retirement.plan", "product_retirement.apply"))
+            payload = {**_plan_payload(), "no_target": True, "expected_target_sha256": ""}
+            with (
+                patch(
+                    "control_plane.product_retirement_no_target.dokploy_source.read_dokploy_config",
+                    return_value=("https://provider.invalid", "test"),
+                ),
+                patch(
+                    "control_plane.product_retirement_no_target.dokploy_api.search_dokploy_applications",
+                    return_value=(),
+                ),
+            ):
+                plan = await _asgi_request(
+                    app, "POST", "/v1/product-retirement", headers=self.headers, payload=payload
+                )
+                self.assertEqual(plan.status_code, 202, plan.text)
+                applied = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/product-retirement",
+                    headers=self.headers,
+                    payload={
+                        **payload,
+                        "mode": "apply",
+                        "reviewed_plan_record_id": plan.json()["records"][
+                            "product_retirement_plan_id"
+                        ],
+                        "reviewed_plan_sha256": plan.json()["result"]["plan_sha256"],
+                        "confirmation": "retire product example-site instance prod with no target",
+                    },
+                )
+            self.assertEqual(applied.status_code, 202, applied.text)
+            self.assertEqual(
+                store.read_product_profile_record("another-site").lifecycle_state, "active"
+            )
+            store.close()
+
+    async def test_no_target_apply_refuses_changed_authority_and_running_reconcile(self) -> None:
+        for change in ("target", "preview", "reconcile", "profile"):
+            with self.subTest(change=change), TemporaryDirectory() as directory:
+                store = self._no_target_store(Path(directory))
+                app = self._app(
+                    store, actions=("product_retirement.plan", "product_retirement.apply")
+                )
+                payload = {**_plan_payload(), "no_target": True, "expected_target_sha256": ""}
+                with (
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "test"),
+                    ),
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_api.search_dokploy_applications",
+                        return_value=(),
+                    ),
+                ):
+                    response = await _asgi_request(
+                        app, "POST", "/v1/product-retirement", headers=self.headers, payload=payload
+                    )
+                    self.assertEqual(response.status_code, 202, response.text)
+                    plan = json.loads(response.text)
+                    if change == "target":
+                        store.write_dokploy_target_id_record(
+                            DokployTargetIdRecord(
+                                context="example-site",
+                                instance="prod",
+                                target_id="late-target",
+                                updated_at=NOW,
+                            )
+                        )
+                    elif change == "preview":
+                        preview = store.read_preview_record("stale-preview")
+                        store.write_preview_record(preview.model_copy(update={"state": "active"}))
+                    elif change == "profile":
+                        profile = store.read_product_profile_record("example-site")
+                        store.write_product_profile_record(
+                            profile.model_copy(update={"display_name": "changed"})
+                        )
+                    else:
+                        store.request_product_reconcile(
+                            ProductReconcileTarget(product="example-site", target_kind="testing"),
+                            NOW,
+                        )
+                        store.claim_next_product_reconcile_request("busy-reconciler", 60, now=NOW)
+                    response = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=self.headers,
+                        payload={
+                            **payload,
+                            "mode": "apply",
+                            "reviewed_plan_record_id": plan["records"][
+                                "product_retirement_plan_id"
+                            ],
+                            "reviewed_plan_sha256": plan["result"]["plan_sha256"],
+                            "confirmation": "retire product example-site instance prod with no target",
+                        },
+                    )
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(
+                    store.read_product_profile_record("example-site").lifecycle_state, "active"
+                )
+                self.assertNotEqual(store.read_preview_record("stale-preview").state, "destroyed")
+                store.close()
+
+    async def test_no_target_provider_matches_and_incomplete_inventory_block_plan(self) -> None:
+        for payload in (
+            {"applicationId": "orphan", "name": "example-site-prod"},
+            {"applicationId": "orphan", "name": "example-site-preview-pr-7"},
+            {"applicationId": "orphan", "name": "renamed", "appName": "example-site-prod-old"},
+            {
+                "applicationId": "orphan",
+                "name": "renamed",
+                "dockerImage": "ghcr.io/every/example-site@sha256:test",
+            },
+            {
+                "applicationId": "orphan",
+                "name": "renamed",
+                "repository": "example-site",
+                "owner": "every",
+            },
+            {
+                "applicationId": "orphan",
+                "name": "renamed",
+                "gitlabRepository": "every/example-site",
+            },
+            {
+                "applicationId": "orphan",
+                "name": "renamed",
+                "customGitUrl": "https://github.com/every/example-site.git",
+            },
+            {"applicationId": "wrong", "name": "unrelated"},
+            {"applicationId": "orphan"},
+        ):
+            with self.subTest(payload=payload), TemporaryDirectory() as directory:
+                store = self._no_target_store(Path(directory))
+                with (
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "test"),
+                    ),
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_api.search_dokploy_applications",
+                        return_value=({"applicationId": "orphan"},),
+                    ),
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_api.fetch_dokploy_target_payload",
+                        return_value=payload,
+                    ),
+                ):
+                    response = await _asgi_request(
+                        self._app(store, actions=("product_retirement.plan",)),
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=self.headers,
+                        payload={
+                            **_plan_payload(),
+                            "no_target": True,
+                            "expected_target_sha256": "",
+                        },
+                    )
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(store.list_product_retirement_records(product="example-site"), ())
+                store.close()
+
+    def _store(self, root: Path, *, database_url: str = "") -> PostgresRecordStore:
         store = PostgresRecordStore(
-            database_url=f"sqlite+pysqlite:///{root / 'launchplane.sqlite3'}"
+            database_url=database_url or f"sqlite+pysqlite:///{root / 'launchplane.sqlite3'}"
         )
         store.ensure_schema()
         profile_payload = _generic_site_profile_payload()
@@ -152,21 +596,31 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
         return store
 
     def _app(self, store: object, *, actions: tuple[str, ...]) -> FastAPI:
-        return create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=LaunchplaneAuthzPolicy(
-                schema_version=2,
-                local_operators=(
-                    LocalOperatorPolicyRule(
-                        subjects=("local-owner-agent",),
-                        token_labels=("local-owner-write",),
-                        products=("example-site",),
-                        contexts=("example-site",),
-                        instances=("prod",),
-                        actions=actions,
-                    ),
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            local_operators=(
+                LocalOperatorPolicyRule(
+                    subjects=("local-owner-agent",),
+                    token_labels=("local-owner-write",),
+                    products=("example-site",),
+                    contexts=("example-site",),
+                    instances=("prod",),
+                    actions=actions,
                 ),
             ),
+        )
+        if isinstance(store, PostgresRecordStore) and not store.database_url.startswith("sqlite"):
+            store.seed_authz_policy_if_absent(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id="retirement-test-policy",
+                    source="test",
+                    updated_at=NOW,
+                    policy=policy,
+                )
+            )
+        return create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=policy,
             bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
             control_plane_root_path=Path("."),
             record_store_factory=lambda: store,
@@ -361,6 +815,32 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     headers=self.headers,
                     payload=_apply_payload(plan.json()),
                 )
+            # Simulate the completed reservation persisted by the pre-no-target service.
+            stored = store.read_idempotency_record(
+                scope=idempotency_scope(
+                    LocalOperatorIdentity(
+                        subject="local-owner-agent",
+                        token_label="local-owner-write",
+                    )
+                ),
+                route_path="/v1/product-retirement",
+                idempotency_key=self.headers["Idempotency-Key"],
+            )
+            assert stored is not None
+            legacy_payload = ProductRetirementRequest.model_validate(
+                _apply_payload(plan.json())
+            ).model_dump(mode="json")
+            legacy_payload.pop("no_target")
+            store.write_idempotency_record(
+                stored.model_copy(
+                    update={
+                        "request_fingerprint": idempotency_request_fingerprint(
+                            route_path="/v1/product-retirement",
+                            payload=legacy_payload,
+                        ),
+                    }
+                )
+            )
             replay = await _asgi_request(
                 app,
                 "POST",

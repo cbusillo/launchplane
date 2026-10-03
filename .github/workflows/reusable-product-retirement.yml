@@ -18,8 +18,14 @@ name: Reusable Product Retirement
         type: string
       expected_target_sha256:
         description: SHA-256 of the exact tracked provider target identifier.
-        required: true
+        required: false
+        default: ""
         type: string
+      no_target:
+        description: Retire unprovisioned records after provider absence is proven; no provider writes.
+        required: false
+        default: false
+        type: boolean
       operator_idempotency_key:
         description: Stable operator-selected key reused for retries of this retirement intent.
         required: true
@@ -45,6 +51,7 @@ name: Reusable Product Retirement
       confirmation:
         description: >-
           Exact apply phrase: retire product PRODUCT instance INSTANCE target TARGET_SHA256
+          (or retire product PRODUCT instance INSTANCE with no target).
         required: false
         default: ""
         type: string
@@ -68,6 +75,7 @@ jobs:
       PRODUCT: ${{ inputs.product }}
       INSTANCE: ${{ inputs.instance }}
       EXPECTED_TARGET_SHA256: ${{ inputs.expected_target_sha256 }}
+      NO_TARGET: ${{ inputs.no_target }}
       OPERATOR_IDEMPOTENCY_KEY: ${{ inputs.operator_idempotency_key }}
       REASON: ${{ inputs.reason }}
       RELATED_ISSUE: ${{ inputs.related_issue }}
@@ -82,11 +90,18 @@ jobs:
           : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
           : "${PRODUCT:?Missing product input}"
           : "${INSTANCE:?Missing instance input}"
-          : "${EXPECTED_TARGET_SHA256:?Missing expected_target_sha256 input}"
           : "${OPERATOR_IDEMPOTENCY_KEY:?Missing operator_idempotency_key input}"
           : "${REASON:?Missing reason input}"
           : "${RELATED_ISSUE:?Missing related_issue input}"
-          if ! [[ "$EXPECTED_TARGET_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+          if [ "${NO_TARGET:-false}" = "true" ]; then
+            if [ -n "$EXPECTED_TARGET_SHA256" ]; then
+              echo "No-target retirement rejects a tracked target digest." >&2
+              exit 1
+            fi
+          elif [ "${NO_TARGET:-false}" != "false" ]; then
+            echo "no_target must be true or false." >&2
+            exit 1
+          elif ! [[ "$EXPECTED_TARGET_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
             echo "expected_target_sha256 must be lowercase SHA-256." >&2
             exit 1
           fi
@@ -102,6 +117,9 @@ jobs:
             : "${REVIEWED_PLAN_RECORD_ID:?Apply requires reviewed_plan_record_id}"
             : "${REVIEWED_PLAN_SHA256:?Apply requires reviewed_plan_sha256}"
             expected_confirmation="retire product ${PRODUCT} instance ${INSTANCE} target ${EXPECTED_TARGET_SHA256}"
+            if [ "${NO_TARGET:-false}" = "true" ]; then
+              expected_confirmation="retire product ${PRODUCT} instance ${INSTANCE} with no target"
+            fi
             if [ "$CONFIRMATION" != "$expected_confirmation" ]; then
               echo "Apply confirmation does not exactly bind product, instance, and target digest." >&2
               exit 1
@@ -120,6 +138,7 @@ jobs:
             --arg product "$PRODUCT" \
             --arg instance "$INSTANCE" \
             --arg target_sha256 "$EXPECTED_TARGET_SHA256" \
+            --argjson no_target "${NO_TARGET:-false}" \
             --arg reason "$REASON" \
             --arg related_issue "$RELATED_ISSUE" \
             --arg reviewed_plan_record_id "$REVIEWED_PLAN_RECORD_ID" \
@@ -130,6 +149,7 @@ jobs:
               product: $product,
               instance: $instance,
               expected_target_sha256: $target_sha256,
+              no_target: $no_target,
               reason: $reason,
               related_issue: $related_issue,
               reviewed_plan_record_id: $reviewed_plan_record_id,
@@ -161,6 +181,10 @@ jobs:
           test "$(jq -r '.result.product' product-retirement-response.json)" = "$PRODUCT"
           test "$(jq -r '.result.instance' product-retirement-response.json)" = "$INSTANCE"
           test "$(jq -r '.result.target_id_sha256' product-retirement-response.json)" = "$EXPECTED_TARGET_SHA256"
+          if [ "${NO_TARGET:-false}" = "true" ]; then
+            test "$(jq -r '.result.no_target' product-retirement-response.json)" = "true"
+            test "$(jq -r '.result.provider_absence_verified' product-retirement-response.json)" = "true"
+          fi
           if jq -e '.. | objects | has("target_id") or has("domain_ids") or has("provider_operation_key")' product-retirement-response.json >/dev/null; then
             echo "Retirement response exposed an internal provider identifier." >&2
             exit 1
@@ -194,7 +218,13 @@ jobs:
             echo "- Mode: ${MODE}"
             echo "- Product: ${PRODUCT}"
             echo "- Instance: ${INSTANCE}"
-            echo "- Target SHA-256: ${EXPECTED_TARGET_SHA256}"
+            if [ "${NO_TARGET:-false}" = "true" ]; then
+              echo "- Provider writes: none (provider absence proven)"
+              echo "- Planned previews: $(jq -r '.result.planned_preview_ids | join(", ")' product-retirement-response.json)"
+              echo "- Closed previews: $(jq -r '.result.closed_preview_ids | join(", ")' product-retirement-response.json)"
+            else
+              echo "- Target SHA-256: ${EXPECTED_TARGET_SHA256}"
+            fi
             echo "- Plan record: $(jq -r '.records.product_retirement_plan_id' product-retirement-response.json)"
             echo "- Plan SHA-256: $(jq -r '.result.plan_sha256' product-retirement-response.json)"
             echo "- Outcome: $(jq -r '.result.outcome' product-retirement-response.json)"

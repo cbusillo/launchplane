@@ -483,12 +483,14 @@ def _strict_stack_overlap(
     stacks = reader.list_merge_train_stack_collapse_plan_records(
         repository=request.repository,
         base_branch=request.base_branch,
-        status="active",
         limit=None,
     )
     if any(
-        stack.plan.root_pull_request_number in selected
-        or any(entry.pull_request_number in selected for entry in stack.plan.entries)
+        (stack.status == "active" or "; retired:" in stack.source)
+        and (
+            stack.plan.root_pull_request_number in selected
+            or any(entry.pull_request_number in selected for entry in stack.plan.entries)
+        )
         for stack in stacks
     ):
         raise HistoricalDispositionError("stack_batch_unsupported")
