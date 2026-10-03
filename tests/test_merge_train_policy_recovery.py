@@ -4,12 +4,18 @@ import unittest
 from unittest.mock import patch
 
 from control_plane.contracts.merge_readiness import MergeReadinessCandidateEvidence
-from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionEvaluation
+from control_plane.merge_admission import (
+    GuardedMergeAdmission,
+    MergeAdmissionDeniedError,
+    MergeAdmissionEvaluation,
+)
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train_admission import build_merge_train_controller_status_read_model
 from control_plane.merge_train_controller_run_once import (
     MergeTrainControllerRunOnceEnvelope,
     MergeTrainControllerRunOnceResult,
+    _ConflictProbeOutcome,
+    _lineage_change_retires_landing,
     execute_merge_train_controller_with_client,
 )
 from control_plane.merge_train_github import GitHubMergeTrainClient, MergeTrainGitHubError
@@ -315,6 +321,168 @@ class MergeTrainPolicyRecoveryTests(unittest.TestCase):
         self.assertEqual(
             self.store.list_merge_train_batch_candidate_records()[0].status, "superseded"
         )
+
+
+class _LineageChangedEvaluator:
+    def evaluate(self, **_: object) -> MergeAdmissionEvaluation:
+        raise MergeAdmissionDeniedError(
+            "Live merge queue or base identity changed from the landing-plan lineage.",
+            reason_code="landing_lineage_changed",
+        )
+
+
+class MergeTrainLineageChangeRecoveryTests(unittest.TestCase):
+    """An older PR labelled after planning must not wedge the train (#2843)."""
+
+    def setUp(self) -> None:
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.store = FilesystemRecordStore(state_dir=Path(temporary.name))
+        self.policy = build_test_merge_train_policy_record(repository=REPOSITORY)
+        self.candidate, self.landing, controller, _ = _guard_records(
+            policy_sha256=self.policy.policy_sha256
+        )
+        self.store.write_merge_train_batch_candidate_record(self.candidate)
+        self.store.write_merge_train_batch_landing_plan_record(self.landing)
+        self.store.write_merge_train_controller_state_record(
+            controller.model_copy(
+                update={
+                    "status": "idle",
+                    "lease_owner": "",
+                    "lease_acquired_at": "",
+                    "lease_expires_at": "",
+                    "heartbeat_at": "",
+                    "active_action": "",
+                    "active_phase": "",
+                    "active_record_id": "",
+                    "active_pull_request_number": None,
+                    "step_payload": {},
+                    "reconciliation_status": "clean",
+                    "reconciliation_detail": "",
+                }
+            )
+        )
+        self.transport = _RecoveryTransport()
+        self.client = GitHubMergeTrainClient(transport=self.transport)
+        self.attempt = 0
+
+    def _run(self, *, mutate: bool = True) -> MergeTrainControllerRunOnceResult:
+        self.attempt += 1
+        return execute_merge_train_controller_with_client(
+            request=MergeTrainControllerRunOnceEnvelope(repository=REPOSITORY, mutate=mutate),
+            policy=self.policy.policy,
+            policy_sha256=self.policy.policy_sha256,
+            repository_policy=self.policy.policy.policies[0],
+            github_client=self.client,
+            trace_id=f"lineage-recovery-{self.attempt}",
+            recorded_at="2026-08-11T03:03:00Z",
+            candidate_store=self.store,
+            landing_store=self.store,
+            stack_collapse_store=self.store,
+            controller_state_store=self.store,
+            admission_store=self.store,
+            admission_evaluator=_LineageChangedEvaluator(),
+        )
+
+    def test_queue_change_retires_the_unlanded_plan_and_replans(self) -> None:
+        result = self._run()
+
+        self.assertEqual(result.accepted_result["controller_action"], "retire_stale_landing")
+        self.assertEqual(self.store.list_merge_admission_records(), ())
+        self.assertEqual(self.store.list_merge_train_controller_state_records()[0].status, "idle")
+        self.assertEqual(
+            self.store.list_merge_train_batch_candidate_records()[0].status, "superseded"
+        )
+        retired = [
+            record
+            for record in self.store.list_merge_train_batch_landing_plan_records()
+            if record.source.startswith("service:controller:lineage-changed-landing:")
+        ]
+        self.assertEqual(len(retired), 1)
+        self.assertEqual({entry.status for entry in retired[0].landing_plan.entries}, {"stale"})
+
+        older = _queued_pull_request(
+            number=2080, head_sha="d" * 40, created_at="2026-08-11T00:30:00Z"
+        )
+        planned = _queued_pull_request(
+            number=2083, head_sha=HEAD_SHA, created_at="2026-08-11T01:00:00Z"
+        )
+        snapshot = MergeTrainDryRunSnapshot(
+            repository=REPOSITORY,
+            base_branch="main",
+            base_sha=BASE_SHA,
+            pull_requests=(older, planned),
+        )
+        with (
+            patch.object(self.client, "read_merge_train_snapshot", return_value=snapshot),
+            patch(
+                "control_plane.merge_train_controller_run_once._probe_queue_entry_conflicts",
+                side_effect=lambda **kwargs: _ConflictProbeOutcome(
+                    snapshot=kwargs["snapshot"],
+                    dry_run_result=kwargs["dry_run_result"],
+                    held_out=kwargs["held_out"],
+                ),
+            ),
+        ):
+            fresh = self._run()
+        self.assertEqual(fresh.accepted_result["controller_action"], "plan_candidate")
+        (active,) = self.store.list_merge_train_batch_candidate_records(status="active")
+        self.assertEqual(
+            [entry.pull_request_number for entry in active.candidate.entries], [2080, 2083]
+        )
+
+    def test_retired_plan_does_not_suppress_the_same_batch_when_the_queue_returns(
+        self,
+    ) -> None:
+        self._run()
+        rebuilt, _, _, _ = _guard_records(policy_sha256=self.policy.policy_sha256)
+        rebuilt = rebuilt.model_copy(update={"record_id": "rebuilt-same-batch-candidate"})
+        self.store.write_merge_train_batch_candidate_record(rebuilt)
+        snapshot = MergeTrainDryRunSnapshot(
+            repository=REPOSITORY,
+            base_branch="main",
+            base_sha=BASE_SHA,
+            pull_requests=(
+                _queued_pull_request(
+                    number=2083, head_sha=HEAD_SHA, created_at="2026-08-11T01:00:00Z"
+                ),
+            ),
+        )
+        with patch.object(self.client, "read_merge_train_snapshot", return_value=snapshot):
+            result = self._run(mutate=False)
+        self.assertEqual(result.accepted_result["controller_action"], "plan_landing")
+
+    def test_only_an_unlanded_plain_plan_is_retired_on_a_lineage_change(self) -> None:
+        plan = _landing_plan()
+        unlanded = self.landing.model_copy(update={"landing_plan": plan})
+        partial = self.landing.model_copy(
+            update={
+                "landing_plan": plan.model_copy(
+                    update={
+                        "entries": (
+                            plan.entries[0].model_copy(update={"status": "merged"}),
+                            plan.entries[1],
+                        )
+                    }
+                )
+            }
+        )
+        cases = {
+            "unlanded": (unlanded, "landing_lineage_changed", False, True),
+            "partial_landing": (partial, "landing_lineage_changed", False, False),
+            "collapsed_stack": (unlanded, "landing_lineage_changed", True, False),
+            "other_denial": (unlanded, "merge_readiness_not_ready", False, False),
+        }
+        for case, (record, reason_code, has_stack_collapse, expected) in cases.items():
+            with self.subTest(case=case):
+                self.assertIs(
+                    _lineage_change_retires_landing(
+                        reason_code=reason_code,
+                        landing_record=record,
+                        has_stack_collapse=has_stack_collapse,
+                    ),
+                    expected,
+                )
 
 
 if __name__ == "__main__":

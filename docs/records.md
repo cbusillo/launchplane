@@ -2313,10 +2313,11 @@ run` is the foreground loop intended for an external process supervisor, and
 
 - Repository human role policies (the manager and delegate roles) and the
   technical human waiver are retired. Their routes, contracts, evaluation, and
-  store methods are deleted. Existing
+  store methods are deleted. Migration `b7e9f1a3c5d8` drops
   `launchplane_repository_human_role_policies` and
-  `launchplane_tenant_technical_human_waiver_events` rows stay in the database
-  unread until the Director decides whether to drop them.
+  `launchplane_tenant_technical_human_waiver_events`, including all rows, under
+  the Director's #2006 decision to keep nothing. It exports no rows or counts.
+  Downgrade recreates empty historical schemas, not the deleted data.
 - Trusted-maintenance policy records are a separate contract, not a human role
   policy and not a generic authz-policy reuse. Each policy revision is keyed by
   immutable numeric `repository_id` plus `repository_owner_id`, `repository`,
@@ -2545,9 +2546,12 @@ delete provider values or deploy an application.
 Manager preview approval is retired. Its contracts, evaluator, command parser,
 reconcile endpoint, projection writer, and store methods are deleted, and
 filesystem-to-database import no longer copies manager events. Existing
-`launchplane_manager_preview_approval_events` rows stay in the database unread
-until the Director decides whether to drop them. Current approval uses product
-review and the release checklist.
+`launchplane_manager_preview_approval_events` rows are deleted with the table
+by migration `b7e9f1a3c5d8`, under the Director's #2006 decision to keep nothing.
+There is no export or row-count record; downgrade recreates only an empty table.
+Hosted service startup applies the release's migration target, so deployment of
+this revision deletes the retired rows. Current approval uses product review
+and the release checklist.
 
 The configured `/v1/manager-preview-approval/github-webhook` URL and its existing
 bootstrap secret remain solely as a transport compatibility boundary for signed
