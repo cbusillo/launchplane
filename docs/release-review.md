@@ -84,7 +84,9 @@ that batch PR only, so the checklist shows the batch PR, not its constituents.
 The batch PR body therefore carries every constituent's `Owner test notes`, each
 under its own subheading, which satisfies the CI requirement below and shows
 the Client each change's notes once; see
-[Merge Train Policy](merge-train-policy.md#pr-native-landing).
+[Merge Train Policy](merge-train-policy.md#pr-native-landing). A constituent the
+batch body names as having no notes is still a release blocker, as it would be
+on its own.
 
 Product CI must require a nonempty **`Owner test notes`** section on every pull
 request, including changes that need no manual test. The shared

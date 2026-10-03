@@ -35,7 +35,11 @@ from control_plane.merge_train_github import (
     _validated_model_update,
     _wait_for_branch_sha,
 )
-from control_plane.release_review_github import nest_owner_test_notes, owner_test_notes
+from control_plane.release_review_github import (
+    missing_owner_test_notes,
+    nest_owner_test_notes,
+    owner_test_notes,
+)
 
 
 def _candidate_branch(
@@ -149,7 +153,7 @@ def _batch_owner_test_notes(
             + (
                 nest_owner_test_notes(notes, min_heading_level=4)
                 if notes
-                else f"#{entry.pull_request_number} has no Owner test notes."
+                else missing_owner_test_notes(entry.pull_request_number)
             )
         )
     return "## Owner test notes\n\n" + "\n\n".join(sections)

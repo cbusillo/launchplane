@@ -51,6 +51,19 @@ def owner_test_notes(body: str) -> str:
     return "\n".join(lines).strip()
 
 
+_MISSING_NOTES = re.compile(r"^#(\d+) has no Owner test notes\.$", re.MULTILINE)
+
+
+def missing_owner_test_notes(pull_request_number: int) -> str:
+    """The line a merge-train batch PR carries for a constituent without notes."""
+    return f"#{pull_request_number} has no Owner test notes."
+
+
+def pull_requests_missing_owner_test_notes(notes: str) -> tuple[int, ...]:
+    """Constituents a batch PR's notes name as having none, so release review still blocks."""
+    return tuple(int(match[1]) for match in _MISSING_NOTES.finditer(notes))
+
+
 def nest_owner_test_notes(notes: str, *, min_heading_level: int) -> str:
     """Demote headings so collected notes stay inside an enclosing notes section.
 

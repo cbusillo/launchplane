@@ -22,7 +22,11 @@ from control_plane.contracts.release_review import (
     ReleaseVersion,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
-from control_plane.release_review_github import GitHubRead, read_release_changes
+from control_plane.release_review_github import (
+    GitHubRead,
+    pull_requests_missing_owner_test_notes,
+    read_release_changes,
+)
 from control_plane.workflows.launchplane import github_api_request, resolve_launchplane_github_token
 
 
@@ -265,6 +269,12 @@ def checklist_blockers(checklist: ReleaseChecklist) -> tuple[str, ...]:
     for item in checklist.items:
         if not item.owner_test_notes:
             blockers.append(f"Pull request #{item.pull_request_number} has no Owner test notes.")
+        # A merge-train batch PR names each of its pull requests that came without notes.
+        for number in pull_requests_missing_owner_test_notes(item.owner_test_notes):
+            blockers.append(
+                f"Pull request #{number}, landed in #{item.pull_request_number},"
+                " has no Owner test notes."
+            )
     if checklist.untracked_commits:
         blockers.append(
             "The release contains commits without a merged pull request and Owner test notes."

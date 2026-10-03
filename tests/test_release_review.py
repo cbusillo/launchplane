@@ -252,6 +252,21 @@ class ReleaseReviewTests(unittest.TestCase):
         self.assertEqual(review.checklist.untracked_commits, (HEAD,))
         self.assertFalse(review.approved)
 
+    def test_batch_constituent_without_notes_is_still_a_blocker(self) -> None:
+        def batch_notes(path: str) -> object:
+            result = github_read(path)
+            if isinstance(result, list):
+                result[0]["body"] = (
+                    "## Owner test notes\n\n### #7 Header\n\nOpen the home page.\n\n"
+                    "### #8 Footer\n\n#8 has no Owner test notes."
+                )
+            return result
+
+        review = build_release_review(store=self.store, profile=profile(), read=batch_notes)
+        self.assertIn("Pull request #8, landed in #42, has no Owner test notes.", review.blockers)
+        self.assertNotIn("Pull request #42 has no Owner test notes.", review.blockers)
+        self.assertFalse(review.approved)
+
     def test_unknown_production_use_requires_review_prelaunch_is_explicit(self) -> None:
         live = profile().model_copy(update={"production_use": "unknown"})
         self.store.write_product_profile_record(live)
