@@ -182,3 +182,7 @@ class OdooStableTargetReplacementApplyResult(BaseModel):
     image_reference: str = ""
     runtime_source: dict[str, str] = Field(default_factory=dict)
     error_message: str = ""
+    # A deploy check's code and the env-key names it is about, such as
+    # deploy_blocked.compose_keys_missing; never its message.
+    error_code: str = ""
+    error_detail_keys: tuple[str, ...] = ()

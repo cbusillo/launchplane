@@ -11,6 +11,9 @@ from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
     PostDeployUpdateEvidence,
 )
+from control_plane.contracts.odoo_stable_target_replacement_operation import (
+    safe_error_detail_keys,
+)
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 
 DelegatedExecutor = str
@@ -67,6 +70,25 @@ class ResolvedTargetEvidence(BaseModel):
         )
 
 
+class DeploymentFailure(BaseModel):
+    """Why a deploy failed: a code, Launchplane's fixed description of it, and the
+    env-key names it is about. Never provider, script or exception text."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    description: str
+    keys: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_failure(self) -> "DeploymentFailure":
+        self.code = self.code.strip()
+        if not self.code:
+            raise ValueError("deployment failure requires code")
+        self.keys = safe_error_detail_keys(self.keys)
+        return self
+
+
 class DeploymentRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -89,6 +111,7 @@ class DeploymentRecord(BaseModel):
     post_deploy_update: PostDeployUpdateEvidence = Field(default_factory=PostDeployUpdateEvidence)
     destination_health: HealthcheckEvidence = Field(default_factory=HealthcheckEvidence)
     integration_key_readback: IntegrationKeyReadbackEvidence | None = None
+    failure: DeploymentFailure | None = None
 
     @model_validator(mode="after")
     def _validate_record(self) -> "DeploymentRecord":

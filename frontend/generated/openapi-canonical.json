@@ -3772,6 +3772,34 @@
         "title": "DeploymentEvidenceRequest",
         "type": "object"
       },
+      "DeploymentFailure": {
+        "additionalProperties": false,
+        "description": "Why a deploy failed: a code, Launchplane's fixed description of it, and the\nenv-key names it is about. Never provider, script or exception text.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Keys",
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "description"
+        ],
+        "title": "DeploymentFailure",
+        "type": "object"
+      },
       "DeploymentRecord-Input": {
         "additionalProperties": false,
         "properties": {
@@ -3812,6 +3840,16 @@
           },
           "destination_health": {
             "$ref": "#/components/schemas/HealthcheckEvidence"
+          },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeploymentFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "instance": {
             "title": "Instance",
@@ -3937,6 +3975,16 @@
           },
           "destination_health": {
             "$ref": "#/components/schemas/HealthcheckEvidence"
+          },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeploymentFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "instance": {
             "title": "Instance",

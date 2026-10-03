@@ -42,6 +42,7 @@ from control_plane.build_provenance import (
     verify_generic_web_build,
 )
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.odoo_target_replacement_failures import deploy_failure_description
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
@@ -917,7 +918,9 @@ def _testing_failure_reason(
             f"{PLAN_BLOCKER_DESCRIPTIONS.get(blocker_code, _UNKNOWN_PLAN_BLOCKER)}"
         )
     else:
-        description = TESTING_FAILURE_DESCRIPTIONS.get(error_code, _UNKNOWN_TESTING_FAILURE)
+        description = deploy_failure_description(error_code) or TESTING_FAILURE_DESCRIPTIONS.get(
+            error_code, _UNKNOWN_TESTING_FAILURE
+        )
     parts = [description]
     if operation.error_detail_keys:
         # Env-key names the record validated, such as undeclared runtime keys.

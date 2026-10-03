@@ -2297,6 +2297,7 @@ class FastApiOdooOperationStatusReadTests(unittest.IsolatedAsyncioTestCase):
                 "attempt": 0,
                 "deployment_record_id": "deployment-20261002T223945Z-cm-testing",
                 "error_code": "deploy_failed",
+                "error_description": "The deploy step failed.",
                 "error_detail_keys": ["ODOO_DB_HOST"],
                 "poll_url": path,
                 "free_text_omitted": True,
