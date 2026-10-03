@@ -942,8 +942,9 @@ Controller actions have these retry/stop semantics:
   progress records of an inapplicable wait when the root head changes or the
   root leaves the open snapshot, recording the reason in the record source.
   Dry runs leave records unchanged. A root that returns at its collapsed head
-  resumes its retired wait when its visible children still have the stored heads;
-  it does not merge the same children again. Retirement preserves the collapse history:
+  can resume its retired wait when its visible children still have the stored
+  heads. A root waiting on checks or ready for admission then skips another
+  collapse; other states continue through ordinary queue handling. Retirement preserves the collapse history:
   landing reconciles every collapsed root whose landed head equals or descends
   from its collapsed head, including retired waits. If a root was collapsed
   again, its newest applicable plan supplies the current child-head expectations.

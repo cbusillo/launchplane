@@ -2816,6 +2816,18 @@ def _advance_from_live_snapshot(
                 if pr.number == disposition.pull_request_number
             )
         )
+        if restored_records:
+            active_collapse_ids = {
+                record.plan.collapse_id
+                for record in stack_collapse_store.list_merge_train_stack_collapse_plan_records(
+                    repository=request.repository, base_branch=request.base_branch, status="active"
+                )
+            }
+            restored_records = tuple(
+                record
+                for record in restored_records
+                if record.plan.collapse_id not in active_collapse_ids
+            )
         restored_record = latest_merge_train_stack_collapse_progress_record(restored_records)
         if restored_record is not None:
             if request.mutate:

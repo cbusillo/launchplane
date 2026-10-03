@@ -534,6 +534,28 @@ class HistoricalCompletionCoreTests(unittest.TestCase):
         )
         self.assertEqual(transport.requests, [])
 
+    def test_retired_stack_root_still_blocks_historical_completion(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _HistoricalCompletionFixture(Path(directory))
+            seed_crowded_scoped_history(
+                fixture.store, fixture, stack_count=1, stack_root_pull_request_number=1
+            )
+            for record in fixture.store.list_merge_train_stack_collapse_plan_records():
+                fixture.store.write_merge_train_stack_collapse_plan_record(
+                    record.model_copy(
+                        update={
+                            "status": "superseded",
+                            "source": "test; retired:root_head_changed:trace",
+                        }
+                    )
+                )
+            transport = _ReadOnlyTransport(responses=_provider_responses())
+            result = _assess(fixture, transport=transport)
+        self.assertEqual(
+            (result.status, result.reason_code), ("unsupported", "stack_batch_unsupported")
+        )
+        self.assertEqual(transport.requests, [])
+
     def test_exact_landing_record_status_scope_and_identity_fail_before_provider(self) -> None:
         cases = ("inactive", "missing", "foreign")
         for case in cases:
