@@ -194,7 +194,11 @@ class ProtectedBatchGuardTests(unittest.TestCase):
                 provider.number = 9000
                 client = GitHubMergeTrainClient(transport=provider)
                 client.ensure_batch_pull_request(candidate=candidate)
-                with patch.object(client, "read_merge_train_snapshot", return_value=snapshot):
+                # The replacement plan's conflict probe is covered by the controller tests.
+                with (
+                    patch.object(client, "read_merge_train_snapshot", return_value=snapshot),
+                    patch.object(client, "probe_batch_entry_conflicts", return_value=()),
+                ):
                     result = execute_merge_train_controller_with_client(
                         request=MergeTrainControllerRunOnceEnvelope(
                             repository=candidate.repository, mutate=True

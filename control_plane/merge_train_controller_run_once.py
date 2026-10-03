@@ -1,6 +1,6 @@
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 from typing import Protocol, cast
 
@@ -46,6 +46,7 @@ from control_plane.merge_train import (
     apply_merge_train_branch_update_intent,
     MergeTrainDryRunResult,
     MergeTrainDryRunSnapshot,
+    MergeTrainQueueEntry,
     build_merge_train_dry_run_result,
     discover_merge_train_stack,
     merge_train_stack_child_readiness_check,
@@ -77,6 +78,7 @@ from control_plane.merge_train_github import (
     MergeTrainGitHubStaleHeadError,
     MergeTrainGitHubTransport,
     UrllibMergeTrainGitHubTransport,
+    merge_train_conflict_probe_ref,
     merge_train_construction_ref,
 )
 from control_plane.merge_train_stack_collapse import (
@@ -1849,6 +1851,7 @@ def _advance_active_candidate_record(
                 },
             )
         reflow_result = try_reflow_failed_merge_train_candidate(
+            lease=lease,
             github_client=github_client,
             candidate_store=candidate_store,
             active_candidate_record=active_candidate_record,
@@ -1967,6 +1970,10 @@ def _advance_active_candidate_record(
                         MergeTrainBatchHeldOutEntry(
                             pull_request_number=error.pull_request_number,
                             head_sha=error.head_sha,
+                            conflicts_with=_entries_ahead_of(
+                                candidate=active_candidate_record.candidate,
+                                pull_request_number=error.pull_request_number,
+                            ),
                         ),
                     )
                 candidate = active_candidate_record.candidate.model_copy(
@@ -2826,23 +2833,45 @@ def _advance_from_live_snapshot(
             "dry_run_result": dry_run_result.model_dump(mode="json"),
         }
 
+    probe = _probe_queue_entry_conflicts(
+        github_client=github_client,
+        policy=policy,
+        snapshot=snapshot,
+        dry_run_result=dry_run_result,
+        held_out=held_out,
+        mutate=request.mutate,
+        enabled=lease.record.ordinary_job_binding is None,
+        lease=lease,
+    )
+    if probe.dry_run_result.intended_next_action != "merge":
+        return {
+            "repository": request.repository,
+            "base_branch": request.base_branch,
+            "mode": "dry-run",
+            "controller_action": probe.dry_run_result.intended_next_action,
+            "dry_run_result": probe.dry_run_result.model_dump(mode="json"),
+            "conflict_probe": probe.report,
+        }
+
     controller_action = "plan_candidate"
     candidate = build_merge_train_batch_candidate(
         ordinary_job_binding=lease.record.ordinary_job_binding,
-        dry_run_result=dry_run_result,
-        base_sha=snapshot.base_sha,
+        dry_run_result=probe.dry_run_result,
+        base_sha=probe.snapshot.base_sha,
         policy_sha256=policy_sha256,
         created_at=recorded_at,
-        held_out=held_out,
+        held_out=probe.held_out,
     )
     result = {
         "repository": candidate.repository,
         "base_branch": candidate.base_branch,
         "mode": "dry-run" if not request.mutate else controller_action,
         "controller_action": controller_action,
-        "dry_run_result": dry_run_result.model_dump(mode="json"),
+        "dry_run_result": probe.dry_run_result.model_dump(mode="json"),
         "candidate": candidate.model_dump(mode="json"),
     }
+    if probe.report is not None:
+        result["conflict_probe"] = probe.report
     if request.mutate:
         lease.checkpoint(
             active_action=controller_action,
@@ -2904,6 +2933,7 @@ def try_reflow_failed_merge_train_candidate(
     recorded_at: str,
     trace_id: str,
     mutate: bool,
+    lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object] | None:
     try:
         snapshot = github_client.read_merge_train_snapshot(
@@ -2962,13 +2992,25 @@ def try_reflow_failed_merge_train_candidate(
             trace_id=trace_id,
             mutate=mutate,
         )
+    probe = _probe_queue_entry_conflicts(
+        github_client=github_client,
+        policy=policy,
+        snapshot=snapshot,
+        dry_run_result=dry_run_result,
+        held_out=held_out,
+        mutate=mutate,
+        enabled=active_candidate_record.ordinary_job_binding is None,
+        lease=lease,
+    )
+    if probe.dry_run_result.intended_next_action != "merge":
+        return None
     candidate = build_merge_train_batch_candidate(
         ordinary_job_binding=active_candidate_record.ordinary_job_binding,
-        dry_run_result=dry_run_result,
-        base_sha=snapshot.base_sha,
+        dry_run_result=probe.dry_run_result,
+        base_sha=probe.snapshot.base_sha,
         policy_sha256=policy_sha256,
         created_at=recorded_at,
-        held_out=held_out,
+        held_out=probe.held_out,
     )
     result: dict[str, object] = {
         "repository": candidate.repository,
@@ -2976,10 +3018,24 @@ def try_reflow_failed_merge_train_candidate(
         "mode": "dry-run" if not mutate else "plan_candidate",
         "controller_action": "plan_candidate",
         "superseded_merge_train_batch_candidate_record_id": active_candidate_record.record_id,
-        "dry_run_result": dry_run_result.model_dump(mode="json"),
+        "dry_run_result": probe.dry_run_result.model_dump(mode="json"),
         "candidate": candidate.model_dump(mode="json"),
     }
+    if probe.report is not None:
+        result["conflict_probe"] = probe.report
     if mutate:
+        # The probe can outlast the lease; renew it, or stop, before persisting.
+        lease.checkpoint(
+            active_action="reflow_candidate",
+            active_phase="persist_replacement_candidate",
+            active_record_id=active_candidate_record.record_id,
+            active_pull_request_number=None,
+            step_payload={
+                "candidate_record_id": active_candidate_record.record_id,
+                "batch_id": candidate.batch_id,
+                "candidate_ref": candidate.candidate_ref,
+            },
+        )
         candidate_record = build_merge_train_batch_candidate_record(
             ordinary_job_binding=active_candidate_record.ordinary_job_binding,
             candidate=candidate,
@@ -3217,6 +3273,108 @@ def _merge_train_stack_collapse_record_matches_landing_plan(
     except ValueError:
         return False
     return True
+
+
+@dataclass(frozen=True)
+class _ConflictProbeOutcome:
+    snapshot: MergeTrainDryRunSnapshot
+    dry_run_result: MergeTrainDryRunResult
+    held_out: tuple[MergeTrainBatchHeldOutEntry, ...]
+    report: dict[str, object] | None = None
+
+
+def _conflict_probe_queue(
+    dry_run_result: MergeTrainDryRunResult,
+) -> tuple[MergeTrainQueueEntry, ...]:
+    """Return the queue a candidate would batch, when it needs a conflict probe."""
+    queue = tuple(entry for entry in dry_run_result.queue if entry.eligible)
+    return queue if len(queue) > 1 else ()
+
+
+def _probe_queue_entry_conflicts(
+    *,
+    github_client: GitHubMergeTrainClient,
+    policy: MergeTrainPolicy,
+    snapshot: MergeTrainDryRunSnapshot,
+    dry_run_result: MergeTrainDryRunResult,
+    held_out: tuple[MergeTrainBatchHeldOutEntry, ...],
+    mutate: bool,
+    enabled: bool,
+    lease: MergeTrainControllerLeaseContext,
+) -> _ConflictProbeOutcome:
+    """Hold out queued pull requests that conflict with the ones ahead of them.
+
+    GitHub computes a pull request's mergeability only against its base, so two
+    queued pull requests can each be clean and still conflict with each other.
+    A mutating pass probes the queue before planning a multi-entry candidate,
+    so the conflict is held out instead of found by a failed build. A dry run
+    writes no ref and reports that the probe will run. Retired ordinary-agent
+    jobs route every effect through their own ledger, so they keep only the
+    build-time conflict handling.
+    """
+    unchanged = _ConflictProbeOutcome(
+        snapshot=snapshot, dry_run_result=dry_run_result, held_out=held_out
+    )
+    queue = _conflict_probe_queue(dry_run_result)
+    if not enabled or not queue:
+        return unchanged
+    probed_pull_request_numbers = [entry.number for entry in queue]
+    if not mutate:
+        return replace(
+            unchanged,
+            report={"status": "will_run", "pull_request_numbers": probed_pull_request_numbers},
+        )
+    probe_ref = merge_train_conflict_probe_ref(
+        repository=dry_run_result.repository,
+        base_branch=dry_run_result.base_branch,
+        lease_owner=lease.owner,
+        lease_acquired_at=lease.acquisition_token,
+    )
+    active_record_id = lease.record.active_record_id
+
+    def checkpoint_probe(pull_request_number: int | None) -> None:
+        lease.checkpoint(
+            active_action="plan_candidate",
+            active_phase="probe_entry_conflicts",
+            active_record_id=active_record_id,
+            active_pull_request_number=pull_request_number,
+            step_payload={"probe_ref": probe_ref},
+        )
+
+    conflicts = github_client.probe_batch_entry_conflicts(
+        repository=dry_run_result.repository,
+        base_branch=dry_run_result.base_branch,
+        base_sha=snapshot.base_sha,
+        queue=queue,
+        probe_ref=probe_ref,
+        checkpoint=checkpoint_probe,
+    )
+    report: dict[str, object] = {
+        "status": "ran",
+        "pull_request_numbers": probed_pull_request_numbers,
+        "held_out": [entry.model_dump(mode="json") for entry in conflicts],
+    }
+    if not conflicts:
+        return replace(unchanged, report=report)
+    held_out = (*held_out, *conflicts)
+    snapshot = _without_held_out_pull_requests(snapshot=snapshot, held_out=held_out)
+    return _ConflictProbeOutcome(
+        snapshot=snapshot,
+        dry_run_result=build_merge_train_dry_run_result(policy=policy, snapshot=snapshot),
+        held_out=held_out,
+        report=report,
+    )
+
+
+def _entries_ahead_of(
+    *, candidate: MergeTrainBatchCandidate, pull_request_number: int
+) -> tuple[int, ...]:
+    ahead: list[int] = []
+    for entry in candidate.entries:
+        if entry.pull_request_number == pull_request_number:
+            break
+        ahead.append(entry.pull_request_number)
+    return tuple(ahead)
 
 
 def _surviving_held_out_entries(
