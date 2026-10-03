@@ -962,9 +962,6 @@ apply fence and storage fences continue to reject persistence.
 `LAUNCHPLANE_AUTHZ_POLICY_RECONCILE_MANAGED_SET_JSON` owns the exact immutable
 policy-admin worker rules for the standalone authz wrapper and must declare the
 `operator.authz-policy-reconcile` managed-set identity;
-`LAUNCHPLANE_AUTHZ_MANAGER_PREVIEW_APPROVAL_MANAGED_SET_JSON` owns the generic
-GitHub-human manager preview approval writer set and must declare the exact
-`operator.manager-preview-approval` managed-set identity;
 `LAUNCHPLANE_AUTHZ_OWNER_ACCEPTANCE_MANAGED_SET_JSON` is a retired compatibility
 name. The `operator.owner-acceptance` managed set accepts only an empty desired
 policy so existing grants can be removed. It cannot create or update Client
@@ -973,10 +970,18 @@ Client identity directly. Do not introduce new GitHub-secret/workflow grants;
 use the native reviewed policy path for any separately authorized contraction.
 See [Client acceptance](owner-acceptance.md).
 
-The manager-preview and Client policy-admin grant sets are retained
-runtime history, not active approval paths: their service evaluators and routes
-are removed. This code retirement creates no grant and performs no runtime
-contraction. Do not extend these sets or use them as delivery authority.
+The manager-preview selector, wrapper job and
+`LAUNCHPLANE_AUTHZ_MANAGER_PREVIEW_APPROVAL_MANAGED_SET_JSON` reference are
+removed under #2006. Before this wiring removal lands, a production-authorized
+session must contract `operator.manager-preview-approval` through the reviewed
+policy path and record the empty-set readback. Source cleanup performs no live
+contraction. The Director deletes that GitHub managed-set secret by hand after
+contraction. The signed trusted-maintenance webhook and its independent
+`LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET` remain in use.
+
+The Client policy-admin grant set is retained runtime history, not an active
+approval path: its service evaluator and routes are removed. Do not extend it
+or use it as delivery authority.
 
 Generic-web preview caller
 grants are no longer sourced from a per-product repository secret. The
