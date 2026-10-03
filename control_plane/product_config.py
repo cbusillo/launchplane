@@ -261,6 +261,7 @@ def plan_product_config_authority_bundle(
 
     existing_runtime_records = record_store.list_runtime_environment_records()
     adopted_secret_values = _resolve_provider_secret_adoptions(
+        record_store=record_store,
         secrets=secrets,
         recorded_keys=_lane_recorded_runtime_keys(
             existing_records=existing_runtime_records,
@@ -600,6 +601,7 @@ def _lane_recorded_runtime_keys(
 
 def _resolve_provider_secret_adoptions(
     *,
+    record_store: control_plane_secrets.SecretWriteStore,
     secrets: tuple[dict[str, object], ...],
     recorded_keys: frozenset[str],
     lane_provider_env_reader: LaneProviderEnvReader | None,
@@ -608,7 +610,8 @@ def _resolve_provider_secret_adoptions(
 
     Only a value that lives on the provider alone is adopted: a key a Launchplane
     record already supplies for the lane (a runtime setting, the tracked target's
-    env, or a managed secret) is refused, so adoption never replaces a recorded
+    env, or a managed secret) is refused, and so is a destination secret that
+    already exists under another binding key, so adoption never replaces a recorded
     value. Both modes check, so a dry run shows a refusal before apply. Refusals
     carry fixed messages; no value leaves this function except to the secret write.
     """
@@ -626,7 +629,10 @@ def _resolve_provider_secret_adoptions(
     values: dict[int, str] = {}
     for index in adopted_indexes:
         key = str(secrets[index]["binding_key"])
-        if key in recorded_keys or key in provider.recorded_keys:
+        existing_action, _ = _product_config_secret_current_action(
+            record_store=record_store, secret=secrets[index]
+        )
+        if key in recorded_keys or key in provider.recorded_keys or existing_action != "created":
             raise ProductConfigError(
                 "A secret named for provider adoption is already supplied by a Launchplane "
                 "record for this lane.",
@@ -685,7 +691,7 @@ def _product_config_secret_inputs(
         copy_from = raw_secret.get("copy_from")
         adopt_from_provider = raw_secret.get("adopt_from_provider")
         if adopt_from_provider is not None:
-            if adopt_from_provider is not True:
+            if not isinstance(adopt_from_provider, bool) or not adopt_from_provider:
                 raise ProductConfigError(
                     f"Product config secret #{index} adopt_from_provider must be true."
                 )

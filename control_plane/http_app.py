@@ -15528,7 +15528,9 @@ def create_launchplane_fastapi_app(
             records={},
             result=ProductConfigApplyResult.model_validate(driver_result),
         )
-        if (operator_identity or copy_references) and product_config_request.mode == "dry-run":
+        if (
+            operator_identity or copy_references or product_config_request.adopts_provider_secrets()
+        ) and product_config_request.mode == "dry-run":
             store_product_config_dry_run_record(
                 record_store=database_store,
                 identity=identity,

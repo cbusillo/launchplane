@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from unittest.mock import patch
 
+from fastapi import FastAPI
 from httpx2 import Response
 
 from control_plane import product_config as control_plane_product_config
@@ -15,16 +16,17 @@ from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.provider_key_adoption import LaneProviderEnv
-from control_plane.service_auth import BearerIdentityConfig
+from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _asgi_request, _RejectingVerifier
-from tests.support.auth import _local_operator_policy
+from tests.support.auth import _identity, _local_operator_policy, _StubVerifier
 from tests.support.profiles import _generic_site_profile_payload
 from tests.support.stores import (
     _seed_tracked_target_records,
     _sqlite_database_url,
     _write_runtime_key_safety_policy,
 )
+from tests.test_runtime_environments import _FakeProductConfigStore
 
 PROVIDER_TOKEN = "provider-only-test-token"
 PROVIDER_STORE_NAME = "provider-only-store-name"
@@ -110,7 +112,14 @@ class ProviderSecretAdoptionTests(unittest.IsolatedAsyncioTestCase):
             "secrets": secrets_input,
         }
 
-    async def _post(self, payload: dict[str, object], key: str = "") -> Response:
+    async def _post(
+        self,
+        payload: dict[str, object],
+        key: str = "",
+        *,
+        app: FastAPI | None = None,
+        authorization: str = "Bearer test-operator-token",
+    ) -> Response:
         with (
             patch.object(
                 dokploy_source,
@@ -124,11 +133,11 @@ class ProviderSecretAdoptionTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             return await _asgi_request(
-                self.app,
+                app or self.app,
                 "POST",
                 "/v1/product-config/apply",
                 headers={
-                    "Authorization": "Bearer test-operator-token",
+                    "Authorization": authorization,
                     **({"Idempotency-Key": key} if key else {}),
                 },
                 payload=payload,
@@ -242,6 +251,60 @@ class ProviderSecretAdoptionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.json()["error"]["code"], code)
         self.assertEqual(self._lane_values("prod"), {"REPAIRSHOPR_TOKEN": PROVIDER_TOKEN})
 
+    async def test_refuses_an_existing_secret_under_another_binding_key(self) -> None:
+        existing = {"name": "repairshopr-credential", "binding_key": "OLD_TOKEN"}
+        await self._post(self._payload("dry-run", [{**existing, "value": "recorded"}]))
+        await self._post(
+            self._payload("apply", [{**existing, "value": "recorded"}]), key="existing"
+        )
+        adoption = [_adopted_secret("REPAIRSHOPR_TOKEN", name="repairshopr-credential")]
+        response = await self._post(self._payload("dry-run", adoption))
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.json()["error"]["code"], "provider_secret_already_recorded")
+        self.assertEqual(self._lane_values("prod"), {"OLD_TOKEN": "recorded"})
+
+    async def test_a_workflow_caller_can_apply_its_reviewed_adoption(self) -> None:
+        workflow_app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml"
+                                "@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["example-site"],
+                            "actions": ["product_config.plan", "product_config.apply"],
+                        }
+                    ]
+                }
+            ),
+            record_store_factory=lambda: self.store,
+        )
+        adopted = [_adopted_secret("REPAIRSHOPR_TOKEN")]
+        unreviewed = await self._post(
+            self._payload("apply", adopted),
+            key="workflow-unreviewed",
+            app=workflow_app,
+            authorization="Bearer valid-token",
+        )
+        self.assertEqual(unreviewed.status_code, 409, unreviewed.text)
+        reviewed = await self._post(
+            self._payload("dry-run", adopted), app=workflow_app, authorization="Bearer valid-token"
+        )
+        self.assertEqual(reviewed.status_code, 202, reviewed.text)
+        applied = await self._post(
+            self._payload("apply", adopted),
+            key="workflow-reviewed",
+            app=workflow_app,
+            authorization="Bearer valid-token",
+        )
+        self.assertEqual(applied.status_code, 202, applied.text)
+        self.assertEqual(self._lane_values("prod"), {"REPAIRSHOPR_TOKEN": PROVIDER_TOKEN})
+
     async def test_refuses_unsafe_request_shapes(self) -> None:
         version = {"context": "example-site", "instance": "prod", "version_id": "v1"}
         for name, secret in (
@@ -274,6 +337,7 @@ class ProviderSecretAdoptionPlanTests(unittest.TestCase):
     def test_adoption_without_the_service_provider_read_is_refused(self) -> None:
         with self.assertRaises(control_plane_product_config.ProductConfigError) as raised:
             control_plane_product_config._resolve_provider_secret_adoptions(
+                record_store=_FakeProductConfigStore(),
                 secrets=({"binding_key": "REPAIRSHOPR_TOKEN", "adopt_from_provider": True},),
                 recorded_keys=frozenset(),
                 lane_provider_env_reader=None,
@@ -286,6 +350,7 @@ class ProviderSecretAdoptionPlanTests(unittest.TestCase):
 
         self.assertEqual(
             control_plane_product_config._resolve_provider_secret_adoptions(
+                record_store=_FakeProductConfigStore(),
                 secrets=({"binding_key": "REPAIRSHOPR_TOKEN", "value": "typed"},),
                 recorded_keys=frozenset(),
                 lane_provider_env_reader=unexpected_read,
