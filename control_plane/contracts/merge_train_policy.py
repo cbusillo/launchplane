@@ -24,7 +24,6 @@ MergeTrainActorRole = Literal["repo_owner", "repo_admin"]
 MergeTrainFailurePolicy = Literal["pause_train", "continue_after_blocking_pr"]
 MergeTrainIdentityKind = Literal["github_actions_oidc", "github_app", "github_token_secret"]
 MergeTrainMergeMethod = Literal["merge", "squash", "rebase"]
-MergeTrainEngineeringReviewMode = Literal["advisory"]
 MergeTrainPolicyRecordStatus = Literal["active", "superseded"]
 MergeTrainSchedulerRunnerMode = Literal["level1", "controller"]
 MERGE_TRAIN_POLICY_TARGETS_READ_ACTION = "merge_train.policy_targets"

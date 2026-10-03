@@ -9,7 +9,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.merge_train_policy import (
     MergeTrainEnqueuePolicy,
-    MergeTrainEngineeringReviewMode,
     MergeTrainFailurePolicy,
     MergeTrainIdentity,
     MergeTrainMergeMethod,
@@ -434,7 +433,6 @@ class ManagedMergeTrainPolicyImportProposalInput(BaseModel):
             raise ValueError("Unsupported merge-train policy import schema version.")
         if self.record.status != "active":
             raise ValueError("Merge-train policy import candidate record must be active.")
-        self.record.policy.require_advisory_review()
         normalize_merge_train_policy_timestamp(self.record.updated_at)
         object.__setattr__(self, "reason", _required_token(self.reason, "reason"))
         object.__setattr__(self, "related_issue", self.related_issue.strip())
@@ -452,7 +450,8 @@ class OrdinaryAgentMergeTrainTargetIntent(BaseModel):
     blocked_label: str = Field(min_length=1, max_length=255)
     stack_child_disposition_label: str = Field(default="", max_length=255)
     merge_method: MergeTrainMergeMethod
-    engineering_review_mode: MergeTrainEngineeringReviewMode = "advisory"
+    # Historical operation requests retain their original intent and digest.
+    engineering_review_mode: Literal["advisory", "required"] = "advisory"
     failure_policy: MergeTrainFailurePolicy
     enqueue: MergeTrainEnqueuePolicy
     merge_identity: MergeTrainIdentity

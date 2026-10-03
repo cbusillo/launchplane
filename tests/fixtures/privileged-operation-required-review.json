@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "operation_id": "privileged-operation-9b865e7683cbcb1461fb5a9e30fa0916",
+  "descriptor_id": "managed-merge-train-policy-import",
+  "descriptor_version": 1,
+  "safety_class": "policy_admin",
+  "status": "planned",
+  "source_event_id": "merge-train-policy-request-1",
+  "requested_by": {
+    "identity_type": "terminal_agent",
+    "login": "terminal-agent",
+    "principal_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "request": {
+    "schema_version": 1,
+    "record": {
+      "schema_version": 1,
+      "record_id": "merge-train-policy-candidate",
+      "status": "active",
+      "source": "test",
+      "updated_at": "2026-08-22T20:00:00+00:00",
+      "policy_sha256": "b73f3b5ed3a6a837876ff73a33364c321add50e8604e608e359859e8a60da225",
+      "policy": {
+        "schema_version": 1,
+        "policies": [
+          {
+            "repository": "cbusillo/codex-skills",
+            "base_branch": "main",
+            "enqueue_label": "ready-to-merge",
+            "blocked_label": "merge-blocked",
+            "stack_child_disposition_label": "stack-landed",
+            "merge_method": "merge",
+            "engineering_review_mode": "required",
+            "failure_policy": "pause_train",
+            "enqueue": {
+              "label_required": true,
+              "allowed_actor_roles": [
+                "repo_owner",
+                "repo_admin"
+              ]
+            },
+            "merge_identity": {
+              "kind": "github_actions_oidc",
+              "name": "launchplane-merge-train"
+            },
+            "service_authz": {
+              "action": "merge_train.run_once",
+              "product": "launchplane",
+              "context": "launchplane"
+            },
+            "github_token": {
+              "env_var": "GH_TOKEN"
+            },
+            "scheduler": {
+              "enabled": false,
+              "runner_mode": "controller",
+              "mutate": false
+            }
+          }
+        ]
+      }
+    },
+    "reason": "Review exact merge-train policy import.",
+    "related_issue": "cbusillo/launchplane#2296",
+    "preparation_context": {
+      "schema_version": 1,
+      "intent": {
+        "repository_id": "12345",
+        "base_branch": "main",
+        "enqueue_label": "ready-to-merge",
+        "blocked_label": "merge-blocked",
+        "stack_child_disposition_label": "stack-landed",
+        "merge_method": "merge",
+        "engineering_review_mode": "required",
+        "failure_policy": "pause_train",
+        "enqueue": {
+          "label_required": true,
+          "allowed_actor_roles": [
+            "repo_owner",
+            "repo_admin"
+          ]
+        },
+        "merge_identity": {
+          "kind": "github_actions_oidc",
+          "name": "launchplane-merge-train"
+        }
+      },
+      "expected_active_record_id": "legacy-active-policy",
+      "expected_active_policy_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_active_updated_at": "2026-08-22T19:00:00+00:00",
+      "target_policy_key": "cbusillo/codex-skills:main"
+    }
+  },
+  "request_digest": "90bc7bc95ebfed6448750b1a87ae9223e5d6bd8380075798ea09bac3c07eb8c0",
+  "evidence": {
+    "schema_version": 1,
+    "result_status": "ok",
+    "plan_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+    "active_record_id": "merge-train-policy-active",
+    "active_status": "active",
+    "active_updated_at": "2026-08-22T19:00:00+00:00",
+    "active_policy_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+    "active_target_count": 1,
+    "candidate_record_id": "merge-train-policy-candidate",
+    "candidate_policy_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+    "candidate_target_count": 1,
+    "added_policy_keys": [],
+    "removed_policy_keys": [],
+    "changed_policy_keys": [
+      "redacted/repository:main"
+    ],
+    "unchanged_policy_keys": []
+  },
+  "evidence_digest": "747743505f0c6b67da650a8c1f8eeaea7fc9352bb499361c2c26397b63177421",
+  "created_at": "2026-08-22T20:00:00+00:00",
+  "updated_at": "2026-08-22T20:00:00+00:00",
+  "expires_at": "2026-08-22T20:30:00+00:00",
+  "approval": null,
+  "execution": null,
+  "terminal_at": "",
+  "terminal_reason": ""
+}

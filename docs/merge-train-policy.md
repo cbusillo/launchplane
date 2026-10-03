@@ -228,7 +228,12 @@ Each repository policy contains:
   default). New policy imports and target preparation reject `required`, which
   is retired by the overall DIRECTION.md. Historical policy records retain
   their original values and digests, but even an active legacy `required`
-  policy cannot make engineering-review evidence block a merge.
+  policy cannot make engineering-review evidence block a merge. To prepare a
+  new target from a legacy active policy, import a replacement policy with
+  every repository set to `advisory`; preparation reports
+  `merge_train_engineering_review_mode_retired` until that replacement.
+  Historical privileged-operation requests remain readable; planning and
+  executing a policy import reject retired required-review candidates.
 - `provider_delivery_protection_expectation`: Optional exact provider-protection
   expectation for ordinary guarded delivery. Absence preserves legacy policy
   bytes and digests and supplies no ordinary readiness capability. Only the

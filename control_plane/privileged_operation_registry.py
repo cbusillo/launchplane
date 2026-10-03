@@ -435,6 +435,10 @@ def plan_managed_merge_train_policy_import(
         raise PrivilegedOperationPlannerError(
             "Merge-train policy import planner received an invalid request type."
         )
+    try:
+        request.record.policy.require_advisory_review()
+    except ValueError as error:
+        raise PrivilegedOperationPlannerError(str(error)) from error
     list_records = getattr(record_store, "list_merge_train_policy_records", None)
     read_record = getattr(record_store, "read_merge_train_policy_record", None)
     if not callable(list_records) or not callable(read_record):

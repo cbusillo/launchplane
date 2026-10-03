@@ -21153,8 +21153,11 @@
             "type": "string"
           },
           "engineering_review_mode": {
-            "const": "advisory",
             "default": "advisory",
+            "enum": [
+              "advisory",
+              "required"
+            ],
             "title": "Engineering Review Mode",
             "type": "string"
           },
@@ -21239,8 +21242,11 @@
             "type": "string"
           },
           "engineering_review_mode": {
-            "const": "advisory",
             "default": "advisory",
+            "enum": [
+              "advisory",
+              "required"
+            ],
             "title": "Engineering Review Mode",
             "type": "string"
           },
