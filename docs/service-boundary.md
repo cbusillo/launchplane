@@ -4097,7 +4097,7 @@ reconcile attempt, naming the `deploy_blocked.*` or other code that stopped it.
 lane's backup authority and the last promotion's failure. A step whose evidence
 cannot be read is `unknown`, never `clear`, and the response never carries
 provider or exception text. `rollback` checks the prod lane, the caller's
-execute grant and accepted bearer/OIDC identity for generic-web (or the signed-in policy administrator
+execute grant and accepted bearer/OIDC identity for generic-web (or the signed-in admin recognized by the active policy
 for queued Odoo rollback), and the recorded previous release. Generic-web uses
 prod deployment history's previous passing different artifact, then
 runs the effect-free rollback plan builder; all target blockers are returned,
