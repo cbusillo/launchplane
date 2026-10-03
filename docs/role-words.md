@@ -53,7 +53,7 @@ them as code and describes their meaning in these words.
 | `owner_agent_identity`, `omit_owner_agent_env` | the Director's own agent and its write credentials |
 | identity role `owner` | a signed-in Client |
 | `can_override`, `overridden` release decisions | an admin override of the Client's review |
-| `require_policy_administrator`, `policy_administrator*` | the admin permission |
+| durable operation grant `policy_administrator`, reason code `authz_policy_administrator_quorum_unsatisfied` | the admin permission |
 | `operator_contract`, `agent-operator-contract`, `operator_bearer_config`, `local_operator`, `LAUNCHPLANE_OPERATOR_URL` | admin access and its contract |
 | `docs/owner-acceptance.md`, `docs/owner-control-channel.md`, `docs/operator-experience.md`, `docs/agent-operator-contract.md`, `docs/product-owner-policy.md` | doc file names; their content uses these words |
 | `## Owner test notes`, `Nothing for the owner to test`, `.github/actions/owner-test-notes` | older spellings of the `## Client test notes` section and its `Nothing for the Client to test` marker, still read; the action keeps its path because product repositories pin it |

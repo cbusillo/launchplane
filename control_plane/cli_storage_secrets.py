@@ -15,7 +15,7 @@ from control_plane.workflows.provider_target_backfill import backfill_provider_t
 
 _SECRET_WRITE_DIRECT_DB_MUTATION_MESSAGE = (
     "Direct local DB mutation is restricted after the Launchplane service boundary. "
-    "Use the deployed service route or operator workflow for shared/production "
+    "Use the deployed service route or admin workflow for shared/production "
     "secret writes, or pass --allow-direct-db-mutation only for explicit "
     "local/bootstrap repair."
 )
@@ -241,7 +241,7 @@ def secrets_show(database_url: str, secret_id: str) -> None:
 @click.option(
     "--reason",
     default="",
-    help="Operator reason recorded with an applied re-encryption.",
+    help="Admin reason recorded with an applied re-encryption.",
 )
 @_direct_db_mutation_acknowledgement_option
 def secrets_reencrypt(

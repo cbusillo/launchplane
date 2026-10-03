@@ -358,7 +358,7 @@ def plan_route_binding_reconcile(
     if current_record.source.source_kind not in {"backfill", "service"} and not external_handoff:
         return _conflict_plan(
             code="route_binding_ownership_conflict",
-            detail=("Reconcile cannot replace a route-binding record owned by an operator source."),
+            detail=("Reconcile cannot replace a route-binding record set by an admin."),
             current_record=current_record,
             current_record_sha256=current_record_sha256,
             candidate_record_sha256=candidate_record_sha256,

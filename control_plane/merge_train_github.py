@@ -59,6 +59,8 @@ from control_plane.merge_train import MergeTrainMergeableState
 from control_plane.merge_train import MergeTrainPullRequestSnapshot
 from control_plane.merge_train import MergeTrainPullRequestState
 from control_plane.merge_train import MergeTrainQueueEntry
+from control_plane.merge_train import MergeTrainReviewConversations
+from control_plane.merge_train import CODE_SCANNING_REVIEW_AUTHOR
 from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionDeniedError
 
 logger = logging.getLogger(__name__)
@@ -123,15 +125,25 @@ class MergeTrainGitHubCandidateEntryConflictError(MergeTrainGitHubStaleHeadError
 class MergeTrainGitHubMergeRejectedError(MergeTrainGitHubError):
     """A conclusive merge refusal with bounded, separately observed diagnosis."""
 
-    def __init__(self, *, pull_request_number: int, head_behind_base: bool) -> None:
+    def __init__(self, *, pull_request_number: int, observed_merge_state: str = "") -> None:
         self.pull_request_number = pull_request_number
-        self.refusal_diagnosis = "head_behind_base" if head_behind_base else "unconfirmed"
-        diagnosis = (
-            "The same PR head is behind its base; refresh the source PR branches and let the "
-            "train build a fresh candidate before another attempt."
-            if head_behind_base
-            else "Reread the PR's merge requirements before another attempt."
-        )
+        # GitHub's mergeable_state for the same open head, when it could be read.
+        self.observed_merge_state = observed_merge_state
+        self.refusal_diagnosis = {
+            "behind": "head_behind_base",
+            "blocked": "merge_blocked",
+        }.get(observed_merge_state, "unconfirmed")
+        diagnosis = {
+            "head_behind_base": (
+                "The same PR head is behind its base; refresh the source PR branches and let "
+                "the train build a fresh candidate before another attempt."
+            ),
+            "merge_blocked": (
+                "GitHub reports the PR blocked by a base-branch requirement, such as an "
+                "unresolved review conversation or a missing review; clear it before another "
+                "attempt."
+            ),
+        }.get(self.refusal_diagnosis, "Reread the PR's merge requirements before another attempt.")
         super().__init__(
             f"GitHub refused to merge PR #{pull_request_number} (HTTP 405). {diagnosis}",
             status_code=405,
@@ -262,6 +274,23 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         return GitHubMergeTrainSnapshotReader(
             transport=self.transport, branch_refresh_store=self._branch_refresh_store
         ).read_pull_request_snapshot(repository=repository, pull_request_number=pull_request_number)
+
+    def read_review_conversations(
+        self, *, repository: str, base_branch: str, pull_request_number: int
+    ) -> MergeTrainReviewConversations | None:
+        """Return unresolved threads that can block this pull request's merge, if any."""
+        repository_path = _repository_path(repository)
+        rule = _conversation_resolution_rule(
+            transport=self.transport, repository_path=repository_path, base_branch=base_branch
+        )
+        if rule == "not_required":
+            return None
+        return _review_conversations(
+            transport=self.transport,
+            repository_path=repository_path,
+            pull_request_number=pull_request_number,
+            rule=rule,
+        )
 
     def observe_historical_batch_completion(
         self,
@@ -1742,7 +1771,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         except MergeTrainGitHubError as error:
             if error.status_code != 405:
                 raise
-            head_behind_base = False
+            observed_merge_state = ""
             try:
                 observed = self.transport.request(
                     method="GET",
@@ -1752,15 +1781,18 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 observed = None
             if isinstance(observed, dict):
                 head = observed.get("head")
-                head_behind_base = (
+                merge_state = observed.get("mergeable_state")
+                if (
                     observed.get("number") == pull_request_number
                     and observed.get("state") == "open"
                     and isinstance(head, dict)
                     and head.get("sha") == expected_head_sha
-                    and observed.get("mergeable_state") == "behind"
-                )
+                    and isinstance(merge_state, str)
+                ):
+                    observed_merge_state = merge_state.strip().lower()
             raise MergeTrainGitHubMergeRejectedError(
-                pull_request_number=pull_request_number, head_behind_base=head_behind_base
+                pull_request_number=pull_request_number,
+                observed_merge_state=observed_merge_state,
             ) from error
         if not isinstance(payload, dict):
             raise MergeTrainGitHubError(
@@ -2108,13 +2140,17 @@ class GitHubMergeTrainSnapshotReader:
             repository=repository,
             base_branch=normalized_base_branch,
         )
-        pull_requests = tuple(
-            self._pull_request_snapshot(
-                repository=repository,
-                repository_path=repository_path,
-                pull_request=pull_request,
-            )
-            for pull_request in relevant_pull_requests
+        pull_requests = self._with_review_conversations(
+            repository_path=repository_path,
+            base_branch=normalized_base_branch,
+            pull_requests=tuple(
+                self._pull_request_snapshot(
+                    repository=repository,
+                    repository_path=repository_path,
+                    pull_request=pull_request,
+                )
+                for pull_request in relevant_pull_requests
+            ),
         )
         return MergeTrainDryRunSnapshot(
             repository=repository,
@@ -2126,10 +2162,56 @@ class GitHubMergeTrainSnapshotReader:
     def read_pull_request_snapshot(
         self, *, repository: str, pull_request_number: int
     ) -> MergeTrainPullRequestSnapshot:
-        return self._pull_request_snapshot(
+        repository_path = _repository_path(repository)
+        snapshot = self._pull_request_snapshot(
             repository=repository,
-            repository_path=_repository_path(repository),
+            repository_path=repository_path,
             pull_request={"number": pull_request_number},
+        )
+        if not snapshot.base_ref:
+            return snapshot
+        (snapshot,) = self._with_review_conversations(
+            repository_path=repository_path,
+            base_branch=snapshot.base_ref,
+            pull_requests=(snapshot,),
+        )
+        return snapshot
+
+    def _with_review_conversations(
+        self,
+        *,
+        repository_path: str,
+        base_branch: str,
+        pull_requests: tuple[MergeTrainPullRequestSnapshot, ...],
+    ) -> tuple[MergeTrainPullRequestSnapshot, ...]:
+        """Record unresolved threads that GitHub would refuse a merge over.
+
+        GitHub refuses a merge into a base that requires conversation
+        resolution while any review thread is unresolved, so such a pull
+        request is not ready for the train. Closed and draft pull requests are
+        already ineligible and are not read.
+        """
+        if not any(_conversations_can_block(pull_request) for pull_request in pull_requests):
+            return pull_requests
+        rule = _conversation_resolution_rule(
+            transport=self.transport, repository_path=repository_path, base_branch=base_branch
+        )
+        if rule == "not_required":
+            return pull_requests
+        return tuple(
+            pull_request.model_copy(
+                update={
+                    "review_conversations": _review_conversations(
+                        transport=self.transport,
+                        repository_path=repository_path,
+                        pull_request_number=pull_request.number,
+                        rule=rule,
+                    )
+                }
+            )
+            if _conversations_can_block(pull_request)
+            else pull_request
+            for pull_request in pull_requests
         )
 
     def _base_branch_sha(self, *, repository_path: str, base_branch: str) -> str:
@@ -3178,6 +3260,184 @@ def _candidate_required_checks_status(
             + ", ".join(missing_required_checks)
         )
     return _combine_check_statuses(observed_status, required_status)
+
+
+_CONVERSATION_RESOLUTION_RULE_QUERY = """
+query($owner: String!, $name: String!, $ref: String!) {
+  repository(owner: $owner, name: $name) {
+    ref(qualifiedName: $ref) { refUpdateRule { requiresConversationResolution } }
+  }
+}
+"""
+
+_REVIEW_THREADS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $after) {
+        nodes { isResolved comments(first: 1) { nodes { author { login } } } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+
+def _conversations_can_block(pull_request: MergeTrainPullRequestSnapshot) -> bool:
+    return pull_request.state == "open" and not pull_request.is_draft
+
+
+def _graphql_repository(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    query: str,
+    variables: dict[str, object],
+) -> dict[str, object]:
+    owner, name = repository_path.split("/", 1)
+    payload = _json_object(
+        transport.request(
+            method="POST",
+            path="/graphql",
+            body={"query": query, "variables": {"owner": owner, "name": name, **variables}},
+        ),
+        "GitHub GraphQL response",
+    )
+    if payload.get("errors"):
+        raise MergeTrainGitHubError("GitHub GraphQL request returned errors.")
+    data = _json_object(payload.get("data"), "GitHub GraphQL data")
+    return _json_object(data.get("repository"), "GitHub GraphQL repository")
+
+
+def _conversation_resolution_rule(
+    *, transport: MergeTrainGitHubTransport, repository_path: str, base_branch: str
+) -> Literal["required", "not_required", "unreadable"]:
+    """Read whether the base branch requires resolved conversations.
+
+    Classic branch protection and active rulesets can each require it. The
+    train token has no Administration permission, so this reads the classic
+    rule GitHub shows to non-admins and the branch's active rules, which need
+    only Metadata read. An unreadable rule is not taken as absent: callers then
+    treat unresolved threads as blocking.
+    """
+    classic = _classic_conversation_rule(
+        transport=transport, repository_path=repository_path, base_branch=base_branch
+    )
+    if classic == "required":
+        return classic
+    ruleset = _ruleset_conversation_rule(
+        transport=transport, repository_path=repository_path, base_branch=base_branch
+    )
+    if ruleset == "required":
+        return ruleset
+    if "unreadable" in (classic, ruleset):
+        return "unreadable"
+    return "not_required"
+
+
+def _classic_conversation_rule(
+    *, transport: MergeTrainGitHubTransport, repository_path: str, base_branch: str
+) -> Literal["required", "not_required", "unreadable"]:
+    try:
+        repository = _graphql_repository(
+            transport=transport,
+            repository_path=repository_path,
+            query=_CONVERSATION_RESOLUTION_RULE_QUERY,
+            variables={"ref": f"refs/heads/{base_branch}"},
+        )
+        ref = _json_object(repository.get("ref"), "GitHub GraphQL base ref")
+    except MergeTrainGitHubError:
+        return "unreadable"
+    rule = ref.get("refUpdateRule")
+    if rule is None:
+        return "not_required"
+    required = rule.get("requiresConversationResolution") if isinstance(rule, dict) else None
+    if not isinstance(required, bool):
+        return "unreadable"
+    return "required" if required else "not_required"
+
+
+def _ruleset_conversation_rule(
+    *, transport: MergeTrainGitHubTransport, repository_path: str, base_branch: str
+) -> Literal["required", "not_required", "unreadable"]:
+    encoded_branch = quote(base_branch, safe="")
+    page = 1
+    while True:
+        try:
+            rules = transport.request(
+                method="GET",
+                path=f"/repos/{repository_path}/rules/branches/{encoded_branch}"
+                f"?per_page=100&page={page}",
+            )
+        except MergeTrainGitHubError:
+            return "unreadable"
+        if not isinstance(rules, list):
+            return "unreadable"
+        for rule in rules:
+            if not isinstance(rule, dict) or rule.get("type") != "pull_request":
+                continue
+            parameters = rule.get("parameters")
+            if not isinstance(parameters, dict):
+                return "unreadable"
+            if parameters.get("required_review_thread_resolution") is True:
+                return "required"
+        if len(rules) < 100:
+            return "not_required"
+        page += 1
+
+
+def _review_conversations(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    pull_request_number: int,
+    rule: Literal["required", "unreadable"],
+) -> MergeTrainReviewConversations | None:
+    unresolved_count = 0
+    code_scanning_count = 0
+    after: str | None = None
+    while True:
+        repository = _graphql_repository(
+            transport=transport,
+            repository_path=repository_path,
+            query=_REVIEW_THREADS_QUERY,
+            variables={"number": pull_request_number, "after": after},
+        )
+        pull_request = _json_object(repository.get("pullRequest"), "GitHub GraphQL pull request")
+        threads = _json_object(pull_request.get("reviewThreads"), "GitHub GraphQL review threads")
+        nodes = threads.get("nodes")
+        if not isinstance(nodes, list):
+            raise MergeTrainGitHubError("GitHub GraphQL review threads must be a list.")
+        for node in nodes:
+            thread = _json_object(node, "GitHub GraphQL review thread")
+            if thread.get("isResolved") is True:
+                continue
+            unresolved_count += 1
+            if _first_comment_author(thread) == CODE_SCANNING_REVIEW_AUTHOR:
+                code_scanning_count += 1
+        page = _json_object(threads.get("pageInfo"), "GitHub GraphQL review thread page")
+        if page.get("hasNextPage") is not True:
+            break
+        after = _required_text(
+            page.get("endCursor"), "GitHub GraphQL review thread page requires endCursor."
+        )
+    if not unresolved_count:
+        return None
+    return MergeTrainReviewConversations(
+        rule=rule,
+        unresolved_count=unresolved_count,
+        code_scanning_count=code_scanning_count,
+    )
+
+
+def _first_comment_author(thread: dict[str, object]) -> str:
+    comments = thread.get("comments")
+    nodes = comments.get("nodes") if isinstance(comments, dict) else None
+    first = nodes[0] if isinstance(nodes, list) and nodes else None
+    author = first.get("author") if isinstance(first, dict) else None
+    login = author.get("login") if isinstance(author, dict) else None
+    return login.strip() if isinstance(login, str) else ""
 
 
 def _required_branch_checks(

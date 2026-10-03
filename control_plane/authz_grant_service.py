@@ -565,11 +565,11 @@ def _managed_policy_safety_blocker(
         ),
         "authz_policy_strict_human_admin_unreachable": (
             "Managed authz policy reconciliation must retain at least one reachable strict "
-            "GitHub-human policy administrator."
+            "GitHub-human admin."
         ),
         "authz_policy_administrator_quorum_unsatisfied": (
             "Managed authz policy reconciliation must retain enough distinct strict "
-            "GitHub-human policy administrators to satisfy administrator_quorum."
+            "GitHub-human admins to satisfy administrator_quorum."
         ),
     }
     return AuthzManagedPolicySafetyBlocker(code=code, message=messages[code])
@@ -1655,7 +1655,7 @@ def _authz_rule_grants_policy_administration(rule: AuthzExistingPolicyRule) -> b
     return bool(rule.subjects and rule.token_labels)
 
 
-def _authz_policy_administrator_rules(
+def _authz_admin_rules(
     policy: LaunchplaneAuthzPolicy,
 ) -> tuple[AuthzExistingPolicyRule, ...]:
     return tuple(
@@ -1667,7 +1667,7 @@ def _authz_policy_administrator_rules(
 
 
 def _authz_policy_retains_administration(policy: LaunchplaneAuthzPolicy) -> bool:
-    return bool(_authz_policy_administrator_rules(policy))
+    return bool(_authz_admin_rules(policy))
 
 
 def _authz_rule_allows_identity(
@@ -1707,7 +1707,7 @@ def _authz_rule_allows_identity(
     )
 
 
-def authz_policy_administrator_quorum_satisfied(
+def authz_admin_quorum_satisfied(
     *,
     policy: LaunchplaneAuthzPolicy,
 ) -> bool:

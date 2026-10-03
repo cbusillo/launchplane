@@ -360,7 +360,6 @@ class OrdinaryAgentLandingStorageTests(unittest.TestCase):
             ),
             engineering_decision=None,
             engineering_evidence=(),
-            engineering_review_authority="advisory",
             candidate_evidence=readiness_support._candidate(
                 repository=target.repository,
                 base_sha=target.base_sha,

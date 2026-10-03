@@ -147,7 +147,7 @@ test("ordinary target preparation posts only target intent and server replay key
       blocked_label: "merge-train-blocked",
       stack_child_disposition_label: "",
       merge_method: "merge",
-      engineering_review_mode: "required",
+      engineering_review_mode: "advisory",
       failure_policy: "pause_train",
       enqueue: { label_required: true, allowed_actor_roles: ["repo_owner"] },
       merge_identity: { kind: "github_app", name: "merge-train-app" },

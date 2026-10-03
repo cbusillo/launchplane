@@ -462,6 +462,7 @@ def execute_merge_train_controller_with_client(
             candidate_store=candidate_store,
             landing_store=landing_store,
             stack_collapse_store=stack_collapse_store,
+            admission_store=admission_store,
             lease=lease,
         )
         if result is None:
@@ -572,6 +573,7 @@ def _resume_merge_train_controller_state(
     candidate_store: MergeTrainBatchCandidateRecordStore,
     landing_store: MergeTrainBatchLandingPlanRecordStore,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
+    admission_store: MergeAdmissionRecordStore,
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object] | None:
     if not request.mutate:
@@ -619,6 +621,17 @@ def _resume_merge_train_controller_state(
             include_lineage_retirements=True,
         )
         if landed_record is None:
+            if lease.record.active_phase == "retire_stale_policy_landing":
+                return _resume_unrecorded_landing_retirement(
+                    trace_id=trace_id,
+                    recorded_at=recorded_at,
+                    github_client=github_client,
+                    candidate_store=candidate_store,
+                    landing_store=landing_store,
+                    admission_store=admission_store,
+                    landing_record=planned_record,
+                    lease=lease,
+                )
             return None
         if lease.record.active_phase == "retire_stale_policy_landing":
             return _finish_retired_policy_landing(
@@ -1429,22 +1442,8 @@ def _retire_changed_policy_landing(
         raise MergeTrainControllerRequestError(
             "Policy-change recovery requires the exact recorded candidate."
         )
-    allow_changed_base = True
-    for entry in plan.entries:
-        admissions = admission_store.list_merge_admission_records(
-            repository=plan.repository,
-            base_branch=plan.base_branch,
-            pull_request_number=entry.pull_request_number,
-            landing_plan_id=plan.plan_id,
-        )
-        if admissions:
-            outcomes = admission_store.list_merge_landing_outcome_records(
-                admission_id=admissions[0].admission_id, limit=1
-            )
-            if not outcomes or outcomes[0].status != "rejected":
-                allow_changed_base = False
-    observed_base_sha, observed_base_tree_sha = github_client.verify_unlanded_batch(
-        landing_plan=plan, allow_changed_base=allow_changed_base
+    observed_base_sha, observed_base_tree_sha = _verify_retirement_has_no_effect(
+        github_client=github_client, admission_store=admission_store, plan=plan
     )
     if not request.mutate:
         return {
@@ -1482,11 +1481,67 @@ def _retire_changed_policy_landing(
             "landing_plan_record_id": landing_record.record_id,
             "landing_plan_id": plan.plan_id,
             "expected_effect_sha": plan.candidate_sha,
+            "retirement_source": retirement_source,
         },
     )
+    return _record_landing_retirement(
+        trace_id=trace_id,
+        recorded_at=recorded_at,
+        github_client=github_client,
+        candidate_store=candidate_store,
+        landing_store=landing_store,
+        candidate_record=candidate_record,
+        landing_record=landing_record,
+        retirement_source=retirement_source,
+        lease=lease,
+    )
+
+
+def _verify_retirement_has_no_effect(
+    *,
+    github_client: GitHubMergeTrainClient,
+    admission_store: MergeAdmissionRecordStore,
+    plan: MergeTrainBatchLandingPlan,
+) -> tuple[str, str]:
+    allow_changed_base = True
+    for entry in plan.entries:
+        admissions = admission_store.list_merge_admission_records(
+            repository=plan.repository,
+            base_branch=plan.base_branch,
+            pull_request_number=entry.pull_request_number,
+            landing_plan_id=plan.plan_id,
+        )
+        if admissions:
+            outcomes = admission_store.list_merge_landing_outcome_records(
+                admission_id=admissions[0].admission_id, limit=1
+            )
+            if not outcomes or outcomes[0].status != "rejected":
+                allow_changed_base = False
+    return github_client.verify_unlanded_batch(
+        landing_plan=plan, allow_changed_base=allow_changed_base
+    )
+
+
+def _record_landing_retirement(
+    *,
+    trace_id: str,
+    recorded_at: str,
+    github_client: GitHubMergeTrainClient,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    landing_store: MergeTrainBatchLandingPlanRecordStore,
+    candidate_record: MergeTrainBatchCandidateRecord,
+    landing_record: MergeTrainBatchLandingPlanRecord,
+    retirement_source: str,
+    lease: MergeTrainControllerLeaseContext,
+) -> dict[str, object]:
+    plan = landing_record.landing_plan
     if plan.candidate_pull_request_number is not None:
+        # Keep the retirement phase so an interruption after the close resumes here (#2846).
         _close_service_batch_pull_request(
-            github_client=github_client, candidate_record=candidate_record, lease=lease
+            github_client=github_client,
+            candidate_record=candidate_record,
+            lease=lease,
+            active_phase="retire_stale_policy_landing",
         )
     retired_record = build_merge_train_batch_landing_plan_record(
         landing_plan=stale_merge_train_landing_plan(plan),
@@ -1496,6 +1551,55 @@ def _retire_changed_policy_landing(
     landing_store.write_merge_train_batch_landing_plan_record(retired_record)
     return _finish_retired_policy_landing(
         candidate_store=candidate_store, retired_record=retired_record, lease=lease
+    )
+
+
+def _resume_unrecorded_landing_retirement(
+    *,
+    trace_id: str,
+    recorded_at: str,
+    github_client: GitHubMergeTrainClient,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    landing_store: MergeTrainBatchLandingPlanRecordStore,
+    admission_store: MergeAdmissionRecordStore,
+    landing_record: MergeTrainBatchLandingPlanRecord,
+    lease: MergeTrainControllerLeaseContext,
+) -> dict[str, object] | None:
+    """Finish a retirement interrupted before its record was written.
+
+    The batch PR may already be closed, so a normal landing pass could record a
+    generic stale landing instead. The constituents are verified again because
+    they may have changed while the controller was down; closing again is a
+    no-op on a closed PR.
+    """
+    retirement_source = lease.record.step_payload.get("retirement_source")
+    if not isinstance(retirement_source, str) or retirement_source not in {
+        "policy-changed-landing",
+        "lineage-changed-landing",
+    }:
+        return None
+    candidate_record = _candidate_record_for_landing_plan(
+        record_store=candidate_store, landing_plan_record=landing_record
+    )
+    if candidate_record is None:
+        raise MergeTrainControllerRequestError(
+            "Retirement resume requires the exact recorded candidate."
+        )
+    _verify_retirement_has_no_effect(
+        github_client=github_client,
+        admission_store=admission_store,
+        plan=landing_record.landing_plan,
+    )
+    return _record_landing_retirement(
+        trace_id=trace_id,
+        recorded_at=recorded_at,
+        github_client=github_client,
+        candidate_store=candidate_store,
+        landing_store=landing_store,
+        candidate_record=candidate_record,
+        landing_record=landing_record,
+        retirement_source=retirement_source,
+        lease=lease,
     )
 
 
@@ -1859,6 +1963,7 @@ def _close_service_batch_pull_request(
     github_client: GitHubMergeTrainClient,
     candidate_record: MergeTrainBatchCandidateRecord,
     lease: MergeTrainControllerLeaseContext,
+    active_phase: str = "close_batch_pull_request",
 ) -> None:
     candidate = candidate_record.candidate
     if (
@@ -1866,7 +1971,7 @@ def _close_service_batch_pull_request(
         and len(candidate.entries) > 1
         and candidate.candidate_sha
     ):
-        lease.checkpoint(active_phase="close_batch_pull_request")
+        lease.checkpoint(active_phase=active_phase)
         github_client.close_batch_pull_request(candidate=candidate)
 
 
@@ -3860,11 +3965,10 @@ def _controller_result_reconciliation_detail(
 
 def _controller_exception_reconciliation_detail(error: Exception) -> str:
     if isinstance(error, MergeTrainGitHubMergeRejectedError):
-        return (
-            "operator_required:pull_request_head_behind_base"
-            if error.refusal_diagnosis == "head_behind_base"
-            else "operator_required:github_merge_rejected"
-        )
+        return {
+            "head_behind_base": "operator_required:pull_request_head_behind_base",
+            "merge_blocked": "operator_required:pull_request_merge_blocked",
+        }.get(error.refusal_diagnosis, "operator_required:github_merge_rejected")
     if isinstance(error, MergeTrainGitHubError):
         if error.status_code is None or error.status_code >= 500:
             return "retryable:github_request_failed"

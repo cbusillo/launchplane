@@ -6,11 +6,6 @@ from pathlib import Path
 
 from control_plane.contracts.preview_request_metadata import (
     LAUNCHPLANE_ALLOWED_COMPANION_REPOS,
-    LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_INFO_STRING,
-)
-from control_plane.workflows.launchplane import (
-    DEFAULT_LAUNCHPLANE_BASELINE_CHANNEL,
-    LAUNCHPLANE_PREVIEW_ENABLE_LABEL,
 )
 
 
@@ -108,7 +103,7 @@ def build_launchplane_action_script(
 ) -> str:
     lines = [
         "# Local rehearsal only. Shared/live mutations must use the deployed "
-        "Launchplane service API or operator workflow.",
+        "Launchplane service API or admin workflow.",
         'STATE_DIR="/path/to/local-state"',
     ]
     for variable_name, file_path, payload in file_payloads:
@@ -298,12 +293,6 @@ def launchplane_inventory_bucket(row: dict[str, object]) -> str:
     return "live"
 
 
-def launchplane_preview_enablement_record_id(
-    *, context_name: str, anchor_repo: str, anchor_pr_number: int
-) -> str:
-    return f"{context_name}-{anchor_repo}-pr-{anchor_pr_number}"
-
-
 def build_launchplane_promotion_resolve_recipe_script(
     *,
     context_name: str,
@@ -339,7 +328,7 @@ def build_launchplane_backup_gate_write_recipe_script(
     }
     lines = [
         "# Local rehearsal only. Shared/live mutations must use the deployed "
-        "Launchplane service API or operator workflow.",
+        "Launchplane service API or admin workflow.",
         'STATE_DIR="/path/to/local-state"',
         'BACKUP_GATE_FILE="/tmp/launchplane-backup-gate.json"',
         "cat >\"$BACKUP_GATE_FILE\" <<'JSON'",
@@ -354,7 +343,7 @@ def build_launchplane_promotion_execute_recipe_script(*, state_dir: str) -> str:
     return "\n".join(
         (
             "# Local rehearsal only. Shared/live promotion execution must use "
-            "the deployed Launchplane service API or operator workflow.",
+            "the deployed Launchplane service API or admin workflow.",
             f'STATE_DIR="{state_dir or "/path/to/runtime"}"',
             'PROMOTION_REQUEST_FILE="/tmp/launchplane-promotion-request.json"',
             'uv run launchplane promote execute --local-rehearsal --state-dir "$STATE_DIR" --input-file "$PROMOTION_REQUEST_FILE"',
@@ -373,7 +362,7 @@ def build_launchplane_environment_ship_recipe_script(
     return "\n".join(
         (
             "# Local rehearsal only. Shared/live ship execution must use "
-            "the deployed Launchplane service API or operator workflow.",
+            "the deployed Launchplane service API or admin workflow.",
             'STATE_DIR="/path/to/runtime"',
             f'SHIP_REQUEST_FILE="{request_file}"',
             f'uv run launchplane ship resolve --context "{context_name}" --instance "{instance_name}" --artifact-id "{artifact_id}" --source-ref "{source_git_ref}" >"$SHIP_REQUEST_FILE"',
@@ -451,7 +440,7 @@ def render_launchplane_preview_policy_page_html(
     <section class=\"policy-mast\">
       <div class=\"section-label\">Read-only policy</div>
       <h2>How Launchplane decides what becomes a preview</h2>
-      <p>This page exposes the current preview contract as operator evidence. GitHub supplies PR events and identity; Launchplane decides eligibility, route shape, baseline input defaults, and preview retention behavior.</p>
+      <p>This page exposes the current preview contract as admin evidence. GitHub supplies PR events and identity; Launchplane decides eligibility, route shape, baseline input defaults, and preview retention behavior.</p>
     </section>
 
     <section class=\"policy-grid\">
@@ -466,9 +455,9 @@ def render_launchplane_preview_policy_page_html(
         </dl>
       </article>
       <article class=\"policy-card\">
-        <div class=\"section-label\">Enablement</div>
-        <h3>Preview request gate</h3>
-        <p>Launchplane can enable a PR preview from the anchor PR label <code>{escape(LAUNCHPLANE_PREVIEW_ENABLE_LABEL)}</code> or from an explicit Launchplane-side request. Once requested, manifest-changing PR events can refresh the same preview identity.</p>
+        <div class=\"section-label\">Lifecycle</div>
+        <h3>Preview follows the pull request</h3>
+        <p>Every open pull request in an eligible anchor repository has a preview of its verified head. Closing or merging the pull request removes it.</p>
       </article>
     </section>
 
@@ -485,11 +474,6 @@ def render_launchplane_preview_policy_page_html(
     </section>
 
     <section class=\"policy-grid\">
-      <article class=\"policy-card\">
-        <div class=\"section-label\">Preview metadata</div>
-        <h3>PR body contract</h3>
-        <p>Launchplane reads one fenced metadata block from the anchor PR body using info string <code>{escape(LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_INFO_STRING)}</code>. The default baseline channel is <code>{escape(DEFAULT_LAUNCHPLANE_BASELINE_CHANNEL)}</code>.</p>
-      </article>
       <article class=\"policy-card\">
         <div class=\"section-label\">Companions</div>
         <h3>Allowlisted companion repos</h3>
@@ -516,7 +500,7 @@ def render_launchplane_preview_policy_page_html(
       <h2>Retention and cleanup</h2>
       <ul class=\"policy-list\">
         <li>Stable long-lived lanes such as local, testing, and prod remain distinct from preview traffic.</li>
-        <li>Destroyed previews remain visible as retained evidence instead of disappearing from the operator surface.</li>
+        <li>Destroyed previews remain visible as retained evidence instead of disappearing from the admin surface.</li>
         <li>Launchplane treats preview records and generation records as canonical control-plane evidence, not transient UI state.</li>
       </ul>
     </section>
@@ -717,7 +701,7 @@ def render_launchplane_preview_index_page_html(
         if state == "pending":
             badges.append(("Build forming", "warn"))
         elif state == "paused":
-            badges.append(("Operator hold", "warn"))
+            badges.append(("Admin hold", "warn"))
         elif state == "teardown_pending":
             badges.append(("Cleanup queued", "warn"))
         elif state == "failed":
@@ -1102,7 +1086,6 @@ def render_launchplane_preview_index_page_html(
         tone = escape(str(item.get("tone", "neutral")).strip() or "neutral")
         request_source = str(item.get("request_source", "none")).strip()
         source_label = {
-            "github_label": "GitHub label",
             "launchplane": "Launchplane request",
             "history": "Earlier request",
             "none": "Not requested",
@@ -1327,7 +1310,7 @@ def render_launchplane_preview_index_page_html(
     tenant_stage_html = ""
     roster_label = "Preview queue"
     roster_title = "Launchplane-native review lanes"
-    roster_summary = "GitHub remains the PR and event source. Launchplane owns the preview inventory, lifecycle, routing, and operator triage surface."
+    roster_summary = "GitHub remains the PR and event source. Launchplane owns the preview inventory, lifecycle, routing, and admin triage surface."
     if isinstance(tenant_payload, dict):
         tenant_label = escape(
             str(tenant_payload.get("tenant_label", "")).strip() or context_name or "tenant"
@@ -3995,9 +3978,9 @@ def render_launchplane_preview_status_page_html(
         operator_actions_html = '<p class="action-empty">No write-side recipe is exposed for this retained preview state.</p>'
     operator_actions_section_html = f"""
     <section class=\"preview-detail-section\" id=\"operator-actions\">
-      <div class=\"section-label\">Operator actions</div>
+      <div class=\"section-label\">Admin actions</div>
       <h2>Write-side Launchplane recipes</h2>
-      <p>Launchplane still renders as a static operator surface here, so each action is shown as a local rehearsal recipe for this preview identity. Shared and production mutations should use the deployed service API or operator workflow.</p>
+      <p>Launchplane still renders as a static admin surface here, so each action is shown as a local rehearsal recipe for this preview identity. Shared and production mutations should use the deployed service API or operator workflow.</p>
       <div class=\"action-stack\">{operator_actions_html}</div>
     </section>
     """

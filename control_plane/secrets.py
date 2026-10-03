@@ -1152,7 +1152,7 @@ def reencrypt_secrets(
 
     safe_reason = redact_untrusted_text(
         reason,
-        fallback="Operator-requested managed-secret rotation.",
+        fallback="Admin-requested managed-secret rotation.",
         maximum_length=160,
     )
     safe_source_label = redact_untrusted_text(

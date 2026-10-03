@@ -4,7 +4,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_INFO_STRING = "launchplane-preview"
 LAUNCHPLANE_ALLOWED_COMPANION_REPOS: tuple[str, ...] = ("shared-addons",)
 LaunchplanePreviewRequestParseStatus = Literal["missing", "valid", "invalid"]
 

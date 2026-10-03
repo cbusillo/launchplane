@@ -1831,7 +1831,8 @@ test.describe("operator journeys", () => {
     await card.getByRole("textbox", { name: "Enqueue label" }).fill("merge-train");
     await card.getByRole("textbox", { name: "Blocked label" }).fill("merge-train-blocked");
     await card.getByRole("combobox", { name: "Merge method" }).selectOption("merge");
-    await card.getByRole("combobox", { name: "Engineering review" }).selectOption("required");
+    await expect(card.getByRole("option", { name: "Required", exact: true })).toHaveCount(0);
+    await card.getByRole("combobox", { name: "Engineering review" }).selectOption("advisory");
     await card.getByRole("combobox", { name: "Failure handling" }).selectOption("pause_train");
     await card.getByRole("combobox", { name: "Require the enqueue label" }).selectOption("true");
     await card.getByRole("checkbox", { name: "Repository owner" }).check();
@@ -1861,6 +1862,7 @@ test.describe("operator journeys", () => {
       "source_event_id",
     ]);
     const intent = (preparedBody?.intent ?? {}) as Record<string, unknown>;
+    expect(intent.engineering_review_mode).toBe("advisory");
     expect(Object.keys(intent).sort()).toEqual([
       "base_branch",
       "blocked_label",
@@ -2002,7 +2004,7 @@ async function fillOrdinaryTargetForm(card: ReturnType<Page["locator"]>): Promis
   await card.getByRole("textbox", { name: "Enqueue label" }).fill("merge-train");
   await card.getByRole("textbox", { name: "Blocked label" }).fill("merge-train-blocked");
   await card.getByRole("combobox", { name: "Merge method" }).selectOption("merge");
-  await card.getByRole("combobox", { name: "Engineering review" }).selectOption("required");
+  await card.getByRole("combobox", { name: "Engineering review" }).selectOption("advisory");
   await card.getByRole("combobox", { name: "Failure handling" }).selectOption("pause_train");
   await card.getByRole("combobox", { name: "Require the enqueue label" }).selectOption("true");
   await card.getByRole("checkbox", { name: "Repository owner" }).check();

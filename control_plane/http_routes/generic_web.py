@@ -177,7 +177,7 @@ __all__ = [
 _LOGGER = logging.getLogger(__name__)
 
 
-# Callers get a generic message; operators need the real cause, so record it
+# Callers get a generic message; an admin needs the real cause, so record it
 # with the trace ID the caller received.
 def _log_masked_promotion_error(error: BaseException, *, trace_id: str) -> None:
     _LOGGER.error(
@@ -1694,9 +1694,7 @@ def build_generic_web_write_route_handlers(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message=(
-                    "Operator workflow dispatches must use the product-owned promotion route."
-                ),
+                message="Admin workflow dispatches must use the product-owned promotion route.",
             )
         try:
             profile, lane, affected_instances = resolve_generic_web_promotion_workflow_lane(

@@ -803,6 +803,7 @@ from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.factory import storage_backend_name
 from control_plane.storage.product_authority_bundle import (
     SecretCopySourceConflictError,
+    SecretRecordConflictError,
     ProductAuthorityBundle,
     ProductContextOwnershipError,
     ProductProfileConflictError,
@@ -1223,7 +1224,7 @@ def _local_operator_product_config_scope_refusal(
     record_store: object,
     product_config_request: ProductConfigApplyEnvelope,
 ) -> str:
-    """Keep the operator's agent on the named product's own lane.
+    """Keep the Director's agent on the named product's own lane.
 
     A context-scoped secret written through an instance request also changes
     what other lanes resolve, and a context reassigned to another product would
@@ -1244,7 +1245,7 @@ def _local_operator_product_config_scope_refusal(
         for secret in product_config_request.secrets
     ):
         return (
-            "An instance request from the operator's agent can only write that instance's secrets."
+            "An instance request from the Director's agent can only write that instance's secrets."
         )
     return ""
 
@@ -2289,6 +2290,7 @@ class MergeTrainPolicyImportEnvelope(BaseModel):
         self.product = self.product.strip() or "launchplane"
         if self.product != "launchplane":
             raise ValueError("merge train policy import requires product 'launchplane'")
+        self.record.policy.require_advisory_review()
         self.reason = self.reason.strip()
         if self.mode == "apply" and not self.reason:
             raise ValueError("merge train policy import apply requires reason")
@@ -4724,7 +4726,7 @@ def create_launchplane_fastapi_app(
             allow_owner=False,
         )
 
-    # Operator release routes take a CSRF-checked session or a bearer caller.
+    # Admin release routes take a CSRF-checked session or a bearer caller.
     # Terminal-agent tokens stay read-only here, as on the generic-web routes.
     def read_operator_mutation_identity(
         identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
@@ -5866,6 +5868,7 @@ def create_launchplane_fastapi_app(
                         "github_status_code": error.status_code,
                         "pull_request_number": error.pull_request_number,
                         "refusal_diagnosis": error.refusal_diagnosis,
+                        "github_mergeable_state": error.observed_merge_state or None,
                     },
                 },
             )
@@ -8107,7 +8110,7 @@ def create_launchplane_fastapi_app(
                 status_code=403,
                 trace_id=trace_id,
                 code="local_operator_lane_scope_required",
-                message="The operator's agent can set a testing hold but not lift one.",
+                message="The Director's agent can set a testing hold but not lift one.",
             )
         _require_lane_product_config_lane(
             record_store=record_store,
@@ -12287,8 +12290,8 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="live_product_requires_operator",
                 message=(
-                    "A live product's expected configuration is changed by the operator, "
-                    "not with the local operator credential the operator's agent uses."
+                    "A live product's expected configuration is changed by an admin, "
+                    "not with the local_operator credential the Director's agent uses."
                 ),
             )
         secret_bindings: tuple[SecretBinding, ...] = ()
@@ -12678,7 +12681,7 @@ def create_launchplane_fastapi_app(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="Product Owner changes require an operator or workflow identity.",
+                message="Product Owner changes require an admin or workflow identity.",
             )
         try:
             raw_payload = await request.json()
@@ -12953,7 +12956,7 @@ def create_launchplane_fastapi_app(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="Product image repository changes require an operator or workflow identity.",
+                message="Product image repository changes require an admin or workflow identity.",
             )
         try:
             raw_payload = await request.json()
@@ -14034,7 +14037,7 @@ def create_launchplane_fastapi_app(
                 raw_payload
             )
         except ValidationError as error:
-            # Never echo pydantic input: the reason text is operator-supplied.
+            # Never echo pydantic input: the reason text is admin-supplied.
             raise _launchplane_http_error(
                 status_code=400,
                 trace_id=trace_id,
@@ -15239,7 +15242,7 @@ def create_launchplane_fastapi_app(
                 status_code=400,
                 trace_id=trace_id,
                 code="reason_required",
-                message="Operator product-config requests require a reason.",
+                message="Admin product-config requests require a reason.",
             )
         normalized_idempotency_key = idempotency_key.strip()
         if (
@@ -15251,7 +15254,7 @@ def create_launchplane_fastapi_app(
                 status_code=400,
                 trace_id=trace_id,
                 code="idempotency_key_required",
-                message="Operator product-config apply requires an Idempotency-Key header.",
+                message="Admin product-config apply requires an Idempotency-Key header.",
             )
         if (
             product_config_request.mode == "apply"
@@ -15344,7 +15347,7 @@ def create_launchplane_fastapi_app(
                 status_code=409,
                 trace_id=trace_id,
                 code="matching_dry_run_required",
-                message="Operator product-config apply requires a prior matching dry-run.",
+                message="Admin product-config apply requires a prior matching dry-run.",
             )
         copy_references = [
             secret.copy_from
@@ -15352,7 +15355,7 @@ def create_launchplane_fastapi_app(
             if secret.copy_from is not None
         ]
         if (
-            copy_references
+            (copy_references or product_config_request.adopts_provider_secrets())
             and product_config_request.mode == "apply"
             and not product_config_dry_run_exists(
                 record_store=database_store,
@@ -15365,7 +15368,7 @@ def create_launchplane_fastapi_app(
                 status_code=409,
                 trace_id=trace_id,
                 code="matching_dry_run_required",
-                message="Secret copy requires a prior matching dry-run.",
+                message="Secret copy and provider adoption require a prior matching dry-run.",
             )
 
         def secret_copy_source_readable(*, context: str, instance: str) -> bool:
@@ -15403,7 +15406,7 @@ def create_launchplane_fastapi_app(
                 )
         lane_provider_env_reader: control_plane_product_config.LaneProviderEnvReader | None = None
         try:
-            if product_config_request.adopts_provider_keys() and product_config_request.instance:
+            if product_config_request.reads_lane_provider_env() and product_config_request.instance:
                 # The service reads the provider values itself; they never reach the caller.
                 lane_provider_env = await asyncio.to_thread(
                     control_plane_product_config_service.read_lane_provider_env,
@@ -15528,7 +15531,9 @@ def create_launchplane_fastapi_app(
             records={},
             result=ProductConfigApplyResult.model_validate(driver_result),
         )
-        if (operator_identity or copy_references) and product_config_request.mode == "dry-run":
+        if (
+            operator_identity or copy_references or product_config_request.adopts_provider_secrets()
+        ) and product_config_request.mode == "dry-run":
             store_product_config_dry_run_record(
                 record_store=database_store,
                 identity=identity,
@@ -15647,6 +15652,16 @@ def create_launchplane_fastapi_app(
                 code="secret_copy_source_changed",
                 message="The secret copy source changed. Read metadata and review a fresh dry-run.",
             ) from error
+        except SecretRecordConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="provider_secret_already_recorded",
+                message=(
+                    "A secret named for provider adoption was recorded before commit. "
+                    "Review a fresh dry-run."
+                ),
+            ) from error
         except ProductProfileConflictError as error:
             raise _launchplane_http_error(
                 status_code=409,
@@ -15680,7 +15695,7 @@ def create_launchplane_fastapi_app(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="Product environment config writes require an operator identity.",
+                message="Product environment config writes require an admin identity.",
             )
         try:
             raw_payload = await request.json()
@@ -15872,7 +15887,7 @@ def create_launchplane_fastapi_app(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="Product promotion browser routes require an operator identity.",
+                message="Product promotion browser routes require an admin identity.",
             )
 
     def resolve_authorized_product_promotion_target(

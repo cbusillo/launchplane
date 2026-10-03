@@ -2316,6 +2316,9 @@ return a typed blocked result rather than guessing a domain.
   keys and review a fresh dry run. A key cannot be adopted and also set or
   retired in the same request. Apply reads the provider again, so a value
   changed on the provider after the dry run is the one recorded.
+- To move a lane's provider-only credential into a managed secret, use a
+  product-config secret entry with `adopt_from_provider: true` instead of a
+  value; see "Adopting a provider-only credential" in `secrets.md`.
 - Platform credentials never reach an app runtime. Every path that renders or
   writes an app runtime environment (live-target runtime sync, ship and
   promotion, Odoo stable bootstrap and target replacement, backup restore, and
@@ -2944,16 +2947,16 @@ The current command group supports:
 - external evidence ingest: `write-from-generation`, `write-destroyed`
 - lifecycle transitions: `request-generation`, `mark-generation-ready`,
   `mark-generation-failed`, `destroy-preview`
-- PR/webhook ingest: `ingest-pr-event`, `ingest-github-webhook`
-- captured delivery replay: `replay-github-webhook`,
-  `build-github-webhook-replay-envelope`
+
+The label-driven PR-event ingest and webhook replay commands are deleted
+(#2738). Previews follow the pull request's state through the event reconciler.
 
 `show-tenant`, `render-index-page`, and `render-site` now resolve stable-lane
 baseline tuples from Launchplane's DB-backed release-tuple records. Cockpit and
 local renders should run with `LAUNCHPLANE_DATABASE_URL` pointed at the same
 shared store that owns the current stable-lane tuple state.
 
-Preview mutation, ingest, replay, and lifecycle transition commands require
+Preview mutation and lifecycle transition commands require
 `--database-url` or `LAUNCHPLANE_DATABASE_URL` plus
 `--allow-direct-db-mutation` for DB-backed execution. Offline JSON writes are
 local rehearsals only and must opt in with `--local-rehearsal`; read and render
@@ -3574,7 +3577,7 @@ repos should remain source inputs only unless a product explicitly maps them to
 a preview context.
 
 Preview enablement records retain the anchor PR head SHA plus any resolved
-companion PR head SHA snapshots from ingest. Tenant renders use those stored
+companion PR head SHA snapshots. Tenant renders use those stored
 snapshots for preview request recipes and keep unresolved companion requests
 blocked instead of guessing source inputs.
 

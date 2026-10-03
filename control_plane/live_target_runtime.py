@@ -153,7 +153,7 @@ def provider_env_platform_credential_report(
     """Report platform credentials already in a lane's provider env; names only.
 
     A sync preserves provider-only keys, so a credential written before the
-    refusal existed stays until an operator retires it. This report finds those
+    refusal existed stays until an admin retires it. This report finds those
     keys; removal stays with product-config retired_provider_keys.
     """
 
