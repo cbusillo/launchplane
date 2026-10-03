@@ -63,11 +63,14 @@ carries only when all of these hold:
   branch is the base the acceptance was given on. A decision keeps the pull
   request's base branch from the first time Launchplane shows it on the pull
   request; a decision without one does not carry.
-- The pull request's change against its base is byte-identical at both heads:
-  every changed file has the same name, status, resulting blob, and patch, in
-  GitHub's comparison from the newest merged base commit. A file without a patch
-  (binary or too large) or a list of 300 files or more is not exact and does not
-  carry.
+- The pull request's change against its base is the same at both heads: every
+  changed file has the same name, status, and added and removed lines, in order,
+  in GitHub's comparison from the newest merged base commit. Hunk positions and
+  context lines are not compared, so a base edit that moves or surrounds the
+  change in a file the pull request also changes still carries; any difference in
+  a line the pull request adds or removes does not. A file without a patch
+  (binary or too large) or a list of 300 files or more cannot be compared and
+  does not carry.
 - The newest decision is that acceptance, made by the product's current Client,
   with its feedback delivered.
 

@@ -221,12 +221,47 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
 
                 self.assert_waits_for_the_client(self._publish())
 
+    def test_acceptance_carries_when_base_edits_only_move_or_surround_the_change(
+        self,
+    ) -> None:
+        # odoo-tenant-cm-website#92: a docs change on main edited two files the
+        # pull request also changes. The lines it adds and removes are the same.
+        self._train_refreshed()
+        readme = (
+            "@@ -79,3 +79,5 @@ Palette\n Colors\n-Old headline\n+New headline\n"
+            "+Second line\n Footer"
+        )
+        moved_readme = (
+            "@@ -133,3 +133,5 @@ Brand\n Palette colors\n-Old headline\n+New headline\n"
+            "+Second line\n Footer note"
+        )
+        notes = "@@ -10 +10,2 @@\n Notes\n+Release note\n\\ No newline at end of file"
+        accepted = _change(patch=readme) + [
+            {"filename": "docs/README.md", "status": "modified", "sha": "d" * 40, "patch": notes}
+        ]
+        refreshed = _change(patch=moved_readme, blob="b" * 40) + [
+            {"filename": "docs/README.md", "status": "modified", "sha": "e" * 40, "patch": notes}
+        ]
+        self.github.changes[(_BASE_COMMIT, _ACCEPTED_HEAD)] = accepted
+        self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = refreshed
+
+        status = self._publish()
+
+        self.assertEqual(status["state"], "success")
+        self.assertEqual(self._decisions()[0].head_sha, _REFRESHED_HEAD)
+
     def test_changed_diff_needs_a_new_decision(self) -> None:
         self._train_refreshed()
         # A conflict resolution or anything else that changes the pull request's change.
         cases: dict[str, list[dict[str, object]]] = {
-            "patch": _change(patch=_PATCH + "\n+Extra line"),
-            "blob": _change(blob="b" * 40),
+            "added line": _change(patch=_PATCH + "\n+Extra line"),
+            "removed line": _change(patch="@@ -1 +1 @@\n-Older headline\n+New headline"),
+            "line order": _change(patch="@@ -1 +1 @@\n+New headline\n-Old headline"),
+            "end of file": _change(patch=_PATCH + "\n\\ No newline at end of file"),
+            "status": [{**_change()[0], "status": "added"}],
+            "file name": [{**_change()[0], "filename": "website/views/about.xml"}],
+            "renamed from": [{**_change()[0], "previous_filename": "website/views/old.xml"}],
+            "another file": _change() + [{**_change()[0], "filename": "website/b.xml"}],
             "binary": [{"filename": "logo.png", "status": "modified", "sha": "c" * 40}],
         }
         for name, change in cases.items():
