@@ -972,14 +972,14 @@ See [Client acceptance](owner-acceptance.md).
 
 The manager-preview selector, wrapper job and
 `LAUNCHPLANE_AUTHZ_MANAGER_PREVIEW_APPROVAL_MANAGED_SET_JSON` reference are
-removed under #2006. Before this wiring removal lands, a production-authorized
-session must contract `operator.manager-preview-approval` through the existing
-`reconcile-manager-preview-approval` wrapper job (review `dry_run`, then apply
-with its reviewed digest) and record the empty-set readback on #2006. Keep the
-source cleanup PR draft until that readback is recorded. Source cleanup
-performs no live contraction. The Director deletes that GitHub managed-set secret by hand after
-contraction. The signed trusted-maintenance webhook and its independent
-`LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET` remain in use.
+removed under #2006. Removing source wiring does not contract the live
+`operator.manager-preview-approval` grant set or delete its GitHub secret.
+The separately production-authorized contraction and empty-set readback are
+tracked on #2006; its execution must use the current reviewed
+[authorization surface](authorization-authority.md). The Director deletes the
+managed-set secret by hand after contraction. The signed trusted-maintenance
+webhook and its independent `LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET`
+remain in use.
 
 The Client policy-admin grant set is retained runtime history, not an active
 approval path: its service evaluator and routes are removed. Do not extend it
