@@ -2438,8 +2438,8 @@ creating that lane's compose, and only when the request carries no
 `expected_current_provider_target`, `project_id` or `environment_id`: the
 compose then lands in a new provider project and environment and can't replace
 a binding or join another lane's environment. It never authorizes `adopt`,
-domain reconcile or prune, or domain authority repair. The context's owner is
-checked again when the target records commit, under the lock product-profile
+domain reconcile or prune, or domain authority repair. Which product holds the
+context is checked again when the target records commit, under the lock product-profile
 writes take, so a context reassigned during the provider calls is refused
 (`local_operator_lane_scope_required`); the compose already created stays
 unrecorded.
