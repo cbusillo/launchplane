@@ -248,6 +248,44 @@ def close_batch_pull_request(
             raise MergeAdmissionReconciliationRequiredError("Batch PR retirement is not confirmed.")
 
 
+def batch_pull_request_body(
+    *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
+) -> str:
+    marker = f"<!-- launchplane-batch:{candidate.batch_id}:{candidate.candidate_sha} -->"
+    members = "\n".join(
+        f"- #{entry.pull_request_number} at `{entry.head_sha}`" for entry in candidate.entries
+    )
+    return (
+        f"{marker}\n\nThis PR lands Launchplane's tested candidate `{candidate.candidate_sha}` "
+        f"through the protected merge endpoint. Constituent PRs and reviewed heads:\n\n{members}\n\n"
+        "Launchplane revalidates every constituent and records the shared landing effect. "
+        "Keep source PRs and branches intact. Let the Launchplane controller merge this PR; "
+        "do not merge it by hand or update its generated branch. An out-of-controller merge "
+        "without a preceding admission remains fenced for explicit reconciliation. "
+        "The controller confirms constituent completion after landing.\n\n"
+        + _batch_owner_test_notes(client=client, candidate=candidate)
+    )
+
+
+def changed_closed_batch_body(
+    *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
+) -> bool:
+    """Require exact closed, unmerged batch binding before comparing generated input."""
+    payload = _find_batch_pull_request(client=client, candidate=candidate)
+    if payload is None:
+        return False
+    bound = _bound_batch_pull_request(payload, candidate)
+    number = bound["number"]
+    assert isinstance(number, int)
+    detail = client._pull_request_detail(
+        repository=candidate.repository, pull_request_number=number
+    )
+    closed = _bound_batch_pull_request(detail, candidate)
+    if closed.get("state") != "closed" or closed.get("merged") is not False:
+        return False
+    return closed["body"] != batch_pull_request_body(client=client, candidate=candidate)
+
+
 def ensure_batch_pull_request(
     *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
 ) -> int:
@@ -262,12 +300,8 @@ def ensure_batch_pull_request(
         candidate_ref=candidate.candidate_ref,
     )
     repository_path = _repository_path(candidate.repository)
-    marker = f"<!-- launchplane-batch:{candidate.batch_id}:{candidate.candidate_sha} -->"
     payload = _find_batch_pull_request(client=client, candidate=candidate)
     if payload is None:
-        members = "\n".join(
-            f"- #{entry.pull_request_number} at `{entry.head_sha}`" for entry in candidate.entries
-        )
         payload = client.transport.request(
             method="POST",
             path=f"/repos/{repository_path}/pulls",
@@ -278,16 +312,7 @@ def ensure_batch_pull_request(
                 "base": candidate.base_branch,
                 "draft": False,
                 "maintainer_can_modify": False,
-                "body": (
-                    f"{marker}\n\nThis PR lands Launchplane's tested candidate `{candidate.candidate_sha}` "
-                    f"through the protected merge endpoint. Constituent PRs and reviewed heads:\n\n{members}\n\n"
-                    "Launchplane revalidates every constituent and records the shared landing effect. "
-                    "Keep source PRs and branches intact. Let the Launchplane controller merge this PR; "
-                    "do not merge it by hand or update its generated branch. An out-of-controller merge "
-                    "without a preceding admission remains fenced for explicit reconciliation. "
-                    "The controller confirms constituent completion after landing.\n\n"
-                    + _batch_owner_test_notes(client=client, candidate=candidate)
-                ),
+                "body": batch_pull_request_body(client=client, candidate=candidate),
             },
         )
     pull_request = _bound_batch_pull_request(payload, candidate)
@@ -492,6 +517,7 @@ def land_protected_batch(
                 expected_base_ref=plan.base_branch,
                 expected_base_sha=base_sha,
                 expected_base_tree_sha=base_tree_sha,
+                require_client_review=True,
             )
         candidate = client.observe_batch_candidate_checks(
             candidate=admission_guard.candidate_record.candidate
@@ -537,6 +563,7 @@ def land_protected_batch(
                     expected_base_ref=plan.base_branch,
                     expected_base_sha=base_sha,
                     expected_base_tree_sha=base_tree_sha,
+                    require_client_review=True,
                 )
                 if checkpoint is not None:
                     checkpoint(plan, entry, "merge_entry")
@@ -559,6 +586,7 @@ def land_protected_batch(
                     expected_base_ref=plan.base_branch,
                     expected_base_sha=base_sha,
                     expected_base_tree_sha=base_tree_sha,
+                    require_client_review=True,
                 )
             final_batch = _read_batch_pull_request(client, plan)
             if final_batch.get("merged") is True or final_batch.get("state") != "open":

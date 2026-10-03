@@ -10,7 +10,7 @@ admin's current product, lane state, and next safe action obvious.
 
 The Client-review surface must be a separate product view. It must show a plain-
 language change, isolated preview, current decision, and observed live/delivery
-state, and must offer only accept, request-changes, revoke, and feedback controls.
+state, and must offer only accept, request-changes, and feedback controls.
 It must not expose source, configuration, deploy, merge, secret, policy, or
 access-admin actions, and trusted controls must remain outside untrusted preview
 content.
@@ -37,10 +37,11 @@ Do not blur these into a generic set of status cards. If a slice needs multiple
 objects, make the primary object visually dominant and place supporting objects
 as evidence around it.
 
-Product Ops is the default top-level surface. Work graph, issue reconciliation,
-Every Code, merge-train control, and platform maintenance belong to a separate
-Engineering Ops navigation area. Sharing a shell does not justify mixing the
-two jobs on one first screen.
+Product Ops is the default top-level surface. Merge-train control and platform
+maintenance belong to a separate Engineering Ops navigation area. Sharing a
+shell does not justify mixing the two jobs on one first screen. The work-graph,
+issue-inbox, Every Code, and ordinary-agent views still in Engineering Ops are
+retired (see [DIRECTION.md](../DIRECTION.md)) and get no new UI work.
 
 The top-level picker chooses a product workspace, not a raw Launchplane context.
 Use display names such as `SellYourOutboard`, `VeriReel`, `Odoo CM`, and

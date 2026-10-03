@@ -14,12 +14,27 @@ This document is the approval gate for new website repos and the cleanup target
 for older repos that grew Launchplane-like scripts before the service boundary
 existed.
 
+Status: a product repository never calls Launchplane
+([DIRECTION.md](../DIRECTION.md)). Its whole handoff is a
+`.github/workflows/build.yml` that publishes an immutable image and a build
+manifest ([artifact-provenance.md](artifact-provenance.md)); Launchplane hears
+the events and deploys previews and `testing` itself
+([event-driven-deploys.md](event-driven-deploys.md)). The trigger inputs,
+OIDC request action, setup clients, and pinned reusable workflows described
+below (from [Minimal Trigger Inputs](#minimal-trigger-inputs) through
+[Reusable Launchplane Request Action](#reusable-launchplane-request-action),
+and the config-authority reusable gate) are the old call-in path. Products
+still on it keep it until #2606 deletes it; a new product repository does not
+add them. Production promotion and rollback that run from Launchplane itself,
+with no product workflow, are #2682 (CM website) and #2792 (generic-web).
+
 ## Target Shape
 
 The durable north star is:
 
-> Product repos build, test, smoke, and publish immutable artifacts, then pass
-> minimal facts. Launchplane derives lifecycle meaning and owns runtime
+> Product repos build, test, smoke, and publish immutable artifacts with
+> verifiable provenance, and never call Launchplane. Launchplane reacts to
+> source-control events, derives lifecycle meaning, and owns runtime
 > authority: it authorizes, decides, mutates, records, explains, and protects.
 > Admins act through Launchplane, not around it.
 
@@ -37,8 +52,8 @@ product repo
   - Dockerfile and runtime contract
   - local dev/test commands
   - product-specific smoke or E2E checks
-  - image build and publish workflow
-  - thin Launchplane trigger workflow
+  - image build and publish workflow (.github/workflows/build.yml) with
+    its build manifest
 
 Launchplane
   - product profile and lane configuration
@@ -242,9 +257,9 @@ runner.
   plumbing; composed expressions and literal runtime identities remain audited.
 - Publishing an immutable image or artifact reference that Launchplane can
   deploy.
-- A minimal GitHub Actions trigger that authenticates to Launchplane with OIDC
-  and submits the product key, source ref or SHA, PR number when relevant, and
-  immutable artifact reference.
+- The build manifest Actions artifact (`artifact-manifest-<run_attempt>`) that
+  names the commit and the image digest; see
+  [artifact-provenance.md](artifact-provenance.md).
 
 Product-specific checks may stay in the repo when they exercise product behavior
 Launchplane cannot know generically, such as a checkout flow, Client route, QR
@@ -315,8 +330,8 @@ ids unless a driver-specific route documents an explicit exception.
 
 A product repo is approved when all of these are true:
 
-- Workflows build, test, and publish product artifacts, then trigger
-  Launchplane. They do not directly mutate runtime providers.
+- Workflows build, test, and publish product artifacts and the build manifest.
+  They do not call Launchplane or directly mutate runtime providers.
 - Scripts do not own Launchplane record or evidence shaping that Launchplane can
   derive from profiles, driver requests, provider results, or GitHub OIDC
   claims.
@@ -400,7 +415,11 @@ feedback delivery. The action appends a stable digest for each payload, requests
 GitHub OIDC per POST, and writes a JSON response array. Do not use shell loops
 or repo-local OIDC clients for those remaining connector calls.
 
-Odoo artifact publication now follows the reusable workflow shape: tenant repos
+Transitional: the rest of this paragraph is the old call-in publish path, which
+the tenant's own `build.yml` and [artifact provenance](artifact-provenance.md)
+replace. #2606 deletes `reusable-odoo-artifact-publish.yml`, the publish and
+publish-inputs routes, and the Launchplane-held Odoo build settings.
+Odoo artifact publication follows the reusable workflow shape: tenant repos
 own the manual dispatch confirmation and the source workspace, while
 `reusable-odoo-artifact-publish.yml` owns the Launchplane publish-input request,
 artifact-record request, idempotency keys, and response mapping. The tenant
@@ -999,7 +1018,9 @@ When creating a new website repo for Launchplane:
   Launchplane runtime identity env payload from `LAUNCHPLANE_RUNTIME_IDENTITY_JSON`
   or the equivalent discrete env keys, then mark lanes as requiring runtime
   identity after the echo is verified.
-- Publish immutable container images or artifacts from GitHub Actions.
+- Publish immutable container images or artifacts from
+  `.github/workflows/build.yml`, with the build manifest described in
+  [artifact-provenance.md](artifact-provenance.md).
 - Apply an admin-owned Launchplane product onboarding manifest to seed the
   product profile, lane profiles, target records, runtime environment, disabled
   managed secret binding placeholders, and then update DB-backed authz policy in

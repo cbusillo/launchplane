@@ -39,9 +39,13 @@ Treat this file as the launch checklist for each engineering session in
 
 - The merge train is the delivery path. The ordinary-agent delegated-delivery
   design is retired; do not extend `ordinary_agent_*` code or its docs.
-- Read `docs/owner-acceptance.md` as the target direction for narrow Client
-  visibility, acceptance, and feedback; it is not current runtime authority and
-  Client decisions grant no operational power.
+- Product repositories never call Launchplane. Docs that describe reusable
+  Launchplane workflows, `launchplane-request`, or workflow-identity grants for
+  product repositories describe the retired call-in path; do not extend it. See
+  `docs/event-driven-deploys.md` and `docs/artifact-provenance.md`.
+- `docs/owner-acceptance.md` and `docs/release-review.md` describe current
+  Client review and the release checklist. Client decisions grant no
+  operational power.
 - Keep Launchplane merge/delivery provider-neutral. GitHub is the current source-
   control adapter and Dokploy is the current application deployment provider.
 

@@ -135,6 +135,11 @@ remain separate rollout steps. Product repositories pass no provider topology.
 
 ## Promotion enforcement
 
+Status: transitional. The reusable promotion workflows below are called from
+product repositories, which [DIRECTION.md](../DIRECTION.md) retires. They stay
+until promotion runs from Launchplane itself (#2682 for the CM website, #2792
+for generic-web) and #2606 deletes the call-in path; the gate itself stays.
+
 The Launchplane reusable Odoo and generic-web promotion workflows first enforce
 the current release-review requirement, then enqueue the shared capture and poll the same
 idempotent request until it completes. The service checks release approval again

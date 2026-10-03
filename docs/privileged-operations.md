@@ -29,6 +29,12 @@ empty context selector so it can read the stored context of each environment.
 That standing access still requires
 separate concrete administrator confirmation and governed installation.
 
+The ordinary-agent delivery preparation described in the next four paragraphs
+belongs to the retired delegated-delivery design (see
+[DIRECTION.md](../DIRECTION.md#retired));
+[#2437](https://github.com/cbusillo/launchplane/issues/2437) deletes its code.
+Do not use or extend it.
+
 The Agent delivery workbench also offers a read-only preparation-input check at
 `GET /v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs`.
 It uses the existing strict admin and managed-proposal authority
@@ -494,8 +500,7 @@ public policy execute route.
 
 ## Completion Holds
 
-Keep #2204 open until actual migration, rollback, policy read-back, and soak
-evidence are complete. Keep #2177 open until its handoff criteria are complete.
+None. #2204 and #2177, the issues this section held open, are closed.
 
 **Preserved history:** Phase 1 planning-only descriptions remain historical
 context only; the supervised Phase 2 worker flow above is current guidance.

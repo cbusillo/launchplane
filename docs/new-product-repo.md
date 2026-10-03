@@ -118,16 +118,23 @@ Start with these workflows:
 - Security: causal pull-request dependency checks plus absolute default-branch
   and artifact health appropriate for the repo. See
   [dependency-health-contract.md](dependency-health-contract.md).
-- Publish image: build and publish an immutable artifact, then trigger
-  Launchplane stable deploy for `testing`.
-- Preview trigger: for every open PR, drafts included, build and publish an
-  immutable preview image, then trigger Launchplane preview refresh.
-- Preview cleanup trigger: when a PR closes or merges, trigger Launchplane
-  preview destroy. No label or draft change creates or removes a preview.
+- Build: `.github/workflows/build.yml`, run on `push` to the default branch and
+  on `pull_request`, builds and pushes an immutable image and uploads the
+  `artifact-manifest-<run_attempt>` Actions artifact described in
+  [artifact-provenance.md](artifact-provenance.md).
 
-The Launchplane trigger steps should use GitHub Actions OIDC and pass minimal
-facts only: product key, source ref or SHA, PR number when relevant, immutable
-artifact reference, and optional run URL.
+A product repository never calls Launchplane (see
+[DIRECTION.md](../DIRECTION.md)): it holds no Launchplane workflow reference,
+OIDC request, grant, secret, or build setting. Launchplane hears the build and
+pull request events itself, verifies the build, and deploys previews and the
+`testing` lane; see [event-driven-deploys.md](event-driven-deploys.md).
+
+Transitional: the caller workflows, reusable workflows, actions and preview
+authz rules described in the rest of this section and in
+[Launchplane Records](#launchplane-records) are the old call-in path. Existing
+products still use them until they move to event-driven deploys (#2740) and
+#2606 deletes the path, and `Product Onboarding` still plans the preview authz
+rules. A new product repository does not add these caller workflows.
 
 For a conventional generic-web product, use the thin preview facade documented
 in [product-repo-contract.md](product-repo-contract.md). One same-repository

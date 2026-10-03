@@ -174,3 +174,22 @@ test("definitive failures retry without replacing the operation identity", async
   assert.equal(failed.phase, "failed");
   assert.equal(retry.identity?.idempotencyKey, prepared.identity?.idempotencyKey);
 });
+
+test("only a settled failure clears continuity after a dispatched uncertain request", async () => {
+  const prepared = await prepareBrowserOperation("profile", { value: "live" });
+  const dispatched = markBrowserOperationDispatched(beginBrowserOperation(prepared));
+  const uncertain = failBrowserOperation(dispatched, {
+    code: "network", message: "Response lost.", statusCode: 0, traceId: "",
+  }, "uncertain");
+  const retry = markBrowserOperationDispatched(beginBrowserOperation(retryBrowserOperation(uncertain)));
+  const failure = { code: "stale", message: "Review again.", statusCode: 409, traceId: "stale" };
+  const definitive = failBrowserOperation(retry, failure, "definitive");
+  assert.equal(definitive.requiresIdempotencyContinuity, true);
+  assert.throws(() => resetBrowserOperation(definitive), /Cannot discard/);
+  const settled = failBrowserOperation(retry, failure, "settled");
+  assert.equal(settled.requiresIdempotencyContinuity, false);
+  assert.equal(settled.phase, "failed");
+  assert.equal(settled.failure.traceId, failure.traceId);
+  const next = await prepareBrowserOperation("profile", { value: "prelaunch" }, resetBrowserOperation(settled));
+  assert.notEqual(next.identity.idempotencyKey, prepared.identity.idempotencyKey);
+});

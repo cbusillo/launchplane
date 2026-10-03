@@ -60,6 +60,9 @@ from control_plane import product_health_monitoring as control_plane_product_hea
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
 from control_plane import product_owner_setting as control_plane_product_owner_setting
 from control_plane import (
+    product_production_use_setting as control_plane_product_production_use_setting,
+)
+from control_plane import (
     product_image_repository_setting as control_plane_product_image_repository_setting,
 )
 from control_plane.generic_web_onboarding import (
@@ -989,6 +992,7 @@ _PRODUCT_PRELAUNCH_REBUILD_POLICY_APPLY_ROUTE = "/v1/product-profiles/prelaunch-
 _PRODUCT_STABLE_LANE_REPAIR_APPLY_ROUTE = "/v1/product-profiles/stable-lane-repair/apply"
 _PRODUCT_REPOSITORY_IDENTITY_APPLY_ROUTE = "/v1/product-profiles/repository-identity/apply"
 _PRODUCT_OWNER_SETTING_ROUTE = "/v1/product-profiles/{product}/owner"
+_PRODUCT_PRODUCTION_USE_SETTING_ROUTE = "/v1/product-profiles/{product}/production-use"
 _PRODUCT_IMAGE_REPOSITORY_SETTING_ROUTE = "/v1/product-profiles/{product}/image-repository"
 _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     **{
@@ -13181,6 +13185,245 @@ def create_launchplane_fastapi_app(
             )
         return response
 
+    async def apply_product_production_use(
+        product: str,
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not isinstance(
+            identity,
+            GitHubHumanIdentity
+            | LocalOperatorIdentity
+            | LocalAdminIdentity
+            | GitHubActionsIdentity,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Product production use changes require an operator or workflow identity.",
+            )
+        try:
+            raw_payload = await request.json()
+            if not isinstance(raw_payload, dict):
+                raise ValueError("Product production use request body must be an object.")
+            production_use_request = control_plane_product_production_use_setting.ProductProductionUseApplyRequest.model_validate(
+                raw_payload
+            )
+        except (ValidationError, ValueError) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Product production use request failed validation.",
+            ) from error
+        normalized_product = product.strip()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="product_profile.write",
+            product=normalized_product,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Caller cannot change the production use of the requested product.",
+            )
+        normalized_idempotency_key = idempotency_key.strip()
+        if production_use_request.mode == "apply" and not normalized_idempotency_key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Product production use apply requests require an Idempotency-Key header.",
+            )
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message="Product production use changes require Launchplane database storage.",
+            )
+        database_store = record_store
+        payload_fingerprint = ""
+        if production_use_request.mode == "apply":
+            payload_fingerprint = idempotency_request_fingerprint(
+                route_path=_PRODUCT_PRODUCTION_USE_SETTING_ROUTE,
+                payload={**raw_payload, "product": normalized_product},
+            )
+            preflight = database_store.prepare_db_only_mutation(
+                scope=idempotency_scope(identity),
+                route_path=_PRODUCT_PRODUCTION_USE_SETTING_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint=payload_fingerprint,
+            )
+            if preflight.status == "replayed":
+                if preflight.record is None:
+                    raise RuntimeError(
+                        "Product production use mutation preflight requires evidence."
+                    )
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=preflight.record,
+                    route_path=_PRODUCT_PRODUCTION_USE_SETTING_ROUTE,
+                )
+            if preflight.status == "conflict":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different "
+                        "Launchplane request payload on this route."
+                    ),
+                )
+            if preflight.status == "in_progress":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_in_progress",
+                    message=(
+                        "A matching product production use change is already running. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                )
+            if preflight.status == "reconcile_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message="The product production use change requires reconciliation before retry.",
+                )
+            if preflight.status not in {"missing", "released"}:
+                raise RuntimeError(
+                    f"Unsupported product production use mutation preflight status: {preflight.status}"
+                )
+        try:
+            profile = database_store.read_product_profile_record(normalized_product)
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Product profile was not found.",
+            ) from error
+        try:
+            plan = control_plane_product_production_use_setting.build_product_production_use_plan(
+                profile=profile,
+                request=production_use_request,
+            )
+        except (
+            control_plane_product_production_use_setting.ProductProductionUseChangedError
+        ) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="stale",
+                message=str(error),
+            ) from error
+        records = {"product_profile": profile.product}
+        if production_use_request.mode != "apply":
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records=records,
+                result=plan.model_dump(mode="json"),
+            )
+        replacement_profile = profile
+        if plan.changed:
+            try:
+                replacement_profile = control_plane_product_production_use_setting.updated_product_production_use_profile(
+                    profile=profile,
+                    production_use=plan.production_use_after,
+                    updated_at=utc_now_timestamp(),
+                )
+            except ValueError as error:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="invalid_product_profile",
+                    message="Updated product profile failed validation.",
+                ) from error
+        applied_plan = plan.model_copy(
+            update={
+                "applied": True,
+                "profile_updated_at_after": replacement_profile.updated_at,
+            }
+        )
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=records,
+            result=applied_plan.model_dump(mode="json"),
+        )
+        write_result = database_store.compare_and_write_product_profile_record(
+            expected_record=profile,
+            replacement_record=replacement_profile,
+            mutation=DbOnlyMutationRequest(
+                scope=idempotency_scope(identity),
+                route_path=_PRODUCT_PRODUCTION_USE_SETTING_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint=payload_fingerprint,
+                lease_owner=trace_id,
+                response_status_code=202,
+                response_trace_id=trace_id,
+                response_payload=response.model_dump(mode="json", exclude_none=True),
+                lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
+            ),
+        )
+        if write_result.status == "replayed":
+            if write_result.idempotency_record is None:
+                raise RuntimeError("Replayed product production use write requires evidence.")
+            return replay_idempotent_response(
+                trace_id=trace_id,
+                stored_record=write_result.idempotency_record,
+                route_path=_PRODUCT_PRODUCTION_USE_SETTING_ROUTE,
+            )
+        if write_result.status == "idempotency_conflict":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="idempotency_key_reused",
+                message=(
+                    "Idempotency-Key was already used for a different "
+                    "Launchplane request payload on this route."
+                ),
+            )
+        if write_result.status == "missing":
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Product profile disappeared before the production use change could be applied.",
+            )
+        if write_result.status == "changed":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="stale",
+                message="Product profile changed while applying the production use change. Review and retry.",
+            )
+        if write_result.status == "reservation_in_progress":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="mutation_in_progress",
+                message=(
+                    "A matching product production use change is already running. "
+                    "Retry with the same Idempotency-Key."
+                ),
+            )
+        if write_result.status == "reconciliation_required":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="mutation_reconciliation_required",
+                message="The product production use change requires reconciliation before retry.",
+            )
+        return response
+
     async def apply_product_prelaunch_rebuild_policy(
         request: Request,
         identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
@@ -15124,13 +15367,33 @@ def create_launchplane_fastapi_app(
                 code="matching_dry_run_required",
                 message="Secret copy requires a prior matching dry-run.",
             )
-        for reference in copy_references:
-            if not resolved_authz_policy_runtime.policy.allows(
+
+        def secret_copy_source_readable(*, context: str, instance: str) -> bool:
+            # A copy source is a record read: ``secret.read`` or the standing
+            # ``product_environment.read`` on the source's own product and lane
+            # (or context, for a context-scoped secret). The copy itself remains a
+            # write under the destination's ``product_config.apply``.
+            target = AuthorizationTarget(
+                scope="instance" if instance else "context",
+                instances=(instance,) if instance else (),
+            )
+            return resolved_authz_policy_runtime.policy.allows(
                 identity=identity,
                 action="secret.read",
                 product="launchplane",
-                context=reference.context,
-                target=AuthorizationTarget(scope="instance", instances=(reference.instance,)),
+                context=context,
+                target=target,
+            ) or resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="product_environment.read",
+                product=product_config_request.product,
+                context=context,
+                target=target,
+            )
+
+        for reference in copy_references:
+            if not secret_copy_source_readable(
+                context=reference.context, instance=reference.instance
             ):
                 raise _launchplane_http_error(
                     status_code=403,
@@ -15155,15 +15418,8 @@ def create_launchplane_fastapi_app(
                     return lane_provider_env
 
             def authorize_copy_source(source: SecretRecord) -> bool:
-                return resolved_authz_policy_runtime.policy.allows(
-                    identity=identity,
-                    action="secret.read",
-                    product="launchplane",
-                    context=source.context,
-                    target=AuthorizationTarget(
-                        scope="instance" if source.instance else "context",
-                        instances=(source.instance,) if source.instance else (),
-                    ),
+                return secret_copy_source_readable(
+                    context=source.context, instance=source.instance or ""
                 )
 
             planned_driver_result, authority_bundle = (
@@ -26644,6 +26900,37 @@ def create_launchplane_fastapi_app(
         },
         operation_id="apply_product_image_repository",
         summary="Preview or change the image repository of a product",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PRODUCT_PRODUCTION_USE_SETTING_ROUTE,
+        apply_product_production_use,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": _openapi_model_schema(
+                            control_plane_product_production_use_setting.ProductProductionUseApplyRequest
+                        )
+                    }
+                },
+            }
+        },
+        operation_id="apply_product_production_use",
+        summary="Preview or change the production use of a product",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

@@ -1,3 +1,4 @@
+import { LaunchplaneApiError } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import type {
   OrdinaryAgentMergeTrainTargetInputsResponse,
@@ -3245,4 +3246,31 @@ export function releaseDecisionForFixture(
       decided_at: "2026-09-26T12:00:00Z", release_issue_url: published ? "https://github.com/example/site/issues/43" : "",
     },
   } };
+}
+
+// Development-only profile controls; this module is excluded from production builds.
+const fixtureProfileFields = new Map<string, string>();
+export function productProfileFieldForFixture(fixture: DataFixtureMode, product: string, field: "image" | "production"): { value: string; suggested: string } {
+  assertFixtureAvailable(fixture);
+  const value = fixtureProfileFields.get(`${product}:${field}`) ?? (field === "image" ? "ghcr.io/example/old-package" : "unknown");
+  return { value, suggested: field === "image" ? `ghcr.io/${productsForFixture(fixture).find(item => item.product === product)?.repository ?? "example/atlas-commerce"}` : value };
+}
+export async function applyProductProfileFieldForFixture(
+  fixture: DataFixtureMode, product: string, field: "image" | "production",
+  payload: { mode?: "dry-run" | "apply"; reason: string; image_repository?: string; production_use?: string },
+): Promise<AcceptedEvidenceResponse> {
+  const { value: before, suggested } = productProfileFieldForFixture(fixture, product, field);
+  const after = field === "image" ? payload.image_repository?.trim().replace(/\/+$/, "") : payload.production_use;
+  if (field === "image" && after !== suggested) throw new LaunchplaneApiError(`The image repository must be ${suggested}.`, 400, "fixture-image", "image_repository_not_repository_named");
+  const prefix = field === "image" ? "image_repository" : "production_use";
+  const applied = payload.mode === "apply";
+  if (applied && after) fixtureProfileFields.set(`${product}:${field}`, after);
+  return {
+    status: "accepted", trace_id: "fixture-profile-field", original_trace_id: null, replayed: null,
+    records: { product_profile: product },
+    result: { [`${prefix}_before`]: before, [`${prefix}_after`]: after, changed: before !== after, applied,
+      plan_sha256: "a".repeat(64), reason: payload.reason,
+      lanes: field === "image" ? [{ instance: "prod", current_artifact_id: "ghcr.io/example/old-package@sha256:fixture" }] : [],
+    },
+  };
 }
