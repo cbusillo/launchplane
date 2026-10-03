@@ -118,6 +118,30 @@ reservation. The webhook request never waits on a deploy.
   - Read the PR state again after taking the preview's reservation and just
     before the provider apply; if it closed or moved its head, the reservation is released with no provider effect and the
     reconcile runs again.
+  - A refused or failed destroy is attempted at most three times for the same
+    preview lifecycle record, product-profile revision, context, and destroy
+    reason. Busy operations, unknown provider outcomes that still need
+    observation, retryable transport exceptions, transient storage errors, and
+    moved PRs do not consume attempts. A generic-web terminal failure result still
+    consumes an attempt even if its provider-side cause was an outage; the
+    automatic limit does not reinterpret unstructured provider messages. Later events and sweeps record a held
+    destroy with reason `preview_destroy_retry_limit` and complete the request
+    without calling the destroy path. The plan retains `destroy_failed_attempts`,
+    `last_failed_error_code`, `last_failed_error_summary`, and
+    `destroy_retry_stop_reason`; the preview is not marked destroyed or removed.
+    A changed lifecycle record, product-profile revision, or destroy reason permits
+    a new bounded run;
+    reopening the PR resumes normal preview reconciliation.
+    For a legacy preview without runtime target evidence, the refusal remains:
+    an admin must establish whether its provider target still exists before
+    retirement. After fixing the underlying evidence/configuration, an admin
+    can request fresh destroy inputs through `POST /v1/drivers/odoo/preview-apply-inputs`
+    and apply a ready plan through `POST /v1/drivers/odoo/preview-apply`, or use
+    `POST /v1/drivers/generic-web/preview-destroy` for a generic-web preview.
+    These supported service paths retain their existing authorization and evidence
+    checks and do not use the automatic retry budget. This retry limit supplies
+    no evidence-free destroy or record deletion route, and does not authorize
+    live retirement.
   - **Odoo:** the apply or destroy issues the same service plan as the preview
     inputs route and runs it through `run_odoo_preview_apply_operation`, under
     reservation scope `launchplane-reconcile:<product>`. Its key is the PR,
