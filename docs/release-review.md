@@ -84,7 +84,8 @@ sections are collected together; CI checks presence, not their number or content
 
 GitHub attributes commits landed through a merge-train batch pull request to
 that batch PR only, so the checklist shows the batch PR, not its constituents.
-The batch PR body therefore carries every constituent's `Client test notes`, each
+The batch PR body therefore carries every constituent's test notes under the older `Owner test notes`
+heading, which every pinned version of the CI action accepts, each
 under its own subheading, which satisfies the CI requirement below and shows
 the Client each change's notes once; see
 [Merge Train Policy](merge-train-policy.md#pr-native-landing). A constituent the

@@ -62,7 +62,10 @@ Launchplane self-bootstrap.
 
 Every product pull request includes a **`Client test notes`** heading with test
 instructions or `Nothing for the Client to test`. The older `Owner test notes`
-heading and `Nothing for the owner to test` marker are still accepted. CI checks presence without
+heading and `Nothing for the owner to test` marker are still accepted. The action
+accepts the Client heading only from the Launchplane commit that introduced it;
+a repository whose pin is older keeps the `Owner test notes` heading until it
+bumps the pin. CI checks presence without
 deciding whether a change needs human review. Add the shared action as a step in
 an existing required CI job, before checking out product code:
 

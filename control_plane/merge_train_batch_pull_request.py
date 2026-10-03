@@ -156,7 +156,9 @@ def _batch_owner_test_notes(
                 else missing_owner_test_notes(entry.pull_request_number)
             )
         )
-    return "## Client test notes\n\n" + "\n\n".join(sections)
+    # role-words: legacy. Product repositories pin the CI action by SHA, and pins older
+    # than the Client heading only accept this one; release review reads both.
+    return "## Owner test notes\n\n" + "\n\n".join(sections)
 
 
 def _find_batch_pull_request(
