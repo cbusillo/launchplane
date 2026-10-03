@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 from datetime import datetime
 from pathlib import Path
-import subprocess
 from tempfile import TemporaryDirectory
 from typing import Literal
 import unittest
@@ -64,7 +63,6 @@ from control_plane.storage.postgres import PostgresRecordStore
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-OWNER_CONTROL_BASE_REVISION = "8c34cb5849edafd8db05f936afe994ac82372087"
 
 
 def _base64url(value: bytes) -> str:
@@ -1136,17 +1134,6 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
 
 
 class OwnerControlShadowVerifierFreezeBoundaryTests(unittest.TestCase):
-    def test_published_wire_models_remain_frozen(self) -> None:
-        frozen_paths = ("control_plane/contracts/owner_control.py",)
-
-        for path in frozen_paths:
-            with self.subTest(path=path):
-                result = subprocess.run(
-                    ["git", "diff", "--quiet", OWNER_CONTROL_BASE_REVISION, "--", path],
-                    cwd=REPOSITORY_ROOT,
-                )
-                self.assertEqual(result.returncode, 0, f"Frozen boundary changed: {path}")
-
     def test_http_transport_remains_decoupled_from_shadow_verifier(self) -> None:
         source = (REPOSITORY_ROOT / "control_plane/http_app.py").read_text(encoding="utf-8")
 

@@ -404,7 +404,9 @@ Retirement uses the reviewed root-owned
 `/etc/launchplane/runner-lane-retirement-targets` file contains tab-separated
 `repository`, `lane`, `registration_root`, and `service_user` bindings. The
 helper rejects symlinked or non-root-owned configuration, verifies the invoking
-sudo user, canonical root, systemd unit user, and unit `ExecStart`, then stops
+sudo user, canonical root, systemd unit user, and the exact `ExecStart`
+executable `<registration_root>/<lane>/bin/runsvc.sh` (not a substring of its
+path or arguments), then stops
 and disables only that exact unit. A sudoers entry may grant only this helper;
 the root-owned target file remains the runtime authority for each approved
 retirement:
