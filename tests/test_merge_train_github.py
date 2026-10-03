@@ -2855,6 +2855,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
                 _conversation_rule(),
+                [],  # no active branch rules
             )
         )
         reader = GitHubMergeTrainSnapshotReader(transport=transport)
@@ -2899,6 +2900,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 "/repos/cbusillo/sellyouroutboard/commits/head-43/status?per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/commits/head-43/check-runs?per_page=100&page=1",
                 "/graphql",
+                "/repos/cbusillo/sellyouroutboard/rules/branches/main?per_page=100&page=1",
             ],
         )
         self.assertNotIn("/pulls/44", "\n".join(request.path for request in transport.requests))
@@ -2916,6 +2918,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
                 _conversation_rule(),
+                [],  # no active branch rules
             )
         )
 
@@ -2995,6 +2998,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                         _combined_status(),
                         {"check_runs": [_check_run("completed", "success")]},
                         _conversation_rule(),
+                        [],  # no active branch rules
                     ]
                 )
                 transport = RecordingMergeTrainGitHubTransport(responses=tuple(responses))
@@ -3028,6 +3032,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     "check_runs": [{"name": "check-100", **_check_run("completed", "failure")}],
                 },
                 _conversation_rule(),
+                [],  # no active branch rules
             )
         )
 
@@ -3072,6 +3077,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 },
                 {"check_runs": [_check_run("completed", "success")]},
                 _conversation_rule(),
+                [],  # no active branch rules
             )
         )
 
@@ -3102,7 +3108,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     {"check_runs": [_check_run("completed", "success")]},
                 ]
             )
-        responses.append(_conversation_rule())
+        responses.extend([_conversation_rule(), []])
         transport = RecordingMergeTrainGitHubTransport(responses=tuple(responses))
 
         snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
@@ -3123,6 +3129,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
                 _conversation_rule(),
+                [],  # no active branch rules
             )
         )
 
@@ -3144,6 +3151,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _combined_status(),
                 {"check_runs": [_check_run("queued", None)]},
                 _conversation_rule(),
+                [],  # no active branch rules
             )
         )
 
@@ -3174,6 +3182,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _combined_status(statuses=()),
                 {"check_runs": [_check_run("completed", "success")]},
                 _conversation_rule(),
+                [],  # no active branch rules
             )
         )
 
@@ -3199,6 +3208,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
                 _conversation_rule(),
+                [],  # no active branch rules
             )
         )
 
@@ -3240,6 +3250,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                         _combined_status(),
                         {"check_runs": [_check_run("completed", "success")]},
                         _conversation_rule(),
+                        [],  # no active branch rules
                     )
                 )
 
@@ -3254,7 +3265,11 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 )
 
     def _read_with_conversations(
-        self, *, rule: object, threads: dict[tuple[int, object], dict[str, object]]
+        self,
+        *,
+        rule: object,
+        threads: dict[tuple[int, object], dict[str, object]],
+        branch_rules: tuple[object, ...] = (),
     ) -> tuple[MergeTrainDryRunSnapshot, list[dict[str, object]]]:
         graphql_bodies: list[dict[str, object]] = []
 
@@ -3269,6 +3284,8 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     if "number" not in variables:
                         return rule
                     return threads[(cast(int, variables["number"]), variables["after"])]
+                if "/rules/branches/" in path:
+                    return list(branch_rules)
                 if path.endswith("/branches/main"):
                     return _github_branch()
                 if "/pulls?" in path:
@@ -3323,6 +3340,23 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 self.assertTrue(
                     all(item.review_conversations is None for item in snapshot.pull_requests)
                 )
+
+    def test_snapshot_reader_reads_a_ruleset_that_requires_resolution(self) -> None:
+        snapshot, _ = self._read_with_conversations(
+            rule=_conversation_rule(None),
+            branch_rules=(
+                {"type": "required_status_checks", "parameters": {}},
+                {"type": "pull_request", "parameters": {"required_review_thread_resolution": True}},
+            ),
+            threads={
+                (20, None): _review_threads((False, "reviewer")),
+                (21, None): _review_threads(),
+            },
+        )
+
+        conversations = snapshot.pull_requests[0].review_conversations
+        assert conversations is not None
+        self.assertEqual(conversations.rule, "required")
 
     def test_snapshot_reader_treats_an_unreadable_rule_as_possibly_blocking(self) -> None:
         snapshot, _ = self._read_with_conversations(

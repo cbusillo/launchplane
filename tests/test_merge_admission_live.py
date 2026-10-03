@@ -407,6 +407,7 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                     _combined_status(),
                     {"check_runs": [_check_run("completed", "success")]},
                     _conversation_rule(),
+                    [],  # no active branch rules
                 )
                 client = _PassingTechnicalCheckClient()
                 client.transport = RecordingMergeTrainGitHubTransport(responses=responses)

@@ -109,6 +109,8 @@ class DependencyRefreshTests(unittest.TestCase):
                     return {"check_runs": [_check_run("completed", "success")]}
                 if path == "/graphql":
                     return _conversation_rule()
+                if "/rules/branches/" in path:
+                    return []
                 return super().request(method=method, path=path, body=body)
 
         comparisons = iter(ancestry)

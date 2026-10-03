@@ -3256,10 +3256,30 @@ def _conversation_resolution_rule(
 ) -> Literal["required", "not_required", "unreadable"]:
     """Read whether the base branch requires resolved conversations.
 
-    The train token has no Administration permission, so this reads the
-    branch rule GitHub shows to non-admins. An unreadable rule is not taken
-    as absent: callers then treat unresolved threads as blocking.
+    Classic branch protection and active rulesets can each require it. The
+    train token has no Administration permission, so this reads the classic
+    rule GitHub shows to non-admins and the branch's active rules, which need
+    only Metadata read. An unreadable rule is not taken as absent: callers then
+    treat unresolved threads as blocking.
     """
+    classic = _classic_conversation_rule(
+        transport=transport, repository_path=repository_path, base_branch=base_branch
+    )
+    if classic == "required":
+        return classic
+    ruleset = _ruleset_conversation_rule(
+        transport=transport, repository_path=repository_path, base_branch=base_branch
+    )
+    if ruleset == "required":
+        return ruleset
+    if "unreadable" in (classic, ruleset):
+        return "unreadable"
+    return "not_required"
+
+
+def _classic_conversation_rule(
+    *, transport: MergeTrainGitHubTransport, repository_path: str, base_branch: str
+) -> Literal["required", "not_required", "unreadable"]:
     try:
         repository = _graphql_repository(
             transport=transport,
@@ -3277,6 +3297,35 @@ def _conversation_resolution_rule(
     if not isinstance(required, bool):
         return "unreadable"
     return "required" if required else "not_required"
+
+
+def _ruleset_conversation_rule(
+    *, transport: MergeTrainGitHubTransport, repository_path: str, base_branch: str
+) -> Literal["required", "not_required", "unreadable"]:
+    encoded_branch = quote(base_branch, safe="")
+    page = 1
+    while True:
+        try:
+            rules = transport.request(
+                method="GET",
+                path=f"/repos/{repository_path}/rules/branches/{encoded_branch}"
+                f"?per_page=100&page={page}",
+            )
+        except MergeTrainGitHubError:
+            return "unreadable"
+        if not isinstance(rules, list):
+            return "unreadable"
+        for rule in rules:
+            if not isinstance(rule, dict) or rule.get("type") != "pull_request":
+                continue
+            parameters = rule.get("parameters")
+            if not isinstance(parameters, dict):
+                return "unreadable"
+            if parameters.get("required_review_thread_resolution") is True:
+                return "required"
+        if len(rules) < 100:
+            return "not_required"
+        page += 1
 
 
 def _review_conversations(
