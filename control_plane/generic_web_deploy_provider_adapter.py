@@ -90,7 +90,10 @@ class GenericWebDeployProviderMutationAdapter:
         lane: ProductLaneProfile,
         trace_id: str,
         deploy_provider: GenericWebDeployProvider | None = None,
+        recorded_artifact: bool = False,
     ) -> None:
+        # Recovery replays a deploy Launchplane reserved; its artifact is a record.
+        self._recorded_artifact = recorded_artifact
         self._control_plane_root = control_plane_root
         self._record_store = record_store
         self._deploy_request = deploy_request
@@ -125,6 +128,7 @@ class GenericWebDeployProviderMutationAdapter:
                 normalized_artifact_id=normalize_generic_web_artifact_id(
                     profile=self._profile,
                     artifact_id=deploy.artifact_id,
+                    recorded=self._recorded_artifact,
                 ),
                 request_deploy_reference=deploy.deploy_reference,
                 fallback_target_name=f"{self._profile.product}-{self._lane.instance}",
@@ -409,6 +413,7 @@ class GenericWebDeployProviderMutationAdapter:
                 normalized_artifact_id=normalize_generic_web_artifact_id(
                     profile=self._profile,
                     artifact_id=deploy.artifact_id,
+                    recorded=self._recorded_artifact,
                 ),
                 request_deploy_reference=deploy.deploy_reference,
                 lane=self._lane,
@@ -484,6 +489,7 @@ class GenericWebDeployProviderMutationAdapter:
                 deploy_provider=self._deploy_provider,
                 resolved_deploy_target=self._resolve_deploy_target(),
                 provider_effect_checkpoint=lease.checkpoint_effect,
+                recorded_artifact=self._recorded_artifact,
             )
         except (FileNotFoundError, ValueError) as error:
             raise ProviderMutationRejectedError(error)
