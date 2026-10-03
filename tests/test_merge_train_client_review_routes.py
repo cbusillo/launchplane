@@ -24,6 +24,7 @@ from tests.merge_train_policy_fixtures import (
 from tests.test_merge_train_github import (
     _check_run,
     _combined_status,
+    _conversation_rule,
     _github_branch,
     _github_pull_request,
     _label_events,
@@ -59,6 +60,8 @@ def _labelled_pull_request_transport(
             _label_events(),
             _combined_status(statuses=({"context": "ci", "state": "success"}, *client_statuses)),
             {"check_runs": [_check_run("completed", "success")]},
+            _conversation_rule(),
+            [],  # no active branch rules
         )
     )
 
@@ -174,6 +177,8 @@ class StandaloneCandidatePlanningClientReviewTests(unittest.TestCase):
                 _label_events(),
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
+                _conversation_rule(),
+                [],  # no active branch rules
             )
         )
         batch_store = Mock()
