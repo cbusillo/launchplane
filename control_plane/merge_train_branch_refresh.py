@@ -7,6 +7,7 @@ from control_plane.contracts.merge_train_branch_refresh_record import (
     MergeTrainBranchRefreshRecord,
     build_merge_train_branch_refresh_record,
 )
+from control_plane.merge_admission import MergeAdmissionDeniedError
 from control_plane.merge_train_github import (
     MergeTrainBranchRefreshRecorder,
     MergeTrainBranchRefreshReadStore as MergeTrainBranchRefreshReadStore,
@@ -33,6 +34,21 @@ def optional_merge_train_branch_refresh_read_store(
     if callable(getattr(record_store, "list_merge_train_branch_refresh_records", None)):
         return cast(MergeTrainBranchRefreshReadStore, record_store)
     return None
+
+
+def require_merge_train_client_review_read_store(
+    record_store: object, *, route: str
+) -> MergeTrainBranchRefreshReadStore:
+    """Return the store that names Client-review labels, or refuse the route."""
+    review_store = optional_merge_train_branch_refresh_read_store(record_store)
+    if review_store is None or not callable(
+        getattr(review_store, "list_product_profile_records", None)
+    ):
+        raise MergeAdmissionDeniedError(
+            f"{route} requires a readable Client-review profile store.",
+            reason_code="client_review_profiles_unavailable",
+        )
+    return review_store
 
 
 def merge_train_branch_refresh_recorder(

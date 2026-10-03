@@ -42,7 +42,7 @@ from control_plane.provider_operations import (
 )
 
 
-_ACTIVE_PREVIEW_STATES = frozenset({"pending", "active", "paused", "teardown_pending"})
+_ACTIVE_PREVIEW_STATES = frozenset({"pending", "active", "failed", "paused", "teardown_pending"})
 _NO_DEPLOYMENT_HISTORY_STATUS = "no_history"
 _RETIRABLE_APPLICATION_STATES = frozenset(
     {"completed", "done", "exited", "idle", "ready", "running", "stopped", "success"}
@@ -1134,15 +1134,20 @@ def active_preview_ids(
     preview_context = profile.preview.context.strip()
     if not preview_context:
         return ()
+    repository = profile.repository.strip().casefold()
+    # Current preview writers use the short name; retain full-form history.
+    preview_anchors = {repository, repository.partition("/")[2].strip()}
     return tuple(
         sorted(
-            preview_id
-            for preview in record_store.list_preview_records(
-                context_name=preview_context,
-                anchor_repo=profile.repository,
-            )
-            if getattr(preview, "state", "") in _ACTIVE_PREVIEW_STATES
-            and (preview_id := str(getattr(preview, "preview_id", "")).strip())
+            {
+                preview_id
+                for preview in record_store.list_preview_records(
+                    context_name=preview_context,
+                )
+                if str(getattr(preview, "anchor_repo", "")).strip().casefold() in preview_anchors
+                and getattr(preview, "state", "") in _ACTIVE_PREVIEW_STATES
+                and (preview_id := str(getattr(preview, "preview_id", "")).strip())
+            }
         )
     )
 

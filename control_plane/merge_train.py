@@ -805,12 +805,24 @@ def _next_action_for_selected_pr(
             f"Add {repository_policy.blocked_label}; pull request has merge conflicts.",
         )
     if selected_pr.required_checks_status == "fail":
+        if selected_pr.owner_review_required:
+            return (
+                "block",
+                "Current-head review or required checks failed on pull request "
+                f"#{selected_pr.number}.",
+            )
         return (
             "block",
             f"Add {repository_policy.blocked_label}; required checks failed.",
         )
     if selected_pr.branch_update_required and not skip_branch_update:
         return "update_branch", "Refresh the pull request against the current base branch."
+    if selected_pr.owner_review_required and selected_pr.required_checks_status != "pass":
+        return (
+            "wait_for_checks",
+            "Wait for current-head Client review and required checks on pull request "
+            f"#{selected_pr.number}.",
+        )
     if selected_pr.mergeable == "unknown" or selected_pr.required_checks_status in {
         "pending",
         "unknown",

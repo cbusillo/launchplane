@@ -5169,7 +5169,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertNotIn("preview_url", thin_connector_keys)
         self.assertNotIn("idempotency-key", thin_connector_keys)
 
-    def test_cli_product_repo_gate_accepts_only_allowed_build_runner_flow_labels(self) -> None:
+    def test_cli_product_repo_gate_accepts_only_allowed_build_runner_labels(self) -> None:
         for runs_on, expected_status in (
             ("[self-hosted]", "pass"),
             ("[ubuntu-latest]", "pass"),
@@ -5196,6 +5196,22 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("[self-hosted,,ubuntu-latest]", "fail"),
             ("[self-hosted", "fail"),
             ("['self-hosted]", "fail"),
+            ("\n      labels: self-hosted", "pass"),
+            ("\n      labels: 'ubuntu-latest'", "pass"),
+            ("\n      labels: [self-hosted, ubuntu-latest]", "pass"),
+            ("\n      labels:\n        - self-hosted\n        - 'ubuntu-latest'", "pass"),
+            ("\n      labels:\n      - self-hosted\n      - ubuntu-latest", "pass"),
+            ("\n      labels: |-\n        self-hosted", "pass"),
+            ("\n      labels: tenant-runner", "fail"),
+            ("\n      labels: [self-hosted, tenant-runner]", "fail"),
+            ("\n      labels:\n        - self-hosted\n        - tenant-runner", "fail"),
+            ("\n      labels:\n      - tenant-runner", "fail"),
+            ("\n      labels: '[self-hosted]'", "fail"),
+            ("\n      labels: |\n        [self-hosted]", "fail"),
+            ("\n      labels:\n        - '[self-hosted]'", "fail"),
+            ("\n      labels: []", "fail"),
+            ("{labels: tenant-runner}", "fail"),
+            ("{labels: [self-hosted, tenant-runner]}", "fail"),
         ):
             with self.subTest(runs_on=runs_on), TemporaryDirectory() as temp_dir:
                 root = Path(temp_dir)

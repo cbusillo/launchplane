@@ -27,7 +27,11 @@ from control_plane.contracts.merge_train_policy import (
 from control_plane.github_request_timing import github_request_tally
 from control_plane.merge_admission import require_merge_admission_record_store
 from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator
-from control_plane.merge_train_branch_refresh import optional_merge_train_branch_refresh_store
+from control_plane.merge_admission import MergeAdmissionDeniedError
+from control_plane.merge_train_branch_refresh import (
+    optional_merge_train_branch_refresh_store,
+    require_merge_train_client_review_read_store,
+)
 from control_plane.merge_train_admission import (
     MergeTrainRunHistoryStore,
     evaluate_merge_train_admission_from_store,
@@ -256,6 +260,12 @@ def _run_level1(
     now: Callable[[], str],
 ) -> MergeTrainScheduledTargetResult:
     mutate = repository_policy.scheduler.mutate
+    try:
+        review_store = require_merge_train_client_review_read_store(
+            record_store, route="Scheduled merge train run-once"
+        )
+    except MergeAdmissionDeniedError as error:
+        return _target_result(repository_policy, status="failed", reason_code=error.reason_code)
     result = execute_recorded_merge_train_run_once(
         request=MergeTrainRunOnceEnvelope(
             repository=repository_policy.repository,
@@ -269,6 +279,7 @@ def _run_level1(
         trace_id=trace_id,
         recorded_at=now(),
         run_record_store=require_merge_train_run_record_store(record_store),
+        review_store=review_store,
         controller_state_store=(
             require_merge_train_controller_state_record_store(record_store) if mutate else None
         ),

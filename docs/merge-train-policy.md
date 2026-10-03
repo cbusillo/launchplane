@@ -277,12 +277,18 @@ Logins are diagnostic labels, not policy identity, because logins can be renamed
 
 PRs labelled for Client review require the newest `launchplane/owner-review`
 commit status on their current head. Missing status is pending, even if check
-runs already passed; pending or failed review cannot admit the PR. Only active product profiles' configured review labels mark this
-boundary; an unrelated label on a repository without such a profile creates no
-review requirement. Every batch member is checked during planning and again
-before the provider landing effect. The standalone landing route also requires
-that profile reader and refuses if it is unavailable. Successful review still
-requires all other current-head checks.
+runs already passed; pending or failed review cannot admit the PR. Only active
+product profiles' configured review labels mark this boundary; an unrelated
+label on a repository without such a profile creates no review requirement.
+Every batch member is checked during planning and again before the provider
+landing effect. The controller, standalone candidate planning and landing, and
+run-once (including scheduled Level 1 runs) all read the product profiles and
+refuse with `client_review_profiles_unavailable` when they cannot. Standalone
+planning applies the same every-member check as the controller and reports a
+waiting or blocked queue without building a candidate. Run-once re-reads the
+review on the head it is about to merge and treats a changed decision as a
+stale head.
+Successful review still requires all other current-head checks.
 
 Only an actor allowed to enqueue may put a pull request in the train: a trusted
 automation identity, or an actor whose role is in `allowed_actor_roles` (by
@@ -290,13 +296,13 @@ default the repository owner and its admins). Pull-request write access
 includes labels, so a Client's GitHub App or any other collaborator can apply
 the enqueue label; the train reads who applied it from the pull request's latest
 `labeled` event, not from its author. A GitHub App that applies the label with
-a user's access token counts as the App, not as that user; an App's own
-installation token is its bot account and needs a trusted automation id. A
+a user's access token is always refused, including a repository owner's token,
+before either the trusted-automation or allowed-role check. An App's own
+installation token acts as its bot account and needs a trusted automation id. A
 label applied by anyone else, or whose labeler cannot be read, is ignored for
-admission, and the dry run reports
-`<label> label ignored: applied by <login> (<role>), who is not allowed to
-enqueue`. Removing the label, by anyone, still takes the pull request out of
-the queue.
+admission. The dry run reports the specific refusal reason and identifies the
+labeler when available. Removing the label, by anyone, still takes the pull
+request out of the queue.
 
 `dependency_update_github_user_ids` names dependency-update bots, for example
 Dependabot. Each id must also be in `trusted_automation_github_user_ids`. A pull
@@ -618,7 +624,11 @@ merge onto the base). The controller result reports the probe as
 requests it conflicts with. Later candidates carry the hold-out forward while
 its head is unchanged, so the rest of the queue lands. A new head brings it
 back into the queue; until then, its author resolves the conflict, typically
-after the others land. A dry run writes no ref and reports
+after the others land. When the probe reduces a changed queue back to a failed
+batch's membership, the batch stays stopped and keeps its retry budget; the
+failed candidate records the new hold-out, and feedback says the batch ahead is
+stopped, so later passes do not probe the same conflict again. A dry run writes
+no ref and reports
 `conflict_probe.status: will_run` with the pull requests a mutating pass would
 probe.
 
@@ -1257,8 +1267,9 @@ Controller-mode mutate runs and manually dispatched batch-candidate,
 stack-collapse, or batch-landing phases render conservative PR feedback payloads
 from their worker responses and post them through the managed feedback endpoint,
 so queued PRs get one evolving Launchplane status comment as the train builds,
-waits, blocks, or completes. Controller-mode dry-runs do not deliver feedback
-comments. Manual-phase feedback binds repository and base-branch identity to the
+waits, blocks, or completes. A pull request awaiting current-head Client review
+hears so even before any candidate exists. Controller-mode dry-runs do not
+deliver feedback comments. Manual-phase feedback binds repository and base-branch identity to the
 phase response's candidate, landing-plan, or stack-collapse-plan record and fails
 closed if another identity-bearing phase result disagrees.
 

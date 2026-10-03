@@ -304,8 +304,12 @@ allowed labels in scalar, JSON, and YAML flow-list forms (for example,
 runtime runner labels remain findings. Quoted or block-scalar job `runs-on`
 values and each block-sequence member are single labels: `"[self-hosted]"`
 is a custom label and remains a finding, while `[self-hosted]` is a sequence
-of allowed mechanics. Reusable-workflow `runs_on` inputs retain their serialized
-JSON-selector contract, including `'["self-hosted"]'`. Block mapping job
+of allowed mechanics.
+Mapping-form jobs with nested `runs-on.labels` use the same label classification,
+including scalar, flow-list, and block-sequence forms. Inline runner mappings
+remain findings because the line scanner does not parse their members.
+Reusable-workflow `runs_on` inputs retain their serialized JSON-selector contract,
+including `'["self-hosted"]'`. Block mapping job
 `runs-on.group` retains its runner context: literal custom groups and arbitrary
 repository-variable groups remain findings. Direct input references such as
 `${{ inputs.runner_group }}` remain supported; literal fallbacks and
