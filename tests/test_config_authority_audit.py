@@ -5169,6 +5169,61 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertNotIn("preview_url", thin_connector_keys)
         self.assertNotIn("idempotency-key", thin_connector_keys)
 
+    def test_cli_product_repo_gate_accepts_only_allowed_build_runner_flow_labels(self) -> None:
+        for runs_on, expected_status in (
+            ("[self-hosted]", "pass"),
+            ("[ubuntu-latest]", "pass"),
+            ("[ self-hosted, ubuntu-latest ]", "pass"),
+            ("['self-hosted', ubuntu-latest]", "pass"),
+            ('["self-hosted", ubuntu-latest]', "pass"),
+            ("[self-hosted,]", "pass"),
+            ('["self-hosted"]', "pass"),
+            ("self-hosted", "pass"),
+            ("[self-hosted, tenant-runner]", "fail"),
+            ("[tenant-runner]", "fail"),
+            ("[]", "fail"),
+            ("[self-hosted,,ubuntu-latest]", "fail"),
+            ("[self-hosted", "fail"),
+            ("['self-hosted]", "fail"),
+        ):
+            with self.subTest(runs_on=runs_on), TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                _init_repo(root)
+                workflow = root / ".github" / "workflows" / "build.yml"
+                workflow.parent.mkdir(parents=True)
+                workflow.write_text("name: Build\n", encoding="utf-8")
+                _commit_all(root)
+                _git(root, "branch", "-M", "main")
+                _checkout_branch(root, "feature/build-runner")
+                workflow.write_text(
+                    "name: Build\n"
+                    "on: pull_request\n"
+                    "jobs:\n"
+                    "  build:\n"
+                    f"    runs-on: {runs_on}\n"
+                    "    steps:\n"
+                    "      - run: echo build\n",
+                    encoding="utf-8",
+                )
+                _commit_all(root)
+                result = CliRunner().invoke(
+                    CLI_MAIN,
+                    [
+                        "service",
+                        "audit-config-authority",
+                        "--control-plane-root",
+                        str(root),
+                        "--mode",
+                        "changed-files-gate",
+                        "--fail-on-findings",
+                        "--gate-profile",
+                        "product-repo",
+                    ],
+                )
+                payload = json.loads(result.output.split("Error:", 1)[0])
+                self.assertEqual(payload["gate"]["status"], expected_status, result.output)
+                self.assertEqual(result.exit_code == 0, expected_status == "pass")
+
     def test_cli_product_repo_gate_runs_on_selector_allows_only_mechanic_labels(self) -> None:
         for runs_on, expected_status in (
             ('["self-hosted"]', "pass"),

@@ -294,7 +294,10 @@ gate. If the gate cannot resolve `origin/main` or `main` and has no dirty files
 to compare against `HEAD`, it fails closed instead of returning an empty green
 report. Allowed docs, tests, schema examples, Launchplane self-bootstrap wiring,
 admin-supplied inputs, and thin connector mechanics keep explicit allow
-reasons and do not fail the default gate. The `product-repo` profile also
+reasons and do not fail the default gate. Runner mechanic selectors use the same
+allowed labels in scalar, JSON, and YAML flow-list forms (for example,
+`self-hosted` and `[self-hosted]`); empty lists and lists containing custom
+runtime runner labels remain findings. The `product-repo` profile also
 rejects test fixtures that carry Launchplane lifecycle authority such as authz,
 runtime-environment, provider target, target-id, managed-secret, route-batch, or
 topology material. Product repos should use this changed-file gate to reject
