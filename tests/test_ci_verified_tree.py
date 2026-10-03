@@ -202,3 +202,25 @@ class ScheduledCiReportingTests(unittest.TestCase):
         self.assertIn("test | success", report)
         self.assertIn("test_fork | skipped", report)
         self.assertIn("::warning", result.stdout)
+
+    def test_clean_scheduled_report_does_not_warn(self) -> None:
+        step = load_workflow(".github/workflows/ci.yml").step_named(
+            "ci_gate", "Report scheduled main CI"
+        )
+        assert step is not None
+        with TemporaryDirectory() as directory:
+            result = subprocess.run(
+                ["bash", "-c", step.run],
+                env=os.environ
+                | {
+                    "CI_RESULTS": json.dumps(
+                        {"test": {"result": "success"}, "test_fork": {"result": "skipped"}}
+                    ),
+                    "GITHUB_SHA": "fixture-commit",
+                    "GITHUB_STEP_SUMMARY": str(Path(directory) / "summary"),
+                },
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        self.assertNotIn("::warning", result.stdout)
