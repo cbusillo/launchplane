@@ -9,8 +9,10 @@ protects nothing. The acceptance carries to the new head only when all hold:
    back after asking for the refresh and recorded it, the previous head, and the
    base commit it merged. That base commit is on the pull request's current base
    branch, which is the base the acceptance was given on.
-2. The pull request's change against its base is byte-identical at both heads:
-   every changed file has the same name, status, resulting blob, and patch.
+2. The pull request's change against its base is the same at both heads: every
+   changed file has the same name, status, and added and removed lines, in order.
+   Hunk positions and context lines are not compared, so a base edit that moves or
+   surrounds the change in a file it also changes does not stop the carry.
 3. The carry is saved as its own decision record naming the decision and head it
    came from and the train's refresh records, so it reads as carried, not re-decided.
 
@@ -22,7 +24,7 @@ the new head waiting for a decision.
 from collections.abc import Callable
 from datetime import datetime, timezone
 import logging
-from typing import Final, cast
+from typing import Final
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -31,7 +33,9 @@ from control_plane.contracts.merge_train_branch_refresh_record import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import ProductReviewCarry, ProductReviewDecisionRecord
-from control_plane.merge_train_branch_refresh import MergeTrainBranchRefreshReadStore
+from control_plane.merge_train_branch_refresh import (
+    optional_merge_train_branch_refresh_read_store,
+)
 from control_plane.product_review import ProductReviewStore
 from control_plane.source_control_change import change_fingerprint as _change_fingerprint
 
@@ -55,9 +59,8 @@ def carry_owner_acceptance(
 ) -> ProductReviewDecisionRecord | None:
     """Save and return the carried acceptance for `head_sha`, or None when it does not carry."""
 
-    if not callable(getattr(store, "list_merge_train_branch_refresh_records", None)):
-        return None
-    if not base_branch.strip():
+    refresh_store = optional_merge_train_branch_refresh_read_store(store)
+    if refresh_store is None or not base_branch.strip():
         return None
     head = head_sha.strip().lower()
     decisions = store.list_product_review_decision_records(
@@ -69,9 +72,7 @@ def carry_owner_acceptance(
     if not _carryable(accepted, profile) or accepted.base_branch != base_branch.strip():
         # Accepted on another base (or one never recorded): the change is not the same.
         return None
-    refreshes = cast(
-        MergeTrainBranchRefreshReadStore, store
-    ).list_merge_train_branch_refresh_records(
+    refreshes = refresh_store.list_merge_train_branch_refresh_records(
         repository=profile.repository, pull_request_number=pull_request_number
     )
     carry = _base_only_refresh(
@@ -86,10 +87,18 @@ def carry_owner_acceptance(
         return None
     refresh_record_ids, base_commit = carry
     accepted_change = _change_fingerprint(
-        repository=profile.repository, base=base_commit, head=accepted.head_sha, read=read
+        repository=profile.repository,
+        base=base_commit,
+        head=accepted.head_sha,
+        read=read,
+        changed_lines_only=True,
     )
     if accepted_change is None or accepted_change != _change_fingerprint(
-        repository=profile.repository, base=base_commit, head=head, read=read
+        repository=profile.repository,
+        base=base_commit,
+        head=head,
+        read=read,
+        changed_lines_only=True,
     ):
         return None
     with store.product_review_lock(

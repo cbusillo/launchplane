@@ -32723,7 +32723,7 @@
       },
       "ProductReviewCarry": {
         "additionalProperties": false,
-        "description": "Where a carried acceptance came from: the Client decided on another head.\n\n`merge_train_base_refresh`: the merge train only merged the base branch into the\npull request, and the pull request's change against its base is byte-identical.",
+        "description": "Where a carried acceptance came from: the Client decided on another head.\n\n`merge_train_base_refresh`: the merge train only merged the base branch into the\npull request, and the pull request's change against its base adds and removes\nthe same lines.",
         "properties": {
           "head_sha": {
             "title": "Head Sha",
