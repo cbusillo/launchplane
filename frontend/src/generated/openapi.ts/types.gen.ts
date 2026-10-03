@@ -3261,7 +3261,6 @@ export type ProductPreviewProfile = {
     copied_env_keys: Array<string>;
     data_transport_mode: 'none' | 'clone' | 'bootstrap' | 'migrate_seed' | 'driver';
     domain_certificate_type: 'none' | 'letsencrypt';
-    enable_label: string;
     enabled: boolean;
     migration_command: string;
     omitted_env_keys: Array<string>;

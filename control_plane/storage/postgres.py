@@ -3343,7 +3343,6 @@ class LaunchplanePreviewDesiredStateRow(Base):
     context: Mapped[str] = mapped_column(String, nullable=False)
     discovered_at: Mapped[str] = mapped_column(String, nullable=False)
     repository: Mapped[str] = mapped_column(String, nullable=False)
-    label: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     desired_count: Mapped[int] = mapped_column(Integer, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
@@ -15687,8 +15686,6 @@ class PostgresRecordStore(HumanSessionStore):
                 context=record.context,
                 discovered_at=record.discovered_at,
                 repository=record.repository,
-                # Retired with the preview label (#2735); the column stays for older rows.
-                label="",
                 status=record.status,
                 desired_count=record.desired_count,
                 payload=self._payload_dict(record),

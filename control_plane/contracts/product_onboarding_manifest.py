@@ -4,7 +4,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.dokploy_target_record import DokployTargetType
 from control_plane.contracts.product_profile_record import (
-    PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL,
     ProductOdooLaneDataPolicy,
     ProductOdooPrelaunchRebuildPolicy,
     ProductOdooStableBootstrapPolicy,
@@ -49,7 +48,6 @@ class ProductOnboardingPreviewManifest(BaseModel):
 
     enabled: bool = False
     context: str = ""
-    enable_label: str = PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL
     slug_template: str = "pr-{number}"
     app_name_prefix: str = ""
     template_instance: str = "testing"

@@ -51,11 +51,6 @@ name: Product Onboarding
         description: Root URL whose subdomains host previews, for example https://product-preview.example.com.
         required: true
         type: string
-      preview_label:
-        description: Label that enables preview automation.
-        required: false
-        default: launchplane-preview
-        type: string
       target_name:
         description: Optional Dokploy application name for a new product.
         required: false
@@ -133,7 +128,6 @@ jobs:
       TESTING_CONTEXT: ${{ inputs.testing_context }}
       PREVIEW_CONTEXT: ${{ inputs.preview_context }}
       PREVIEW_BASE_URL: ${{ inputs.preview_base_url }}
-      PREVIEW_LABEL: ${{ inputs.preview_label }}
       TARGET_NAME: ${{ inputs.target_name }}
       PROJECT_NAME: ${{ inputs.project_name }}
       ENVIRONMENT_NAME: ${{ inputs.environment_name }}
@@ -218,7 +212,6 @@ jobs:
               raise SystemExit("preview_base_url has an invalid port.") from error
           required("DISPLAY_NAME")
           required("IMAGE_REPOSITORY")
-          required("PREVIEW_LABEL")
           required("REASON")
           required("RELATED_ISSUE")
           if required("ENVIRONMENT_NAME") != "testing":
@@ -302,7 +295,6 @@ jobs:
             --arg server_id "$SERVER_ID" \
             --arg preview_context "$NORMALIZED_PREVIEW_CONTEXT" \
             --arg preview_base_url "$PREVIEW_BASE_URL" \
-            --arg preview_label "$PREVIEW_LABEL" \
             --arg domain_certificate_type "$DOMAIN_CERTIFICATE_TYPE" \
             --argjson runtime_port "$RUNTIME_PORT" \
             '{schema_version:1, product:$product, display_name:$display_name,
@@ -313,7 +305,6 @@ jobs:
               target_name:$target_name, project_name:$project_name,
               server_id:$server_id,
               preview_context:$preview_context, preview_base_url:$preview_base_url,
-              preview_label:$preview_label,
               domain_certificate_type:$domain_certificate_type}' \
             > generic-web-intent.json
           jq -n \

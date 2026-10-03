@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -67,17 +66,3 @@ class EveryCodePreviewGateRecord(BaseModel):
         if self.status == "cancelled" and not self.cancelled_at.strip():
             raise ValueError("cancelled Every Code preview gate requires cancelled_at")
         return self
-
-
-def build_every_code_preview_gate_id(*, repository: str, pr_number: int, head_sha: str) -> str:
-    normalized_repository = repository.strip().lower()
-    normalized_sha = head_sha.strip().lower()
-    if not normalized_repository or pr_number < 1 or not normalized_sha:
-        raise ValueError("Every Code preview gate id requires repository, pr_number, and head_sha")
-    digest = hashlib.sha256(
-        f"{normalized_repository}#{pr_number}:{normalized_sha}".encode("utf-8")
-    ).hexdigest()[:16]
-    return (
-        f"every-code-preview-gate-{normalized_repository.replace('/', '-')}-{pr_number}"
-        f"-{normalized_sha[:12]}-{digest}"
-    )
