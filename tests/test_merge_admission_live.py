@@ -15,6 +15,7 @@ from tests.test_merge_train_github import (
     _github_branch,
     _github_commit,
     _combined_status,
+    _conversation_rule,
     _check_run,
 )
 
@@ -39,6 +40,7 @@ from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator
 from control_plane.merge_train import (
     MergeTrainDryRunSnapshot,
     MergeTrainPullRequestSnapshot,
+    MergeTrainReviewConversations,
 )
 from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.service_auth import LaunchplaneAuthzPolicy
@@ -276,6 +278,7 @@ def _evaluate_live(
     provider: _EvidenceProvider,
     evidence: RepositoryEvidence,
     extra_pull_requests: tuple[MergeTrainPullRequestSnapshot, ...] = (),
+    target_conversations: MergeTrainReviewConversations | None = None,
 ) -> MergeAdmissionEvaluation:
     policy_record = build_test_merge_train_policy_record(repository=OWNER_REPOSITORY)
     candidate_record, landing_record, controller_state, _ = _guard_records(
@@ -301,7 +304,7 @@ def _evaluate_live(
                         number=2022,
                         head_sha=evidence.target.head_sha,
                         created_at="2026-08-11T03:00:00Z",
-                    ),
+                    ).model_copy(update={"review_conversations": target_conversations}),
                     *extra_pull_requests,
                 ),
             )
@@ -403,6 +406,8 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                     *(({"status": "identical"}, _change(), _change(), []) if recorded else ()),
                     _combined_status(),
                     {"check_runs": [_check_run("completed", "success")]},
+                    _conversation_rule(),
+                    [],  # no active branch rules
                 )
                 client = _PassingTechnicalCheckClient()
                 client.transport = RecordingMergeTrainGitHubTransport(responses=responses)
@@ -444,6 +449,22 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                     else:
                         with self.assertRaisesRegex(MergeAdmissionDeniedError, "Live merge queue"):
                             evaluate()
+
+    def test_a_conversation_opened_after_planning_blocks_with_its_own_reason(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            evidence = _repository_evidence()
+            with self.assertRaises(MergeAdmissionDeniedError) as blocked:
+                _evaluate_live(
+                    store=store,
+                    provider=_EvidenceProvider(evidence),
+                    evidence=evidence,
+                    target_conversations=MergeTrainReviewConversations(
+                        rule="required", unresolved_count=1
+                    ),
+                )
+        self.assertEqual(blocked.exception.reason_code, "pull_request_conversations_unresolved")
+        self.assertIn("PR #2022", str(blocked.exception))
 
     def test_a_pull_request_queued_behind_the_plan_does_not_block_landing(self) -> None:
         # A newer PR labeled while the batch lands waits for the next candidate (#2637).

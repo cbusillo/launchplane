@@ -20,6 +20,7 @@ from control_plane.merge_admission import (
     MergeAdmissionDeniedError,
     MergeAdmissionReconciliationRequiredError,
 )
+from control_plane.merge_train import review_conversations_reason
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     MERGE_REF_READ_DELAYS_SECONDS,
@@ -530,6 +531,16 @@ def land_protected_batch(
             raise MergeAdmissionDeniedError(
                 "Batch PR requires successful checks on the exact candidate.",
                 reason_code="batch_pull_request_checks_not_ready",
+            )
+        # Code scanning can open threads on the batch PR itself, which GitHub
+        # then refuses to merge. Stop before any admission instead.
+        conversations = client.read_review_conversations(
+            repository=plan.repository, base_branch=plan.base_branch, pull_request_number=number
+        )
+        if conversations is not None:
+            raise MergeAdmissionDeniedError(
+                f"Batch PR #{number} has {review_conversations_reason(conversations)}.",
+                reason_code="batch_pull_request_conversations_unresolved",
             )
         try:
             # Evaluate the whole batch before appending its first admission.

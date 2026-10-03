@@ -621,6 +621,24 @@ An exhausted final-publication readback also fails closed, with no individual
 failed pull request: its checkpoint identifies the publication phase and the
 retained construction ref.
 
+GitHub refuses to merge into a base that requires conversation resolution
+while any review thread is unresolved. The snapshot reader reads that rule from
+classic protection through the base branch's `refUpdateRule`, which GitHub shows
+without the Administration permission the train token does not hold, and from
+the branch's active rulesets, which need only Metadata read. When the rule is on, each open,
+non-draft pull request's review threads are read, and one with an unresolved
+thread is ineligible with a reason that counts them; file paths stay out of
+public reasons. A thread opened by code scanning tells the author to fix the
+code rather than resolve the thread.
+The other entries plan and land without it, and resolving the thread brings it
+back. An unreadable rule is not taken as absent: unresolved threads still make
+the entry ineligible, and the reason says the rule could not be read. A planned
+entry that gains a thread before landing blocks admission with
+`pull_request_conversations_unresolved`. The batch PR is checked the same way
+after its checks pass and before any admission; an unresolved thread there,
+such as a code-scanning finding on the combined change, blocks with
+`batch_pull_request_conversations_unresolved` instead of a refused merge.
+
 ## Example Policy Entries
 
 The example below is documentation/import material only. It is not packaged as a

@@ -63,6 +63,39 @@ class MergeTrainLabelActor(BaseModel):
     on_behalf_via_app: str = Field(default="", exclude_if=lambda value: not value)
 
 
+# GitHub's code-scanning App opens review threads for its findings.
+CODE_SCANNING_REVIEW_AUTHOR = "github-advanced-security"
+
+
+class MergeTrainReviewConversations(BaseModel):
+    """Unresolved review threads that can stop GitHub from merging a pull request.
+
+    Recorded only when the base branch requires conversation resolution, or
+    when that rule could not be read and the threads might still block.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    rule: Literal["required", "unreadable"]
+    unresolved_count: PositiveInt
+    code_scanning_count: int = Field(default=0, ge=0)
+
+
+def review_conversations_reason(conversations: MergeTrainReviewConversations) -> str:
+    # Thread paths stay out: reasons are public summaries with a length limit.
+    count = conversations.unresolved_count
+    noun = "conversation" if count == 1 else "conversations"
+    rule = (
+        "the base branch requires conversation resolution"
+        if conversations.rule == "required"
+        else "the base branch's conversation-resolution rule could not be read"
+    )
+    reason = f"{count} unresolved review {noun}; {rule}"
+    if conversations.code_scanning_count:
+        reason += "; fix the code-scanning finding in the code instead of resolving its thread"
+    return reason
+
+
 class MergeTrainPullRequestSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -91,6 +124,9 @@ class MergeTrainPullRequestSnapshot(BaseModel):
     branch_update_required: bool = False
     # Set only for bot-authored pull requests; see merge_train_dependency_updates.
     dependency_update_class: DependencyUpdateClass | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    review_conversations: MergeTrainReviewConversations | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
 
@@ -608,6 +644,8 @@ def _build_queue_entry(
         and actor_role not in repository_policy.enqueue.allowed_actor_roles
     ):
         ineligible_reasons.append("actor role is not allowed to enqueue")
+    if pull_request.review_conversations is not None:
+        ineligible_reasons.append(review_conversations_reason(pull_request.review_conversations))
     return MergeTrainQueueEntry(
         number=pull_request.number,
         url=pull_request.url,
