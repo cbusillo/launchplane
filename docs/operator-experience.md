@@ -292,6 +292,14 @@ Issue `#2240`'s delegated-delivery Client route is retired and the issue is
 closed. The Client's release decision uses the release review route in
 [release-review.md](release-review.md).
 
+The privileged-operation list opens on the first readable supported plan type
+(secret rotation, access policy, then merge-train policy), using authorized
+read-only list requests. Only descriptor read denials advance to another tab;
+authentication, service failures, and cancellation stay visible. An explicit
+tab or descriptor link keeps its selection and names that plan type in a denial.
+If no supported type is readable, the page says so and leaves the tabs available.
+Direct operation links read only the requested review.
+
 The transitional Engineering privileged-operation route consumes the
 server-computed semantic review projection for its list cards and activity
 stream. Browser code does not classify raw request/evidence unions or repeat
