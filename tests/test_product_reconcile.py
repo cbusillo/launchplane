@@ -1603,7 +1603,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.assertIn("generic-web deploy recovery", blocked.last_error)
         self.assertEqual(self.deploys.runtime_identities, [])
 
-    def test_changed_settings_still_observe_and_settle_the_same_unknown_deploy(self) -> None:
+    def test_changed_authority_still_observes_and_settles_the_same_unknown_deploy(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
         succeeded = self.deploys.observation
         self.deploys.deploy_error = click.ClickException("provider timed out")
@@ -1615,6 +1615,16 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             RuntimeEnvironmentRecord(
                 scope="global",
                 env={"SYNC_INTERVAL_SECONDS": 3600},
+                updated_at="2026-10-02T01:00:00Z",
+            )
+        )
+        # A renamed app changes reconciliation metadata, but not its target identity.
+        self.deploys.target_name = "renamed-testing-app"
+        self.store.write_dokploy_target_record(
+            DokployTargetRecord(
+                context="cm",
+                instance="testing",
+                target_name=self.deploys.target_name,
                 updated_at="2026-10-02T01:00:00Z",
             )
         )

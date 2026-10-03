@@ -673,7 +673,7 @@ def _deploy_generic_web_testing(
         # authority key must not bypass an unresolved old attempt, even after a
         # binding repair points at a different provider application. The same
         # key still goes through the runner's normal observation/recovery path.
-        # Recover an old key automatically only when its complete provider and
+        # Recover an old key automatically only when its provider target and
         # request identity match; recovery must never act on a repointed app.
         lane_prefix = f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:{TESTING_INSTANCE}:"
         for reservation in cast(
@@ -687,7 +687,6 @@ def _deploy_generic_web_testing(
             ):
                 if (
                     reservation.provider_target_key == adapter.target_key()
-                    and reservation.reconciliation_key == adapter.reconciliation_key()
                     and reservation.request_fingerprint == request_fingerprint
                 ):
                     idempotency_key = reservation.idempotency_key
@@ -714,6 +713,8 @@ def _deploy_generic_web_testing(
                             reservation = reservation.model_copy(
                                 update={"state": "reconcile_required"}
                             )
+                    elif lookup.status == "missing":
+                        continue
                     else:
                         reservation = reservation.model_copy(update={"state": "reconcile_required"})
                 return _generic_web_testing_outcome(

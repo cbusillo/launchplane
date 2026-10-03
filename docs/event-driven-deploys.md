@@ -103,10 +103,12 @@ reservation. The webhook request never waits on a deploy.
     keyed fingerprint protects plaintext target/settings values; managed-secret
     values are neither read nor hashed for the key. Identical stored authority
     replays the failure. Rotating the service's active encryption key also changes
-    this keyed identity and permits a fresh attempt of a known failure. The existing
+    this keyed identity and permits a fresh attempt of a known failure. Upgrading
+    from the earlier key format likewise permits one fresh attempt of a previously
+    recorded failure without a configuration change. The existing
     provider-target reservation still fences an unknown or concurrent operation.
     Before using a new authority key, the reconciler also checks held attempts
-    for its testing lane. Matching provider target, reconciliation identity and
+    for its testing lane. Matching provider target and
     deploy request reuse the held attempt's key for normal observation/recovery.
     Otherwise a running attempt defers it, and an unknown or expired attempt
     requires generic-web deploy recovery first, even after a provider-binding
