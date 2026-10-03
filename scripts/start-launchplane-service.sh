@@ -88,6 +88,5 @@ exec uv run launchplane service serve \
 	--host "$launchplane_service_host" \
 	--port "$launchplane_service_port" \
 	--state-dir "$state_dir" \
-	--database-url "$launchplane_database_url" \
 	--policy-file "$policy_file" \
 	--audience "$launchplane_service_audience"
