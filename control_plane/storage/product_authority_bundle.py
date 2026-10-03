@@ -127,6 +127,9 @@ class ProductAuthorityBundle(BaseModel):
     # (product, context) that must still own the context exclusively when the
     # bundle commits; checked under the same lock as product-profile writes.
     required_context_owner: tuple[str, str] | None = None
+    # Context-wide config has the same exclusive ownership requirement for all
+    # authorized callers, including admins configuring Launchplane itself.
+    required_config_context_owner: tuple[str, str] | None = None
 
     @model_validator(mode="after")
     def validate_runtime_environment_routes(self) -> ProductAuthorityBundle:
@@ -188,13 +191,19 @@ def require_bundle_context_owner(
     bundle: ProductAuthorityBundle,
     profiles: Iterable[LaunchplaneProductProfileRecord],
 ) -> None:
-    if bundle.required_context_owner is None:
+    if bundle.required_context_owner is None and bundle.required_config_context_owner is None:
         return
-    product, context = bundle.required_context_owner
-    if not is_exclusive_product_context(
-        context=context, product=product, owners=product_context_owner_map(profiles)
-    ):
-        raise ProductContextOwnershipError("The context must belong to the named product only.")
+    owners = product_context_owner_map(profiles)
+    if bundle.required_context_owner is not None:
+        product, context = bundle.required_context_owner
+        if not is_exclusive_product_context(context=context, product=product, owners=owners):
+            raise ProductContextOwnershipError("The context must belong to the named product only.")
+    if bundle.required_config_context_owner is not None:
+        product, context = bundle.required_config_context_owner
+        if owners.get(context.strip().lower()) != frozenset((product,)):
+            raise ProductProfileConflictError(
+                "Product config context ownership changed before commit."
+            )
 
 
 class ProductAuthorityBundleStore(Protocol):

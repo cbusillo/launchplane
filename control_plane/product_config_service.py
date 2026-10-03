@@ -21,6 +21,7 @@ from control_plane.contracts.product_environment_read_model import (
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
+    product_context_owner_map,
     product_config_requirement_applies_to_lane,
 )
 from control_plane.contracts.secret_record import SecretBinding
@@ -45,7 +46,12 @@ class ProductConfigServiceError:
 
 
 def resolve_product_config_profile(
-    record_store: PostgresRecordStore, *, product: str, context: str, instance: str
+    record_store: PostgresRecordStore,
+    *,
+    product: str,
+    context: str,
+    instance: str,
+    context_wide: bool = False,
 ) -> LaunchplaneProductProfileRecord:
     """Bind a config target to its stored product, independent of the driver."""
     try:
@@ -61,6 +67,13 @@ def resolve_product_config_profile(
     ):
         raise control_plane_product_config.ProductConfigError(
             "Product config target is not owned by the named product.",
+            code="product_config_lane_not_owned",
+        )
+    if context_wide and product_context_owner_map(record_store.list_product_profile_records()).get(
+        context.lower()
+    ) != frozenset((product,)):
+        raise control_plane_product_config.ProductConfigError(
+            "Context-wide config requires the named product to own the context alone.",
             code="product_config_lane_not_owned",
         )
     return profile

@@ -2246,9 +2246,13 @@ return a typed blocked result rather than guessing a domain.
   the canonical DB-backed product id and a context/instance owned by that
   product's profile, regardless of driver. Missing profiles, foreign lanes,
   and global targets return `403 product_config_lane_not_owned` before planning
-  or replay. Context-scoped requests require a context declared by the profile.
+  or replay. Context-scoped requests, including context-scoped secrets in an
+  instance request, require the product to own the context alone; another
+  product's current or historical context claim causes refusal. Exact
+  instance-scoped requests can use a shared context when the product owns the lane.
   Apply rechecks the profile under the bundle's write lock; an ownership change
-  returns `409 product_profile_conflict` without config writes. Use canonical
+  returns `409 product_profile_conflict` without config writes. Context-wide
+  writes also recheck every product's context claims under that lock. Use canonical
   product ids rather than lane context aliases (for example, `odoo-tenant-opw`,
   not `opw`, for `opw/testing`). It fails closed
   when secret writes are requested without valid Launchplane secret-key

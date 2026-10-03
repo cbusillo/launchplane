@@ -14780,12 +14780,16 @@ def create_launchplane_fastapi_app(
             record_store=record_store,
             trace_id=trace_id,
         )
+        context_wide_config = not product_config_request.instance or any(
+            secret.scope == "context" for secret in product_config_request.secrets
+        )
         try:
             config_profile = control_plane_product_config_service.resolve_product_config_profile(
                 database_store,
                 product=product_config_request.product,
                 context=product_config_request.context,
                 instance=product_config_request.instance,
+                context_wide=context_wide_config,
             )
         except control_plane_product_config.ProductConfigError as error:
             profile_error = control_plane_product_config_service.product_config_service_error(error)
@@ -14920,6 +14924,15 @@ def create_launchplane_fastapi_app(
         if expected_product_profile is not None:
             authority_bundle = authority_bundle.model_copy(
                 update={"expected_product_profiles": (expected_product_profile,)}
+            )
+        if context_wide_config:
+            authority_bundle = authority_bundle.model_copy(
+                update={
+                    "required_config_context_owner": (
+                        product_config_request.product,
+                        product_config_request.context,
+                    )
+                }
             )
         driver_result: dict[str, object] = {
             **planned_driver_result,
