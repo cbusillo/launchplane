@@ -5980,15 +5980,23 @@ def create_launchplane_fastapi_app(
                 record_store
             )
             controller_state_store = require_merge_train_controller_state_record_store(record_store)
-            review_store = require_merge_train_client_review_read_store(
-                record_store, route="Merge train batch candidate"
-            )
-        except (TypeError, MergeAdmissionDeniedError) as error:
+        except TypeError as error:
             raise _launchplane_http_error(
                 status_code=503,
                 trace_id=trace_id,
                 code="database_storage_required",
                 message="Merge train batch candidate storage requires database-backed records.",
+            ) from error
+        try:
+            review_store = require_merge_train_client_review_read_store(
+                record_store, route="Merge train batch candidate"
+            )
+        except MergeAdmissionDeniedError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code=error.reason_code,
+                message=str(error),
             ) from error
         try:
             with merge_train_controller_mutation_fence(
@@ -10944,19 +10952,27 @@ def create_launchplane_fastapi_app(
             )
         try:
             run_record_store = require_merge_train_run_record_store(record_store)
-            review_store = require_merge_train_client_review_read_store(
-                record_store, route="Merge train run-once"
-            )
             controller_state_store = (
                 require_merge_train_controller_state_record_store(record_store)
                 if merge_train_request.mutate
                 else None
             )
-        except (TypeError, MergeAdmissionDeniedError) as error:
+        except TypeError as error:
             raise _launchplane_http_error(
                 status_code=503,
                 trace_id=trace_id,
                 code="database_storage_required",
+                message=str(error),
+            ) from error
+        try:
+            review_store = require_merge_train_client_review_read_store(
+                record_store, route="Merge train run-once"
+            )
+        except MergeAdmissionDeniedError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code=error.reason_code,
                 message=str(error),
             ) from error
         try:

@@ -21,6 +21,9 @@ from control_plane.merge_train import (
     build_merge_train_dry_run_result,
     discover_merge_train_stack,
 )
+from control_plane.merge_train_branch_refresh import (
+    require_merge_train_client_review_read_store,
+)
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     GitHubMergeTrainSnapshotReader,
@@ -130,6 +133,9 @@ def execute_merge_train_batch_candidate_run_once(
     review_store: MergeTrainBranchRefreshReadStore,
     mutation_checkpoint: Callable[[str, int | None], None] | None = None,
 ) -> MergeTrainBatchCandidateRunOnceResult:
+    review_store = require_merge_train_client_review_read_store(
+        review_store, route="Merge train batch candidate"
+    )
     transport = UrllibMergeTrainGitHubTransport(
         token=token,
         api_base_url=request.github_api_base_url,

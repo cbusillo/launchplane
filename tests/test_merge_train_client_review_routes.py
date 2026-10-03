@@ -231,6 +231,43 @@ class ClientReviewProfileStoreTests(unittest.TestCase):
             require_merge_train_client_review_read_store(store, route="Merge train run-once")
         self.assertEqual(refused.exception.reason_code, "client_review_profiles_unavailable")
 
+    def test_entrypoints_refuse_a_store_without_profiles_before_reading_github(self) -> None:
+        store = cast(Any, SimpleNamespace(list_merge_train_branch_refresh_records=lambda **_: ()))
+        with (
+            patch(
+                "control_plane.merge_train_run_once.UrllibMergeTrainGitHubTransport"
+            ) as run_once_transport,
+            self.assertRaises(MergeAdmissionDeniedError),
+        ):
+            execute_merge_train_run_once(
+                request=MergeTrainRunOnceEnvelope(repository=REPOSITORY, mutate=True),
+                policy=build_test_merge_train_policy(),
+                policy_sha256="policy-sha",
+                token="token",
+                trace_id="trace",
+                recorded_at="2026-10-03T18:00:00Z",
+                review_store=store,
+            )
+        run_once_transport.assert_not_called()
+        with (
+            patch(
+                "control_plane.merge_train_batch_candidate.UrllibMergeTrainGitHubTransport"
+            ) as candidate_transport,
+            self.assertRaises(MergeAdmissionDeniedError),
+        ):
+            execute_merge_train_batch_candidate_run_once(
+                request=MergeTrainBatchCandidateRunOnceEnvelope(repository=REPOSITORY),
+                policy=build_test_merge_train_policy(),
+                policy_sha256="policy-sha",
+                token="token",
+                trace_id="trace",
+                recorded_at="2026-10-03T18:00:00Z",
+                batch_store=cast(Any, Mock()),
+                stack_collapse_store=cast(Any, Mock()),
+                review_store=store,
+            )
+        candidate_transport.assert_not_called()
+
     def test_scheduled_level1_fails_before_reading_github_without_profiles(self) -> None:
         policy_record = build_test_merge_train_policy_record()
         repository_policy = policy_record.policy.find_repository_policy(
