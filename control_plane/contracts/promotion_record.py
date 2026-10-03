@@ -1,4 +1,5 @@
 import re
+from collections.abc import Iterable
 from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -176,9 +177,18 @@ class RollbackExecutionEvidence(BaseModel):
         return self
 
 
-# An env-key name, such as one a check is about. Names only, never values.
-_FAILURE_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
-_FAILURE_KEYS_MAX = 32
+# An env-key name, such as one a check is about. Names only, never values. The
+# length matches what a runtime environment record accepts, so override secret
+# names such as ODOO_OVERRIDE_SECRET__CONFIG_PARAM__REPAIRSHOPR__SYNC_DB__PASSWORD
+# are kept.
+_ENV_KEY_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
+ENV_KEY_NAMES_MAX = 32
+
+
+def env_key_names(keys: Iterable[object]) -> tuple[str, ...]:
+    """The env-key names among ``keys``, sorted and unique, capped; anything else dropped."""
+    names = {key for key in keys if isinstance(key, str) and _ENV_KEY_NAME_PATTERN.match(key)}
+    return tuple(sorted(names))[:ENV_KEY_NAMES_MAX]
 
 
 class RecordFailure(BaseModel):
@@ -197,8 +207,7 @@ class RecordFailure(BaseModel):
         self.code = self.code.strip()
         if not self.code:
             raise ValueError("record failure requires code")
-        names = {key for key in self.keys if _FAILURE_KEY_PATTERN.match(key)}
-        self.keys = tuple(sorted(names))[:_FAILURE_KEYS_MAX]
+        self.keys = env_key_names(self.keys)
         return self
 
 

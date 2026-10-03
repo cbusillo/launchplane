@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from collections.abc import Iterable
 from typing import Literal
 
@@ -16,6 +15,7 @@ from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
     OdooStableTargetReplacementApplyResult,
 )
+from control_plane.contracts.promotion_record import ENV_KEY_NAMES_MAX, env_key_names
 
 OdooStableTargetReplacementOperationStatus = Literal[
     "pending",
@@ -47,16 +47,14 @@ ODOO_STABLE_TARGET_REPLACEMENT_TERMINAL_OPERATION_STATUSES: frozenset[
 ] = frozenset(_TERMINAL_OPERATION_STATUSES)
 
 
-# An env-key identifier, such as one a Launchplane compose template references.
-# Key names, never values: safe to copy onto product-readable records.
-_ERROR_DETAIL_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
-ERROR_DETAIL_KEYS_MAX = 32
+# Env-key names, never values: safe to copy onto product-readable records. The same
+# rule as a deployment record's failure keys, so the two never disagree.
+ERROR_DETAIL_KEYS_MAX = ENV_KEY_NAMES_MAX
 
 
 def safe_error_detail_keys(keys: Iterable[object]) -> tuple[str, ...]:
     """The env-key names among ``keys``, sorted and unique, capped; anything else dropped."""
-    names = {key for key in keys if isinstance(key, str) and _ERROR_DETAIL_KEY_PATTERN.match(key)}
-    return tuple(sorted(names))[:ERROR_DETAIL_KEYS_MAX]
+    return env_key_names(keys)
 
 
 class OdooStableTargetReplacementOperationRecord(BaseModel):

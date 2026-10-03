@@ -2793,7 +2793,9 @@ def _advance_from_live_snapshot(
         )
     held_out = _surviving_held_out_entries(snapshot=snapshot, held_out=held_out)
     snapshot = _without_held_out_pull_requests(snapshot=snapshot, held_out=held_out)
-    dry_run_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
+    dry_run_result = build_merge_train_dry_run_result(
+        policy=policy, snapshot=snapshot, batch_landing=lease.record.ordinary_job_binding is None
+    )
     selected_pr = dry_run_result.selected_pr
     if selected_pr is not None:
         restored_records = tuple(
@@ -2923,6 +2925,20 @@ def _advance_from_live_snapshot(
             "controller_action": "idle",
             "dry_run_result": dry_run_result.model_dump(mode="json"),
         }
+    probe = _ConflictProbeOutcome(snapshot, dry_run_result, held_out)
+    if dry_run_result.intended_next_action == "merge":
+        probe = _probe_queue_entry_conflicts(
+            github_client=github_client,
+            policy=policy,
+            snapshot=snapshot,
+            dry_run_result=dry_run_result,
+            held_out=held_out,
+            mutate=request.mutate,
+            enabled=lease.record.ordinary_job_binding is None,
+            lease=lease,
+        )
+        dry_run_result = probe.dry_run_result
+        selected_pr = dry_run_result.selected_pr
     if (
         dry_run_result.intended_next_action == "update_branch"
         and request.mutate
@@ -2945,6 +2961,7 @@ def _advance_from_live_snapshot(
             "controller_action": "update_branch",
             "dry_run_result": dry_run_result.model_dump(mode="json"),
             "branch_update_result": branch_update_result.model_dump(mode="json"),
+            "conflict_probe": probe.report,
         }
     if dry_run_result.intended_next_action != "merge":
         return {
@@ -2953,26 +2970,6 @@ def _advance_from_live_snapshot(
             "mode": "dry-run",
             "controller_action": dry_run_result.intended_next_action,
             "dry_run_result": dry_run_result.model_dump(mode="json"),
-        }
-
-    probe = _probe_queue_entry_conflicts(
-        github_client=github_client,
-        policy=policy,
-        snapshot=snapshot,
-        dry_run_result=dry_run_result,
-        held_out=held_out,
-        mutate=request.mutate,
-        enabled=lease.record.ordinary_job_binding is None,
-        lease=lease,
-    )
-    if probe.dry_run_result.intended_next_action != "merge":
-        return {
-            "repository": request.repository,
-            "base_branch": request.base_branch,
-            "mode": "dry-run",
-            "controller_action": probe.dry_run_result.intended_next_action,
-            "dry_run_result": probe.dry_run_result.model_dump(mode="json"),
-            "conflict_probe": probe.report,
         }
 
     controller_action = "plan_candidate"
@@ -3068,7 +3065,47 @@ def try_reflow_failed_merge_train_candidate(
         snapshot=snapshot, held_out=active_candidate_record.candidate.held_out
     )
     snapshot = _without_held_out_pull_requests(snapshot=snapshot, held_out=held_out)
-    dry_run_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
+    dry_run_result = build_merge_train_dry_run_result(
+        policy=policy,
+        snapshot=snapshot,
+        batch_landing=active_candidate_record.ordinary_job_binding is None,
+    )
+    if dry_run_result.intended_next_action not in {"merge", "update_branch"}:
+        return None
+    queue_unchanged = _merge_train_candidate_matches_dry_run_queue(
+        candidate=active_candidate_record.candidate,
+        dry_run_result=dry_run_result,
+        base_sha=snapshot.base_sha,
+    )
+    if (
+        dry_run_result.intended_next_action == "merge"
+        and queue_unchanged
+        and active_candidate_record.candidate.candidate_sha
+    ):
+        return _reobserve_failed_merge_train_candidate(
+            candidate_store=candidate_store,
+            active_candidate_record=active_candidate_record,
+            github_client=github_client,
+            merge_method=merge_method,
+            repository=repository,
+            base_branch=base_branch,
+            recorded_at=recorded_at,
+            trace_id=trace_id,
+            mutate=mutate,
+        )
+    probe = _ConflictProbeOutcome(snapshot, dry_run_result, held_out)
+    if dry_run_result.intended_next_action == "merge":
+        probe = _probe_queue_entry_conflicts(
+            github_client=github_client,
+            policy=policy,
+            snapshot=snapshot,
+            dry_run_result=dry_run_result,
+            held_out=held_out,
+            mutate=mutate,
+            enabled=active_candidate_record.ordinary_job_binding is None,
+            lease=lease,
+        )
+    dry_run_result = probe.dry_run_result
     if (
         dry_run_result.intended_next_action == "update_branch"
         and mutate
@@ -3076,6 +3113,13 @@ def try_reflow_failed_merge_train_candidate(
     ):
         # The queue head is behind its base; a failed candidate must not keep it
         # from being refreshed. Retire the failed candidate, then update the branch.
+        lease.checkpoint(
+            active_action="update_branch",
+            active_phase="update_pull_request_branch",
+            active_record_id=active_candidate_record.record_id,
+            active_pull_request_number=dry_run_result.selected_pr.number,
+            step_payload={"expected_head_sha": dry_run_result.selected_pr.head_sha},
+        )
         _supersede_active_merge_train_batch_candidate_records(
             record_store=candidate_store,
             repository=repository,
@@ -3094,36 +3138,8 @@ def try_reflow_failed_merge_train_candidate(
             "superseded_merge_train_batch_candidate_record_id": active_candidate_record.record_id,
             "dry_run_result": dry_run_result.model_dump(mode="json"),
             "branch_update_result": branch_update_result.model_dump(mode="json"),
+            "conflict_probe": probe.report,
         }
-    if dry_run_result.intended_next_action != "merge":
-        return None
-    queue_unchanged = _merge_train_candidate_matches_dry_run_queue(
-        candidate=active_candidate_record.candidate,
-        dry_run_result=dry_run_result,
-        base_sha=snapshot.base_sha,
-    )
-    if queue_unchanged and active_candidate_record.candidate.candidate_sha:
-        return _reobserve_failed_merge_train_candidate(
-            candidate_store=candidate_store,
-            active_candidate_record=active_candidate_record,
-            github_client=github_client,
-            merge_method=merge_method,
-            repository=repository,
-            base_branch=base_branch,
-            recorded_at=recorded_at,
-            trace_id=trace_id,
-            mutate=mutate,
-        )
-    probe = _probe_queue_entry_conflicts(
-        github_client=github_client,
-        policy=policy,
-        snapshot=snapshot,
-        dry_run_result=dry_run_result,
-        held_out=held_out,
-        mutate=mutate,
-        enabled=active_candidate_record.ordinary_job_binding is None,
-        lease=lease,
-    )
     if probe.dry_run_result.intended_next_action != "merge":
         return None
     candidate = build_merge_train_batch_candidate(
@@ -3482,7 +3498,9 @@ def _probe_queue_entry_conflicts(
     snapshot = _without_held_out_pull_requests(snapshot=snapshot, held_out=held_out)
     return _ConflictProbeOutcome(
         snapshot=snapshot,
-        dry_run_result=build_merge_train_dry_run_result(policy=policy, snapshot=snapshot),
+        dry_run_result=build_merge_train_dry_run_result(
+            policy=policy, snapshot=snapshot, batch_landing=enabled
+        ),
         held_out=held_out,
         report=report,
     )
