@@ -73,7 +73,6 @@ class MergeTrainStackCollapsePlanRecordStore(Protocol):
         repository: str = "",
         base_branch: str = "",
         status: str = "",
-        root_pull_request_number: int | None = None,
         limit: int | None = None,
     ) -> tuple[MergeTrainStackCollapsePlanRecord, ...]: ...
 

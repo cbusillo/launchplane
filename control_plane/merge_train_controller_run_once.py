@@ -888,12 +888,9 @@ def stack_collapse_records_for_completed_landing(
         for entry in landing_plan.entries
         if entry.status == "merged"
     }
-    records = tuple(
-        record
-        for root_number in merged_root_heads
-        for record in record_store.list_merge_train_stack_collapse_plan_records(
-            repository=repository, base_branch=base_branch, root_pull_request_number=root_number
-        )
+    # Include retired waits: a fixed history limit could hide another merged root.
+    records = record_store.list_merge_train_stack_collapse_plan_records(
+        repository=repository, base_branch=base_branch
     )
     contained: dict[tuple[str, str], bool] = {}
     landed_records: list[MergeTrainStackCollapsePlanRecord] = []
