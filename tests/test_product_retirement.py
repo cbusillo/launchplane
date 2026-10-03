@@ -218,6 +218,12 @@ class ProductRetirementTests(unittest.TestCase):
             for anchor, context, state, blocked in (
                 ("example-site", "example-site-preview", "active", True),
                 ("every/example-site", "example-site-preview", "active", True),
+                ("Example-Site", "example-site-preview", "active", True),
+                ("Every/Example-Site", "example-site-preview", "active", True),
+                ("example-site", "example-site-preview", "pending", True),
+                ("example-site", "example-site-preview", "paused", True),
+                ("example-site", "example-site-preview", "teardown_pending", True),
+                ("example-site", "example-site-preview", "failed", True),
                 ("example-site", "another-preview", "active", False),
                 ("other/example-site", "example-site-preview", "active", False),
                 ("another-site", "example-site-preview", "active", False),

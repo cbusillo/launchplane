@@ -3611,8 +3611,10 @@ profile.
 
 Tracked retirement blocks active previews in the profile's preview context for
 both the short repository anchor written by preview dispatch/reconciliation and
-historical full `owner/repo` anchors. Previews in other contexts or for other
-repository anchors do not block that product; destroyed previews do not block it.
+historical full `owner/repo` anchors, compared without case sensitivity. Pending,
+active, failed, paused and teardown-pending previews block it: failure does not
+prove runtime absence. Previews in other contexts or for other repository anchors
+do not block that product; destroyed previews do not block it.
 
 The service also accepts an explicit `no_target: true` retirement intent, with
 an empty `expected_target_sha256`. This narrow case requires an active generic-web
