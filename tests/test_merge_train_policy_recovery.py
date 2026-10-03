@@ -431,6 +431,27 @@ class MergeTrainLineageChangeRecoveryTests(unittest.TestCase):
             [entry.pull_request_number for entry in active.candidate.entries], [2080, 2083]
         )
 
+    def test_retired_plan_does_not_suppress_the_same_batch_when_the_queue_returns(
+        self,
+    ) -> None:
+        self._run()
+        rebuilt, _, _, _ = _guard_records(policy_sha256=self.policy.policy_sha256)
+        rebuilt = rebuilt.model_copy(update={"record_id": "rebuilt-same-batch-candidate"})
+        self.store.write_merge_train_batch_candidate_record(rebuilt)
+        snapshot = MergeTrainDryRunSnapshot(
+            repository=REPOSITORY,
+            base_branch="main",
+            base_sha=BASE_SHA,
+            pull_requests=(
+                _queued_pull_request(
+                    number=2083, head_sha=HEAD_SHA, created_at="2026-08-11T01:00:00Z"
+                ),
+            ),
+        )
+        with patch.object(self.client, "read_merge_train_snapshot", return_value=snapshot):
+            result = self._run(mutate=False)
+        self.assertEqual(result.accepted_result["controller_action"], "plan_landing")
+
     def test_only_an_unlanded_plain_plan_is_retired_on_a_lineage_change(self) -> None:
         plan = _landing_plan()
         unlanded = self.landing.model_copy(update={"landing_plan": plan})

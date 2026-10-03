@@ -606,6 +606,7 @@ def _resume_merge_train_controller_state(
             batch_id=planned_record.landing_plan.batch_id,
             candidate_sha=planned_record.landing_plan.candidate_sha,
             policy_sha256=planned_record.landing_plan.policy_sha256,
+            include_lineage_retirements=True,
         )
         if landed_record is None:
             return None
@@ -814,7 +815,14 @@ def latest_completed_merge_train_batch_landing_plan_record(
     batch_id: str,
     candidate_sha: str,
     policy_sha256: str,
+    include_lineage_retirements: bool = False,
 ) -> MergeTrainBatchLandingPlanRecord | None:
+    """Return the terminal landing record for this batch candidate, if any.
+
+    A lineage-change retirement had no provider effect, so it does not stop the
+    same batch from landing when the queue returns to it; only resuming that
+    retirement looks it up (#2843).
+    """
     records = record_store.list_merge_train_batch_landing_plan_records(
         repository=repository,
         base_branch=base_branch,
@@ -823,7 +831,13 @@ def latest_completed_merge_train_batch_landing_plan_record(
     )
     return latest_completed_merge_train_batch_landing_progress_record(
         landing_plan_records=tuple(
-            record for record in records if record.landing_plan.policy_sha256 == policy_sha256
+            record
+            for record in records
+            if record.landing_plan.policy_sha256 == policy_sha256
+            and (
+                include_lineage_retirements
+                or not record.source.startswith(_LINEAGE_RETIREMENT_SOURCE_PREFIX)
+            )
         ),
         batch_id=batch_id,
         candidate_sha=candidate_sha,
@@ -1362,9 +1376,10 @@ def _lineage_change_retires_landing(
     )
 
 
+_LINEAGE_RETIREMENT_SOURCE_PREFIX = "service:controller:lineage-changed-landing:"
 _RETIRED_LANDING_SOURCE_PREFIXES = (
     "service:controller:policy-changed-landing:",
-    "service:controller:lineage-changed-landing:",
+    _LINEAGE_RETIREMENT_SOURCE_PREFIX,
 )
 
 
