@@ -104,10 +104,11 @@ reservation. The webhook request never waits on a deploy.
     values are neither read nor hashed for the key. Identical stored authority
     replays the failure. Rotating the service's active encryption key also changes
     this keyed identity and permits a fresh attempt of a known failure. The existing
-    provider-target reservation still fences an unknown or concurrent operation
-    even when authority changes, while the provider target stays the same.
-    Retargeting to a different provider application has a different fence;
-    it does not settle an unknown operation on the previous application.
+    provider-target reservation still fences an unknown or concurrent operation.
+    Before using a new authority key, the reconciler also checks held attempts
+    for its testing lane: a running attempt defers it, and an unknown attempt
+    requires generic-web deploy recovery first, even after a provider-binding
+    repair moves the lane to another application.
     Provider-only edits outside Launchplane's
     records do not authorize a retry. A refusal
     before any provider change (a missing target, say) is tried again at the

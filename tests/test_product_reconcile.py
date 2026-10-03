@@ -75,10 +75,12 @@ from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.product_reconcile import (
     PLAN_BLOCKER_DESCRIPTIONS,
     TESTING_FAILURE_DESCRIPTIONS,
+    RECONCILE_SOURCE,
     PreviewProviderHooks,
     ProductReconcileError,
     TestingProviderHooks,
     request_product_reconcile_sweep,
+    reconcile_reservation_scope,
     resolve_build_provenance_transport,
     resolve_pull_request_feedback_token,
     run_product_reconcile_once,
@@ -116,6 +118,7 @@ from control_plane.workflows.generic_web_preview import (
 )
 from tests.support.profiles import _odoo_preview_profile_payload, product_profile_payload
 from tests.test_generic_web_deploy import _FakeGenericWebDeployProvider
+from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
 from tests.support.stores import sqlite_database_url
 
 REPOSITORY = "example/site"
@@ -1526,6 +1529,59 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         plan = self.reconcile()
 
         self.assertEqual((plan["action"], plan["reason"]), ("wait", "staff_testing"))
+        self.assertEqual(self.deploys.runtime_identities, [])
+
+    def test_retargeting_does_not_bypass_an_unknown_deploy_to_the_old_app(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.deploys.deploy_error = click.ClickException("provider timed out")
+        self.deploys.observation = GenericWebProviderDeploymentObservation(outcome="unknown")
+        self.request()
+        first = self.run_once()
+        self.assertEqual(first.state, "failed")
+
+        self.deploys.target_id = "repaired-target"
+        self.store.write_dokploy_target_id_record(
+            DokployTargetIdRecord(
+                context="cm",
+                instance="testing",
+                target_id=self.deploys.target_id,
+                updated_at="2026-10-02T01:00:00Z",
+            )
+        )
+        self.deploys.deploy_error = None
+        self.deploys.observation = GenericWebProviderDeploymentObservation(
+            outcome="present",
+            deployment_status="success",
+            deployment_id="new-deployment",
+            started_at="2026-10-02T12:00:00Z",
+            finished_at="2026-10-02T12:01:00Z",
+        )
+        self.request()
+        blocked = self.run_once()
+        self.assertEqual(blocked.state, "failed")
+        self.assertIn("generic-web deploy recovery", blocked.last_error)
+        self.assertEqual(blocked.last_plan["deploy_operation_status"], "target_busy")
+        self.assertNotEqual(
+            first.last_plan["deploy_idempotency_key"], blocked.last_plan["deploy_idempotency_key"]
+        )
+        self.assertEqual(len(self.deploys.runtime_identities), 1)
+
+    def test_running_deploy_on_old_authority_defers_a_new_attempt(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.store.reserve_mutation(
+            scope=reconcile_reservation_scope("site"),
+            route_path=GENERIC_WEB_DEPLOY_ROUTE,
+            idempotency_key=f"{RECONCILE_SOURCE}:site:cm:testing:old-authority",
+            request_fingerprint="old-request",
+            lease_owner="other-worker",
+            lease_seconds=300,
+            reconciliation_key="old-app-reconciliation",
+            provider_target_key="old-app-target",
+        )
+        self.request()
+        deferred = self.run_once()
+        self.assertEqual(deferred.state, "pending")
+        self.assertEqual(deferred.last_plan["deferred"], "lane_busy")
         self.assertEqual(self.deploys.runtime_identities, [])
 
     def test_the_reconcile_may_deploy_only_the_generic_web_testing_lane(self) -> None:
