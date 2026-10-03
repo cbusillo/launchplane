@@ -198,6 +198,12 @@ plans a fresh candidate under the current policy; old checks, admissions, and
 terminal records from the previous policy cannot authorize or suppress it.
 Candidate refs remain as recovery evidence; a rebuild reuses one only when its
 base and heads still identify the same batch.
+The same retirement applies when landing admission is denied with
+`landing_lineage_changed` before any entry has merged, for example when an
+older pull request is labelled after the plan and now sorts ahead of it. Such a
+plan can never match the live queue again, so the controller retires it instead
+of blocking on every pass, and the next pass plans a candidate from the live
+queue.
 An interrupted retirement resumes from its persisted evidence. Partial landings,
 collapsed stacks, retired ordinary-agent jobs, and unreadable or conflicting
 provider evidence still require explicit reconciliation.

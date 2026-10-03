@@ -1178,6 +1178,25 @@ def _advance_active_landing_record(
         readiness = error.readiness
         structural_result = error.structural_result
         blocked_landing_record = admission_guard.landing_plan_record
+        if _lineage_change_retires_landing(
+            reason_code=error.reason_code,
+            landing_record=blocked_landing_record,
+            has_stack_collapse=collapse_record is not None,
+        ):
+            return _retire_changed_policy_landing(
+                request=request,
+                trace_id=trace_id,
+                recorded_at=recorded_at,
+                github_client=github_client,
+                candidate_store=candidate_store,
+                landing_store=landing_store,
+                stack_collapse_store=stack_collapse_store,
+                admission_store=admission_store,
+                admission_evaluator=admission_evaluator,
+                landing_record=blocked_landing_record,
+                lease=lease,
+                retirement_source="lineage-changed-landing",
+            )
         return {
             "merge_train_batch_landing_plan_record_id": blocked_landing_record.record_id,
             "repository": blocked_landing_record.landing_plan.repository,
@@ -1322,6 +1341,33 @@ def _advance_active_landing_record(
     )
 
 
+def _lineage_change_retires_landing(
+    *,
+    reason_code: str,
+    landing_record: MergeTrainBatchLandingPlanRecord,
+    has_stack_collapse: bool,
+) -> bool:
+    """Whether a lineage denial retires the plan instead of blocking on it.
+
+    A queue that changed ahead of an unlanded plan never matches it again, so
+    the plan is retired and the next pass replans from the live queue (#2843).
+    Partial landings, collapsed stacks and ordinary-agent jobs keep blocking
+    for explicit reconciliation.
+    """
+    return (
+        reason_code == "landing_lineage_changed"
+        and landing_record.ordinary_job_binding is None
+        and not has_stack_collapse
+        and all(entry.status == "planned" for entry in landing_record.landing_plan.entries)
+    )
+
+
+_RETIRED_LANDING_SOURCE_PREFIXES = (
+    "service:controller:policy-changed-landing:",
+    "service:controller:lineage-changed-landing:",
+)
+
+
 def _retire_changed_policy_landing(
     *,
     request: MergeTrainControllerRunOnceEnvelope,
@@ -1335,6 +1381,7 @@ def _retire_changed_policy_landing(
     admission_evaluator: MergeAdmissionEvaluator,
     landing_record: MergeTrainBatchLandingPlanRecord,
     lease: MergeTrainControllerLeaseContext,
+    retirement_source: str = "policy-changed-landing",
 ) -> dict[str, object]:
     plan = landing_record.landing_plan
     if (
@@ -1418,7 +1465,7 @@ def _retire_changed_policy_landing(
         )
     retired_record = build_merge_train_batch_landing_plan_record(
         landing_plan=stale_merge_train_landing_plan(plan),
-        source=f"service:controller:policy-changed-landing:{trace_id}",
+        source=f"service:controller:{retirement_source}:{trace_id}",
         updated_at=recorded_at,
     )
     landing_store.write_merge_train_batch_landing_plan_record(retired_record)
@@ -1436,7 +1483,7 @@ def _finish_retired_policy_landing(
     plan = retired_record.landing_plan
     if (
         retired_record.ordinary_job_binding is not None
-        or not retired_record.source.startswith("service:controller:policy-changed-landing:")
+        or not retired_record.source.startswith(_RETIRED_LANDING_SOURCE_PREFIXES)
         or any(entry.status != "stale" for entry in plan.entries)
     ):
         raise MergeTrainControllerRequestError("Policy-change retirement evidence is incomplete.")
