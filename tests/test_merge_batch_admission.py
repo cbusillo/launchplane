@@ -1,4 +1,5 @@
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -12,7 +13,7 @@ from control_plane.merge_admission import (
     MergeAdmissionDeniedError,
     MergeAdmissionReconciliationRequiredError,
 )
-from control_plane.merge_train_github import GitHubMergeTrainClient
+from control_plane.merge_train_github import GitHubMergeTrainClient, MergeTrainGitHubError
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train_controller_run_once import (
     MergeTrainControllerRunOnceEnvelope,
@@ -226,6 +227,119 @@ class ProtectedBatchGuardTests(unittest.TestCase):
                 self.assertEqual(
                     store.list_merge_train_controller_state_records()[0].status, "idle"
                 )
+
+    def _check_interrupted_batch_retirements(self, check: Callable[..., None]) -> None:
+        """Run check for each retirement source on a batch interrupted after its close."""
+        candidate = self.fixture.candidate_record.candidate
+        payload = self.fixture.policy.model_dump(mode="json")
+        payload["policy"]["policies"][0]["merge_method"] = "squash"
+        payload["policy_sha256"] = ""
+        changed_policy = MergeTrainPolicyRecord.model_validate(payload)
+
+        class LineageChanged:
+            @staticmethod
+            def evaluate(**_: Any) -> Any:
+                raise MergeAdmissionDeniedError(
+                    "Live merge queue changed from the landing-plan lineage.",
+                    reason_code="landing_lineage_changed",
+                )
+
+        cases = {
+            "policy-changed-landing": (changed_policy, self.guard.evaluator),
+            "lineage-changed-landing": (self.fixture.policy, LineageChanged()),
+        }
+        for retirement_source, (policy, evaluator) in cases.items():
+            with self.subTest(retirement_source), TemporaryDirectory() as directory:
+                store = FilesystemRecordStore(Path(directory))
+                store.write_merge_train_batch_candidate_record(self.fixture.candidate_record)
+                store.write_merge_train_batch_landing_plan_record(self.fixture.landing_record)
+                provider = _BatchProvider(candidate)
+                provider.number = 9000
+                client = GitHubMergeTrainClient(transport=provider)
+                client.ensure_batch_pull_request(candidate=candidate)
+
+                def run(trace_id: str) -> Any:
+                    return execute_merge_train_controller_with_client(
+                        request=MergeTrainControllerRunOnceEnvelope(
+                            repository=candidate.repository, mutate=True
+                        ),
+                        policy=policy.policy,
+                        policy_sha256=policy.policy_sha256,
+                        repository_policy=policy.policy.policies[0],
+                        github_client=client,
+                        trace_id=trace_id,
+                        recorded_at="2026-08-11T03:03:00Z",
+                        candidate_store=store,
+                        landing_store=store,
+                        stack_collapse_store=store,
+                        controller_state_store=store,
+                        admission_store=store,
+                        admission_evaluator=evaluator,
+                    )
+
+                with patch.object(
+                    store,
+                    "write_merge_train_batch_landing_plan_record",
+                    side_effect=OSError("interrupted"),
+                ):
+                    with self.assertRaises(OSError):
+                        run("retire")
+                self.assertTrue(provider.closed)
+                check(retirement_source, store, provider, run)
+
+    def test_retirement_interrupted_after_closing_the_batch_pr_resumes_as_retirement(
+        self,
+    ) -> None:
+        """A closed batch PR must not turn the retirement into a generic stale landing (#2846)."""
+
+        def check(retirement_source: str, store: Any, provider: Any, run: Any) -> None:
+            result = run("resume")
+
+            self.assertEqual(result.accepted_result["controller_action"], "retire_stale_landing")
+            self.assertEqual(
+                [request for request in provider.requests if request[0] == "PATCH"],
+                [
+                    (
+                        "PATCH",
+                        f"/repos/{provider.candidate.repository}/pulls/9000",
+                        {"state": "closed"},
+                    )
+                ],
+            )
+            self.assertEqual(provider.merge_calls, [])
+            sources = [
+                record.source.rsplit(":", maxsplit=1)[0]
+                for record in store.list_merge_train_batch_landing_plan_records()
+                if record.record_id != self.fixture.landing_record.record_id
+            ]
+            self.assertEqual(sources, [f"service:controller:{retirement_source}"])
+            self.assertEqual(
+                store.list_merge_train_batch_candidate_records()[0].status, "superseded"
+            )
+            self.assertEqual(store.list_merge_train_controller_state_records()[0].status, "idle")
+
+        self._check_interrupted_batch_retirements(check)
+
+    def test_resumed_retirement_rechecks_constituents_changed_during_the_interruption(
+        self,
+    ) -> None:
+        def check(_retirement_source: str, store: Any, provider: Any, run: Any) -> None:
+            provider.heads[self.fixture.plan.entries[0].pull_request_number] = "f" * 40
+
+            with self.assertRaises(MergeTrainGitHubError):
+                run("resume")
+
+            self.assertEqual(
+                store.list_merge_train_batch_landing_plan_records(),
+                (self.fixture.landing_record,),
+            )
+            self.assertEqual(store.list_merge_train_batch_candidate_records()[0].status, "active")
+            self.assertEqual(
+                store.list_merge_train_controller_state_records()[0].status,
+                "reconcile_required",
+            )
+
+        self._check_interrupted_batch_retirements(check)
 
     def test_both_real_admissions_persist_before_one_shared_no_effect_reconciliation(self) -> None:
         admissions = [self.admit(1), self.admit(2)]
