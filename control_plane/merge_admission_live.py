@@ -53,6 +53,7 @@ from control_plane.merge_train import (
     MergeTrainDryRunSnapshot,
     MergeTrainSnapshotReader,
     build_merge_train_dry_run_result,
+    review_conversations_reason,
 )
 from control_plane.merge_train_github import GitHubMergeTrainClient, GitHubMergeTrainSnapshotReader
 from control_plane.merge_train_branch_refresh import optional_merge_train_branch_refresh_read_store
@@ -262,6 +263,17 @@ class LiveMergeAdmissionEvaluator:
             for plan_entry in landing_plan.entries
             if plan_entry.status not in {"merged", "skipped"}
         )
+        planned_numbers = {pull_request_number for pull_request_number, _ in expected_queue}
+        for pull_request in snapshot.pull_requests:
+            if (
+                pull_request.number in planned_numbers
+                and pull_request.review_conversations is not None
+            ):
+                raise MergeAdmissionDeniedError(
+                    f"PR #{pull_request.number} has "
+                    f"{review_conversations_reason(pull_request.review_conversations)}.",
+                    reason_code="pull_request_conversations_unresolved",
+                )
         live_queue_by_number = {queue_entry.number: queue_entry for queue_entry in live_queue.queue}
         live_queue_identity = tuple(
             (pull_request_number, live_queue_by_number[pull_request_number].head_sha)

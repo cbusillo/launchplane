@@ -3860,11 +3860,10 @@ def _controller_result_reconciliation_detail(
 
 def _controller_exception_reconciliation_detail(error: Exception) -> str:
     if isinstance(error, MergeTrainGitHubMergeRejectedError):
-        return (
-            "operator_required:pull_request_head_behind_base"
-            if error.refusal_diagnosis == "head_behind_base"
-            else "operator_required:github_merge_rejected"
-        )
+        return {
+            "head_behind_base": "operator_required:pull_request_head_behind_base",
+            "merge_blocked": "operator_required:pull_request_merge_blocked",
+        }.get(error.refusal_diagnosis, "operator_required:github_merge_rejected")
     if isinstance(error, MergeTrainGitHubError):
         if error.status_code is None or error.status_code >= 500:
             return "retryable:github_request_failed"

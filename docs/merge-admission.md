@@ -75,12 +75,14 @@ Reconciliation observes GitHub first and appends a successor outcome; it never
 rewrites history or repeats an ambiguous mutation.
 
 A GitHub merge-endpoint HTTP 405 remains a conclusive rejected outcome. The
-adapter makes one read of the same PR to diagnose whether its unchanged, open
-head is now behind its base. The admin response retains the attempt's trace,
-PR number, and provider status, with a branch-refresh instruction only when that
-read proves the condition. A failed, malformed, closed, or changed-head read
-leaves the diagnosis unconfirmed and asks the admin to reread merge
-requirements. Raw provider response bodies are not copied into this diagnosis.
+adapter makes one read of the same PR to diagnose the refusal from its
+unchanged, open head's `mergeable_state`. The admin response retains the
+attempt's trace, PR number, provider status, and that state as
+`github_mergeable_state`. `behind` gives a branch-refresh instruction
+(`head_behind_base`); `blocked` names a base-branch requirement such as an
+unresolved conversation or a missing review (`merge_blocked`). A failed,
+malformed, closed, or changed-head read leaves the diagnosis unconfirmed and
+asks the admin to reread merge requirements. Raw provider response bodies are not copied into this diagnosis.
 The refusal returns HTTP 409 `github_merge_rejected`, not an upstream-outage
 retry instruction; no second merge is attempted by the diagnostic read.
 Before each subsequent merge, the existing PR read also blocks an observed
