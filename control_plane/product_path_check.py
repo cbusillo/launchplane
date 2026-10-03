@@ -34,6 +34,7 @@ from control_plane.contracts.promotion_record import (
 )
 from control_plane.contracts.release_review import ReleaseReviewStatus
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.deployment_record import DeploymentRecord, previous_passing_deployment
 from control_plane.contracts.generic_web_rollback import (
     GenericWebRollbackPlanReader,
     GenericWebRollbackPlanRequest,
@@ -563,7 +564,13 @@ class _RollbackRecordReader(Protocol):
         self, *, context_name: str, instance_name: str
     ) -> EnvironmentInventory: ...
 
-    def read_promotion_record(self, record_id: str) -> PromotionRecord: ...
+    def list_deployment_records(
+        self,
+        *,
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[DeploymentRecord, ...]: ...
 
 
 def _rollback_grant_step(step_id: str, action: str, allowed: bool | Unread) -> PathCheckStep:
@@ -699,7 +706,7 @@ def _rollback_target_steps(
                     "rollback_target",
                     "blocked",
                     "rollback_target_missing",
-                    "No earlier passing prod deployment of a different artifact is recorded.",
+                    "No default rollback target is recorded; choose an explicit artifact through the rollback route.",
                     "by_hand",
                 ),
             )
@@ -709,7 +716,7 @@ def _rollback_target_steps(
                     "rollback_target",
                     "blocked",
                     "rollback_not_ready",
-                    "The rollback target's artifact manifest or current promotion is unavailable.",
+                    "The recorded rollback prerequisites do not pass target resolution.",
                     "by_hand",
                 ),
             )
@@ -726,56 +733,30 @@ def _rollback_target_steps(
                 ),
             ),
         )
-    if not inventory.promotion_record_id:
+    previous = previous_passing_deployment(
+        reader.list_deployment_records(
+            context_name=prod_lane.context,
+            instance_name="prod",
+        )
+    )
+    if previous is None:
         return (
             _step(
                 "rollback_target",
                 "blocked",
-                "current_promotion_missing",
-                "The prod inventory names no promotion with a previous rollback target.",
+                "rollback_target_missing",
+                "No default rollback target is recorded; choose an explicit deployment through the rollback route.",
                 "by_hand",
+                (inventory.deployment_record_id,),
             ),
         )
-    try:
-        promotion = reader.read_promotion_record(inventory.promotion_record_id)
-    except FileNotFoundError:
-        return (
-            _step(
-                "rollback_target",
-                "blocked",
-                "current_promotion_missing",
-                "The prod inventory's promotion record is missing.",
-                "by_hand",
-            ),
-        )
-    if promotion.context != prod_lane.context or promotion.to_instance != "prod":
-        return (
-            _step(
-                "rollback_target",
-                "blocked",
-                "promotion_scope_mismatch",
-                "The current promotion does not match the prod lane.",
-                "code",
-            ),
-        )
-    record_ids = (promotion.record_id, promotion.rollback.target_deployment_record_id)
-    if not promotion.rollback.target_deployment_record_id:
-        return (
-            _step(
-                "rollback_target",
-                "blocked",
-                "missing_rollback_target",
-                "The current promotion recorded no previous deployment to roll back to.",
-                "by_hand",
-                record_ids,
-            ),
-        )
+    record_ids = (inventory.deployment_record_id, previous.record_id)
     # Build only: execute_generic_web_rollback_plan persists a plan and must not run here.
     plan = build_generic_web_rollback_plan(
         record_store=cast(GenericWebRollbackPlanReader, record_store),
         request=GenericWebRollbackPlanRequest(
             product=profile.product,
-            rollback_deployment_record_id=promotion.rollback.target_deployment_record_id,
+            rollback_deployment_record_id=previous.record_id,
         ),
     )
     if plan.blockers:

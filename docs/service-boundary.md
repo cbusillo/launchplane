@@ -4099,7 +4099,7 @@ cannot be read is `unknown`, never `clear`, and the response never carries
 provider or exception text. `rollback` checks the prod lane, the caller's
 execute grant for generic-web (or the signed-in policy administrator
 for queued Odoo rollback), and the recorded previous release. Generic-web uses
-the current inventory's promotion and its recorded rollback deployment, then
+prod deployment history's previous passing different artifact, then
 runs the effect-free rollback plan builder; all target blockers are returned,
 including mutable image references. Odoo uses the queued rollback's effect-free
 previous-passing-deployment resolver, requiring its manifest and current

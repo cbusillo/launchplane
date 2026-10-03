@@ -19,7 +19,7 @@ from control_plane.contracts.promotion_record import (
 from control_plane.contracts.release_review import ReleaseReviewStatus
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
-from control_plane.contracts.promotion_record import HealthcheckEvidence, RollbackExecutionEvidence
+from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
     ArtifactImageReference,
@@ -289,13 +289,28 @@ class ProductRollbackPathCheckTests(unittest.TestCase):
             destination_health=HealthcheckEvidence(status="pass"),
         )
         self.store.write_deployment_record(self.previous)
-        self.promotion = _promotion("promotion-current").model_copy(
+        self.previous = self.previous.model_copy(
             update={
-                "rollback": RollbackExecutionEvidence(
-                    target_deployment_record_id=self.previous.record_id
+                "deploy": self.previous.deploy.model_copy(
+                    update={"finished_at": "2026-10-01T00:00:00Z"}
                 )
             }
         )
+        self.store.write_deployment_record(self.previous)
+        self.current = self.previous.model_copy(
+            update={
+                "record_id": "deployment-current",
+                "artifact_identity": ArtifactIdentityReference(
+                    artifact_id=self.profile.image.repository + "@sha256:" + "b" * 64
+                ),
+                "deploy": self.previous.deploy.model_copy(
+                    update={"finished_at": "2026-10-02T00:00:00Z"}
+                ),
+            }
+        )
+        self.store.write_deployment_record(self.current)
+        # Successful promotions leave rollback evidence at its default, with no target field.
+        self.promotion = _promotion("promotion-current")
         self.store.write_promotion_record(self.promotion)
         self.inventory = EnvironmentInventory(
             context="example-site",
@@ -350,10 +365,10 @@ class ProductRollbackPathCheckTests(unittest.TestCase):
         self.review.assert_not_called()
         self.assertEqual(
             getattr(check, "steps")[-1].record_ids,
-            (self.promotion.record_id, self.previous.record_id),
+            (self.current.record_id, self.previous.record_id),
         )
 
-    def test_missing_grants_and_mutable_failed_target_reported_together(self) -> None:
+    def test_missing_grant_and_mutable_target_reported_together(self) -> None:
         # Occurrence 7: the old prod record names a tag; rollback must refuse it
         # before the owner grants access or starts any mutation.
         self.store.write_deployment_record(
@@ -362,8 +377,6 @@ class ProductRollbackPathCheckTests(unittest.TestCase):
                     "artifact_identity": ArtifactIdentityReference(
                         artifact_id=self.profile.image.repository + ":v1"
                     ),
-                    "deploy": self.previous.deploy.model_copy(update={"status": "fail"}),
-                    "destination_health": HealthcheckEvidence(status="fail"),
                 }
             )
         )
@@ -371,27 +384,34 @@ class ProductRollbackPathCheckTests(unittest.TestCase):
         for step_id in (
             "rollback_grant",
             "rollback_target_mutable_artifact_reference",
-            "rollback_target_target_deploy_not_passed",
-            "rollback_target_health_evidence_failed",
         ):
             self.assertEqual(steps[step_id][0], "blocked")
         self.assertEqual(steps["rollback_target_mutable_artifact_reference"][2], "by_hand")
 
-    def test_missing_target_and_wrong_scope_are_blocked(self) -> None:
-        self.store.write_promotion_record(
-            self.promotion.model_copy(
-                update={
-                    "rollback": RollbackExecutionEvidence(target_deployment_record_id="missing")
-                }
+    def test_manual_deploy_inventory_needs_no_promotion_to_find_previous_release(self) -> None:
+        self.store.write_environment_inventory(
+            self.inventory.model_copy(
+                update={"promotion_record_id": "", "promoted_from_instance": ""}
             )
         )
-        self.assertEqual(
-            _steps(self.check())["rollback_target_missing_rollback_target"][0], "blocked"
+        self.assertEqual(_steps(self.check())["rollback_target"][0], "clear")
+
+    def test_no_previous_release_is_blocked_with_explicit_target_guidance(self) -> None:
+        with patch.object(self.store, "list_deployment_records", return_value=(self.current,)):
+            check = self.check()
+        self.assertEqual(_steps(check)["rollback_target"][1], "rollback_target_missing")
+        self.assertIn("explicit deployment", getattr(check, "steps")[-1].description)
+
+    def test_previous_release_from_wrong_lane_fails_plan_validation(self) -> None:
+        self.store.write_deployment_record(
+            self.previous.model_copy(update={"context": "other-site"})
         )
-        self.store.write_promotion_record(
-            self.promotion.model_copy(update={"context": "other-site"})
-        )
-        self.assertEqual(_steps(self.check())["rollback_target"][1], "promotion_scope_mismatch")
+        with patch.object(
+            self.store, "list_deployment_records", return_value=(self.current, self.previous)
+        ):
+            self.assertEqual(
+                _steps(self.check())["rollback_target_deployment_scope_mismatch"][0], "blocked"
+            )
 
     def test_unread_authorization_does_not_hide_target_blockers_or_leak_text(self) -> None:
         with patch.object(
@@ -404,10 +424,10 @@ class ProductRollbackPathCheckTests(unittest.TestCase):
         self.assertEqual(_steps(check)["rollback_grant"][0], "blocked")
         self.assertNotIn("10.1.2.3", str(check))
         with patch.object(
-            self.store, "read_promotion_record", side_effect=FileNotFoundError("secret")
+            self.store, "list_deployment_records", side_effect=RuntimeError("secret")
         ):
             self.assertEqual(
-                _steps(self.check())["rollback_target"][1], "current_promotion_missing"
+                _steps(self.check())["rollback_target"][1], "rollback_records_unread"
             )
 
     def test_authorization_read_failure_is_unknown_with_clear_target(self) -> None:
@@ -559,7 +579,11 @@ class ProductPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(rollback.status_code, 200, rollback.text)
         self.assertEqual(rollback.json()["check"]["path"], "rollback")
-        self.assertEqual(rollback.json()["check"]["state"], "blocked")
+        rollback_check = rollback.json()["check"]
+        self.assertEqual(rollback_check["state"], "blocked")
+        rollback_steps = {step["step_id"]: step for step in rollback_check["steps"]}
+        self.assertEqual(rollback_steps["rollback_grant"]["code"], "caller_lacks_rollback_grant")
+        self.assertEqual(rollback_steps["rollback_target"]["code"], "prod_inventory_missing")
         self.assertEqual(denied.status_code, 404)
         self.assertEqual(missing.status_code, 404)
 
