@@ -3010,6 +3010,18 @@ def try_reflow_failed_merge_train_candidate(
     if probe.report is not None:
         result["conflict_probe"] = probe.report
     if mutate:
+        # The probe can outlast the lease; renew it, or stop, before persisting.
+        lease.checkpoint(
+            active_action="reflow_candidate",
+            active_phase="persist_replacement_candidate",
+            active_record_id=active_candidate_record.record_id,
+            active_pull_request_number=None,
+            step_payload={
+                "candidate_record_id": active_candidate_record.record_id,
+                "batch_id": candidate.batch_id,
+                "candidate_ref": candidate.candidate_ref,
+            },
+        )
         candidate_record = build_merge_train_batch_candidate_record(
             ordinary_job_binding=active_candidate_record.ordinary_job_binding,
             candidate=candidate,

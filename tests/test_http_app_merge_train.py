@@ -10,6 +10,7 @@ from click import ClickException
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerLeaseLostError,
     build_merge_train_controller_state_record,
 )
 from control_plane.contracts.merge_train_policy import (
@@ -3255,6 +3256,106 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             result["conflict_probe"], {"status": "will_run", "pull_request_numbers": [1, 2, 3]}
         )
+
+    async def test_replan_after_a_probe_that_outlived_its_lease_writes_nothing(self) -> None:
+        lease_lost = {"value": False}
+        probe_executor = _PairConflictProbeExecutor(conflicting_pair=(0, 0))
+
+        class LeaseLosingProbeExecutor:
+            def prepare_candidate_ref(self, effect: CandidateRefPrepareEffect) -> None:
+                probe_executor.prepare_candidate_ref(effect)
+
+            def merge_candidate_head(
+                self, effect: CandidateHeadMergeEffect
+            ) -> CandidateHeadMergeOutcome:
+                outcome = probe_executor.merge_candidate_head(effect)
+                if replanning["value"] and effect.pull_request_number == 3:
+                    # Another pass adopts the lease after the probe's last merge.
+                    lease_lost["value"] = True
+                return outcome
+
+            def delete_candidate_ref(self, effect: CandidateRefDeleteEffect) -> bool:
+                return probe_executor.delete_candidate_ref(effect)
+
+        replanning = {"value": False}
+
+        class BuildConflictClient(_FakeMergeTrainGitHubClient):
+            def probe_batch_entry_conflicts(self, **kwargs: Any) -> Any:
+                return GitHubMergeTrainClient(
+                    transport=cast(Any, self.transport),
+                    effect_executor=cast(
+                        MergeTrainSemanticEffectExecutor, LeaseLosingProbeExecutor()
+                    ),
+                ).probe_batch_entry_conflicts(**kwargs)
+
+            def build_batch_candidate(self, **kwargs: Any) -> Any:
+                for entry in kwargs["candidate"].entries:
+                    if entry.pull_request_number == 2:
+                        raise MergeTrainGitHubCandidateEntryConflictError(
+                            pull_request_number=2, head_sha=entry.head_sha
+                        )
+                return super().build_batch_candidate(**kwargs)
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            compare_and_set = store.compare_and_set_merge_train_controller_state_record
+
+            def guarded_compare_and_set(**kwargs: Any) -> Any:
+                if lease_lost["value"]:
+                    raise MergeTrainControllerLeaseLostError("lease adopted by another pass")
+                return compare_and_set(**kwargs)
+
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            actions = []
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _ThreeQueuedSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    BuildConflictClient,
+                ),
+                patch.object(
+                    store,
+                    "compare_and_set_merge_train_controller_state_record",
+                    guarded_compare_and_set,
+                ),
+            ):
+                for _ in range(2):
+                    response = await _post_merge_train_controller_run_once(app, request_payload)
+                    actions.append(response.json()["result"]["controller_action"])
+                records_before = store.list_merge_train_batch_candidate_records(
+                    repository="cbusillo/sellyouroutboard", base_branch="main"
+                )
+                replanning["value"] = True
+                await _post_merge_train_controller_run_once(app, request_payload)
+                records_after = store.list_merge_train_batch_candidate_records(
+                    repository="cbusillo/sellyouroutboard", base_branch="main"
+                )
+
+        self.assertEqual(actions, ["plan_candidate", "candidate_failed"])
+        self.assertTrue(lease_lost["value"])
+        self.assertEqual(
+            [(record.record_id, record.candidate.status) for record in records_after],
+            [(record.record_id, record.candidate.status) for record in records_before],
+        )
+        self.assertEqual(probe_executor.ref_events[-1], ("delete", probe_executor.probe_ref))
 
     async def test_failed_candidate_does_not_block_a_behind_base_queue_head(self) -> None:
         branch_updates: list[tuple[int, str]] = []
