@@ -1415,6 +1415,15 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
                     record_failure_summary("preview_plan_blocked"),
                 )
             self.assertEqual(inputs.call_count, PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS)
+        # A transient failure before planning must not erase the exhausted budget.
+        self.request("preview", 5)
+        with patch.object(self.github, "get_json", side_effect=OSError("GitHub unavailable")):
+            with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                self.assertEqual(self.run_once().state, "failed")
+        self.request("preview", 5)
+        with patch.object(self.provider, "build_inputs") as inputs:
+            self.assertEqual(self.reconcile()["reason"], "preview_destroy_retry_limit")
+            inputs.assert_not_called()
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(self.provider.applied, [])
 
@@ -1711,7 +1720,7 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
         before = self.snapshot()
         with patch(
             "control_plane.generic_web_preview_http.execute_generic_web_preview_destroy",
-            side_effect=ValueError("target evidence missing"),
+            side_effect=RuntimeError("provider transport unavailable"),
         ) as destroy:
             for _attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS):
                 self.request("preview", 5)

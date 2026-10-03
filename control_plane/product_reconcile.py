@@ -1079,28 +1079,36 @@ def reconcile_preview_target(
                 ),
             )
             return ReconcileOutcome(plan)
-    if not odoo:
-        outcome = _run_generic_web_preview_operation(
-            record_store=record_store,
-            profile=profile,
-            transport=transport,
-            decision=decision,
-            pull_request_number=pull_request_number,
-            control_plane_root=control_plane_root,
-            preview_hooks=preview_hooks,
-            previous_plan=previous,
-            lease_held=lease_held,
-        )
-    else:
-        outcome = _run_preview_operation(
-            record_store=record_store,
-            profile=profile,
-            transport=transport,
-            decision=decision,
-            pull_request_number=pull_request_number,
-            control_plane_root=control_plane_root,
-            preview_hooks=preview_hooks,
-        )
+    try:
+        if not odoo:
+            outcome = _run_generic_web_preview_operation(
+                record_store=record_store,
+                profile=profile,
+                transport=transport,
+                decision=decision,
+                pull_request_number=pull_request_number,
+                control_plane_root=control_plane_root,
+                preview_hooks=preview_hooks,
+                previous_plan=previous,
+                lease_held=lease_held,
+            )
+        else:
+            outcome = _run_preview_operation(
+                record_store=record_store,
+                profile=profile,
+                transport=transport,
+                decision=decision,
+                pull_request_number=pull_request_number,
+                control_plane_root=control_plane_root,
+                preview_hooks=preview_hooks,
+            )
+    except Exception as error:
+        if plan["action"] != "destroy" or (
+            isinstance(error, ProductReconcileError) and error.code == "preview_lease_lost"
+        ):
+            raise
+        _LOGGER.warning("Preview destroy of %s raised: %s", profile.product, error)
+        outcome = _preview_failure(plan, "preview_reconcile_failed")
     if plan["action"] == "destroy" and outcome.error:
         plan["destroy_failed_attempts"] = failed_attempts + 1
     return outcome
@@ -1603,6 +1611,10 @@ def run_product_reconcile_once(
         _LOGGER.warning("Product reconcile of %s failed: %s", request.target_key, error)
         failed_plan: dict[str, object] = {"target": request.target_kind}
         if request.target_kind == "preview":
+            # A failed read or lost lease must not re-arm a previously exhausted destroy.
+            for key in ("destroy_retry_key", "destroy_failed_attempts"):
+                if key in request.last_plan:
+                    failed_plan[key] = request.last_plan[key]
             failed_plan["last_failed_error_code"] = getattr(error, "code", "")
         outcome = ReconcileOutcome(failed_plan, error=_error_text(error))
     else:
