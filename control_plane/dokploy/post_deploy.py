@@ -2393,7 +2393,7 @@ record_integration_readback_passed() {{
     fi
     local checked_payload checked_sha256
     checked_payload=$(docker exec "${{workflow_environment[@]}}" "${{script_runner_container_id}}" \
-        printenv ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64 || true)
+        sh -c 'printf %s "${{ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64-}}"') || return 1
     checked_sha256=$(printf '%s\\n%s' "${{database_name}}" "${{checked_payload}}" \
         | sha256sum | cut -d " " -f 1) || return 1
     docker exec -u root "${{script_runner_container_id}}" \
