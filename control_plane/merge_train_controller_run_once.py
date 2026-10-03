@@ -883,14 +883,18 @@ def stack_collapse_records_for_completed_landing(
     policy_sha256: str,
 ) -> tuple[MergeTrainStackCollapsePlanRecord, ...]:
     """Recover each collapse carried by a merged root, including retired waits."""
-    records = record_store.list_merge_train_stack_collapse_plan_records(
-        repository=repository, base_branch=base_branch
-    )
     merged_root_heads = {
         entry.pull_request_number: entry.expected_head_sha
         for entry in landing_plan.entries
         if entry.status == "merged"
     }
+    records = tuple(
+        record
+        for root_number in merged_root_heads
+        for record in record_store.list_merge_train_stack_collapse_plan_records(
+            repository=repository, base_branch=base_branch, root_pull_request_number=root_number
+        )
+    )
     contained: dict[tuple[str, str], bool] = {}
     landed_records: list[MergeTrainStackCollapsePlanRecord] = []
     for collapse_id in sorted({record.plan.collapse_id for record in records}):
@@ -2323,19 +2327,30 @@ def _advance_without_candidate_record(
     waiting_records = stack_collapse_store.list_merge_train_stack_collapse_plan_records(
         repository=request.repository, base_branch=request.base_branch, status="active"
     )
-    if any(record.plan.status == "waiting_for_root_checks" for record in waiting_records):
+    latest_waiting_records = tuple(
+        progress
+        for collapse_id in sorted({record.plan.collapse_id for record in waiting_records})
+        if (
+            progress := latest_merge_train_stack_collapse_progress_record(
+                tuple(
+                    record for record in waiting_records if record.plan.collapse_id == collapse_id
+                )
+            )
+        )
+        is not None
+        and progress.plan.status == "waiting_for_root_checks"
+    )
+    if latest_waiting_records:
         snapshot = github_client.read_merge_train_snapshot(
             repository=request.repository, base_branch=request.base_branch
         )
         root_heads = {pr.number: pr.head_sha for pr in snapshot.pull_requests}
         retired_collapse_ids: set[str] = set()
-        for collapse_id in sorted({record.plan.collapse_id for record in waiting_records}):
+        for record in latest_waiting_records:
+            collapse_id = record.plan.collapse_id
             progress_records = tuple(
-                record for record in waiting_records if record.plan.collapse_id == collapse_id
+                item for item in waiting_records if item.plan.collapse_id == collapse_id
             )
-            record = latest_merge_train_stack_collapse_progress_record(progress_records)
-            if record is None or record.plan.status != "waiting_for_root_checks":
-                continue
             observed_head = root_heads.get(record.plan.root_pull_request_number)
             if observed_head == stack_collapse_expected_root_head_sha(record.plan):
                 continue
@@ -2351,7 +2366,7 @@ def _advance_without_candidate_record(
                     progress_records, key=lambda item: item.record_id == record.record_id
                 ):
                     lease.checkpoint(
-                        active_action="retire_stack_collapse_wait",
+                        active_action=MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
                         active_phase="supersede_inapplicable_collapse",
                         active_record_id=progress_record.record_id,
                         active_pull_request_number=record.plan.root_pull_request_number,
@@ -2386,6 +2401,7 @@ def _advance_without_candidate_record(
             candidate_store=candidate_store,
             stack_collapse_store=stack_collapse_store,
             waiting_collapse_record=waiting_collapse_record,
+            snapshot=snapshot,
             trace_id=trace_id,
             recorded_at=recorded_at,
             lease=lease,
@@ -2450,6 +2466,7 @@ def _advance_waiting_stack_collapse_record(
     trace_id: str,
     recorded_at: str,
     lease: MergeTrainControllerLeaseContext,
+    snapshot: MergeTrainDryRunSnapshot | None = None,
 ) -> tuple[dict[str, object] | None, MergeTrainDryRunSnapshot]:
     """Admit a collapsed root once its checks pass, or step aside.
 
@@ -2458,7 +2475,7 @@ def _advance_waiting_stack_collapse_record(
     live queue with the snapshot already read, so the controller refreshes it
     or moves on to the other ready pull requests instead of waiting forever.
     """
-    snapshot = github_client.read_merge_train_snapshot(
+    snapshot = snapshot or github_client.read_merge_train_snapshot(
         repository=request.repository,
         base_branch=request.base_branch,
     )

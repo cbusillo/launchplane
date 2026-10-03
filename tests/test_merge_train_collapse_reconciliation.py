@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from control_plane.contracts.merge_train_stack_collapse import (
+    MergeTrainStackCollapsePlanRecord,
     build_merge_train_stack_collapse_plan_record,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
@@ -54,7 +55,24 @@ class CollapseReconciliationTests(unittest.IsolatedAsyncioTestCase):
                         state_dir = Path(directory) / "state"
                         _seed_merge_train_policy(state_dir)
                         _seed_executed_merge_train_stack_collapse_plan_record(state_dir)
-                        store = FilesystemRecordStore(state_dir)
+
+                        class InterruptedStore(FilesystemRecordStore):
+                            failed = False
+
+                            def write_merge_train_stack_collapse_plan_record(
+                                self, record: MergeTrainStackCollapsePlanRecord
+                            ) -> Path:
+                                if (
+                                    mutate
+                                    and not self.failed
+                                    and record.status == "superseded"
+                                    and record.plan.status == "waiting_for_root_checks"
+                                ):
+                                    self.failed = True
+                                    raise MergeTrainGitHubError("interrupted retirement write")
+                                return super().write_merge_train_stack_collapse_plan_record(record)
+
+                        store = InterruptedStore(state_dir)
                         app = create_launchplane_fastapi_app(
                             verifier=_StubVerifier(_merge_train_service_identity()),
                             authz_policy=_merge_train_service_policy(),
@@ -79,6 +97,17 @@ class CollapseReconciliationTests(unittest.IsolatedAsyncioTestCase):
                                     "mutate": mutate,
                                 },
                             )
+                            if mutate:
+                                self.assertEqual(response.status_code, 502, response.text)
+                                response = await _post_merge_train_controller_run_once(
+                                    app,
+                                    {
+                                        "schema_version": 1,
+                                        "repository": "cbusillo/sellyouroutboard",
+                                        "base_branch": "main",
+                                        "mutate": True,
+                                    },
+                                )
                         self.assertEqual(response.status_code, 202, response.text)
                         records = store.list_merge_train_stack_collapse_plan_records()
                         self.assertTrue(records)
