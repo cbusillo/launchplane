@@ -54,7 +54,7 @@ def build_feedback_payloads(
         result=result,
         controller_record_id=controller_record_id,
     )
-    return [
+    payloads: list[dict[str, object]] = [
         {
             "schema_version": 1,
             "repository": repository,
@@ -68,6 +68,24 @@ def build_feedback_payloads(
         }
         for pull_request_number in pull_request_numbers
     ]
+    if controller_action == "plan_candidate":
+        payloads.extend(
+            {
+                "schema_version": 1,
+                "repository": repository,
+                "base_branch": base_branch,
+                "pull_request_number": pull_request_number,
+                "event": "blocked",
+                "controller_action": controller_action,
+                "controller_record_id": controller_record_id,
+                "message": held_out_message,
+                "source": source,
+            }
+            for pull_request_number, held_out_message in _held_out_messages(
+                result=result, base_branch=base_branch
+            )
+        )
+    return payloads
 
 
 def _controller_action(*, result: dict[str, Any], phase: str) -> str:
@@ -245,6 +263,36 @@ def _blocking_detail(result: dict[str, Any]) -> str:
     if required_checks_status == "fail":
         return "candidate required checks failed"
     return ""
+
+
+def _held_out_messages(*, result: dict[str, Any], base_branch: str) -> list[tuple[int, str]]:
+    """Tell each held-out pull request which queued pull requests it conflicts with."""
+    messages: list[tuple[int, str]] = []
+    for held_out in _as_list(_as_dict(result.get("candidate")).get("held_out")):
+        held_out_entry = _as_dict(held_out)
+        number = held_out_entry.get("pull_request_number")
+        if not isinstance(number, int) or number <= 0:
+            continue
+        conflicts_with: list[int] = [
+            other
+            for other in _as_list(held_out_entry.get("conflicts_with"))
+            if isinstance(other, int) and other > 0
+        ]
+        if conflicts_with:
+            conflict = "conflicts with " + ", ".join(f"#{other}" for other in conflicts_with)
+            conflict += ", queued ahead of it"
+        else:
+            conflict = f"does not merge cleanly onto `{base_branch}`"
+        messages.append(
+            (
+                number,
+                f"Launchplane left this pull request out of the merge-train batch: it "
+                f"{conflict}. The rest of the queue continues without it. It rejoins "
+                "the queue when its head changes; resolve the conflict, typically "
+                "after the others land.",
+            )
+        )
+    return messages
 
 
 def _pull_request_numbers(result: dict[str, Any]) -> list[int]:

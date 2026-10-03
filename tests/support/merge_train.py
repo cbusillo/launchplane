@@ -7,6 +7,7 @@ from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
     MergeTrainBatchEntry,
+    MergeTrainBatchHeldOutEntry,
     MergeTrainBatchLandingEntry,
     MergeTrainBatchLandingPlan,
     MergeTrainBatchLandingPlanRecord,
@@ -32,6 +33,7 @@ from control_plane.merge_train import (
     MergeTrainCheckStatus,
     MergeTrainDryRunSnapshot,
     MergeTrainPullRequestSnapshot,
+    MergeTrainQueueEntry,
     build_merge_train_dry_run_result,
     discover_merge_train_stack,
 )
@@ -140,6 +142,18 @@ class _FakeMergeTrainGitHubClient:
         return candidate.model_copy(
             update={"candidate_sha": "candidate-built", "status": "ready_for_checks"}
         )
+
+    def probe_batch_entry_conflicts(
+        self,
+        *,
+        repository: str,
+        base_branch: str,
+        base_sha: str,
+        queue: tuple[MergeTrainQueueEntry, ...],
+        probe_ref: str,
+        checkpoint: Callable[[int | None], None] | None = None,
+    ) -> tuple[MergeTrainBatchHeldOutEntry, ...]:
+        return ()
 
     def observe_batch_candidate_checks(
         self, *, candidate: MergeTrainBatchCandidate
