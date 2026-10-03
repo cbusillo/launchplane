@@ -865,6 +865,17 @@ class NativeHistoricalDispositionPostgresTests(unittest.TestCase):
                 with self.assertRaisesRegex(HistoricalDispositionError, "admission"):
                     _all_target_admissions(session, request, (1, 2))
 
+    def test_retired_stack_member_still_refuses_historical_completion(self) -> None:
+        with _prepared_store() as (store, fixture):
+            record = _stack_member_record(fixture).model_copy(
+                update={"status": "superseded", "source": "test; retired:root_head_changed:trace"}
+            )
+            store.write_merge_train_stack_collapse_plan_record(record)
+            request = _request(fixture)
+            authority = store.authorize_merge_train_historical_completion(request)
+            with self.assertRaisesRegex(HistoricalDispositionError, "stack"):
+                store.read_merge_train_historical_completion_snapshot(request, authority)
+
     def test_active_stack_member_and_malformed_progress_fail_closed(self) -> None:
         with _prepared_store() as (store, fixture):
             store.write_merge_train_stack_collapse_plan_record(_stack_member_record(fixture))

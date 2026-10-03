@@ -54,8 +54,9 @@ its evidence window. An initial candidate without a commit SHA may precede the
 materialized candidate, but conflicting materialized candidates are ambiguous.
 
 For each of at most 25 selected PRs, the portable observational reader checks
-for an active stack whose root is that PR. The native PostgreSQL service path
-also validates every active stack in the target and excludes overlap as either
+for an active stack or a controller-retired wait whose root is that PR.
+The native PostgreSQL service path also validates those stacks in the target
+and excludes overlap as either
 a root or a member. Its queries have no capped history post-filter. It refuses
 any admission for a selected repository/base/PR, across all heads and lineages,
 and any ordinary effect for the target, including terminal effects. An ordinary
