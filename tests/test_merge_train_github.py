@@ -3264,8 +3264,8 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     snapshot.pull_requests[0].label_actors[0].on_behalf_via_app, expected_app
                 )
 
+    @staticmethod
     def _read_with_conversations(
-        self,
         *,
         rule: object,
         threads: dict[tuple[int, object], dict[str, object]],
@@ -3332,7 +3332,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
     def test_snapshot_reader_skips_threads_when_the_base_does_not_require_resolution(
         self,
     ) -> None:
-        for rule in (_conversation_rule(False), _conversation_rule(None)):
+        for rule in (_conversation_rule(), _conversation_rule(None)):
             with self.subTest(rule=rule):
                 snapshot, bodies = self._read_with_conversations(rule=rule, threads={})
 
