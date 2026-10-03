@@ -182,7 +182,7 @@ class ProviderSecretAdoptionTests(unittest.IsolatedAsyncioTestCase):
                 "REPAIRSHOPR_URL_STORE_NAME": PROVIDER_STORE_NAME,
             },
         )
-        bindings = self.store.list_secret_bindings(limit=None)
+        bindings = self.store.list_secret_bindings()
         self.assertEqual({binding.instance for binding in bindings}, {"prod"})
         for binding in bindings:
             self.assertEqual(binding.declared_secret_class, "shared_safe")
@@ -228,7 +228,7 @@ class ProviderSecretAdoptionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list_secret_records(integration="runtime_environment"), ())
 
     async def test_refuses_keys_missing_on_the_provider_or_already_recorded(self) -> None:
-        await self._post(self._payload("dry-run", [_adopted_secret("REPAIRSHOPR_TOKEN")]), key="")
+        await self._post(self._payload("dry-run", [_adopted_secret("REPAIRSHOPR_TOKEN")]))
         await self._post(
             self._payload("apply", [_adopted_secret("REPAIRSHOPR_TOKEN")]), key="first"
         )
