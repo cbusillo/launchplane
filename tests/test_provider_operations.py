@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from control_plane.contracts.record_failures import record_failure_summary
+
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
@@ -734,16 +736,24 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             fixture = _StoreFixture(directory)
             adapter = _FakeAdapter(
-                apply_error=ProviderMutationUnknownError("timed out after dispatch"),
+                apply_error=ProviderMutationUnknownError(
+                    "target site-prod-app on 203.0.113.42; ENOTFOUND database"
+                ),
             )
 
             result = fixture.run(adapter)
 
             self.assertEqual(result.status, "reconcile_required")
+            payload = result.response_payload["result"]
+            assert isinstance(payload, dict)
+            self.assertEqual(payload["error_code"], "reconcile_required")
             self.assertEqual(
-                result.response_payload,
-                {"result": {"status": "fail", "error_message": "timed out after dispatch"}},
+                f"{payload['error_code']}: {payload['error_description']}",
+                record_failure_summary("reconcile_required"),
             )
+            self.assertNotIn("203.0.113.42", str(payload))
+            replay = fixture.run(adapter)
+            self.assertEqual(replay.response_payload, result.response_payload)
             self.assertEqual(adapter.apply_calls, 1)
             stored = fixture.stored()
             self.assertEqual(getattr(stored, "state"), "reconcile_required")

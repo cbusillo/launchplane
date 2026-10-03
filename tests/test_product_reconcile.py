@@ -1,3 +1,4 @@
+from control_plane.contracts.record_failures import record_failure_summary
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone, tzinfo
 from email.message import Message
@@ -1402,7 +1403,8 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
 
         self.assertEqual(failed.state, "failed")
         self.assertEqual(failed.last_plan["preview_operation_status"], "reconcile_required")
-        self.assertEqual(failed.last_error, "Dokploy compose deploy failed: image pull denied.")
+        self.assertEqual(failed.last_error, record_failure_summary("reconcile_required"))
+        self.assertNotIn("image pull denied", failed.model_dump_json())
 
     def test_preview_is_not_changed_while_it_waits_or_has_nothing_to_do(self) -> None:
         cases: tuple[tuple[str, dict[str, object], bool, bool, str], ...] = (
@@ -1839,7 +1841,8 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.assertEqual(self.run_once().state, "failed")
 
         self.assertIn("preview refresh failed for PR #5", self.comment_body())
-        self.assertIn("image pull denied", self.comment_body())
+        self.assertIn(record_failure_summary("reconcile_required"), self.comment_body())
+        self.assertNotIn("image pull denied", self.comment_body())
 
     def test_ready_preview_mentions_the_owner_only_on_a_marked_pr(self) -> None:
         payload = _profile()

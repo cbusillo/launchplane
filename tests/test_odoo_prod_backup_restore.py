@@ -1,3 +1,4 @@
+from control_plane.contracts.record_failures import record_failure_summary
 import unittest
 from collections.abc import Callable
 from pathlib import Path
@@ -668,7 +669,7 @@ class OdooProdBackupRestoreApplyTests(unittest.TestCase):
                 canonical_url="https://wrong.example.test",
                 logo_urls=(f"{BASE_URL}/web/image/website/1/logo",),
             ),
-            error_message="Odoo canonical verification failed.",
+            error_message="Odoo canonical verification failed: FATAL database cm_test; ECONNREFUSED 203.0.113.42:22; ENOTFOUND database",
         )
         with (
             patch(
@@ -752,6 +753,14 @@ class OdooProdBackupRestoreApplyTests(unittest.TestCase):
         self.assertEqual(failed_result.restore_status, "fail")
         self.assertEqual(failed_result.canonical_status, "fail")
         self.assertEqual(failed_deployment.deploy.status, "fail")
+        assert failed_deployment.failure is not None
+        self.assertEqual(
+            f"{failed_deployment.failure.code}: {failed_deployment.failure.description}",
+            record_failure_summary("restore_verification_failed"),
+        )
+        self.assertNotIn("restore_error", failed_deployment.runtime_source)
+        for fragment in ("cm_test", "203.0.113.42", "ENOTFOUND database"):
+            self.assertNotIn(fragment, failed_deployment.model_dump_json())
         replay_operation = OdooProdBackupRestoreOperationRecord.model_validate(
             {
                 "operation_id": "restore-operation-1",

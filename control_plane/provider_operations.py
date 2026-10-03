@@ -22,6 +22,7 @@ import hashlib
 from threading import Event, Lock, Thread
 from typing import Callable, Literal, NamedTuple, Protocol, runtime_checkable
 
+from control_plane.contracts.record_failures import record_failure
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     complete_launchplane_mutation_reservation,
@@ -604,15 +605,12 @@ def _apply_acquired(
             reservation=current_reservation,
             reconciliation_key=reconciliation_key,
         )
-    except ProviderMutationUnknownError as error:
+    except ProviderMutationUnknownError:
         current_reservation, _ = heartbeat.stop()
-        return _with_unknown_outcome_reason(
-            _mark_reconcile_required(
-                store=store,
-                reservation=current_reservation,
-                reconciliation_key=reconciliation_key,
-            ),
-            error,
+        return _mark_reconcile_required(
+            store=store,
+            reservation=current_reservation,
+            reconciliation_key=reconciliation_key,
         )
     except BaseException:
         current_reservation, _ = heartbeat.stop()
@@ -734,7 +732,7 @@ def _complete_or_adopt_outcome(
         "reconcile_required",
         completion_result.record,
         409,
-        {},
+        _reconcile_required_payload(),
     )
 
 
@@ -793,7 +791,7 @@ def _reconcile(
                 "reconcile_required",
                 None,
                 409,
-                {},
+                _reconcile_required_payload(),
             )
         retry = store.retry_reconciled_mutation(
             reservation=fallback_record,
@@ -818,14 +816,14 @@ def _reconcile(
             "reconcile_required",
             fallback_record,
             409,
-            {},
+            _reconcile_required_payload(),
         )
     if fallback_record is None:
         return DurableProviderOperationResult(
             "reconcile_required",
             None,
             409,
-            {},
+            _reconcile_required_payload(),
         )
     adoption_result, adoption_record = _adopt_reconciled_result(
         store=store,
@@ -840,18 +838,22 @@ def _reconcile(
         "reconcile_required",
         adoption_record or fallback_record,
         409,
-        {},
+        _reconcile_required_payload(),
     )
 
 
-def _with_unknown_outcome_reason(
-    result: DurableProviderOperationResult, error: ProviderMutationUnknownError
-) -> DurableProviderOperationResult:
-    """Keep the adapter's reason on an unknown outcome, so a caller can say why it stopped."""
-    reason = str(error).strip()
-    if result.status != "reconcile_required" or result.response_payload or not reason:
-        return result
-    return result._replace(response_payload={"result": {"status": "fail", "error_message": reason}})
+def _reconcile_required_payload() -> dict[str, object]:
+    # The durable state is the reason code. Reconstruct the same safe description
+    # on the first failure and every later observation; never retain adapter text.
+    failure = record_failure("reconcile_required")
+    return {
+        "result": {
+            "status": "fail",
+            "error_code": failure.code,
+            "error_description": failure.description,
+            "error_message": failure.description,
+        }
+    }
 
 
 def _mark_reconcile_required(
@@ -872,7 +874,7 @@ def _mark_reconcile_required(
         "reconcile_required",
         transition.record or reservation,
         409,
-        {},
+        _reconcile_required_payload(),
     )
 
 

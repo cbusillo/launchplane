@@ -1,3 +1,4 @@
+from control_plane.contracts.record_failures import record_failure_summary
 import unittest
 from contextlib import nullcontext
 from collections.abc import Callable
@@ -1190,7 +1191,7 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
         self.assertEqual(
             promotion.rollback.deployment_record_id, "deployment-promotion-syo-prod-rollback"
         )
-        self.assertIn("health check failed", promotion.rollback.detail)
+        self.assertEqual(promotion.rollback.detail, record_failure_summary("rollback_passed"))
         self.assertEqual(promotion.rollback_health.status, "pass")
         inventory = store.inventories[("sellyouroutboard-testing", "prod")]
         self.assertEqual(inventory.deployment_record_id, "deployment-promotion-syo-prod-rollback")
@@ -1216,8 +1217,22 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
         self.assertEqual(result.deployment_status, "fail")
         self.assertEqual(result.rollback_status, "pass")
         promotion = store.promotions[result.promotion_record_id]
-        self.assertIn("Destination deploy failed", promotion.rollback.detail)
+        self.assertEqual(promotion.rollback.detail, record_failure_summary("rollback_passed"))
         self.assertEqual(promotion.rollback.target_deployment_record_id, _PREVIOUS_DEPLOYMENT)
+
+    def test_rollback_health_error_is_not_kept_on_the_promotion(self) -> None:
+        store = _store_with_production()
+        provider = _ProductionProvider()
+        raw = 'FATAL: database "cm_test" does not exist; ECONNREFUSED 203.0.113.42:22; ENOTFOUND database'
+        with patch.object(provider, "healthcheck", side_effect=click.ClickException(raw)):
+            result = self._promote(store, provider)
+        promotion = store.promotions[result.promotion_record_id]
+        self.assertEqual(result.rollback_status, "fail")
+        self.assertEqual(
+            promotion.rollback.detail, record_failure_summary("rollback_health_failed")
+        )
+        for fragment in ("cm_test", "203.0.113.42", "ENOTFOUND database"):
+            self.assertNotIn(fragment, promotion.rollback.model_dump_json())
 
     def test_promotion_is_refused_before_changing_production_without_a_rollback_target(
         self,

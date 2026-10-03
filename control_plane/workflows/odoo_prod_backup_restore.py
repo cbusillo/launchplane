@@ -40,6 +40,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
+from control_plane.contracts.record_failures import record_failure
 from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDeployUpdateEvidence
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -819,7 +820,7 @@ def execute_odoo_prod_backup_restore_apply(
                 runtime_source=runtime_source,
                 runtime_identity=runtime_identity,
                 post_deploy_update=post_deploy_evidence,
-                error_message=post_deploy_result.error_message or "Odoo post-deploy failed.",
+                failure_code="restore_post_deploy_failed",
             )
             return result(
                 restore_status="fail",
@@ -859,7 +860,7 @@ def execute_odoo_prod_backup_restore_apply(
                 runtime_source=runtime_source,
                 runtime_identity=runtime_identity,
                 post_deploy_update=post_deploy_evidence,
-                error_message=verification.error_message,
+                failure_code="restore_verification_failed",
             )
             return result(
                 restore_status="fail",
@@ -886,7 +887,7 @@ def execute_odoo_prod_backup_restore_apply(
                 runtime_source=runtime_source,
                 runtime_identity=runtime_identity,
                 post_deploy_update=post_deploy_evidence,
-                error_message=error_message,
+                failure_code="restore_runtime_identity_failed",
             )
             return result(
                 restore_status="fail",
@@ -904,7 +905,7 @@ def execute_odoo_prod_backup_restore_apply(
             resolved_target=resolved_target,
             runtime_source=runtime_source,
             runtime_identity=runtime_identity,
-            error_message=str(error),
+            failure_code="restore_failed",
         )
         return result(restore_status="fail", error_message=str(error))
 
@@ -1091,7 +1092,7 @@ def execute_odoo_prod_backup_restore_verification_replay(
                 if post_deploy_update is not None
                 else deployment_record.post_deploy_update
             ),
-            error_message=error_message,
+            failure_code="restore_verification_failed",
         )
         return result(
             restore_status="fail",
@@ -1821,10 +1822,20 @@ def _write_failed_deployment(
     resolved_target: ResolvedTargetEvidence,
     runtime_source: dict[str, str],
     runtime_identity: RuntimeIdentity,
-    error_message: str,
+    failure_code: str = "restore_failed",
     post_deploy_update: PostDeployUpdateEvidence | None = None,
     deployment_id: str = "control-plane-dokploy",
 ) -> None:
+    if post_deploy_update is not None:
+        post_deploy_update = post_deploy_update.model_copy(
+            update={
+                "detail": (
+                    record_failure("restore_post_deploy_failed").description
+                    if post_deploy_update.status != "pass"
+                    else "Odoo post-deploy completed after verified production backup restore."
+                )
+            }
+        )
     record_store.write_deployment_record(
         build_deployment_record(
             request=ship_request,
@@ -1834,11 +1845,13 @@ def _write_failed_deployment(
             started_at=started_at,
             finished_at=utc_now_timestamp(),
             resolved_target=resolved_target,
-            runtime_source={**runtime_source, "restore_error": error_message[:1000]},
+            runtime_source={
+                key: value for key, value in runtime_source.items() if key != "restore_error"
+            },
             runtime_identity=runtime_identity,
             post_deploy_update=post_deploy_update or PostDeployUpdateEvidence(status="skipped"),
             destination_health=HealthcheckEvidence(status="fail"),
-        )
+        ).model_copy(update={"failure": record_failure(failure_code)})
     )
 
 

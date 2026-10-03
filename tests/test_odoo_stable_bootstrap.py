@@ -82,7 +82,7 @@ def _verification_failure_result() -> OdooVerificationResult:
             health_url="https://cm-testing.shinycomputers.com/launchplane/health",
             canonical_url="https://cm-testing.shinycomputers.com",
         ),
-        error_message="canonical failed",
+        error_message="canonical failed; FATAL database cm_test; ECONNREFUSED 203.0.113.42:22; ENOTFOUND database",
     )
 
 
@@ -784,7 +784,9 @@ class OdooStableBootstrapTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.odoo_stable_bootstrap.dokploy_post_deploy.run_compose_odoo_stable_bootstrap",
-                side_effect=click.ClickException("schedule failed"),
+                side_effect=click.ClickException(
+                    "schedule failed; FATAL database cm_test; ECONNREFUSED 203.0.113.42:22; ENOTFOUND database"
+                ),
             ),
             patch(
                 "control_plane.workflows.odoo_stable_bootstrap.utc_now_timestamp",
@@ -812,6 +814,11 @@ class OdooStableBootstrapTests(unittest.TestCase):
         self.assertEqual(result.readiness_status, "fail")
         self.assertIn("schedule failed", result.error_message)
         self.assertEqual(store.deployment_records[-1].deploy.status, "fail")
+        failed_record = store.deployment_records[-1]
+        self.assertIsNotNone(failed_record.failure)
+        self.assertNotIn("cm_test", failed_record.model_dump_json())
+        self.assertNotIn("203.0.113.42", failed_record.model_dump_json())
+        self.assertNotIn("ENOTFOUND database", failed_record.model_dump_json())
         self.assertEqual(store.deployment_records[-1].bootstrap.run_status, "fail")
         self.assertEqual(store.deployment_records[-1].bootstrap.readiness_status, "fail")
         self.assertEqual(len(store.environment_inventories), 1)
@@ -842,7 +849,7 @@ class OdooStableBootstrapTests(unittest.TestCase):
                     instance="testing",
                     phase="deploy",
                     post_deploy_status="fail",
-                    error_message="override failed",
+                    error_message="override failed; FATAL database cm_test; ECONNREFUSED 203.0.113.42:22; ENOTFOUND database",
                 ),
             ),
             patch(
@@ -871,6 +878,11 @@ class OdooStableBootstrapTests(unittest.TestCase):
         self.assertEqual(result.readiness_status, "fail")
         self.assertEqual(result.post_deploy_status, "fail")
         self.assertEqual(store.deployment_records[-1].deploy.status, "fail")
+        failed_record = store.deployment_records[-1]
+        self.assertIsNotNone(failed_record.failure)
+        self.assertNotIn("cm_test", failed_record.model_dump_json())
+        self.assertNotIn("203.0.113.42", failed_record.model_dump_json())
+        self.assertNotIn("ENOTFOUND database", failed_record.model_dump_json())
         self.assertEqual(store.deployment_records[-1].bootstrap.run_status, "pass")
         self.assertEqual(store.deployment_records[-1].bootstrap.readiness_status, "fail")
         self.assertEqual(len(store.environment_inventories), 1)
@@ -896,7 +908,9 @@ class OdooStableBootstrapTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.odoo_stable_bootstrap.execute_odoo_post_deploy",
-                side_effect=click.ClickException("post-deploy exploded"),
+                side_effect=click.ClickException(
+                    "post-deploy exploded; FATAL database cm_test; ECONNREFUSED 203.0.113.42:22; ENOTFOUND database"
+                ),
             ),
             patch(
                 "control_plane.workflows.odoo_stable_bootstrap.utc_now_timestamp",
@@ -923,8 +937,16 @@ class OdooStableBootstrapTests(unittest.TestCase):
         self.assertEqual(result.bootstrap_run_status, "pass")
         self.assertEqual(result.readiness_status, "fail")
         self.assertEqual(result.post_deploy_status, "fail")
-        self.assertIn("post-deploy exploded", result.error_message)
+        self.assertIn(
+            "post-deploy exploded; FATAL database cm_test; ECONNREFUSED 203.0.113.42:22; ENOTFOUND database",
+            result.error_message,
+        )
         self.assertEqual(store.deployment_records[-1].deploy.status, "fail")
+        failed_record = store.deployment_records[-1]
+        self.assertIsNotNone(failed_record.failure)
+        self.assertNotIn("cm_test", failed_record.model_dump_json())
+        self.assertNotIn("203.0.113.42", failed_record.model_dump_json())
+        self.assertNotIn("ENOTFOUND database", failed_record.model_dump_json())
         self.assertEqual(store.deployment_records[-1].bootstrap.run_status, "pass")
         self.assertEqual(store.deployment_records[-1].bootstrap.readiness_status, "fail")
         self.assertEqual(store.deployment_records[-1].post_deploy_update.status, "fail")
@@ -989,6 +1011,11 @@ class OdooStableBootstrapTests(unittest.TestCase):
         self.assertEqual(result.health_status, "pass")
         self.assertEqual(result.canonical_status, "fail")
         self.assertEqual(store.deployment_records[-1].deploy.status, "fail")
+        failed_record = store.deployment_records[-1]
+        self.assertIsNotNone(failed_record.failure)
+        self.assertNotIn("cm_test", failed_record.model_dump_json())
+        self.assertNotIn("203.0.113.42", failed_record.model_dump_json())
+        self.assertNotIn("ENOTFOUND database", failed_record.model_dump_json())
         self.assertEqual(store.deployment_records[-1].bootstrap.run_status, "pass")
         self.assertEqual(
             store.deployment_records[-1].bootstrap.readiness_status,

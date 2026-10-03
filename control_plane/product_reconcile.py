@@ -41,6 +41,8 @@ from control_plane.build_provenance import (
     verify_build_artifact,
     verify_generic_web_build,
 )
+from control_plane.contracts.record_failures import record_failure_summary
+from control_plane.contracts.promotion_record import env_key_names
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.odoo_target_replacement_failures import deploy_failure_description
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -1212,10 +1214,7 @@ def _run_preview_operation(
         issued_plan = issue_odoo_preview_apply_plan(result=inputs, plan_id=plan_id)
         if issued_plan.status != "ready":
             plan["preview_result_status"] = "blocked"
-            return ReconcileOutcome(
-                plan,
-                error=f"The preview {operation} plan is blocked: {issued_plan.error_message}",
-            )
+            return _preview_failure(plan, "preview_plan_blocked")
         apply_request = validate_odoo_preview_issued_plan(
             plan_id=plan_id,
             issued_plan=issued_plan,
@@ -1268,10 +1267,11 @@ def _run_preview_operation(
         result_status = str(driver_result.get("status") or "")
         plan["preview_result_status"] = result_status
         if result.status in {"conflict", "reconcile_required"} or result_status != "pass":
-            message = str(driver_result.get("error_message") or "").strip()
-            return ReconcileOutcome(
+            return _preview_failure(
                 plan,
-                error=message or f"The preview {operation} ended {result.status}/{result_status}.",
+                "reconcile_required"
+                if result.status == "reconcile_required"
+                else "preview_apply_failed",
             )
         records = result.response_payload.get("records")
         validate_odoo_preview_lifecycle_response_current(
@@ -1284,17 +1284,24 @@ def _run_preview_operation(
         plan["deferred"] = "pull_request_moved"
         return ReconcileOutcome(plan, deferred=True)
     except OdooPreviewApplyConfigError as error:
-        # Key names, never values: what the operator must set before the preview can run.
-        plan["missing_keys"] = list(error.missing_keys)
-        missing = f" Missing: {', '.join(error.missing_keys)}." if error.missing_keys else ""
-        return ReconcileOutcome(
-            plan, error=f"The preview {operation} was refused: {error.format_message()}{missing}"
-        )
-    except OdooPreviewPlanProvenanceError as error:
-        return ReconcileOutcome(plan, error=f"The preview {operation} was refused: {error}")
-    except (FileNotFoundError, ValueError, click.ClickException) as error:
-        return ReconcileOutcome(plan, error=f"The preview {operation} failed: {error}")
+        plan["missing_keys"] = list(env_key_names(error.missing_keys))
+        return _preview_failure(plan, "preview_config_refused")
+    except OdooPreviewPlanProvenanceError:
+        return _preview_failure(plan, "preview_provenance_refused")
+    except (FileNotFoundError, ValueError, click.ClickException):
+        return _preview_failure(plan, "preview_apply_failed")
     return ReconcileOutcome(plan)
+
+
+def _preview_failure(plan: dict[str, object], code: str) -> ReconcileOutcome:
+    summary = record_failure_summary(code)
+    if code == "preview_config_refused":
+        keys = env_key_names(cast(list[object], plan.get("missing_keys", [])))
+        plan["missing_keys"] = list(keys)
+        if keys:
+            summary += f" Missing: {', '.join(keys)}."
+    plan.update(last_failed_error_code=code, last_failed_error_summary=summary)
+    return ReconcileOutcome(plan, error=summary)
 
 
 def _run_generic_web_preview_operation(
@@ -1348,13 +1355,7 @@ def _run_generic_web_preview_operation(
         ) in {"fail", "blocked"}:
             # Every sweep would otherwise run the same failing refresh again.
             plan["preview_result_status"] = previous_plan["preview_result_status"]
-            return ReconcileOutcome(
-                plan,
-                error=(
-                    "The preview of this build failed; Launchplane tries again when the PR "
-                    "has a new build (a push, or a re-run of its Build workflow)."
-                ),
-            )
+            return _preview_failure(plan, "preview_build_failed")
     if decision.observed and _pull_request_moved(
         transport=transport,
         profile=profile,
@@ -1574,6 +1575,19 @@ def run_product_reconcile_once(
     else:
         if outcome.error:
             _LOGGER.warning("Product reconcile of %s failed: %s", request.target_key, outcome.error)
+    if request.target_kind == "preview" and outcome.error:
+        code = outcome.plan.get("last_failed_error_code")
+        if code not in {
+            "preview_plan_blocked",
+            "preview_config_refused",
+            "preview_provenance_refused",
+            "preview_apply_failed",
+            "preview_reconcile_failed",
+            "preview_build_failed",
+            "reconcile_required",
+        }:
+            code = "preview_reconcile_failed"
+        outcome = _preview_failure(dict(outcome.plan), str(code))
     plan = dict(outcome.plan)
     feedback = post_reconcile_feedback(
         record_store=record_store,
