@@ -15,6 +15,7 @@ from control_plane.merge_train_batch_pull_request import (
     batch_pull_request_body,
     changed_closed_batch_body,
 )
+from control_plane.merge_train_controller_feedback import build_feedback_payloads
 from control_plane.merge_train_controller_run_once import try_reflow_failed_merge_train_candidate
 from control_plane.merge_train_github import GitHubMergeTrainClient
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -64,6 +65,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         client = Mock(wraps=self.client)
         client.read_merge_train_snapshot.return_value = self.snapshot
         client.probe_batch_entry_conflicts.return_value = conflicts
+        self.reflow_client = client
         result = try_reflow_failed_merge_train_candidate(
             candidate_store=store,
             active_candidate_record=record,
@@ -152,12 +154,53 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                     MergeTrainBatchHeldOutEntry(
                         pull_request_number=3,
                         head_sha=third.head_sha,
+                        conflicts_with=(1,),
                     ),
                 ),
             )
             self.assertEqual(result["controller_action"], "candidate_failed")
             self.assertEqual(result["reason_code"], "unchanged_batch_after_conflict_probe")
-            self.assertEqual(len(store.list_merge_train_batch_candidate_records()), 1)
+            payloads = build_feedback_payloads(
+                response={
+                    "result": result,
+                    "records": {
+                        "merge_train_batch_candidate_record_id": result[
+                            "merge_train_batch_candidate_record_id"
+                        ]
+                    },
+                }
+            )
+            held_out_feedback = [
+                payload for payload in payloads if payload["pull_request_number"] == 3
+            ]
+            self.assertEqual([payload["event"] for payload in held_out_feedback], ["blocked"])
+            self.assertIn("#1", cast(str, held_out_feedback[0]["message"]))
+            self.assertIn("stays stopped", cast(str, held_out_feedback[0]["message"]))
+
+            # The held-out evidence survives a restart without spending the budget.
+            restarted = FilesystemRecordStore(state_dir=Path(directory))
+            persisted = max(
+                restarted.list_merge_train_batch_candidate_records(),
+                key=lambda record: record.updated_at,
+            ).candidate
+            self.assertEqual(persisted.status, "failed")
+            self.assertEqual(persisted.batch_body_retry_of, "earlier-failure")
+            self.assertEqual(
+                [(entry.pull_request_number, entry.conflicts_with) for entry in persisted.held_out],
+                [(3, (1,))],
+            )
+            later = self._reflow(restarted, persisted)
+            self.reflow_client.probe_batch_entry_conflicts.assert_not_called()
+            self.assertEqual(later["reason_code"], "batch_body_retry_already_used")
+            self.assertFalse(
+                [
+                    payload
+                    for payload in build_feedback_payloads(
+                        response={"result": later, "records": {}}
+                    )
+                    if payload["pull_request_number"] == 3
+                ]
+            )
 
     def test_active_batch_reports_later_review_wait_even_when_that_pr_is_behind(self) -> None:
         from control_plane.merge_train_controller_run_once import (

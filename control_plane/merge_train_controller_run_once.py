@@ -3337,15 +3337,17 @@ def try_reflow_failed_merge_train_candidate(
         if not body_retry_approved:
             # A probe reducing a changed queue back to the failed membership
             # cannot evade the unchanged-queue gates or mint another retry.
-            return {
-                "repository": repository,
-                "base_branch": base_branch,
-                "mode": "dry-run",
-                "controller_action": "candidate_failed",
-                "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
-                "candidate": active_candidate_record.candidate.model_dump(mode="json"),
-                "reason_code": "unchanged_batch_after_conflict_probe",
-            }
+            return _stop_failed_batch_after_conflict_probe(
+                candidate_store=candidate_store,
+                active_candidate_record=active_candidate_record,
+                probe=probe,
+                repository=repository,
+                base_branch=base_branch,
+                recorded_at=recorded_at,
+                trace_id=trace_id,
+                mutate=mutate,
+                lease=lease,
+            )
         # A separate ref prevents rediscovery of the failed closed batch PR.
         batch_id = candidate.batch_id + "-body-retry"
         candidate = MergeTrainBatchCandidate.model_validate(
@@ -3712,6 +3714,57 @@ def _probe_queue_entry_conflicts(
         held_out=held_out,
         report=report,
     )
+
+
+def _stop_failed_batch_after_conflict_probe(
+    *,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    active_candidate_record: MergeTrainBatchCandidateRecord,
+    probe: _ConflictProbeOutcome,
+    repository: str,
+    base_branch: str,
+    recorded_at: str,
+    trace_id: str,
+    mutate: bool,
+    lease: MergeTrainControllerLeaseContext,
+) -> dict[str, object]:
+    """Keep the failed batch stopped, but remember the pull requests the probe held out.
+
+    The failed candidate keeps its status and retry budget. Its new held-out
+    entries keep later passes from probing the same conflict again, until the
+    held-out pull request's head changes.
+    """
+    failed = active_candidate_record.candidate
+    record_id = active_candidate_record.record_id
+    if mutate and probe.held_out != failed.held_out:
+        lease.checkpoint(
+            active_action="reflow_candidate",
+            active_phase="persist_held_out_entries",
+            active_record_id=record_id,
+            active_pull_request_number=None,
+            step_payload={"candidate_record_id": record_id},
+        )
+        failed = failed.model_copy(update={"held_out": probe.held_out})
+        updated_record = build_merge_train_batch_candidate_record(
+            ordinary_job_binding=active_candidate_record.ordinary_job_binding,
+            candidate=failed,
+            source=f"service:controller:candidate-held-out:{trace_id}",
+            updated_at=recorded_at,
+        )
+        candidate_store.write_merge_train_batch_candidate_record(updated_record)
+        record_id = updated_record.record_id
+    result: dict[str, object] = {
+        "repository": repository,
+        "base_branch": base_branch,
+        "mode": "dry-run",
+        "controller_action": "candidate_failed",
+        "merge_train_batch_candidate_record_id": record_id,
+        "candidate": failed.model_dump(mode="json"),
+        "reason_code": "unchanged_batch_after_conflict_probe",
+    }
+    if probe.report is not None:
+        result["conflict_probe"] = probe.report
+    return result
 
 
 def _entries_ahead_of(

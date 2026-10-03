@@ -608,7 +608,11 @@ merge onto the base). The controller result reports the probe as
 requests it conflicts with. Later candidates carry the hold-out forward while
 its head is unchanged, so the rest of the queue lands. A new head brings it
 back into the queue; until then, its author resolves the conflict, typically
-after the others land. A dry run writes no ref and reports
+after the others land. When the probe reduces a changed queue back to a failed
+batch's membership, the batch stays stopped and keeps its retry budget; the
+failed candidate records the new hold-out, and feedback says the batch ahead is
+stopped, so later passes do not probe the same conflict again. A dry run writes
+no ref and reports
 `conflict_probe.status: will_run` with the pull requests a mutating pass would
 probe.
 

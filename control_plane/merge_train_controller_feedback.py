@@ -68,7 +68,7 @@ def build_feedback_payloads(
         }
         for pull_request_number in pull_request_numbers
     ]
-    if controller_action == "plan_candidate":
+    if controller_action in {"plan_candidate", "candidate_failed"}:
         payloads.extend(
             {
                 "schema_version": 1,
@@ -82,7 +82,9 @@ def build_feedback_payloads(
                 "source": source,
             }
             for pull_request_number, held_out_message in _held_out_messages(
-                result=result, base_branch=base_branch
+                result=result,
+                base_branch=base_branch,
+                stopped=controller_action == "candidate_failed",
             )
         )
     return payloads
@@ -265,13 +267,32 @@ def _blocking_detail(result: dict[str, Any]) -> str:
     return ""
 
 
-def _held_out_messages(*, result: dict[str, Any], base_branch: str) -> list[tuple[int, str]]:
-    """Tell each held-out pull request which queued pull requests it conflicts with."""
+def _held_out_messages(
+    *, result: dict[str, Any], base_branch: str, stopped: bool
+) -> list[tuple[int, str]]:
+    """Tell each held-out pull request which queued pull requests it conflicts with.
+
+    A stopped failed batch reports only the pull requests its own probe just held
+    out, so later passes do not repeat the message.
+    """
+    probed: set[object] | None = None
+    if stopped:
+        probed = {
+            _as_dict(entry).get("pull_request_number")
+            for entry in _as_list(_as_dict(result.get("conflict_probe")).get("held_out"))
+        }
+    queue_state = (
+        "The failed batch ahead of it stays stopped until someone resolves it."
+        if stopped
+        else "The rest of the queue continues without it."
+    )
     messages: list[tuple[int, str]] = []
     for held_out in _as_list(_as_dict(result.get("candidate")).get("held_out")):
         held_out_entry = _as_dict(held_out)
         number = held_out_entry.get("pull_request_number")
         if not isinstance(number, int) or number <= 0:
+            continue
+        if probed is not None and number not in probed:
             continue
         conflicts_with: list[int] = [
             other
@@ -287,9 +308,8 @@ def _held_out_messages(*, result: dict[str, Any], base_branch: str) -> list[tupl
             (
                 number,
                 f"Launchplane left this pull request out of the merge-train batch: it "
-                f"{conflict}. The rest of the queue continues without it. It rejoins "
-                "the queue when its head changes; resolve the conflict, typically "
-                "after the others land.",
+                f"{conflict}. {queue_state} It rejoins the queue when its head changes; "
+                "resolve the conflict, typically after the others land.",
             )
         )
     return messages
