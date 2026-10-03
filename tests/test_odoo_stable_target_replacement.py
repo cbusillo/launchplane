@@ -4471,6 +4471,10 @@ class OdooTargetReplacementFailureStageTests(unittest.TestCase):
         )
 
         self.assertEqual(error.detail_keys, tuple(sorted((long_key, longest_key))))
+        # The deploy step's recorded failure keeps them too.
+        failure = _deploy_step_failure(error)
+        self.assertEqual(failure.code, "deploy_blocked.runtime_key_safety_refused")
+        self.assertEqual(failure.keys, tuple(sorted((long_key, longest_key))))
 
     def test_every_stage_code_has_a_testing_failure_description(self) -> None:
         for code in (
