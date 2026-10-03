@@ -96,13 +96,18 @@ def bind_no_target_retirement(
         sorted(
             (
                 PreviewRecord.model_validate(preview)
-                for preview in store.list_preview_records(anchor_repo=profile.repository)
+                for preview in (
+                    store.list_preview_records(context_name=profile.preview.context)
+                    if profile.preview.context
+                    else ()
+                )
             ),
             key=lambda preview: preview.preview_id,
         )
     )
     if any(
         preview.context != profile.preview.context
+        or preview.anchor_repo not in {profile.repository, profile.repository.partition("/")[2]}
         or preview.active_generation_id
         or preview.serving_generation_id
         or preview.latest_generation_id
@@ -112,23 +117,22 @@ def bind_no_target_retirement(
         raise ProductRetirementBlockedError(
             "No-target retirement found preview generation evidence."
         )
-    # This path only ends failed provisioning; it does not delete runtime data or secrets.
-    if any(
-        store.list_runtime_environment_records(context_name=name)
-        or store.list_secret_records(context_name=name)
-        for name in contexts - {context}
-    ):
-        raise ProductRetirementBlockedError(
-            "No-target retirement found historical runtime authority."
-        )
     return BoundProductRetirement(
         profile=profile,
         context=context,
         provider_target=None,
         dokploy_target=target,
         dokploy_target_id=None,
-        runtime_records=store.list_runtime_environment_records(context_name=context),
-        secret_records=store.list_secret_records(context_name=context),
+        runtime_records=tuple(
+            record
+            for name in sorted(contexts)
+            for record in store.list_runtime_environment_records(context_name=name)
+        ),
+        secret_records=tuple(
+            record
+            for name in sorted(contexts)
+            for record in store.list_secret_records(context_name=name)
+        ),
         previews=previews,
     )
 

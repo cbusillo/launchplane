@@ -35197,12 +35197,17 @@ class PostgresRecordStore(HumanSessionStore):
                     "No-target configuration changed before commit."
                 )
             previews = session.scalars(
-                select(LaunchplanePreviewRow)
-                .where(LaunchplanePreviewRow.anchor_repo == profile.repository)
-                .order_by(LaunchplanePreviewRow.preview_id)
+                select(LaunchplanePreviewRow).where(
+                    LaunchplanePreviewRow.context == profile.preview.context
+                )
             ).all()
             if (
-                tuple(PreviewRecord.model_validate(row.payload) for row in previews)
+                tuple(
+                    sorted(
+                        (PreviewRecord.model_validate(row.payload) for row in previews),
+                        key=lambda preview: preview.preview_id,
+                    )
+                )
                 != bound.previews
             ):
                 raise ProductRetirementBlockedError("No-target previews changed before commit.")

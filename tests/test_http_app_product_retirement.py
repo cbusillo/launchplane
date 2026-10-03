@@ -126,7 +126,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             PreviewRecord(
                 preview_id="stale-preview",
                 context="example-site-preview",
-                anchor_repo="every/example-site",
+                anchor_repo="example-site",
                 anchor_pr_number=1,
                 anchor_pr_url="https://github.com/every/example-site/pull/1",
                 preview_label="launchplane-preview",
@@ -135,6 +135,15 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 created_at=NOW,
                 updated_at=NOW,
                 eligible_at=NOW,
+            )
+        )
+        store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="context",
+                context="example-site-preview",
+                instance="",
+                env={"PREVIEW_BASE_URL": "https://preview.example.invalid"},
+                updated_at=NOW,
             )
         )
         return store
@@ -165,6 +174,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(plan_response.status_code, 202, plan_response.text)
                 plan = json.loads(plan_response.text)
                 self.assertEqual(store.read_preview_record("stale-preview").state, "failed")
+                runtime_before = store.list_runtime_environment_records()
                 apply_payload = {
                     **payload,
                     "mode": "apply",
@@ -188,6 +198,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 profile = store.read_product_profile_record("example-site")
                 self.assertEqual(profile.lifecycle_state, "retired")
                 self.assertFalse(profile.preview.enabled)
+                self.assertEqual(store.list_runtime_environment_records(), runtime_before)
                 self.assertEqual(request_product_reconcile_sweep(store, NOW), ())
                 inventory_reads_before_replay = inventory.call_count
                 replay = await _asgi_request(

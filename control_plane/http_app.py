@@ -21281,7 +21281,8 @@ def create_launchplane_fastapi_app(
                 if retirement_request.no_target:
                     from control_plane.product_retirement_no_target import observe_no_target_absence
 
-                    observation = observe_no_target_absence(
+                    observation = await asyncio.to_thread(
+                        observe_no_target_absence,
                         control_plane_root=resolved_control_plane_root,
                         bound=bound,
                         observed_at=requested_at,

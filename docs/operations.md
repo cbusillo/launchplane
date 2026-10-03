@@ -3622,6 +3622,10 @@ target configuration, secret records and artifact/package history are preserved.
 Retired profiles are already excluded from the product reconciliation sweep.
 Running either mode against shared Launchplane remains an admin action; source
 delivery does not approve a live retirement or package deletion.
+Before apply, finish or cancel other provisioning actions for the product; do
+not start onboarding or stable-lane repair concurrently with retirement. The
+database checks fence recorded authority and the reconciler, not an independent
+provider operation that has not recorded its result yet.
 
 The updated reusable worker supports this intent. The protected dispatch wrapper
 still pins the earlier tracked-target-only worker: expose `no_target` and pin the

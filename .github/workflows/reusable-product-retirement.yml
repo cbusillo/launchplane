@@ -181,6 +181,10 @@ jobs:
           test "$(jq -r '.result.product' product-retirement-response.json)" = "$PRODUCT"
           test "$(jq -r '.result.instance' product-retirement-response.json)" = "$INSTANCE"
           test "$(jq -r '.result.target_id_sha256' product-retirement-response.json)" = "$EXPECTED_TARGET_SHA256"
+          if [ "${NO_TARGET:-false}" = "true" ]; then
+            test "$(jq -r '.result.no_target' product-retirement-response.json)" = "true"
+            test "$(jq -r '.result.provider_absence_verified' product-retirement-response.json)" = "true"
+          fi
           if jq -e '.. | objects | has("target_id") or has("domain_ids") or has("provider_operation_key")' product-retirement-response.json >/dev/null; then
             echo "Retirement response exposed an internal provider identifier." >&2
             exit 1
@@ -214,7 +218,13 @@ jobs:
             echo "- Mode: ${MODE}"
             echo "- Product: ${PRODUCT}"
             echo "- Instance: ${INSTANCE}"
-            echo "- Target SHA-256: ${EXPECTED_TARGET_SHA256}"
+            if [ "${NO_TARGET:-false}" = "true" ]; then
+              echo "- Provider writes: none (provider absence proven)"
+              echo "- Planned previews: $(jq -r '.result.planned_preview_ids | join(", ")' product-retirement-response.json)"
+              echo "- Closed previews: $(jq -r '.result.closed_preview_ids | join(", ")' product-retirement-response.json)"
+            else
+              echo "- Target SHA-256: ${EXPECTED_TARGET_SHA256}"
+            fi
             echo "- Plan record: $(jq -r '.records.product_retirement_plan_id' product-retirement-response.json)"
             echo "- Plan SHA-256: $(jq -r '.result.plan_sha256' product-retirement-response.json)"
             echo "- Outcome: $(jq -r '.result.outcome' product-retirement-response.json)"

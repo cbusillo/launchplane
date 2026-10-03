@@ -1100,6 +1100,7 @@ def redacted_product_retirement_response(record: ProductRetirementRecord) -> dic
             "target_id_sha256": record.provider_observation.target_id_sha256,
             "no_target": record.provider_observation.no_target,
             "closed_preview_ids": list(evidence.closed_preview_ids),
+            "planned_preview_ids": list(record.authority_snapshot.preview_record_refs),
             "provider_observation_sha256": canonical_sha256(
                 record.provider_observation.model_dump(
                     mode="json",
@@ -1112,7 +1113,12 @@ def redacted_product_retirement_response(record: ProductRetirementRecord) -> dic
                 else ""
             ),
             "provider_effect_phases": list(evidence.provider_effect_phases),
-            "provider_absence_verified": evidence.provider_absence_verified,
+            "provider_absence_verified": evidence.provider_absence_verified
+            or (
+                record.mode == "plan"
+                and record.provider_observation.no_target
+                and record.provider_observation.state == "absent"
+            ),
             "runtime_delete_event_count": len(evidence.runtime_delete_event_ids),
             "deleted_authority_refs": list(evidence.deleted_authority_refs),
             "disabled_secret_record_count": len(evidence.disabled_secret_record_sha256),
