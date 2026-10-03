@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane import provider_key_adoption
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentScope,
     ScalarValue,
+    normalize_retired_provider_keys,
 )
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyFinding,
@@ -25,6 +28,8 @@ from control_plane.contracts.product_profile_record import (
 
 
 ProductConfigMode = Literal["dry-run", "apply"]
+
+_ENV_KEY_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 
 
 class ProductConfigRuntimeInput(BaseModel):
@@ -87,6 +92,10 @@ class ProductEnvironmentConfigApplyEnvelope(BaseModel):
     reason: str = ""
     confirmation: str = ""
     runtime_settings: dict[str, ScalarValue] = Field(default_factory=dict)
+    retired_provider_keys: list[str] = Field(
+        default_factory=list,
+        description="Provider keys to retire on this lane, added to those it already retires.",
+    )
     managed_secrets: list[ProductEnvironmentManagedSecretInput] = Field(default_factory=list)
 
     @field_validator("mode", mode="before")
@@ -96,6 +105,13 @@ class ProductEnvironmentConfigApplyEnvelope(BaseModel):
         if normalized_value not in {"dry-run", "apply"}:
             raise ValueError("Product config mode must be 'dry-run' or 'apply'.")
         return cast(ProductConfigMode, normalized_value)
+
+    @field_validator("retired_provider_keys", mode="before")
+    @classmethod
+    def _validate_retired_provider_keys(cls, value: object) -> list[str]:
+        if isinstance(value, (list, tuple)):
+            value = [key.strip() if isinstance(key, str) else key for key in value]
+        return list(normalize_retired_provider_keys(value))
 
     @model_validator(mode="after")
     def _validate_input_boundary(self) -> "ProductEnvironmentConfigApplyEnvelope":
@@ -113,7 +129,8 @@ class ProductEnvironmentConfigApplyEnvelope(BaseModel):
         secret_keys = [(secret.integration, secret.binding_key) for secret in self.managed_secrets]
         if len(secret_keys) != len(set(secret_keys)):
             raise ValueError("Managed secret integration and binding keys must be unique.")
-        if bool(self.runtime_settings) == bool(self.managed_secrets):
+        runtime_change = bool(self.runtime_settings or self.retired_provider_keys)
+        if runtime_change == bool(self.managed_secrets):
             raise ValueError(
                 "Product environment config requests must contain runtime settings or managed "
                 "secrets, but not both."
@@ -350,12 +367,23 @@ def product_environment_config_confirmation(*, product: str, environment: str) -
     return f"APPLY {product.strip()}/{environment.strip()}"
 
 
+class ProductEnvironmentConfigRefused(ValueError):
+    """The form request names a site setting the service will not record; names only."""
+
+    def __init__(self, message: str, *, code: str, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
+
+
 def product_environment_config_apply_request(
     *,
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
     request: ProductEnvironmentConfigApplyEnvelope,
     owner_submission_resolver: Callable[[ProductSecretConfigRequirement, str], str] | None = None,
+    current_retired_provider_keys: tuple[str, ...] = (),
+    undeclared_settings_allowed: bool = True,
 ) -> ProductConfigApplyEnvelope:
     runtime_requirements = {
         requirement.key
@@ -366,9 +394,6 @@ def product_environment_config_apply_request(
             lane=lane,
         )
     }
-    unknown_runtime_keys = sorted(set(request.runtime_settings) - runtime_requirements)
-    if unknown_runtime_keys:
-        raise ValueError("Runtime settings contain keys not declared for this environment.")
 
     secret_requirements = {
         (requirement.integration, requirement.binding_key): requirement
@@ -386,6 +411,29 @@ def product_environment_config_apply_request(
     if unknown_secret_keys:
         raise ValueError("Managed secrets contain bindings not declared for this environment.")
 
+    # A site's own settings need no declaration (#2467); no declaration vouches for them,
+    # so each must be a plain setting rather than a credential.
+    site_setting_keys = sorted(set(request.runtime_settings) - runtime_requirements)
+    if site_setting_keys and not undeclared_settings_allowed:
+        raise ProductEnvironmentConfigRefused(
+            "A live product's undeclared settings are recorded by the operator, "
+            "not with the local operator credential the operator's agent uses.",
+            code="live_product_requires_operator",
+            status_code=403,
+        )
+    secret_binding_keys = {binding_key for _, binding_key in secret_requirements}
+    for key in site_setting_keys:
+        if (
+            not _ENV_KEY_PATTERN.fullmatch(key)
+            or key in secret_binding_keys
+            or provider_key_adoption.looks_like_credential(key, str(request.runtime_settings[key]))
+        ):
+            raise ProductEnvironmentConfigRefused(
+                f"Site setting {key!r} must be an env key name holding a plain setting; "
+                "write credentials as managed secrets.",
+                code="runtime_setting_refused",
+            )
+
     secrets = []
     for secret in request.managed_secrets:
         requirement = secret_requirements[(secret.integration, secret.binding_key)]
@@ -402,15 +450,26 @@ def product_environment_config_apply_request(
             )
         )
     runtime_env = None
-    if request.runtime_settings:
+    retired_provider_keys = None
+    if request.retired_provider_keys:
+        retired_provider_keys = tuple(
+            sorted(set(current_retired_provider_keys) | set(request.retired_provider_keys))
+        )
+    if request.runtime_settings or retired_provider_keys is not None:
         runtime_env = ProductConfigRuntimeInput(
             scope="instance",
             context=lane.context,
             instance=lane.instance,
             env=request.runtime_settings,
+            **(
+                {"retired_provider_keys": retired_provider_keys}
+                if retired_provider_keys is not None
+                else {}
+            ),
         )
     return ProductConfigApplyEnvelope(
-        schema_version=request.schema_version,
+        # Retirement is a product-config schema v2 field.
+        schema_version=2 if retired_provider_keys is not None else request.schema_version,
         mode=request.mode,
         product=profile.product,
         context=lane.context,

@@ -1,12 +1,14 @@
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone, tzinfo
 from email.message import Message
 import io
 import json
+import time
 import unittest
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
+from typing import Literal, cast
 from unittest.mock import patch
 from urllib.error import HTTPError
 
@@ -32,7 +34,10 @@ from control_plane.contracts.preview_generation_record import (
     PreviewPullRequestSummary,
 )
 from control_plane.contracts.preview_record import PreviewRecord, PreviewState
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductPreviewProfile,
+)
 from control_plane.contracts.product_reconcile import (
     ProductReconcileLeaseLostError,
     ProductReconcileRequestRecord,
@@ -50,6 +55,7 @@ from control_plane.contracts.durable_operation_authorization import (
 from control_plane.launchplane_reconcile_authorization import (
     build_launchplane_reconcile_authorization,
     launchplane_reconcile_generic_web_testing_allowed,
+    launchplane_reconcile_preview_destination_allowed,
 )
 from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_ROUTE,
@@ -93,6 +99,13 @@ from tests.support.durable_operations import durable_operation_authorization_pay
 from tests.support.artifact_manifests import artifact_manifest_v2
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebProviderDeploymentObservation,
+)
+from control_plane.workflows.generic_web_preview import (
+    GenericWebPreviewDestroyRequest,
+    GenericWebPreviewDestroyResult,
+    GenericWebPreviewRefreshRequest,
+    GenericWebPreviewRefreshResult,
+    _build_preview_runtime_identity,
 )
 from tests.support.profiles import _odoo_preview_profile_payload, product_profile_payload
 from tests.test_generic_web_deploy import _FakeGenericWebDeployProvider
@@ -576,6 +589,35 @@ class ProductReconcileStoreTests(ProductReconcileTestCase):
         self.assertEqual((reclaimed.lease_owner, reclaimed.attempt), ("worker-b", 2))
         with self.assertRaises(ProductReconcileLeaseLostError):
             self.store.complete_product_reconcile_request("site:testing", "worker-a", "done", {})
+
+    def test_a_renewed_lease_is_not_reclaimed_and_only_its_holder_renews_it(self) -> None:
+        self.request()
+        self.store.claim_next_product_reconcile_request("worker-a", 60, now="2026-09-29T12:00:00Z")
+
+        self.assertTrue(
+            self.store.renew_product_reconcile_lease(
+                "site:testing", "worker-a", 60, now="2026-09-29T12:00:50Z"
+            )
+        )
+        self.assertFalse(
+            self.store.renew_product_reconcile_lease(
+                "site:testing", "worker-b", 60, now="2026-09-29T12:00:55Z"
+            )
+        )
+        self.assertIsNone(
+            self.store.claim_next_product_reconcile_request(
+                "worker-b", 60, now="2026-09-29T12:01:30Z"
+            )
+        )
+        reclaimed = self.store.claim_next_product_reconcile_request(
+            "worker-b", 60, now="2026-09-29T12:02:00Z"
+        )
+        assert reclaimed is not None
+        self.assertFalse(
+            self.store.renew_product_reconcile_lease(
+                "site:testing", "worker-a", 60, now="2026-09-29T12:02:10Z"
+            )
+        )
 
     def test_request_during_run_returns_it_to_pending_with_the_plan(self) -> None:
         self.request()
@@ -1410,6 +1452,290 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(completed.state, "pending")
         self.assertEqual(completed.last_plan["deferred"], "pull_request_moved")
         self.assertEqual(self.provider.applied, [])
+
+
+def _generic_web_preview_profile() -> LaunchplaneProductProfileRecord:
+    return _generic_web_profile().model_copy(
+        update={
+            "preview": ProductPreviewProfile(
+                enabled=True,
+                context="site-preview",
+                slug_template="pr-{number}",
+                template_instance="testing",
+            )
+        }
+    )
+
+
+class FakeGenericWebPreviewDriver:
+    """Plays the provider side of a generic-web preview; Launchplane's records are real."""
+
+    def __init__(self, test: unittest.TestCase) -> None:
+        self.changes: list[tuple[str, int]] = []
+        self.refresh_status = "pass"
+        self.during_refresh: Callable[[], None] = lambda: None
+        for name, fake in (
+            ("execute_generic_web_preview_refresh", self.refresh),
+            ("execute_generic_web_preview_destroy", self.destroy),
+        ):
+            patcher = patch(f"control_plane.generic_web_preview_http.{name}", side_effect=fake)
+            patcher.start()
+            test.addCleanup(patcher.stop)
+
+    def refresh(
+        self,
+        *,
+        request: GenericWebPreviewRefreshRequest,
+        profile: LaunchplaneProductProfileRecord,
+        **_kwargs: object,
+    ) -> GenericWebPreviewRefreshResult:
+        assert request.anchor_pr_number is not None
+        self.during_refresh()
+        self.changes.append(("refresh", request.anchor_pr_number))
+        return GenericWebPreviewRefreshResult(
+            refresh_status=cast(Literal["pass", "blocked", "fail"], self.refresh_status),
+            refresh_started_at="2026-10-02T12:00:00Z",
+            refresh_finished_at="2026-10-02T12:01:00Z",
+            product=profile.product,
+            context=profile.preview.context,
+            preview_slug=request.preview_slug,
+            application_name=f"site-{request.preview_slug}",
+            preview_url=f"https://{request.preview_slug}.site.example.test",
+            runtime_identity=_build_preview_runtime_identity(
+                profile=profile,
+                preview_slug=request.preview_slug,
+                image_reference=request.image_reference,
+                anchor_head_sha=request.anchor_head_sha,
+            ),
+            error_message="" if self.refresh_status == "pass" else PROVIDER_FAILURE_TEXT,
+        )
+
+    def destroy(
+        self,
+        *,
+        request: GenericWebPreviewDestroyRequest,
+        profile: LaunchplaneProductProfileRecord,
+        **_kwargs: object,
+    ) -> GenericWebPreviewDestroyResult:
+        assert request.anchor_pr_number is not None
+        self.changes.append(("destroy", request.anchor_pr_number))
+        return GenericWebPreviewDestroyResult(
+            destroy_status="pass",
+            destroy_started_at="2026-10-02T13:00:00Z",
+            destroy_finished_at="2026-10-02T13:01:00Z",
+            product=profile.product,
+            context=profile.preview.context,
+            preview_slug=request.preview_slug,
+            application_name=f"site-{request.preview_slug}",
+            application_id="application-1",
+        )
+
+
+class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.store.write_product_profile_record(_generic_web_preview_profile())
+        self.github = FakeGenericWebGitHub()
+        self.driver = FakeGenericWebPreviewDriver(self)
+
+    def test_an_open_pr_gets_a_preview_of_its_verified_build_until_it_closes(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+
+        applied = self.reconcile()
+
+        self.assertEqual(
+            (applied["action"], applied["preview_result_status"], applied["preview_url"]),
+            ("apply", "pass", "https://pr-5.site.example.test"),
+        )
+        (preview,) = self.store.list_preview_records()
+        self.assertEqual((preview.anchor_pr_number, preview.state), (5, "active"))
+        self.assertEqual(preview.serving_generation_id, preview.active_generation_id)
+        (comment,) = self.comments.on(5)
+        self.assertIn("https://pr-5.site.example.test", cast(str, comment["body"]))
+        # Nothing went to the Odoo artifact store.
+        self.assertEqual(self.store.list_artifact_manifests(), ())
+
+        self.request("preview", 5)
+        kept = self.reconcile()
+
+        self.assertEqual((kept["action"], kept["reason"]), ("none", "already_serving"))
+        self.assertEqual(kept["current_image_digest"], _digest(PR_HEAD))
+
+        self.github.pull_request["state"] = "closed"
+        self.request("preview", 5)
+        destroyed = self.reconcile()
+
+        self.assertEqual(
+            (destroyed["action"], destroyed["preview_result_status"]), ("destroy", "pass")
+        )
+        self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
+        self.assertEqual(self.driver.changes, [("refresh", 5), ("destroy", 5)])
+
+    def test_a_new_push_replaces_the_preview_it_serves(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.reconcile()
+        pushed = "b" * 40
+        self.github.pull_request["head"] = {"sha": pushed}
+        self.github.add_run(51, pushed, event="pull_request")
+        self.request("preview", 5)
+
+        replaced = self.reconcile()
+
+        self.assertEqual(replaced["action"], "apply")
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["reason"], "already_serving")
+        self.assertEqual(self.driver.changes, [("refresh", 5), ("refresh", 5)])
+
+    def test_a_pr_without_a_verified_build_keeps_the_preview_it_has(self) -> None:
+        # A preview the product's old preview workflow made, before its build.yml existed.
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.reconcile()
+        self.github.runs.clear()
+        self.github.pull_request["head"] = {"sha": "b" * 40}
+        self.request("preview", 5)
+        before = self.snapshot()
+
+        waiting = self.reconcile()
+
+        self.assertEqual((waiting["action"], waiting["reason"]), ("wait", "no_verified_build"))
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.driver.changes, [("refresh", 5)])
+
+    def test_a_failed_refresh_keeps_driver_text_out_and_waits_for_a_new_build(self) -> None:
+        self.driver.refresh_status = "fail"
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        failures = []
+        for _attempt in range(2):
+            self.request("preview", 5)
+            failures.append(self.run_once())
+
+        for completed in failures:
+            self.assertEqual(completed.state, "failed")
+            (comment,) = self.comments.on(5)
+            for text in (completed.last_error, cast(str, comment["body"])):
+                for fragment in PROVIDER_FAILURE_FRAGMENTS:
+                    self.assertNotIn(fragment, text)
+        self.assertIn("tries again when the PR has a new build", failures[-1].last_error)
+        self.assertEqual(self.driver.changes, [("refresh", 5)])
+
+        # A re-run of the Build workflow can produce the same image; it is tried again.
+        self.driver.refresh_status = "pass"
+        self.github.add_run(51, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+
+        self.assertEqual(self.reconcile()["preview_result_status"], "pass")
+        self.assertEqual(self.store.list_preview_records()[0].state, "active")
+        self.assertEqual(self.driver.changes, [("refresh", 5), ("refresh", 5)])
+
+    def test_a_failed_replacement_is_not_mistaken_for_the_earlier_preview(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.reconcile()
+        pushed = "b" * 40
+        self.github.pull_request["head"] = {"sha": pushed}
+        self.github.add_run(51, pushed, event="pull_request")
+        self.driver.refresh_status = "fail"
+        self.request("preview", 5)
+        self.assertEqual(self.run_once().state, "failed")
+        # The PR is force-pushed back to the build the preview served before.
+        self.driver.refresh_status = "pass"
+        self.github.pull_request["head"] = {"sha": PR_HEAD}
+        self.request("preview", 5)
+
+        restored = self.reconcile()
+
+        self.assertEqual((restored["action"], restored["preview_result_status"]), ("apply", "pass"))
+        self.assertEqual(self.driver.changes, [("refresh", 5)] * 3)
+
+    def test_a_refresh_longer_than_the_lease_keeps_it(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        claims: list[object] = []
+
+        def outlast_the_lease() -> None:
+            # Another worker tries to claim the PR while the refresh outlasts the lease.
+            time.sleep(3)
+            claims.append(self.store.claim_next_product_reconcile_request("worker-b", 2))
+
+        self.driver.during_refresh = outlast_the_lease
+        completed = run_product_reconcile_once(
+            record_store=self.store,
+            lease_owner="worker-a",
+            lease_seconds=2,
+            transport_factory=lambda _store, _profile: self.github,
+            control_plane_root=self.root,
+            preview_hooks=self.provider.hooks(),
+            feedback_token=lambda _store, _profile: "feedback-token",
+            public_origin=lambda: self.public_origin,
+        )
+
+        assert completed is not None
+        self.assertEqual((completed.state, completed.last_error), ("done", ""))
+        self.assertEqual(claims, [None])
+
+    def test_a_worker_that_lost_its_lease_records_nothing_more(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+
+        def lose_the_lease() -> None:
+            # The lease expired during the refresh and another worker claimed the PR.
+            self.store.renew_product_reconcile_lease(
+                "site:preview:5", "worker-a", 1, now="2026-01-01T00:00:00Z"
+            )
+            self.store.claim_next_product_reconcile_request("worker-b", 600)
+
+        self.driver.during_refresh = lose_the_lease
+        with self.assertRaises(ProductReconcileLeaseLostError):
+            self.run_once()
+
+        (preview,) = self.store.list_preview_records()
+        self.assertNotEqual(preview.state, "active")
+        self.assertEqual(self.driver.changes, [("refresh", 5)])
+
+    def test_a_refresh_whose_verification_was_not_recorded_is_run_again(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        with patch(
+            "control_plane.product_reconcile.apply_generic_web_preview_verification_result",
+            side_effect=RuntimeError("worker stopped"),
+        ):
+            self.assertEqual(self.run_once().state, "failed")
+        self.request("preview", 5)
+
+        recovered = self.reconcile()
+
+        self.assertEqual(
+            (recovered["action"], recovered["preview_result_status"]), ("apply", "pass")
+        )
+        (preview,) = self.store.list_preview_records()
+        self.assertEqual(preview.state, "active")
+        self.assertEqual(preview.serving_generation_id, preview.active_generation_id)
+
+    def test_a_pr_that_moves_before_the_provider_change_is_reconciled_again(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        # Reads: the plan, the build verification, then the check just before refreshing.
+        self.github.pull_request_move = (2, {"head": {"sha": "b" * 40}})
+        self.request("preview", 5)
+
+        completed = self.run_once()
+
+        self.assertEqual(completed.state, "pending")
+        self.assertEqual(completed.last_plan["deferred"], "pull_request_moved")
+        self.assertEqual(self.driver.changes, [])
+
+    def test_the_reconcile_may_change_only_the_products_own_previews(self) -> None:
+        def allowed(*, context: str = "site-preview", slug: str = "pr-5") -> bool:
+            return launchplane_reconcile_preview_destination_allowed(
+                record_store=self.store, product="site", context=context, preview_slug=slug
+            )
+
+        self.assertTrue(allowed())
+        self.assertFalse(allowed(context="cm"))
+        self.assertFalse(allowed(slug="prod"))
+        self.assertFalse(allowed(slug="testing"))
 
 
 class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
