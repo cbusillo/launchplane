@@ -391,7 +391,13 @@ def _controller_can_continue(result: dict[str, object]) -> bool:
     if result.get("error"):
         return False
     action = result.get("controller_action")
-    if action in {"plan_candidate", "plan_landing", "plan_stack_collapse", "retire_stale_landing"}:
+    if action in {
+        "plan_candidate",
+        "admit_collapsed_root",
+        "plan_landing",
+        "plan_stack_collapse",
+        "retire_stale_landing",
+    }:
         return True
     candidate = result.get("candidate")
     if action == "build_candidate" and isinstance(candidate, dict):

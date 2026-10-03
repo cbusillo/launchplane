@@ -119,7 +119,7 @@ class MergeTrainSchedulerPassTests(TestCase):
             "admitted"
         )
         actions = (
-            ("plan_candidate", "planned"),
+            ("admit_collapsed_root", "planned"),
             ("build_candidate", "ready_for_checks"),
             ("observe_candidate", "passed"),
             ("plan_landing", "passed"),
@@ -407,6 +407,25 @@ class MergeTrainSchedulerPassTests(TestCase):
 
 
 class MergeTrainSchedulerLoopTests(TestCase):
+    def test_event_wait_starts_a_fresh_pass_without_waiting_for_the_sweep(self) -> None:
+        stop_event = MagicMock(spec=Event)
+        stop_event.is_set.return_value = False
+        event_wait = MagicMock()
+        with patch.object(
+            merge_train_scheduler, "run_merge_train_scheduler_pass", return_value=()
+        ) as run:
+            run_merge_train_scheduler_loop(
+                record_store=object(),
+                control_plane_root=_ROOT,
+                stop_event=stop_event,
+                max_passes=2,
+                wait_for_event=event_wait,
+                monotonic=lambda: 0,
+            )
+        self.assertEqual(run.call_count, 2)
+        event_wait.assert_called_once()
+        stop_event.wait.assert_not_called()
+
     def test_passes_start_on_the_interval_and_survive_a_failed_pass(self) -> None:
         clock = iter([0.0, 40.0, 300.0, 310.0])
         waits: list[float] = []

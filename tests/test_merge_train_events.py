@@ -5,6 +5,7 @@ from threading import Event
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
+import click
 
 from control_plane import merge_train_events
 from control_plane.contracts.merge_train_policy import MergeTrainSchedulerPolicy
@@ -18,6 +19,7 @@ from tests.test_merge_train_scheduler import _policy_record
 
 class MergeTrainEventTests(TestCase):
     def setUp(self) -> None:
+        self.store = SimpleNamespace(notify_merge_train=MagicMock())
         self.policy = _policy_record(
             ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=False))
         )
@@ -34,12 +36,9 @@ class MergeTrainEventTests(TestCase):
                     )
                 ),
             ),
-            patch.object(
-                merge_train_events, "resolve_database_url", return_value="postgresql://test"
-            ),
             patch.object(merge_train_events, "_connect"),
         )
-        self.policy_reader, self.inventory_reader, _, self.connect = (
+        self.policy_reader, self.inventory_reader, self.connect = (
             patcher.start() for patcher in self.patchers
         )
         for patcher in self.patchers:
@@ -52,35 +51,36 @@ class MergeTrainEventTests(TestCase):
             "pull_request": {"base": {"ref": "main"}},
             "label": {"name": self.policy.policy.policies[0].enqueue_label},
         }
-        self.assertTrue(wake_merge_train_for_event(object(), "pull_request", payload))
+        self.assertTrue(wake_merge_train_for_event(self.store, "pull_request", payload))
         for event in ("check_run", "check_suite", "workflow_run"):
             self.assertTrue(
                 wake_merge_train_for_event(
-                    object(), event, {"repository": {"id": 42}, "action": "completed"}
+                    self.store, event, {"repository": {"id": 42}, "action": "completed"}
                 )
             )
         self.assertTrue(
             wake_merge_train_for_event(
-                object(), "status", {"repository": {"id": 42}, "state": "success"}
+                self.store, "status", {"repository": {"id": 42}, "state": "success"}
             )
         )
-        self.connect.return_value.__enter__.return_value.execute.assert_called()
+        self.store.notify_merge_train.assert_called()
+        self.connect.assert_not_called()
 
     def test_unmapped_disabled_or_unrelated_events_do_not_notify(self) -> None:
         payload: dict[str, object] = {"repository": {"id": 42}, "action": "completed"}
         self.inventory_reader.return_value.current_record = None
-        self.assertFalse(wake_merge_train_for_event(object(), "check_run", payload))
+        self.assertFalse(wake_merge_train_for_event(self.store, "check_run", payload))
         self.inventory_reader.return_value.current_record = SimpleNamespace(
             inventory_state="tracked", repository="cbusillo/other"
         )
-        self.assertFalse(wake_merge_train_for_event(object(), "check_run", payload))
+        self.assertFalse(wake_merge_train_for_event(self.store, "check_run", payload))
         self.inventory_reader.return_value.current_record.repository = "cbusillo/alpha"
         self.policy_reader.return_value = _policy_record(
             ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=False))
         )
-        self.assertFalse(wake_merge_train_for_event(object(), "check_run", payload))
+        self.assertFalse(wake_merge_train_for_event(self.store, "check_run", payload))
         self.assertFalse(
-            wake_merge_train_for_event(object(), "check_run", {**payload, "action": "created"})
+            wake_merge_train_for_event(self.store, "check_run", {**payload, "action": "created"})
         )
         self.connect.assert_not_called()
 
@@ -88,7 +88,7 @@ class MergeTrainEventTests(TestCase):
         for base, label in (("other", "ready-to-merge"), ("main", "other")):
             self.assertFalse(
                 wake_merge_train_for_event(
-                    object(),
+                    self.store,
                     "pull_request",
                     {
                         "repository": {"id": 42},
@@ -136,18 +136,41 @@ class MergeTrainEventTests(TestCase):
         self.assertEqual(status, 400)
         wake.assert_not_called()
 
+    def test_invalid_signature_never_wakes_the_train(self) -> None:
+        wake = MagicMock()
+        status, _ = handle_github_app_webhook_request(
+            b"{}",
+            "check_run",
+            "delivery",
+            "invalid",
+            object(),
+            Path("."),
+            "trace",
+            dependencies=GitHubAppWebhookDependencies(
+                webhook_secret=lambda: "secret",
+                verify_signature=MagicMock(side_effect=click.ClickException("invalid signature")),
+                wake_merge_train=wake,
+            ),
+        )
+        self.assertEqual(status, 401)
+        wake.assert_not_called()
+
     def test_listener_returns_on_notification_and_closes_connection(self) -> None:
         connection = self.connect.return_value
-        connection.notifies.return_value = iter([object()])
 
         # psycopg returns a generator with close().
+        pending = [object(), object(), object()]
+
         def notifications(**_: object) -> Iterator[object]:
-            yield object()
+            while pending:
+                yield pending.pop()
 
         connection.notifies.side_effect = notifications
         listener = MergeTrainEventListener("postgresql://test")
         listener.wait(300, Event())
         connection.execute.assert_called_once()
+        self.assertEqual(pending, [])
+        connection.notifies.assert_any_call(timeout=0)
         listener.close()
         connection.close.assert_called_once()
 

@@ -19,9 +19,8 @@ from control_plane.merge_train_policy_source import (
     resolve_merge_train_policy_record,
 )
 from control_plane.repository_inventory import get_repository_inventory_read_model
-from control_plane.storage.factory import resolve_database_url
 
-_CHANNEL = "launchplane_merge_train_wake"
+MERGE_TRAIN_EVENT_CHANNEL = "launchplane_merge_train_wake"
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -64,11 +63,10 @@ def wake_merge_train_for_event(
         )
     if not policies:
         return False
-    database_url = resolve_database_url()
-    if database_url is None:
+    notify = getattr(record_store, "notify_merge_train", None)
+    if not callable(notify):
         return False
-    with _connect(database_url) as connection:
-        connection.execute("SELECT pg_notify(%s, '')", (_CHANNEL,))
+    notify()
     return True
 
 
@@ -102,14 +100,21 @@ class MergeTrainEventListener:
         try:
             if self.connection is None:
                 self.connection = _connect(self.database_url)
-                self.connection.execute(f"LISTEN {_CHANNEL}")
+                self.connection.execute(f"LISTEN {MERGE_TRAIN_EVENT_CHANNEL}")
             while not stop_event.is_set():
                 remaining = deadline - monotonic()
                 if remaining <= 0:
                     return
-                notifications = self.connection.notifies(timeout=min(remaining, 1), stop_after=1)
-                if next(notifications, None) is not None:
-                    notifications.close()
+                received = False
+                # Fully consume the received batch: closing a generator after
+                # its first yield can retain backlog or discard a partial batch.
+                for _ in self.connection.notifies(timeout=min(remaining, 1), stop_after=1):
+                    received = True
+                if received:
+                    # Fold hints queued while the controller was busy into one
+                    # fresh pass; timeout=0 polls without waiting for new events.
+                    for _ in self.connection.notifies(timeout=0):
+                        pass
                     return
         except Exception:  # noqa: BLE001 - the sweep remains available when notifications fail.
             _LOGGER.warning("Merge train event listener unavailable; using timed sweep.")
