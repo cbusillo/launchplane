@@ -26,6 +26,11 @@ not describe runtime authority until it is implemented, deployed, and activated.
   website or service repo operated by Launchplane.
 - [product-repo-contract.md](product-repo-contract.md) — thin product repo
   approval gate and new website repo checklist.
+- [artifact-provenance.md](artifact-provenance.md) — how Launchplane verifies
+  which repository and commit a product's own build came from.
+- [event-driven-deploys.md](event-driven-deploys.md) — GitHub App webhook
+  receiver and reconciler that deploy verified builds to testing and previews
+  without the product repository calling Launchplane.
 - [preview-workflow-contract.md](preview-workflow-contract.md) — reusable thin
   preview workflow event, idempotency, feedback, and lifecycle contract.
 - [driver-descriptors.md](driver-descriptors.md) — provider-neutral driver
@@ -39,8 +44,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [post-v2-audit.md](post-v2-audit.md) — post-v2 product, security,
   persistence, contract, test, and modularity audit baseline and execution
   graph.
-- [work-graph-read-model.md](work-graph-read-model.md) — Code Plans/GitHub work
-  graph snapshot and recommendation queue contract.
+- [work-graph-read-model.md](work-graph-read-model.md) — RETIRED (work graphs
+  inside Launchplane), scheduled for deletion; see DIRECTION.md.
 - [merge-train-policy.md](merge-train-policy.md) — repository/base-branch merge
   train policy contract, enqueue authority, and smoke-target policy.
 - [merge-readiness.md](merge-readiness.md) — ephemeral machine-derived merge
@@ -85,8 +90,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [production-backup-provider.md](production-backup-provider.md) — typed
   Proxmox/PBS capture, host boundary, evidence and rollout prerequisites.
 - [records.md](records.md) — persisted record formats and storage policy.
-- [public-readiness.md](public-readiness.md) — current public-repository posture,
-  remaining blockers, and safe-public exit criteria.
+- [public-readiness.md](public-readiness.md) — standing public-source posture,
+  image and secret boundary, and ongoing public hygiene.
 - [secrets.md](secrets.md) — Managed secrets, key rotation, plaintext exposure,
   and local contract.
 - [github-actions-security.md](github-actions-security.md) — GitHub Actions
@@ -102,5 +107,6 @@ not describe runtime authority until it is implemented, deployed, and activated.
   code-quality guardrails.
 - [codex-lab-workers.md](codex-lab-workers.md) — executable selection, session
   provenance, and retirement verification.
-- [every-code-feedback-resume.md](every-code-feedback-resume.md) — approved
-  feedback continuation foundation, evidence semantics and production gates.
+- [every-code-feedback-resume.md](every-code-feedback-resume.md) — feedback
+  continuation contracts and evidence foundation; not connected to production,
+  and its plan (#2328) is closed.

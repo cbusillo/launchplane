@@ -13,7 +13,7 @@ Missing, malformed, incomplete, or changing provider evidence still refuses
 admission. Engineering review uses the existing two independent authority slots,
 without consulting path rules or affected-product detection.
 
-`contracts/retired_change_impact*.py` retains only historical payload and digest
+`control_plane/contracts/retired_change_impact*.py` retains only historical payload and digest
 compatibility needed by persisted policies, audits, and review records. Existing
 tables, migrations, history, and storage import behavior are preserved. There is
 no service route for applying or evaluating these retired policies. This change

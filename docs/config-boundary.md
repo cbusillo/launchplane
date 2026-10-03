@@ -60,7 +60,7 @@ topology or GitHub-variable-backed product/context authority in workflow code.
 | Launchplane self image ref                | `DOCKER_IMAGE_REFERENCE`                                                                                                                                                        | Service target env               | Needed for Launchplane self-deploy and rollback posture.                                                                                                                                                                                                                                                                              |
 | Process wiring                            | `LAUNCHPLANE_SERVICE_HOST`, `LAUNCHPLANE_SERVICE_PORT`, `LAUNCHPLANE_SERVICE_AUDIENCE`, `LAUNCHPLANE_STATE_DIR`, `LAUNCHPLANE_APP_ROOT`, `LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK`, `LAUNCHPLANE_ORDINARY_AGENT_WORKER_REPLICAS` | Service target env               | Runtime/process wiring, not product config. `LAUNCHPLANE_STATE_DIR` is a non-authoritative runtime directory; service persistence still requires `LAUNCHPLANE_DATABASE_URL`. The external compose network value is admin-owned provider wiring for Launchplane's own deployed services and must not encode product/lane authority. The ordinary-worker count is constrained to a reviewed absent, zero, or one topology change.    |
 | Every Code webhook ingress secret         | `LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET`                                                                                                                                  | Bootstrap env or platform secret | Required before unauthenticated GitHub webhook ingress can trust the request body. Store it outside repository config.                                                                                                                                                                                                                |
-| Manager-preview webhook ingress secret    | `LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET`                                                                                                                             | Bootstrap env or platform secret | Required before the manager-preview GitHub webhook route can trust comment and pull-request lifecycle deliveries. Keep it route-specific, configure the matching GitHub webhook outside repository config, and never reuse the Every Code webhook secret.                                                                             |
+| Manager-preview webhook ingress secret    | `LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET`                                                                                                                             | Bootstrap env or platform secret | Required before the `/v1/manager-preview-approval/github-webhook` route, which now handles only trusted-maintenance `pull_request` deliveries, can trust the request body. Keep it route-specific, configure the matching GitHub webhook outside repository config, and never reuse the Every Code webhook secret. |
 | Every Code worker bearer token            | `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN`                                                                                                                                           | Bootstrap env or platform secret | Shared by the Launchplane service and local worker to authorize worker read/claim/status routes. Store it outside repository config.                                                                                                                                                                                                  |
 | Engineering review worker identity        | `LAUNCHPLANE_ENGINEERING_REVIEW_WORKER_RUNTIME_ID`, `LAUNCHPLANE_ENGINEERING_REVIEW_WORKER_HOST`                                                                                | Service target env               | Server-owned identity bound to the Every Code worker token for engineering-review list/claim/start/fail routes. Worker requests cannot select or override these values; they must match the active DB-backed review authority.                                                                                                        |
 | Every Code claim-comment GitHub identity  | `LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN`, optional `LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR`                                                                                           | Bootstrap env or platform secret | Used only by the local Every Code worker when it posts the public claim comment on a GitHub issue. The worker verifies the token actor before posting and fails closed instead of falling back to active local `gh` credentials.                                                                                                      |
@@ -69,10 +69,11 @@ topology or GitHub-variable-backed product/context authority in workflow code.
 | Local-admin write bearer token            | `LAUNCHPLANE_LOCAL_ADMIN_TOKEN`, `LAUNCHPLANE_LOCAL_ADMIN_SUBJECT`, `LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL`                                                                       | Bootstrap env or platform secret | Shared by the Launchplane service and trusted local Director automation for rare privileged mutations. Exact authority is DB-backed by `local_admins` authz policy rules; the token alone does not grant blanket access. Store it outside repository config and load it only for deliberate escalation.                               |
 
 The Every Code and manager-preview rows above describe current compatibility
-wiring. They do not make either name the target client or Client-decision model.
-Issue `#2240` replaces the target path with client-neutral delegated sessions and
-trusted Launchplane Client acceptance while preserving current bootstrap facts
-until migration and rollback coverage are proved.
+wiring under retired names. Every Code is retired, manager-preview approval is
+deleted, and the delegated-session target once planned in issue `#2240` is
+retired with ordinary-agent delivery (see [DIRECTION.md](../DIRECTION.md)).
+See [Client review](owner-acceptance.md) and
+[release review](release-review.md).
 
 The Launchplane self-deploy workflow has a manual `omit_every_code_env`
 compatibility input for the one deploy that teaches an older running service to
@@ -112,12 +113,12 @@ Launchplane records/secrets instead of repo files or admin-local env.
 | Class                                                    | Current surface                                                                                                                                                                                                   | Final authority                                 | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Merge-train repository policy                            | `launchplane_merge_train_policies`                                                                                                                                                                                | DB-backed Launchplane policy record             | Defines supported repository/base branch merge-train policies. The service fails closed when no active policy record exists and for unsupported pairs before GitHub calls. Repo TOML files are not a supported live authority.                                                                                                                                                                                                        |
-| Tenant repository classification and admission authority | `launchplane_tenant_repository_classifications`, trusted-maintenance policies/evidence, and managed authz policy records | DB-backed Launchplane records                   | Numeric repository classification selects engineering normal flow or tenant UI admission. Tenant UI admission is recomputed as an exact-head OR across manager preview approval, technical human waiver, and trusted maintenance; the GitHub status is projection only. Revisions/events remain DB authority, filesystem records are rehearsal/import input, and no service-host env or checked-in repository list decides admission. |
-| Work graph GitHub source configuration                   | Transitional `LAUNCHPLANE_WORK_GRAPH_PROJECT_*` and `LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_*` service env                                                                                                            | DB-backed Launchplane work-graph source records | Project identity, repository inventory, source enablement, and read limits are mutable operational configuration, not bootstrap. Issue #2193 owns migration and retirement of the transitional env authority. GitHub credentials remain managed/platform secrets.                                                                                                                                                                     |
+| Tenant repository classification and admission authority | `launchplane_tenant_repository_classifications`, trusted-maintenance policies/evidence, and managed authz policy records | DB-backed Launchplane records                   | Numeric repository classification selects engineering or tenant UI normal flow; both are admitted through the normal technical merge checks. Manager preview approval and the technical human waiver are deleted. Revisions/events remain DB authority, filesystem records are rehearsal/import input, and no service-host env or checked-in repository list decides admission. |
+| Work graph GitHub source configuration                   | Transitional `LAUNCHPLANE_WORK_GRAPH_PROJECT_*` and `LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_*` service env                                                                                                            | None: retired                                   | Work graphs inside Launchplane are retired (see [DIRECTION.md](../DIRECTION.md)). Do not build DB-backed source records; issue #2520 deletes the work-graph subsystem with this env.                                                                                                                                                                                                                                             |
 
-The tenant-admission row describes current runtime authority. The reconciled
-target retires manager-preview admission in favor of narrow Client acceptance plus
-separately authorized Launchplane delivery; it must not be read as already live.
+The tenant-admission row describes current runtime authority. Client review of
+previews and releases is separate and grants no merge authority; see
+[Client review](owner-acceptance.md).
 
 | Class                                      | Current surface(s)                                                                         | Final authority                                                                                               | Notes                                                                                                                                                                                                                                                       |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -154,10 +155,12 @@ Checked-in workflows and repo metadata may route to Launchplane, run quality
 gates, and document examples. They must not define the real product catalog,
 repo catalog, lane topology, target inventory, domain inventory, authz grants,
 admin identities, or mutable runtime values used by production behavior.
-Product-repo deploy workflows may forward admin-owned GitHub variables and
-fresh image build outputs into Launchplane request payloads, but fixed image
-references, provider targets, domains, and secret values remain outside the
-checked-in workflow authority boundary.
+Product repositories calling Launchplane is retired (see
+[DIRECTION.md](../DIRECTION.md)). Product-repo deploy workflows that still forward
+admin-owned GitHub variables and fresh image build outputs into Launchplane
+request payloads are compatibility paths being deleted, not a pattern to extend;
+fixed image references, provider targets, domains, and secret values remain
+outside the checked-in workflow authority boundary.
 
 ### Stale Local Artifacts
 
@@ -223,13 +226,14 @@ live authority across DB, files, and process env:
   inventory routes resolve Dokploy host, token, preview URL shape, app identity,
   and target identity from Launchplane-managed secrets plus DB-backed runtime
   and target records. `LAUNCHPLANE_PREVIEW_BASE_URL` is a context-level runtime
-  value. Product-repo app-maintenance workflows must pass operation intent;
-  product-repo workflows may pass preview slug and GitHub OIDC identity, but not
-  Dokploy credentials or preview domain topology.
+  value. The product-repo workflows that still call these routes (passing
+  operation intent, preview slug, and GitHub OIDC identity, never Dokploy
+  credentials or preview domain topology) are retired call-in paths awaiting
+  deletion.
 - VeriReel stable environment metadata, including testing/prod target names,
   target ids, base URLs, and health URLs, is served by Launchplane from
-  DB-backed target/runtime records. Product-repo workflows should ask
-  Launchplane for those values instead of hard-coding stable lane topology.
+  DB-backed target/runtime records, so no product repository hard-codes stable
+  lane topology.
 - Product onboarding and runtime key-safety policy writes use Launchplane service
   routes with scoped authorization. Product/runtime records are not read from
   checked-in catalogs during deploy or repair.

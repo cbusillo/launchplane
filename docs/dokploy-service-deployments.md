@@ -142,12 +142,18 @@ records as repo-local authority.
 Product repos own image build and publish. Launchplane owns deploy selection and
 evidence after the image exists.
 
-The stable product-repo integration surface for this contract is image-backed
-generic-web deploy through `POST /v1/drivers/generic-web/deploy`, normally via
-the shared `cbusillo/launchplane/.github/actions/launchplane-request` action.
-The product repo submits immutable image identity plus the tested source SHA;
-Launchplane resolves lane, provider target, runtime environment, managed
-secrets, and deployment records from DB-backed authority.
+A product repository never calls Launchplane (see
+[DIRECTION.md](../DIRECTION.md)). It builds the image in
+`.github/workflows/build.yml` and uploads the build manifest described in
+[artifact-provenance.md](artifact-provenance.md). Launchplane verifies that
+build and deploys the image to `testing` itself
+([event-driven-deploys.md](event-driven-deploys.md)), through the generic-web
+deploy route's provider operation; it resolves lane, provider target, runtime
+environment, managed secrets, and deployment records from DB-backed authority.
+Transitional: `POST /v1/drivers/generic-web/deploy` through the
+`cbusillo/launchplane/.github/actions/launchplane-request` action is the old
+call-in path some product workflows still use until #2606 deletes it; a new
+product repository does not call it.
 
 Publish images to the profile's `image.repository` and preserve digest identity:
 
@@ -157,17 +163,16 @@ ghcr.io/cbusillo/discord-blue@sha256:<digest>
 
 Mutable tags such as `latest`, branch names, or environment names are display or
 debug labels only; they are not stable deploy inputs. If a product workflow also
-emits a human-readable tag, the Launchplane trigger should still send the exact
-digest image reference or an artifact id that Launchplane can resolve to that
-digest.
+emits a human-readable tag, the build manifest still carries the exact digest.
 
 For generic-web and VeriReel application targets, `artifact_id` remains the
 canonical artifact identity and should be the digest-pinned
 `repository@sha256:digest` reference. Dokploy applications with a saved Registry
 Swarm cannot save that digest reference as the Docker image because Dokploy
-re-tags application images internally. Product workflows that publish a stable
-SHA tag, such as `repository:sha-<commit>`, should pass that tag as
-`deploy_reference`. Launchplane validates that `deploy_reference` is a
+re-tags application images internally. On the old call-in path, product
+workflows that publish a stable SHA tag, such as `repository:sha-<commit>`, pass
+that tag as `deploy_reference`; the build manifest and the event-driven testing
+deploy carry no `deploy_reference`. Launchplane validates that `deploy_reference` is a
 non-floating tag in the same repository, uses it only for the provider-facing
 Docker image, and records runtime identity with `artifact_id` as the digest and
 `image_reference` as the provider tag. Compose targets remain backward
@@ -177,9 +182,9 @@ RepairShopr Sync is the first live canary for this stable shape. The
 `cbusillo/repairshopr_api` product workflow built an immutable GHCR image,
 called deployed Launchplane, and received `deploy_status: pass` for deployment
 record `deployment-20260630T034901Z-repairshopr-sync-prod` after Launchplane PR
-#1503 deployed. Treat that run as proof that service-shaped worker products can
-use this contract without source-ref deploy or direct Dokploy mutation in the
-product repo.
+#1503 deployed. That run proved image deploy for a service-shaped worker
+without source-ref deploy or direct Dokploy mutation in the product repo; its
+product-repo call into Launchplane is the retired call-in path.
 
 The inherited source-ref deploy bridge is retired. Services that still deploy a
 Dokploy compose target from Git must migrate the provider target to immutable
@@ -226,7 +231,8 @@ contract; their endpoint should report product-owned freshness in `status` and
 Non-secret runtime settings belong in Launchplane runtime-environment records.
 Secret settings belong in Launchplane managed secret records and bindings. A
 product workflow may pass the product key, source ref, run URL, and immutable
-image reference; it should not pass secret values or render a Dokploy env file.
+image reference on the old call-in path; it never passes secret values or
+renders a Dokploy env file.
 Launchplane live-target runtime sync delivers only the site's own environment
 for the lane (see `docs/secrets.md`) and records only key names and counts.
 Generic-web preview refresh applies the same rule to credentials copied from a
@@ -285,9 +291,10 @@ only the product-level health URL or runtime port in Launchplane records.
 
 A normal service deploy does this:
 
-1. Product CI builds, tests, and publishes an immutable image.
-2. The product workflow calls Launchplane with product key, stable lane,
-   source ref, and immutable image reference.
+1. Product CI builds, tests, and publishes an immutable image and its build
+   manifest.
+2. Launchplane hears the build event and verifies the build; see
+   [event-driven-deploys.md](event-driven-deploys.md).
 3. Launchplane resolves the product profile lane and DB-backed Dokploy target.
 4. Launchplane updates the Dokploy application image and triggers deployment.
 5. Launchplane writes a deployment record with the resolved target and status.
