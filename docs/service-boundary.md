@@ -2806,11 +2806,15 @@ Every Code worker token for the collection route only. Product profile show
 reads load the stored profile first, check `product_profile.read` against the
 stored profile product and Launchplane service context, and return the typed
 profile envelope. Ingress route audit reads check `ingress_route.plan` or
-`route_binding.read` against the requested query product/context before storage access, require those
-scope query parameters for list and single-record reads, preserve optional
-`status`, `mode`, `provider_host_id`, `trace_id`, `idempotency_key`, and `limit`
-list filters, and return `404 not_found` when a record exists outside the
-requested scope. Endpoint apply and ingress route apply routes use native
+`route_binding.read` against the requested query product/context before
+storage access, require those scope query parameters for list and
+single-record reads, preserve optional `status`, `mode`, `provider_host_id`,
+`trace_id`, `idempotency_key`, and `limit` list filters, and return
+`404 not_found` when a record exists outside the requested scope.
+`ingress_route.plan` reads the full record. A caller with only
+`route_binding.read` reads it with provider host ids cleared, an empty
+certificate reference and a fixed reason, and is refused the
+`provider_host_id` filter with `403 authorization_denied`. Endpoint apply and ingress route apply routes use native
 FastAPI write handlers with the apply contracts above.
 
 Environment route-binding reads check `route_binding.read` against the requested
