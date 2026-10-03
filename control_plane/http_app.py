@@ -7708,7 +7708,10 @@ def create_launchplane_fastapi_app(
         instance: str,
         trace_id: str,
         denied_message: str,
+        read_action: str = "",
     ) -> None:
+        # A read also accepts read_action, so reading a lane setting never
+        # needs the grant that plans a change to it.
         if isinstance(identity, TerminalAgentIdentity):
             raise _launchplane_http_error(
                 status_code=403,
@@ -7716,12 +7719,17 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message="Terminal agent credentials can only read redacted Launchplane context.",
             )
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action=action,
-            product=product,
-            context=context,
-            target=AuthorizationTarget(scope="instance", instances=(instance,)),
+        target = AuthorizationTarget(scope="instance", instances=(instance,))
+        if not any(
+            resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action=allowed_action,
+                product=product,
+                context=context,
+                target=target,
+            )
+            for allowed_action in (action, read_action)
+            if allowed_action
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -7793,6 +7801,7 @@ def create_launchplane_fastapi_app(
             instance=instance,
             trace_id=trace_id,
             denied_message=_INTEGRATION_ALLOWANCES_DENIED_MESSAGE,
+            read_action="product_environment.read",
         )
         _require_lane_product_config_lane(
             record_store=record_store,
@@ -8001,6 +8010,7 @@ def create_launchplane_fastapi_app(
             instance=instance,
             trace_id=trace_id,
             denied_message=_TESTING_HOLD_DENIED_MESSAGE,
+            read_action="product_environment.read",
         )
         _require_lane_product_config_lane(
             record_store=record_store,

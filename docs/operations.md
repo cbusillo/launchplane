@@ -2547,8 +2547,8 @@ context only, and `context_instance` has both context and instance.
     testing lane may keep the tenant's real integration settings, because
     testing is the working instance. Only testing and dev lanes accept it.
 - Read a lane's allowances with `GET /v1/product-config/integration-allowances`
-  (query `product`, `context`, `instance`; needs `product_config.plan`). Set
-  them with `POST /v1/product-config/integration-allowances/apply`. The request
+  (query `product`, `context`, `instance`; needs `product_environment.read` or
+  `product_config.plan`). Set them with `POST /v1/product-config/integration-allowances/apply`. The request
   carries the lane's whole allowance list, so an omitted integration is removed.
   - Dry-run needs `product_config.plan`, and apply needs
     `product_config.apply`, both instance-scoped. Terminal agent credentials are
@@ -2612,7 +2612,8 @@ context only, and `context_instance` has both context and instance.
   so a merge doesn't deploy mid-session; see
   [event-driven deploys](event-driven-deploys.md#staff-testing-hold). Read the
   hold with `GET /v1/product-config/testing-hold` (query `product`, `context`,
-  `instance`; needs `product_config.plan`). Set or lift it with
+  `instance`; needs `product_environment.read` or `product_config.plan`). Set or
+  lift it with
   `POST /v1/product-config/testing-hold/apply` (`hold`, `reason`). It follows
   the allowances route above: the same actions, dry-run digest, reviewed apply,
   `Idempotency-Key`, lane ownership check, stale refusal and read-back. It
