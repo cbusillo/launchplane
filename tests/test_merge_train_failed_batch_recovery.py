@@ -210,7 +210,8 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             assert result is not None
             self.assertEqual(result["controller_action"], "wait_for_checks")
             self.assertEqual(
-                cast(dict[str, Any], result["dry_run_result"])["selected_pr"]["number"], snapshot.pull_requests[1].number
+                cast(dict[str, Any], result["dry_run_result"])["selected_pr"]["number"],
+                snapshot.pull_requests[1].number,
             )
             self.assertEqual(store.list_merge_train_batch_candidate_records()[0].status, "active")
             client.build_batch_candidate.assert_not_called()
