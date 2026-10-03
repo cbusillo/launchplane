@@ -78,6 +78,13 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
     async def test_shared_context_allows_an_owned_instance_scoped_write(self) -> None:
         await self._request_config(mode="apply", shared_context=True)
 
+    async def test_duplicate_lane_ownership_is_refused(self) -> None:
+        for mode in ("dry-run", "apply"):
+            await self._request_config(mode=mode, shared_lane=True, refused=True)
+
+    async def test_foreign_exact_lane_claim_added_before_commit_refuses(self) -> None:
+        await self._request_config(mode="apply", add_foreign_claim_on_commit=True, refused=True)
+
     async def test_foreign_context_claim_added_before_commit_refuses(self) -> None:
         await self._request_config(
             mode="apply", target=("own-site", ""), add_foreign_claim_on_commit=True, refused=True
@@ -94,6 +101,7 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
         change_profile: bool = False,
         replay_after_change: bool = False,
         shared_context: bool = False,
+        shared_lane: bool = False,
         historical: bool = False,
         context_secret: bool = False,
         add_foreign_claim_on_commit: bool = False,
@@ -116,12 +124,18 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
                     _generic_site_profile_payload("other-site")
                 )
             )
-            if shared_context:
+            if shared_context or shared_lane:
                 other = store.read_product_profile_record("other-site")
                 if historical:
                     other = other.model_copy(update={"historical_contexts": ("own-site",)})
                 else:
-                    other = other.model_copy(update={"lanes": profile.lanes})
+                    other = other.model_copy(
+                        update={
+                            "lanes": profile.lanes
+                            if shared_lane
+                            else (profile.lanes[0].model_copy(update={"instance": "prod"}),)
+                        }
+                    )
                 store.write_product_profile_record(other)
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
@@ -224,8 +238,16 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
 
 class ProductConfigContextCommitTests(unittest.TestCase):
     def test_both_stores_refuse_a_new_foreign_context_owner_before_publish(self) -> None:
-        for store_type in (FilesystemRecordStore, PostgresRecordStore):
-            with self.subTest(store=store_type.__name__), TemporaryDirectory() as directory:
+        for store_type, instance in (
+            (FilesystemRecordStore, ""),
+            (PostgresRecordStore, ""),
+            (FilesystemRecordStore, "testing"),
+            (PostgresRecordStore, "testing"),
+        ):
+            with (
+                self.subTest(store=store_type.__name__, instance=instance),
+                TemporaryDirectory() as directory,
+            ):
                 root = Path(directory)
                 store = (
                     FilesystemRecordStore(state_dir=root)
@@ -241,11 +263,12 @@ class ProductConfigContextCommitTests(unittest.TestCase):
                 )
                 store.write_product_profile_record(profile)
                 bundle = ProductAuthorityBundle(
-                    required_config_context_owner=("own-site", "own-site"),
+                    required_product_config_target=("own-site", "own-site", instance),
                     runtime_environments=(
                         RuntimeEnvironmentRecord(
-                            scope="context",
+                            scope="instance" if instance else "context",
                             context="own-site",
+                            instance=instance,
                             env={"SITE_MODE": "private-setting"},
                             updated_at="2026-10-03T00:00:00Z",
                             source_label="test",

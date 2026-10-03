@@ -2249,10 +2249,11 @@ return a typed blocked result rather than guessing a domain.
   or replay. Context-scoped requests, including context-scoped secrets in an
   instance request, require the product to own the context alone; another
   product's current or historical context claim causes refusal. Exact
-  instance-scoped requests can use a shared context when the product owns the lane.
+  instance-scoped requests can use a shared context when the product alone owns
+  that exact lane. Duplicate lane claims are refused.
   Apply rechecks the profile under the bundle's write lock; an ownership change
   returns `409 product_profile_conflict` without config writes. Context-wide
-  writes also recheck every product's context claims under that lock. Use canonical
+  writes also recheck every product's target claims under that lock. Use canonical
   product ids rather than lane context aliases (for example, `odoo-tenant-opw`,
   not `opw`, for `opw/testing`). It fails closed
   when secret writes are requested without valid Launchplane secret-key

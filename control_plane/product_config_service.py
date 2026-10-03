@@ -21,7 +21,7 @@ from control_plane.contracts.product_environment_read_model import (
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
-    product_context_owner_map,
+    product_target_owner_products,
     product_config_requirement_applies_to_lane,
 )
 from control_plane.contracts.secret_record import SecretBinding
@@ -69,11 +69,13 @@ def resolve_product_config_profile(
             "Product config target is not owned by the named product.",
             code="product_config_lane_not_owned",
         )
-    if context_wide and product_context_owner_map(record_store.list_product_profile_records()).get(
-        context.lower()
+    if product_target_owner_products(
+        record_store.list_product_profile_records(),
+        context=context,
+        instance="" if context_wide else instance,
     ) != frozenset((product,)):
         raise control_plane_product_config.ProductConfigError(
-            "Context-wide config requires the named product to own the context alone.",
+            "Product config requires the named product to own the target alone.",
             code="product_config_lane_not_owned",
         )
     return profile

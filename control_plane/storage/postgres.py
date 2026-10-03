@@ -6251,7 +6251,7 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if (
                 bundle.required_context_owner is not None
-                or bundle.required_config_context_owner is not None
+                or bundle.required_product_config_target is not None
             ):
                 require_bundle_context_owner(
                     bundle,

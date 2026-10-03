@@ -14925,15 +14925,15 @@ def create_launchplane_fastapi_app(
             authority_bundle = authority_bundle.model_copy(
                 update={"expected_product_profiles": (expected_product_profile,)}
             )
-        if context_wide_config:
-            authority_bundle = authority_bundle.model_copy(
-                update={
-                    "required_config_context_owner": (
-                        product_config_request.product,
-                        product_config_request.context,
-                    )
-                }
-            )
+        authority_bundle = authority_bundle.model_copy(
+            update={
+                "required_product_config_target": (
+                    product_config_request.product,
+                    product_config_request.context,
+                    "" if context_wide_config else product_config_request.instance,
+                )
+            }
+        )
         driver_result: dict[str, object] = {
             **planned_driver_result,
             "reason": product_config_request.reason,
