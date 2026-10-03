@@ -14,6 +14,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
+import click
+
 from pydantic import BaseModel, ConfigDict
 
 from control_plane.contracts.odoo_target_replacement_failures import (
@@ -31,6 +33,17 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
 )
 from control_plane.contracts.release_review import ReleaseReviewStatus
+from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.generic_web_rollback import (
+    GenericWebRollbackPlanReader,
+    GenericWebRollbackPlanRequest,
+    build_generic_web_rollback_plan,
+)
+from control_plane.contracts.odoo_prod_rollback_operation import OdooProdRollbackRequest
+from control_plane.workflows.odoo_prod_rollback import (
+    OdooProdRollbackTargetMissingError,
+    resolve_odoo_prod_rollback_target,
+)
 from control_plane.contracts.odoo_prod_promotion_operation import ODOO_PROD_PROMOTION_RUN_ACTION
 from control_plane.operation_status_read import safe_operation_error_code
 from control_plane.product_reconcile_read import (
@@ -50,8 +63,8 @@ from control_plane.workflows.production_promotion_backup import (
 # The action the generic-web release panel's live promotion checks.
 GENERIC_WEB_PROMOTION_ACTION = "generic_web_prod_promotion.dispatch"
 
-PathName = Literal["testing", "promote"]
-PATH_NAMES: tuple[PathName, ...] = ("testing", "promote")
+PathName = Literal["testing", "promote", "rollback"]
+PATH_NAMES: tuple[PathName, ...] = ("testing", "promote", "rollback")
 StepState = Literal["clear", "blocked", "unknown"]
 FixKind = Literal["none", "code", "grant", "owner_approval", "client_acceptance", "by_hand", "wait"]
 
@@ -97,6 +110,7 @@ class PathCheckInputs:
     release_review: ReleaseReviewStatus | Unread | None = None
     backup_authority: ProductionBackupAuthorityReadModel | Unread | None = None
     latest_promotion: PromotionRecord | None | Unread = None
+    rollback_steps: tuple[PathCheckStep, ...] = ()
 
 
 _TRANSIENT_DEPLOY_CHECKS = frozenset(
@@ -367,9 +381,20 @@ def _promote_steps(inputs: PathCheckInputs) -> list[PathCheckStep]:
     ]
 
 
+def _rollback_steps(inputs: PathCheckInputs) -> list[PathCheckStep]:
+    return [
+        _profile_step(inputs.profile, "prod"),
+        *(
+            inputs.rollback_steps
+            or (_unread("rollback_target", Unread("rollback_evidence_unread")),)
+        ),
+    ]
+
+
 _PATH_STEPS: dict[PathName, Callable[[PathCheckInputs], list[PathCheckStep]]] = {
     "testing": _testing_steps,
     "promote": _promote_steps,
+    "rollback": _rollback_steps,
 }
 
 
@@ -437,6 +462,17 @@ def read_path_check_inputs(
     prod_lane = _lane(profile, "prod")
     if prod_lane is None:
         return PathCheckInputs(profile=profile)
+    if path == "rollback":
+        return PathCheckInputs(
+            profile=profile,
+            rollback_steps=_read_rollback_steps(
+                profile=profile,
+                prod_lane=prod_lane,
+                record_store=record_store,
+                action_allowed=action_allowed,
+                caller_is_policy_administrator=caller_is_policy_administrator,
+            ),
+        )
     odoo = profile.driver_id == "odoo"
     promotion_action = ODOO_PROD_PROMOTION_RUN_ACTION if odoo else GENERIC_WEB_PROMOTION_ACTION
     instances = ("prod",) if odoo else ("testing", "prod")
@@ -518,3 +554,232 @@ class _PromotionRecordLister(Protocol):
         to_instance_name: str = "",
         limit: int | None = None,
     ) -> tuple[PromotionRecord, ...]: ...
+
+
+class _RollbackRecordReader(Protocol):
+    def read_environment_inventory(
+        self, *, context_name: str, instance_name: str
+    ) -> EnvironmentInventory: ...
+
+    def read_promotion_record(self, record_id: str) -> PromotionRecord: ...
+
+
+def _rollback_grant_step(step_id: str, action: str, allowed: bool | Unread) -> PathCheckStep:
+    if isinstance(allowed, Unread):
+        return _unread(step_id, allowed)
+    return _step(
+        step_id,
+        "clear" if allowed else "blocked",
+        "caller_may_rollback" if allowed else "caller_lacks_rollback_grant",
+        f"The caller {'holds' if allowed else 'does not hold'} {action} for the prod lane.",
+        "grant",
+    )
+
+
+def _read_rollback_steps(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    prod_lane: ProductLaneProfile,
+    record_store: object,
+    action_allowed: ActionAllowed,
+    caller_is_policy_administrator: Callable[[], bool],
+) -> tuple[PathCheckStep, ...]:
+    steps: list[PathCheckStep] = []
+    odoo = profile.driver_id == "odoo"
+    if odoo:
+        allowed = _read("authorization_unread", caller_is_policy_administrator)
+        if isinstance(allowed, Unread):
+            steps.append(_unread("rollback_grant", allowed))
+        else:
+            steps.append(
+                _step(
+                    "rollback_grant",
+                    "clear" if allowed else "blocked",
+                    "caller_may_rollback" if allowed else "rollback_needs_signed_in_administrator",
+                    "Only the signed-in policy administrator can queue an Odoo prod rollback.",
+                    "owner_approval",
+                )
+            )
+    else:
+        for step_id, action in (
+            ("rollback_plan_grant", "generic_web_prod_rollback.plan"),
+            ("rollback_grant", "generic_web_prod_rollback.execute"),
+        ):
+            allowed = cast(
+                bool | Unread,
+                _read(
+                    "authorization_unread",
+                    lambda: action_allowed(action, prod_lane.context, ("prod",)),
+                ),
+            )
+            steps.append(_rollback_grant_step(step_id, action, allowed))
+    # An authority refusal must not hide independent target blockers.
+    target_steps = _read(
+        "rollback_records_unread",
+        lambda: _rollback_target_steps(
+            profile=profile, prod_lane=prod_lane, record_store=record_store
+        ),
+    )
+    if isinstance(target_steps, Unread):
+        steps.append(_unread("rollback_target", target_steps))
+    else:
+        steps.extend(cast(tuple[PathCheckStep, ...], target_steps))
+    return tuple(steps)
+
+
+def _rollback_target_steps(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    prod_lane: ProductLaneProfile,
+    record_store: object,
+) -> tuple[PathCheckStep, ...]:
+    reader = cast(_RollbackRecordReader, record_store)
+    try:
+        inventory = reader.read_environment_inventory(
+            context_name=prod_lane.context, instance_name="prod"
+        )
+    except FileNotFoundError:
+        return (
+            _step(
+                "rollback_target",
+                "blocked",
+                "prod_inventory_missing",
+                "The prod lane has no current inventory record.",
+                "by_hand",
+            ),
+        )
+    if inventory.context != prod_lane.context or inventory.instance != "prod":
+        return (
+            _step(
+                "rollback_target",
+                "blocked",
+                "inventory_scope_mismatch",
+                "The inventory does not match the prod lane.",
+                "code",
+            ),
+        )
+    if profile.driver_id == "odoo":
+        try:
+            target = resolve_odoo_prod_rollback_target(
+                record_store=record_store,
+                request=OdooProdRollbackRequest(context=prod_lane.context),
+            )
+        except OdooProdRollbackTargetMissingError:
+            return (
+                _step(
+                    "rollback_target",
+                    "blocked",
+                    "rollback_target_missing",
+                    "No earlier passing prod deployment of a different artifact is recorded.",
+                    "by_hand",
+                ),
+            )
+        except click.ClickException:
+            return (
+                _step(
+                    "rollback_target",
+                    "blocked",
+                    "rollback_not_ready",
+                    "The rollback target's artifact manifest or current promotion is unavailable.",
+                    "by_hand",
+                ),
+            )
+        return (
+            _step(
+                "rollback_target",
+                "clear",
+                "rollback_target_recorded",
+                "The previous passing deployment, artifact manifest and current promotion are recorded.",
+                record_ids=(
+                    target.deployment_record_id,
+                    target.artifact_id,
+                    inventory.promotion_record_id,
+                ),
+            ),
+        )
+    if not inventory.promotion_record_id:
+        return (
+            _step(
+                "rollback_target",
+                "blocked",
+                "current_promotion_missing",
+                "The prod inventory names no promotion with a previous rollback target.",
+                "by_hand",
+            ),
+        )
+    try:
+        promotion = reader.read_promotion_record(inventory.promotion_record_id)
+    except FileNotFoundError:
+        return (
+            _step(
+                "rollback_target",
+                "blocked",
+                "current_promotion_missing",
+                "The prod inventory's promotion record is missing.",
+                "by_hand",
+            ),
+        )
+    if promotion.context != prod_lane.context or promotion.to_instance != "prod":
+        return (
+            _step(
+                "rollback_target",
+                "blocked",
+                "promotion_scope_mismatch",
+                "The current promotion does not match the prod lane.",
+                "code",
+            ),
+        )
+    record_ids = (promotion.record_id, promotion.rollback.target_deployment_record_id)
+    if not promotion.rollback.target_deployment_record_id:
+        return (
+            _step(
+                "rollback_target",
+                "blocked",
+                "missing_rollback_target",
+                "The current promotion recorded no previous deployment to roll back to.",
+                "by_hand",
+                record_ids,
+            ),
+        )
+    # Build only: execute_generic_web_rollback_plan persists a plan and must not run here.
+    plan = build_generic_web_rollback_plan(
+        record_store=cast(GenericWebRollbackPlanReader, record_store),
+        request=GenericWebRollbackPlanRequest(
+            product=profile.product,
+            rollback_deployment_record_id=promotion.rollback.target_deployment_record_id,
+        ),
+    )
+    if plan.blockers:
+        return tuple(
+            _step(
+                f"rollback_target_{blocker.code}",
+                "blocked",
+                blocker.code,
+                _ROLLBACK_BLOCKER_DESCRIPTIONS[blocker.code],
+                "by_hand",
+                record_ids,
+            )
+            for blocker in plan.blockers
+        )
+    return (
+        _step(
+            "rollback_target",
+            "clear",
+            "rollback_target_ready",
+            "The recorded previous deployment passes rollback planning with an immutable digest.",
+            record_ids=record_ids,
+        ),
+    )
+
+
+_ROLLBACK_BLOCKER_DESCRIPTIONS = {
+    "backup_gate_missing": "The requested backup gate record is missing.",
+    "backup_gate_not_passed": "The requested backup gate has not passed.",
+    "backup_gate_scope_mismatch": "The backup gate does not match the prod lane.",
+    "deployment_scope_mismatch": "The rollback deployment does not match the prod lane.",
+    "health_evidence_failed": "The rollback deployment has failed health evidence.",
+    "missing_deploy_reference": "The rollback deployment has no immutable provider deploy reference.",
+    "missing_rollback_target": "The rollback deployment or its artifact identity is missing.",
+    "mutable_artifact_reference": "The rollback deployment must use an immutable image digest.",
+    "target_deploy_not_passed": "The rollback deployment did not pass.",
+}

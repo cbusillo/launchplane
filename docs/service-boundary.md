@@ -4085,7 +4085,7 @@ are removed only after provider absence is verified; runtime deletion events
 and preserved managed-secret references remain audit evidence. The profile is
 never deleted and becomes `retired` with previews disabled.
 
-`GET /v1/products/{product}/path-check?path=testing|promote` answers, in one
+`GET /v1/products/{product}/path-check?path=testing|promote|rollback` answers, in one
 read, whether the caller can take the product along that path and what is in
 the way. It needs `product_environment.read` on the product's lane contexts and
 writes nothing. Each step is `clear`, `blocked` or `unknown` with a code,
@@ -4096,7 +4096,16 @@ reconcile attempt, naming the `deploy_blocked.*` or other code that stopped it.
 `promote` checks the caller's own promotion grant, Client acceptance, the prod
 lane's backup authority and the last promotion's failure. A step whose evidence
 cannot be read is `unknown`, never `clear`, and the response never carries
-provider or exception text.
+provider or exception text. `rollback` checks the prod lane, the caller's
+plan and execute grants for generic-web (or the signed-in policy administrator
+for queued Odoo rollback), and the recorded previous release. Generic-web uses
+the current inventory's promotion and its recorded rollback deployment, then
+runs the effect-free rollback plan builder; all target blockers are returned,
+including mutable image references. Odoo uses the queued rollback's effect-free
+previous-passing-deployment resolver, requiring its manifest and current
+promotion. Neither check persists a plan or contacts a provider. These are
+record and authority checks; deploy fences, live provider readiness and later
+repair paths remain outside this slice.
 
 `GET /v1/product-retirements/{record_id}` reads one retirement record's
 structured outcome with `operations.read` on the Launchplane product for the

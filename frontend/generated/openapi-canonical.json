@@ -30881,7 +30881,8 @@
           "path": {
             "enum": [
               "testing",
-              "promote"
+              "promote",
+              "rollback"
             ],
             "title": "Path",
             "type": "string"
@@ -82426,7 +82427,8 @@
             "schema": {
               "enum": [
                 "testing",
-                "promote"
+                "promote",
+                "rollback"
               ],
               "title": "Path",
               "type": "string"

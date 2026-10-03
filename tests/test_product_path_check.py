@@ -3,6 +3,8 @@ import unittest
 from fastapi import FastAPI
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from contextlib import ExitStack
+from unittest.mock import Mock, patch
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.production_backup_authority import (
@@ -15,12 +17,20 @@ from control_plane.contracts.promotion_record import (
     RecordFailure,
 )
 from control_plane.contracts.release_review import ReleaseReviewStatus
+from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.promotion_record import HealthcheckEvidence, RollbackExecutionEvidence
+from control_plane.contracts.artifact_identity import (
+    ArtifactIdentityManifest,
+    ArtifactImageReference,
+)
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.product_path_check import (
     PathCheckInputs,
     Unread,
     _latest_promotion,
     build_product_path_check,
+    read_path_check_inputs,
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy, LocalOperatorPolicyRule
 from control_plane.storage.postgres import PostgresRecordStore
@@ -251,6 +261,228 @@ class ProductPathCheckTests(unittest.TestCase):
         self.assertEqual(check.steps[0].code, "product_not_active")
 
 
+class ProductRollbackPathCheckTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.store = PostgresRecordStore(
+            database_url=f"sqlite+pysqlite:///{Path(self.directory.name) / 'state.db'}"
+        )
+        self.store.ensure_schema()
+        self.addCleanup(self.store.close)
+        self.profile = _profile()
+        self.store.write_product_profile_record(self.profile)
+        self.previous = DeploymentRecord(
+            record_id="deployment-previous",
+            context="example-site",
+            instance="prod",
+            source_git_ref="previous-commit",
+            artifact_identity=ArtifactIdentityReference(
+                artifact_id=self.profile.image.repository + "@sha256:" + "a" * 64
+            ),
+            deploy=DeploymentEvidence(
+                target_name="example-prod",
+                target_type="compose",
+                deploy_mode="dokploy-compose-api",
+                status="pass",
+            ),
+            destination_health=HealthcheckEvidence(status="pass"),
+        )
+        self.store.write_deployment_record(self.previous)
+        self.promotion = _promotion("promotion-current").model_copy(
+            update={
+                "rollback": RollbackExecutionEvidence(
+                    target_deployment_record_id=self.previous.record_id
+                )
+            }
+        )
+        self.store.write_promotion_record(self.promotion)
+        self.inventory = EnvironmentInventory(
+            context="example-site",
+            instance="prod",
+            source_git_ref="current-commit",
+            deploy=self.previous.deploy,
+            updated_at="2026-10-03T00:00:00Z",
+            deployment_record_id="deployment-current",
+            promotion_record_id=self.promotion.record_id,
+            promoted_from_instance="testing",
+        )
+        self.store.write_environment_inventory(self.inventory)
+
+    def check(self, allowed: bool = True) -> object:
+        self.actions = Mock(return_value=allowed)
+        self.review = Mock(side_effect=AssertionError("rollback must not compile release review"))
+        inputs = read_path_check_inputs(
+            path="rollback",
+            profile=self.profile,
+            record_store=self.store,
+            action_allowed=self.actions,
+            caller_is_policy_administrator=lambda: allowed,
+            read_release_review=self.review,
+            generated_at="2026-10-03T00:00:00Z",
+        )
+        return build_product_path_check(
+            product=self.profile.product, path="rollback", inputs=inputs
+        )
+
+    def test_previous_digest_target_is_clear_without_writes(self) -> None:
+        with ExitStack() as stack:
+            writes = [
+                stack.enter_context(
+                    patch.object(
+                        self.store, name, side_effect=AssertionError("read wrote a record")
+                    )
+                )
+                for name in (
+                    "write_generic_web_rollback_plan_record",
+                    "write_deployment_record",
+                    "write_promotion_record",
+                    "write_environment_inventory",
+                )
+            ]
+            check = self.check()
+        self.assertEqual(getattr(check, "state"), "clear")
+        self.assertEqual(
+            self.actions.call_args_list[0].args,
+            ("generic_web_prod_rollback.plan", "example-site", ("prod",)),
+        )
+        self.assertEqual(
+            self.actions.call_args_list[1].args,
+            ("generic_web_prod_rollback.execute", "example-site", ("prod",)),
+        )
+        for write in writes:
+            write.assert_not_called()
+        self.review.assert_not_called()
+        self.assertEqual(
+            getattr(check, "steps")[-1].record_ids,
+            (self.promotion.record_id, self.previous.record_id),
+        )
+
+    def test_missing_grants_and_mutable_failed_target_reported_together(self) -> None:
+        # Occurrence 7: the old prod record names a tag; rollback must refuse it
+        # before the owner grants access or starts any mutation.
+        self.store.write_deployment_record(
+            self.previous.model_copy(
+                update={
+                    "artifact_identity": ArtifactIdentityReference(
+                        artifact_id=self.profile.image.repository + ":v1"
+                    ),
+                    "deploy": self.previous.deploy.model_copy(update={"status": "fail"}),
+                    "destination_health": HealthcheckEvidence(status="fail"),
+                }
+            )
+        )
+        steps = _steps(self.check(False))
+        for step_id in (
+            "rollback_plan_grant",
+            "rollback_grant",
+            "rollback_target_mutable_artifact_reference",
+            "rollback_target_target_deploy_not_passed",
+            "rollback_target_health_evidence_failed",
+        ):
+            self.assertEqual(steps[step_id][0], "blocked")
+        self.assertEqual(steps["rollback_target_mutable_artifact_reference"][2], "by_hand")
+
+    def test_missing_target_and_wrong_scope_are_blocked(self) -> None:
+        self.store.write_promotion_record(
+            self.promotion.model_copy(
+                update={
+                    "rollback": RollbackExecutionEvidence(target_deployment_record_id="missing")
+                }
+            )
+        )
+        self.assertEqual(
+            _steps(self.check())["rollback_target_missing_rollback_target"][0], "blocked"
+        )
+        self.store.write_promotion_record(
+            self.promotion.model_copy(update={"context": "other-site"})
+        )
+        self.assertEqual(_steps(self.check())["rollback_target"][1], "promotion_scope_mismatch")
+
+    def test_unread_authorization_does_not_hide_target_blockers_or_leak_text(self) -> None:
+        with patch.object(
+            self.store, "read_environment_inventory", side_effect=RuntimeError("secret at 10.1.2.3")
+        ):
+            check = self.check(False)
+        self.assertEqual(
+            _steps(check)["rollback_target"], ("unknown", "rollback_records_unread", "wait")
+        )
+        self.assertEqual(_steps(check)["rollback_grant"][0], "blocked")
+        self.assertNotIn("10.1.2.3", str(check))
+        with patch.object(
+            self.store, "read_promotion_record", side_effect=FileNotFoundError("secret")
+        ):
+            self.assertEqual(
+                _steps(self.check())["rollback_target"][1], "current_promotion_missing"
+            )
+
+    def test_authorization_read_failure_is_unknown_with_clear_target(self) -> None:
+        inputs = read_path_check_inputs(
+            path="rollback",
+            profile=self.profile,
+            record_store=self.store,
+            action_allowed=Mock(side_effect=RuntimeError("private")),
+            caller_is_policy_administrator=lambda: False,
+            read_release_review=Mock(),
+            generated_at="2026-10-03T00:00:00Z",
+        )
+        check = build_product_path_check(
+            product=self.profile.product, path="rollback", inputs=inputs
+        )
+        self.assertEqual(check.state, "unknown")
+        self.assertEqual(
+            _steps(check)["rollback_grant"], ("unknown", "authorization_unread", "wait")
+        )
+        self.assertEqual(_steps(check)["rollback_target"][0], "clear")
+
+    def test_odoo_uses_previous_passing_target_manifest_and_administrator(self) -> None:
+        self.profile = self.profile.model_copy(update={"driver_id": "odoo"})
+        self.store.write_product_profile_record(self.profile)
+        manifest = ArtifactIdentityManifest(
+            artifact_id="artifact-previous",
+            source_commit="a" * 40,
+            enterprise_base_digest="sha256:base",
+            image=ArtifactImageReference(
+                repository=self.profile.image.repository, digest="sha256:" + "a" * 64
+            ),
+        )
+        self.store.write_artifact_manifest(manifest)
+        self.store.write_deployment_record(
+            self.previous.model_copy(
+                update={
+                    "artifact_identity": ArtifactIdentityReference(
+                        artifact_id=manifest.artifact_id
+                    ),
+                    "deploy": self.previous.deploy.model_copy(
+                        update={"finished_at": "2026-10-01T00:00:00Z"}
+                    ),
+                }
+            )
+        )
+        self.store.write_deployment_record(
+            self.previous.model_copy(
+                update={
+                    "record_id": "deployment-current",
+                    "artifact_identity": ArtifactIdentityReference(artifact_id="artifact-current"),
+                    "deploy": self.previous.deploy.model_copy(
+                        update={"finished_at": "2026-10-02T00:00:00Z"}
+                    ),
+                }
+            )
+        )
+        check = self.check(False)
+        self.assertEqual(
+            _steps(check)["rollback_grant"],
+            ("blocked", "rollback_needs_signed_in_administrator", "owner_approval"),
+        )
+        self.assertEqual(_steps(check)["rollback_target"][0], "clear")
+        self.actions.assert_not_called()
+        with patch.object(
+            self.store, "read_artifact_manifest", side_effect=FileNotFoundError("private")
+        ):
+            self.assertEqual(_steps(self.check())["rollback_target"][1], "rollback_not_ready")
+
+
 class ProductPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_route_needs_product_read_and_answers_for_the_caller(self) -> None:
         with TemporaryDirectory() as directory:
@@ -292,6 +524,12 @@ class ProductPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
                 "/v1/products/no-such-product/path-check?path=testing",
                 headers=headers,
             )
+            rollback = await _asgi_request(
+                app_with(("product_environment.read",)),
+                "GET",
+                "/v1/products/example-site/path-check?path=rollback",
+                headers=headers,
+            )
             store.close()
 
         self.assertEqual(allowed.status_code, 200, allowed.text)
@@ -305,6 +543,9 @@ class ProductPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
                 ("testing_deploy", "unknown"),
             ],
         )
+        self.assertEqual(rollback.status_code, 200, rollback.text)
+        self.assertEqual(rollback.json()["check"]["path"], "rollback")
+        self.assertEqual(rollback.json()["check"]["state"], "blocked")
         self.assertEqual(denied.status_code, 404)
         self.assertEqual(missing.status_code, 404)
 
