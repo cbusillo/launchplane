@@ -92,7 +92,7 @@ def register_owner_secret_input_routes(
                 status_code=503,
                 trace_id=trace_id,
                 code="database_storage_required",
-                message="Owner credential input requires database storage.",
+                message="Client credential input requires database storage.",
             )
         lane: ProductLaneProfile | None = None
         try:

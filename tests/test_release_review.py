@@ -27,8 +27,10 @@ from control_plane.release_review import (
     require_unchanged_production_artifact,
 )
 from control_plane.release_review_github import (
+    missing_owner_test_notes,
     nest_owner_test_notes,
     owner_test_notes,
+    pull_requests_missing_owner_test_notes,
     read_release_changes,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -242,7 +244,7 @@ class ReleaseReviewTests(unittest.TestCase):
             return result
 
         review = build_release_review(store=self.store, profile=profile(), read=no_notes)
-        self.assertIn("Pull request #42 has no Owner test notes.", review.blockers)
+        self.assertIn("Pull request #42 has no Client test notes.", review.blockers)
         review = build_release_review(
             store=self.store,
             profile=profile(),
@@ -263,9 +265,16 @@ class ReleaseReviewTests(unittest.TestCase):
             return result
 
         review = build_release_review(store=self.store, profile=profile(), read=batch_notes)
-        self.assertIn("Pull request #8, landed in #42, has no Owner test notes.", review.blockers)
-        self.assertNotIn("Pull request #42 has no Owner test notes.", review.blockers)
+        self.assertIn("Pull request #8, landed in #42, has no Client test notes.", review.blockers)
+        self.assertNotIn("Pull request #42 has no Client test notes.", review.blockers)
         self.assertFalse(review.approved)
+
+    def test_batch_notes_in_either_role_word_name_the_constituent_without_notes(self) -> None:
+        body = "## Client test notes\n\n### #7 Header\n\nOpen the home page.\n\n### #8 Footer\n\n{line}"
+        for line in (missing_owner_test_notes(8), "#8 has no Owner test notes."):
+            with self.subTest(line=line):
+                notes = owner_test_notes(body.format(line=line))
+                self.assertEqual(pull_requests_missing_owner_test_notes(notes), (8,))
 
     def test_unknown_production_use_requires_review_prelaunch_is_explicit(self) -> None:
         live = profile().model_copy(update={"production_use": "unknown"})
@@ -410,6 +419,12 @@ class ReleaseGitHubTests(unittest.TestCase):
         self.assertEqual(
             owner_test_notes("## Owner test notes\nNothing for the owner to test"),
             "Nothing for the owner to test",
+        )
+        self.assertEqual(
+            owner_test_notes(
+                "## Client test notes\nCheck checkout.\n## Owner test notes\nCheck booking."
+            ),
+            "Check checkout.\nCheck booking.",
         )
         self.assertEqual(
             owner_test_notes(

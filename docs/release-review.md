@@ -4,15 +4,15 @@ title: Client release review
 
 Before a customer production promotion, Launchplane compiles the release from
 the current production and testing revisions. The product's Client reviews the
-testing site and the **`Owner test notes`** from every merged pull request in that
+testing site and the **`Client test notes`** from every merged pull request in that
 commit range at `/ui/owner-review?product=<product>`. No GitHub interaction is
 required to read the checklist, accept it, or request changes.
 
 The review leads with the product, the viewer's Client or admin role, the
 testing-site link, and **What to test**. Pull requests with identical
-`Owner test notes` appear as one check listing each change it covers, and a change missing
+`Client test notes` appear as one check listing each change it covers, and a change missing
 notes appears as its own check. Changes whose notes begin with
-`Nothing for the owner to test` collapse into one expandable count. This grouping
+`Nothing for the Client to test` collapse into one expandable count. This grouping
 is display only: the checklist, its digest, and blockers remain per pull request. A collapsed **Technical details**
 section identifies the **Current production version** and **Proposed production
 version** (currently in testing). Accepting records approval for that proposed
@@ -49,7 +49,9 @@ with the trace ID and logged with it: `testing_lane_missing`,
 `candidate_identity_missing`, `release_record_missing`, or `github_read_failed`.
 Provider error text is never returned or logged, because it can contain private
 URLs. Missing test notes and commits without a merged pull request are
-visible checklist blockers. `Nothing for the owner to test` is valid test notes.
+visible checklist blockers. `Nothing for the Client to test` is valid test notes.
+Pull requests written before the role words changed say `Owner test notes` and
+`Nothing for the owner to test`; Launchplane and the CI action read both.
 Previous preview acceptance is an annotation, never release approval.
 Changes to shared Odoo addon sources or selections are also bound into the
 checklist and shown as an explicit blocker. They cannot be represented as an
@@ -76,20 +78,24 @@ was lost. GitHub issue contents and membership never decide release contents or
 approval; the saved Launchplane decision remains authoritative.
 The complete record uses one issue body. If GitHub rejects publication, the
 decision remains saved and promotion stays blocked; records are not split into
-comments. Retry recovery checks the complete issue body. Multiple `Owner test notes`
+comments. Retry recovery checks the complete issue body, so the issue keeps its
+`## Owner checklist` heading until recovery matches on the record marker instead. Multiple `Client test notes`
 sections are collected together; CI checks presence, not their number or content.
 
 GitHub attributes commits landed through a merge-train batch pull request to
 that batch PR only, so the checklist shows the batch PR, not its constituents.
-The batch PR body therefore carries every constituent's `Owner test notes`, each
+The batch PR body therefore carries every constituent's test notes under the older `Owner test notes`
+heading, which every pinned version of the CI action accepts, each
 under its own subheading, which satisfies the CI requirement below and shows
 the Client each change's notes once; see
 [Merge Train Policy](merge-train-policy.md#pr-native-landing). A constituent the
 batch body names as having no notes is still a release blocker, as it would be
 on its own.
 
-Product CI must require a nonempty **`Owner test notes`** section on every pull
-request, including changes that need no manual test. The shared
+Product CI must require a nonempty test notes section on every pull request,
+including changes that need no manual test. Write **`Client test notes`** once the
+repository pins the action at or after the commit that introduced that heading;
+with an older pin, keep **`Owner test notes`**, which every version accepts. The shared
 `.github/actions/owner-test-notes` action checks presence only, using the pull
 request event as data without checking out or running its code. Run it inside an
 existing required CI job and include `edited` among that workflow's pull request

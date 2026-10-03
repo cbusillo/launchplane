@@ -132,7 +132,7 @@ def _owned_batch_pull_request(
 def _batch_owner_test_notes(
     *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
 ) -> str:
-    """Carry each constituent's own Owner test notes into the batch PR body.
+    """Carry each constituent's own Client test notes into the batch PR body.
 
     GitHub attributes a batch-landed commit to the batch PR alone, so release
     review reads these notes from the batch PR, never from the constituents.
@@ -156,6 +156,8 @@ def _batch_owner_test_notes(
                 else missing_owner_test_notes(entry.pull_request_number)
             )
         )
+    # role-words: legacy. Product repositories pin the CI action by SHA, and pins older
+    # than the Client heading only accept this one; release review reads both.
     return "## Owner test notes\n\n" + "\n\n".join(sections)
 
 

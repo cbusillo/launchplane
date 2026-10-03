@@ -32796,7 +32796,7 @@
       },
       "ProductReviewDecisionRecord": {
         "additionalProperties": false,
-        "description": "One Owner decision about one pull request preview.\n\nThe decision is a recorded opinion: it never merges or deploys anything.",
+        "description": "One Client decision about one pull request preview.\n\nThe decision is a recorded opinion: it never merges or deploys anything.",
         "properties": {
           "base_branch": {
             "default": "",
@@ -79179,7 +79179,7 @@
             "description": "Service Unavailable"
           }
         },
-        "summary": "Read the Owner review page for one pull request",
+        "summary": "Read the Client review page for one pull request",
         "tags": [
           "product-review"
         ]
@@ -79272,7 +79272,7 @@
             "description": "Service Unavailable"
           }
         },
-        "summary": "Record the product Owner's accept or request-changes decision",
+        "summary": "Record the product Client's accept or request-changes decision",
         "tags": [
           "product-review"
         ]
@@ -79375,7 +79375,7 @@
             "description": "Service Unavailable"
           }
         },
-        "summary": "Retry delivery of a saved Owner decision without recording a new decision",
+        "summary": "Retry delivery of a saved Client decision without recording a new decision",
         "tags": [
           "product-review"
         ]
