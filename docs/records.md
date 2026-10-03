@@ -1383,6 +1383,15 @@ decision (`accepted` or `changes_requested` with its reason), the Client's GitHu
 id and login, and `decided_at`. The newest record for a repository and pull
 request is the current decision. The record authorizes nothing.
 
+A record with `carried_from` was not decided again: it carries an acceptance to
+a new head after a base-only refresh by the merge train (see
+[carried acceptance](owner-acceptance.md#carried-acceptance)). `carried_from`
+names the decision record and head it came from, the reason
+(`merge_train_base_refresh`), and the merge train branch refresh records that
+produced the new head. Its `decided_at` is when Launchplane carried it.
+`base_branch` is the pull request's base branch when the decision was first shown
+on it; an acceptance carries, and a carried acceptance applies, only on that base.
+
 ## Product Reconcile Request Records
 
 `launchplane_product_reconcile_requests` holds at most one row per target key
@@ -2744,6 +2753,17 @@ preflights.
   id is not copied into the compact public queue response.
   The record is evidence for a single Level 1 ordered-queue service call, not
   queue authority for a later pass.
+- Merge train branch refreshes are persisted as
+  `launchplane_merge_train_branch_refreshes` records, one each time the train's
+  GitHub client has GitHub merge a pull request's base branch into it
+  (`update-branch`). Each record stores the repository, base branch, pull request
+  number, the head SHA the train expected, the merge commit GitHub made
+  (`result_head_sha`, read back from the pull request after the request) and the
+  base commit it merged, the request time, and the controller trace id. It is
+  written only when the read-back head is a two-parent merge from the expected
+  head; otherwise, or if the write fails, nothing is recorded and the refresh
+  still stands. It is the proof that exactly that commit was made by the train,
+  used to carry a Client's acceptance across it.
 - Merge train pull-request feedback is persisted as
   `launchplane_merge_train_pr_feedback` records. Each record stores the
   repository/base branch, PR number/url, feedback event, hidden managed-comment

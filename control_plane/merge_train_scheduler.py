@@ -27,6 +27,7 @@ from control_plane.contracts.merge_train_policy import (
 from control_plane.github_request_timing import github_request_tally
 from control_plane.merge_admission import require_merge_admission_record_store
 from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator
+from control_plane.merge_train_branch_refresh import optional_merge_train_branch_refresh_store
 from control_plane.merge_train_admission import (
     MergeTrainRunHistoryStore,
     evaluate_merge_train_admission_from_store,
@@ -327,6 +328,7 @@ def _run_controller(
             controller_state_store=require_merge_train_controller_state_record_store(record_store),
             admission_store=require_merge_admission_record_store(record_store),
             admission_evaluator=admission_evaluator,
+            branch_refresh_store=optional_merge_train_branch_refresh_store(record_store),
         )
     delivered = 0
     failed = 0

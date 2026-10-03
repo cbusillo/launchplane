@@ -356,11 +356,17 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
       </p>
       <p>
         {!decision.head_sha ? "The reviewed version was not recorded." : <>
-          {currentHead && decision.head_sha !== currentHead ? "Earlier preview version" : "Reviewed preview version"}{" "}
+          {currentHead && decision.head_sha !== currentHead ? "Earlier preview version" : decision.carried_from ? "Applies to preview version" : "Reviewed preview version"}{" "}
           {decision.head_sha.slice(0, 7)}
           {!currentHead ? ". No preview is currently ready for comparison." : decision.head_sha !== currentHead ? ". This decision does not apply to the current preview." : ""}
         </>}
       </p>
+      {decision.carried_from ? (
+        <p>
+          Carried from version {decision.carried_from.head_sha.slice(0, 7)}: the merge train only
+          merged the base branch in, and the change itself is identical.
+        </p>
+      ) : null}
       {decision.reason ? <blockquote>{decision.reason}</blockquote> : null}
       {!decision.feedback_url ? (
         <>
