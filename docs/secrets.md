@@ -625,3 +625,56 @@ and revocation is possible only before worker claim. See
 
 **Preserved history:** Phase 1 described planning evidence before a deployed
 worker existed; it is not current root-rotation operating guidance.
+
+## Copying a product's own managed runtime secret
+
+`GET /v1/products/{product}/secret-bindings` returns the product's configured
+runtime secret bindings: name, binding key, scope, context, instance, declared
+class, sharing reason and current version ID. It reads no ciphertext or value,
+excludes global and worker/service stores, and requires product-profile read
+access. Contexts shared ambiguously between products are excluded.
+
+A product-config secret entry can use `copy_from` instead of `value`:
+
+```json
+{
+  "binding_key": "INTEGRATION_TOKEN",
+  "copy_from": {
+    "context": "example-site",
+    "instance": "prod",
+    "version_id": "<version_id from the metadata read>"
+  },
+  "secret_class": "shared_safe",
+  "sharing_reason": {
+    "kind": "read_only_source",
+    "reason": "Testing reads the same source",
+    "evidence": "Client verified read-only permissions on <date>"
+  },
+  "description": "Read-only source verified by the Client"
+}
+```
+
+The top-level product-config target is the destination lane. The source must be
+another stable lane of that same product, and the destination must be lane-exact
+in `runtime_environment`. The source binding key is the destination binding key;
+renaming a token to bypass integration key safety is not supported. Neither a
+source product nor another secret store can be supplied. Site-shared sources
+may be selected when that source lane has no configured exact binding. Ambiguous,
+disabled, missing or superseded sources are refused. Copies to previews are refused.
+
+Every copy requires a declared class and an allowlisted sharing reason with
+reason and evidence, in addition to normal runtime key safety. The caller needs
+existing source-lane `secret.read` access and destination product-config access;
+the route creates no grant. Launchplane does not verify token permissions: a
+person verifies them and records who, when and what they checked.
+
+Use the normal product-config dry run first, then apply the same reviewed
+request with its idempotency key. The source version ID pins the review; a
+rotation requires reading metadata and reviewing a fresh request. Dry runs
+resolve metadata without decrypting. Apply decrypts inside the service and
+writes a separately encrypted destination secret atomically, leaving the source
+unchanged. Product ownership, profile and source record/binding changes before
+commit abort the copy. The audit records the source secret and version IDs.
+Completed retries replay before resolving or decrypting the source. Request,
+response and audit metadata contain no secret value; subsequent live runtime
+sync or deployment remains a separate operation.

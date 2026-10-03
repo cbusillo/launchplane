@@ -44,6 +44,17 @@ class ProductProfileConflictError(ValueError):
     """A product profile changed after it authorized a bundled write."""
 
 
+class SecretCopySourceConflictError(ValueError):
+    """A reviewed copy source changed before the destination committed."""
+
+
+class SecretCopySourceExpectation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    record: SecretRecord
+    binding: SecretBinding
+
+
 class RuntimeEnvironmentWrite(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -117,6 +128,7 @@ class ProductAuthorityBundle(BaseModel):
     secret_versions: tuple[SecretVersion, ...] = ()
     secret_bindings: tuple[SecretBinding, ...] = ()
     secret_audit_events: tuple[SecretAuditEvent, ...] = ()
+    secret_copy_sources: tuple[SecretCopySourceExpectation, ...] = ()
     environment_inventory: tuple[EnvironmentInventory, ...] = ()
     release_tuples: tuple[ReleaseTupleRecord, ...] = ()
     delete_runtime_environments: tuple[RuntimeEnvironmentDelete, ...] = ()
@@ -127,6 +139,7 @@ class ProductAuthorityBundle(BaseModel):
     # (product, context) that must still own the context exclusively when the
     # bundle commits; checked under the same lock as product-profile writes.
     required_context_owner: tuple[str, str] | None = None
+    required_context_owners: tuple[tuple[str, str], ...] = ()
 
     @model_validator(mode="after")
     def validate_runtime_environment_routes(self) -> ProductAuthorityBundle:
@@ -188,13 +201,15 @@ def require_bundle_context_owner(
     bundle: ProductAuthorityBundle,
     profiles: Iterable[LaunchplaneProductProfileRecord],
 ) -> None:
-    if bundle.required_context_owner is None:
+    required_owners = bundle.required_context_owners + (
+        (bundle.required_context_owner,) if bundle.required_context_owner is not None else ()
+    )
+    if not required_owners:
         return
-    product, context = bundle.required_context_owner
-    if not is_exclusive_product_context(
-        context=context, product=product, owners=product_context_owner_map(profiles)
-    ):
-        raise ProductContextOwnershipError("The context must belong to the named product only.")
+    owners = product_context_owner_map(profiles)
+    for product, context in required_owners:
+        if not is_exclusive_product_context(context=context, product=product, owners=owners):
+            raise ProductContextOwnershipError("The context must belong to the named product only.")
 
 
 class ProductAuthorityBundleStore(Protocol):

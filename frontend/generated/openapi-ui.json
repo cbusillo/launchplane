@@ -22587,6 +22587,17 @@
             "title": "Context",
             "type": "string"
           },
+          "copy_from": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductSecretCopyFrom"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "instance": {
             "title": "Instance",
             "type": "string"
@@ -22631,6 +22642,21 @@
             "default": "",
             "title": "Secret Id",
             "type": "string"
+          },
+          "sharing_reason": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sharing Reason",
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -28314,6 +28340,30 @@
           "owner_input"
         ],
         "title": "ProductSecretConfigRequirement",
+        "type": "object"
+      },
+      "ProductSecretCopyFrom": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "instance",
+          "version_id"
+        ],
+        "title": "ProductSecretCopyFrom",
         "type": "object"
       },
       "ProductSiteOverview": {

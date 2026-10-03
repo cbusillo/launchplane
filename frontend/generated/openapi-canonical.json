@@ -27586,6 +27586,17 @@
             "title": "Context",
             "type": "string"
           },
+          "copy_from": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductSecretCopyFrom"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "instance": {
             "title": "Instance",
             "type": "string"
@@ -27630,6 +27641,21 @@
             "default": "",
             "title": "Secret Id",
             "type": "string"
+          },
+          "sharing_reason": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sharing Reason",
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -33072,6 +33098,78 @@
         "title": "ProductRuntimeSettingSummary",
         "type": "object"
       },
+      "ProductSecretBindingMetadata": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_key": {
+            "title": "Binding Key",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "global",
+              "context",
+              "context_instance"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "secret_class": {
+            "anyOf": [
+              {
+                "enum": [
+                  "prod_only",
+                  "testing",
+                  "preview",
+                  "non_prod",
+                  "shared_safe"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret Class"
+          },
+          "sharing_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SecretSharingReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding_key",
+          "name",
+          "scope",
+          "context",
+          "instance",
+          "version_id"
+        ],
+        "title": "ProductSecretBindingMetadata",
+        "type": "object"
+      },
       "ProductSecretBindingSummary": {
         "additionalProperties": false,
         "properties": {
@@ -33174,6 +33272,39 @@
         "title": "ProductSecretBindingSummary",
         "type": "object"
       },
+      "ProductSecretBindingsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "bindings": {
+            "items": {
+              "$ref": "#/components/schemas/ProductSecretBindingMetadata"
+            },
+            "title": "Bindings",
+            "type": "array"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "product",
+          "bindings"
+        ],
+        "title": "ProductSecretBindingsResponse",
+        "type": "object"
+      },
       "ProductSecretConfigRequirement": {
         "additionalProperties": false,
         "properties": {
@@ -33211,6 +33342,30 @@
           "binding_key"
         ],
         "title": "ProductSecretConfigRequirement",
+        "type": "object"
+      },
+      "ProductSecretCopyFrom": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "instance",
+          "version_id"
+        ],
+        "title": "ProductSecretCopyFrom",
         "type": "object"
       },
       "ProductSiteOverview": {
@@ -74386,6 +74541,16 @@
                         ],
                         "title": "Context"
                       },
+                      "copy_from": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/$defs/ProductSecretCopyFrom"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "description": {
                         "default": "",
                         "title": "Description",
@@ -74458,15 +74623,90 @@
                         ],
                         "title": "Secret Class"
                       },
+                      "sharing_reason": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/$defs/ProductConfigSharingReasonInput"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "value": {
-                        "title": "Value",
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Value"
+                      }
+                    },
+                    "title": "ProductConfigSecretInput",
+                    "type": "object"
+                  },
+                  "ProductConfigSharingReasonInput": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "evidence": {
+                        "title": "Evidence",
+                        "type": "string"
+                      },
+                      "kind": {
+                        "anyOf": [
+                          {
+                            "enum": [
+                              "dev_store",
+                              "read_only_source",
+                              "pre_live"
+                            ],
+                            "type": "string"
+                          },
+                          {
+                            "const": "site_shared",
+                            "type": "string"
+                          }
+                        ],
+                        "title": "Kind"
+                      },
+                      "reason": {
+                        "title": "Reason",
                         "type": "string"
                       }
                     },
                     "required": [
-                      "value"
+                      "kind",
+                      "reason",
+                      "evidence"
                     ],
-                    "title": "ProductConfigSecretInput",
+                    "title": "ProductConfigSharingReasonInput",
+                    "type": "object"
+                  },
+                  "ProductSecretCopyFrom": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "context": {
+                        "title": "Context",
+                        "type": "string"
+                      },
+                      "instance": {
+                        "title": "Instance",
+                        "type": "string"
+                      },
+                      "version_id": {
+                        "title": "Version Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "context",
+                      "instance",
+                      "version_id"
+                    ],
+                    "title": "ProductSecretCopyFrom",
                     "type": "object"
                   }
                 },
@@ -82040,6 +82280,105 @@
           }
         },
         "summary": "Report every step that stands between the caller and the end of a path"
+      }
+    },
+    "/v1/products/{product}/secret-bindings": {
+      "get": {
+        "operationId": "list_product_secret_bindings",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductSecretBindingsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "List product runtime secret binding metadata without values"
       }
     },
     "/v1/promotions/{record_id}": {

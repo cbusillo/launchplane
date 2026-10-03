@@ -239,6 +239,7 @@ from control_plane.production_backup_authority import (
     validate_production_backup_policy_binding,
 )
 from control_plane.storage.product_authority_bundle import (
+    SecretCopySourceConflictError,
     require_bundle_context_owner,
     ProductAuthorityBundle,
     ProviderTargetWrite,
@@ -484,6 +485,26 @@ class FilesystemRecordStore:
             return
         with self._product_authority_bundle_lock():
             require_bundle_context_owner(bundle, self._list_product_profile_records_locked())
+            for expected_source in bundle.secret_copy_sources:
+                try:
+                    current_record = self.read_secret_record(expected_source.record.secret_id)
+                except FileNotFoundError as error:
+                    raise SecretCopySourceConflictError(
+                        "Secret copy source disappeared."
+                    ) from error
+                current_binding = next(
+                    (
+                        binding
+                        for binding in self.list_secret_bindings(limit=None)
+                        if binding.binding_id == expected_source.binding.binding_id
+                    ),
+                    None,
+                )
+                if (
+                    current_record != expected_source.record
+                    or current_binding != expected_source.binding
+                ):
+                    raise SecretCopySourceConflictError("Secret copy source changed before commit.")
             stage_id = f"{_utc_now_timestamp().replace(':', '').replace('-', '')}-{time.time_ns()}"
             stage_dir = self._product_authority_bundle_stage_root() / stage_id
             records_dir = stage_dir / "records"

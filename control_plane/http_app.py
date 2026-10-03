@@ -794,6 +794,7 @@ from control_plane.service_human_auth import (
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.factory import storage_backend_name
 from control_plane.storage.product_authority_bundle import (
+    SecretCopySourceConflictError,
     ProductAuthorityBundle,
     ProductContextOwnershipError,
     ProductProfileConflictError,
@@ -14822,6 +14823,41 @@ def create_launchplane_fastapi_app(
                 code="matching_dry_run_required",
                 message="Operator product-config apply requires a prior matching dry-run.",
             )
+        copy_references = [
+            secret.copy_from
+            for secret in product_config_request.secrets
+            if secret.copy_from is not None
+        ]
+        if (
+            copy_references
+            and product_config_request.mode == "apply"
+            and not product_config_dry_run_exists(
+                record_store=database_store,
+                identity=identity,
+                request_payload=request_payload,
+                route_path=route_path,
+            )
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="matching_dry_run_required",
+                message="Secret copy requires a prior matching dry-run.",
+            )
+        for reference in copy_references:
+            if not resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="secret.read",
+                product="launchplane",
+                context=reference.context,
+                target=AuthorizationTarget(scope="instance", instances=(reference.instance,)),
+            ):
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="The caller cannot read the secret copy source lane.",
+                )
         lane_provider_env_reader: control_plane_product_config.LaneProviderEnvReader | None = None
         try:
             if product_config_request.adopts_provider_keys() and product_config_request.instance:
@@ -14900,6 +14936,16 @@ def create_launchplane_fastapi_app(
                     message="Product configuration changed; review a fresh dry run.",
                 )
         if expected_product_profile is not None:
+            if (
+                authority_bundle.expected_product_profiles
+                and authority_bundle.expected_product_profiles != (expected_product_profile,)
+            ):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="product_profile_conflict",
+                    message="The product configuration changed. Review a fresh dry-run.",
+                )
             authority_bundle = authority_bundle.model_copy(
                 update={"expected_product_profiles": (expected_product_profile,)}
             )
@@ -14924,7 +14970,7 @@ def create_launchplane_fastapi_app(
             records={},
             result=ProductConfigApplyResult.model_validate(driver_result),
         )
-        if operator_identity and product_config_request.mode == "dry-run":
+        if (operator_identity or copy_references) and product_config_request.mode == "dry-run":
             store_product_config_dry_run_record(
                 record_store=database_store,
                 identity=identity,
@@ -15036,6 +15082,13 @@ def create_launchplane_fastapi_app(
                 route_path=_PRODUCT_CONFIG_APPLY_ROUTE,
                 product_config_request=product_config_request,
             )
+        except SecretCopySourceConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="secret_copy_source_changed",
+                message="The secret copy source changed. Read metadata and review a fresh dry-run.",
+            ) from error
         except ProductProfileConflictError as error:
             raise _launchplane_http_error(
                 status_code=409,
