@@ -4329,7 +4329,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 202)
         return response.json()["result"], branch_updates
 
-    async def test_refreshes_a_behind_base_collapsed_root_instead_of_waiting(self) -> None:
+    async def test_batches_a_behind_base_collapsed_root_with_an_independent_pr(self) -> None:
         dry_run, _ = await self._run_controller_after_collapse(
             root_update={"branch_update_required": True}, mutate=False
         )
@@ -4337,10 +4337,13 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             root_update={"branch_update_required": True}, mutate=True
         )
 
-        self.assertEqual(dry_run["controller_action"], "update_branch")
+        self.assertEqual(dry_run["controller_action"], "plan_candidate")
         self.assertEqual(dry_run["dry_run_result"]["queue_order"], [1, 3])
-        self.assertEqual(mutated["controller_action"], "update_branch")
-        self.assertEqual(branch_updates, [1])
+        self.assertEqual(mutated["controller_action"], "plan_candidate")
+        self.assertEqual(
+            [entry["pull_request_number"] for entry in mutated["candidate"]["entries"]], [1, 3]
+        )
+        self.assertEqual(branch_updates, [])
 
     async def test_unlabelled_collapsed_root_lets_the_queue_proceed(self) -> None:
         result, branch_updates = await self._run_controller_after_collapse(
