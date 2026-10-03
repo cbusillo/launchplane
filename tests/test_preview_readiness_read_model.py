@@ -2,10 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from control_plane.contracts.every_code_preview_gate_record import (
-    EveryCodePreviewGateRecord,
-    build_every_code_preview_gate_id,
-)
+from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.preview_readiness_read_model import (
     build_preview_readiness_read_model,
 )
@@ -21,11 +18,7 @@ def _gate(
     check_summary: str = "",
 ) -> EveryCodePreviewGateRecord:
     return EveryCodePreviewGateRecord(
-        gate_id=build_every_code_preview_gate_id(
-            repository="cbusillo/sellyouroutboard",
-            pr_number=pr_number,
-            head_sha=head_sha,
-        ),
+        gate_id=f"every-code-preview-gate-cbusillo-sellyouroutboard-{pr_number}-{head_sha[:12]}",
         request_id="every-code-cbusillo-sellyouroutboard-123-test",
         repository="cbusillo/sellyouroutboard",
         issue_number=123,

@@ -310,7 +310,7 @@ def render_testing_feedback_markdown(
     lines = [TESTING_FEEDBACK_MARKER, titles[status], "", f"- Commit: `{commit}`"]
     if status == "waiting":
         if hold_reason:
-            # Operator free text: redacted like a failure summary before it is public.
+            # Admin free text: redacted like a failure summary before it is public.
             lines.append(f"- Hold: {_failure_summary(hold_reason)}")
         lines.extend(["", "Launchplane deploys the newest verified build when the hold is lifted."])
     elif status == "failed":

@@ -304,7 +304,7 @@ class GitHubOAuthClient:
             teams=teams,
         )
         bootstrap_admin_email = ""
-        if role is None and not _has_db_backed_human_policy_administrator(authz_policy):
+        if role is None and not _has_db_backed_human_admin(authz_policy):
             bootstrap_admin_email = next(
                 iter(sorted(self._config.bootstrap_admin_emails.intersection(email_candidates))),
                 "",
@@ -388,7 +388,7 @@ def _team_names(team_payload: object) -> tuple[str, ...]:
     return tuple(names)
 
 
-def _has_db_backed_human_policy_administrator(policy: LaunchplaneAuthzPolicy) -> bool:
+def _has_db_backed_human_admin(policy: LaunchplaneAuthzPolicy) -> bool:
     return any(
         bool(rule.github_ids)
         and not any((rule.logins, rule.organizations, rule.teams))
@@ -428,7 +428,7 @@ class HumanSessionManager:
             organizations=identity.organizations,
             teams=identity.teams,
         )
-        if role is not None or _has_db_backed_human_policy_administrator(authz_policy):
+        if role is not None or _has_db_backed_human_admin(authz_policy):
             return role
         email = identity.email.strip().lower()
         if email and email in self._config.bootstrap_admin_emails:

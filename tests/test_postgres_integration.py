@@ -230,9 +230,11 @@ from tests.test_product_retirement import _plan as _retirement_plan
 from tests.test_detached_application_retirement import (
     _plan as _detached_application_retirement_plan,
 )
+from control_plane.contracts.secret_record import SecretRecord, SecretVersion
 from control_plane.storage.product_authority_bundle import (
     ProductProfileConflictError,
     ProductAuthorityBundle,
+    SecretRecordConflictError,
     RuntimeEnvironmentConflictError,
     RuntimeEnvironmentWrite,
 )
@@ -1208,6 +1210,64 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 )
             )
             self.assertEqual(store.list_runtime_environment_records(), (runtime,))
+
+    def test_adopted_secret_insert_loses_to_a_record_written_after_the_absence_check(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            recorded = SecretRecord(
+                secret_id="secret-adopted",
+                scope="context_instance",
+                integration="runtime_environment",
+                name="REPAIRSHOPR_TOKEN",
+                context="example-site",
+                instance="prod",
+                current_version_id="version-recorded",
+                created_at="2026-10-03T00:00:00Z",
+                updated_at="2026-10-03T00:00:00Z",
+                updated_by="other-writer",
+            )
+            database_url = store.database_url
+
+            class _RacingStore(PostgresRecordStore):
+                def _after_product_authority_bundle_step(self, step_name: str) -> None:
+                    # Another writer commits the same secret after the absence check,
+                    # outside the bundle lock, as a direct secret write does.
+                    if step_name == "write_secret_version":
+                        other_store = PostgresRecordStore(database_url=database_url)
+                        try:
+                            other_store.write_secret_record(recorded)
+                        finally:
+                            other_store.close()
+
+            racing_store = _RacingStore(database_url=database_url)
+            try:
+                with self.assertRaises(SecretRecordConflictError):
+                    racing_store.write_product_authority_bundle(
+                        ProductAuthorityBundle(
+                            secret_versions=(
+                                SecretVersion(
+                                    version_id="version-adopted",
+                                    secret_id="secret-adopted",
+                                    created_at="2026-10-03T00:00:01Z",
+                                    key_id="test-key",
+                                    ciphertext="ciphertext",
+                                ),
+                            ),
+                            secret_records=(
+                                recorded.model_copy(
+                                    update={
+                                        "current_version_id": "version-adopted",
+                                        "updated_by": "adopter",
+                                    }
+                                ),
+                            ),
+                            absent_secret_ids=("secret-adopted",),
+                        )
+                    )
+            finally:
+                racing_store.close()
+            self.assertEqual(store.read_secret_record("secret-adopted"), recorded)
 
     def test_historical_preflight_scopes_database_history_before_limits(self) -> None:
         with TemporaryDirectory() as directory, _store_for_fresh_head_database() as store:

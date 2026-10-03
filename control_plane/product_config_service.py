@@ -331,6 +331,9 @@ def product_config_service_error(
     if error_code == "provider_env_unavailable":
         status_code = 503
         error_message = "Launchplane could not read the lane's provider env."
+    if error_code in {"provider_secret_missing", "provider_secret_already_recorded"}:
+        # Adoption planning emits fixed messages with no caller input or secret data.
+        error_message = str(error)
     if error_code == "provider_key_adoption_refused":
         error_message = (
             "Provider key adoption names keys that are missing on the provider or look like "

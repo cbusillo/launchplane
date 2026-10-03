@@ -2563,8 +2563,9 @@ credential, runtime grant, or stored record is changed by this code retirement.
 - One file per tenant PR enablement snapshot.
 - Record the anchor PR identity, enablement state, normalized preview-request
   metadata, candidate/request evidence, and timestamps.
-- PR ingest and `launchplane-previews write-enablement` write the same typed record
-  shape so webhook and non-webhook flows preserve comparable evidence.
+- `launchplane-previews write-enablement` writes the record. The PR-event ingest
+  that also wrote it is deleted (#2738). Records written earlier name whether
+  the retired preview label was present; renders no longer read it.
 
 ## Launchplane Preview Inventory Scan Record
 
@@ -2590,7 +2591,8 @@ credential, runtime grant, or stored record is changed by this code retirement.
   slug prefix, discovered timestamp, discovered desired previews, and pass/fail
   status. The desired previews are the open pull requests, drafts included;
   labels play no part (#2735). Records written earlier also name a label, which
-  is ignored on read.
+  is ignored on read. Migration `c87d8d574b67` drops the empty `label` column;
+  each row's payload keeps what older records named (#2738).
 - Desired-state records let Launchplane own the recurring open-PR discovery
   loop before it plans cleanup against provider inventory.
 
@@ -2667,9 +2669,7 @@ preflights.
   rerun mutation.
 - The local worker handoff is `uv run launchplane every-code run` for polling or
   `uv run launchplane every-code run-once` for a single scan. Each pass applies
-  trusted PR feedback, reconciles preview gates and ready preview labels, removes
-  stale source-issue queue labels for closed requests that can no longer reach
-  preview readiness, routes failed checks back to the owning session, then claims
+  trusted PR feedback, routes failed checks back to the owning session, then claims
   at most one queued request. Request handoff terminates any stale deterministic
   tmux session before launching a newly claimed attempt, records `running` or
   immediate `blocked` status, and wraps the visible command so terminal success

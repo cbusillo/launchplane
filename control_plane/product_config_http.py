@@ -64,6 +64,13 @@ class ProductConfigSecretInput(BaseModel):
     binding_key: str | None = None
     value: str | None = Field(default=None, repr=False)
     copy_from: ProductSecretCopyFrom | None = None
+    adopt_from_provider: Literal[True] | None = Field(
+        default=None,
+        description=(
+            "Store the lane's current provider env value for binding_key; the service "
+            "reads it, and no value is sent or returned."
+        ),
+    )
     description: str = ""
     secret_class: RuntimeSecretClass | None = None
     sharing_reason: ProductConfigSharingReasonInput | None = None
@@ -72,8 +79,12 @@ class ProductConfigSecretInput(BaseModel):
     def _require_secret_identity(self) -> "ProductConfigSecretInput":
         if not (self.name or "").strip() and not (self.binding_key or "").strip():
             raise ValueError("Product config secrets require name or binding_key.")
-        if (self.value is not None) == (self.copy_from is not None):
-            raise ValueError("Product config secrets require exactly one value or copy_from.")
+        sources = (self.value, self.copy_from, self.adopt_from_provider)
+        if sum(source is not None for source in sources) != 1:
+            raise ValueError(
+                "Product config secrets require exactly one value, copy_from or "
+                "adopt_from_provider."
+            )
         return self
 
 
@@ -362,6 +373,12 @@ class ProductConfigApplyEnvelope(BaseModel):
             for runtime_input in (self.runtime_env, self.runtime_environment)
         )
 
+    def adopts_provider_secrets(self) -> bool:
+        return any(secret.adopt_from_provider for secret in self.secrets)
+
+    def reads_lane_provider_env(self) -> bool:
+        return self.adopts_provider_keys() or self.adopts_provider_secrets()
+
     def product_config_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {
             "schema_version": self.schema_version,
@@ -438,8 +455,8 @@ def product_environment_config_apply_request(
     site_setting_keys = sorted(set(request.runtime_settings) - runtime_requirements)
     if site_setting_keys and not undeclared_settings_allowed:
         raise ProductEnvironmentConfigRefused(
-            "A live product's undeclared settings are recorded by the operator, "
-            "not with the local operator credential the operator's agent uses.",
+            "A live product's undeclared settings are recorded by an admin, "
+            "not with the local_operator credential the Director's agent uses.",
             code="live_product_requires_operator",
             status_code=403,
         )

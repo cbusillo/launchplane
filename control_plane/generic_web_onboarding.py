@@ -18,7 +18,6 @@ from control_plane.contracts.product_onboarding_manifest import (
     ProductOnboardingTargetManifest,
 )
 from control_plane.contracts.product_profile_record import (
-    PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL,
     LaunchplaneProductProfileRecord,
     ProductRuntimeConfigRequirement,
 )
@@ -89,7 +88,6 @@ class GenericWebOnboardingIntent(BaseModel):
     project_name: str = ""
     server_id: str = ""
     preview_context: str = ""
-    preview_label: str = PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL
     preview_app_name_prefix: str = ""
     domain_certificate_type: Literal["none", "letsencrypt"] = "none"
 
@@ -109,7 +107,6 @@ class GenericWebOnboardingIntent(BaseModel):
         self.project_name = self.project_name.strip() or self.product
         self.server_id = self.server_id.strip()
         self.preview_context = self.preview_context.strip() or f"{self.product}-preview"
-        self.preview_label = self.preview_label.strip() or PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL
         self.preview_app_name_prefix = (
             self.preview_app_name_prefix.strip() or f"{self.product}-preview"
         )
@@ -138,7 +135,6 @@ class GenericWebOnboardingIntent(BaseModel):
             ("target_name", self.target_name),
             ("project_name", self.project_name),
             ("preview_context", self.preview_context),
-            ("preview_label", self.preview_label),
             ("preview_app_name_prefix", self.preview_app_name_prefix),
         ):
             if not value:
@@ -201,7 +197,6 @@ def build_generic_web_onboarding_manifest(
         preview=ProductOnboardingPreviewManifest(
             enabled=True,
             context=intent.preview_context,
-            enable_label=intent.preview_label,
             app_name_prefix=intent.preview_app_name_prefix,
             template_instance="testing",
             domain_certificate_type=intent.domain_certificate_type,

@@ -926,7 +926,7 @@ class PrivilegedOperationContractTests(unittest.TestCase):
                 blocked_label=target.blocked_label,
                 stack_child_disposition_label=target.stack_child_disposition_label,
                 merge_method=target.merge_method,
-                engineering_review_mode=target.engineering_review_mode,
+                engineering_review_mode="advisory",
                 failure_policy=target.failure_policy,
                 enqueue=target.enqueue,
                 merge_identity=target.merge_identity,
@@ -1165,6 +1165,39 @@ class PrivilegedOperationStorageTests(unittest.TestCase):
         postgres = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{root / 'records.sqlite'}")
         postgres.ensure_schema()
         return FilesystemRecordStore(root / "state"), postgres
+
+    def test_historical_required_review_operation_round_trips_across_stores(self) -> None:
+        payload = json.loads(
+            (
+                Path(__file__).parent / "fixtures" / "privileged-operation-required-review.json"
+            ).read_text(encoding="utf-8")
+        )
+        record = PrivilegedOperationRecord.model_validate(payload)
+        self.assertEqual(record.model_dump(mode="json"), payload)
+        with TemporaryDirectory() as temporary_directory:
+            stores = self._stores(Path(temporary_directory))
+            try:
+                for store in stores:
+                    with self.subTest(store=type(store).__name__):
+                        store.write_privileged_operation_plan(
+                            record,
+                            PrivilegedOperationEventRecord(
+                                operation_id=record.operation_id,
+                                sequence=1,
+                                action="planned",
+                                occurred_at=record.created_at,
+                                source_kind="agent_api",
+                                source_event_id=record.source_event_id,
+                                actor=record.requested_by,
+                                resulting_record_digest=privileged_operation_record_digest(record),
+                            ),
+                        )
+                        restored = store.read_privileged_operation_record(record.operation_id)
+                        self.assertEqual(restored.model_dump(mode="json"), payload)
+                        listed = store.list_privileged_operation_records(limit=10)
+                        self.assertEqual(listed[0].model_dump(mode="json"), payload)
+            finally:
+                stores[1].close()
 
     def test_plan_replay_cancel_and_expiry_are_consistent_across_stores(self) -> None:
         with TemporaryDirectory() as temporary_directory:

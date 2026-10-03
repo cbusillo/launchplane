@@ -47,10 +47,8 @@ INLINE_CODE = re.compile(r"(`+).*?\1")
 LINK_TARGET = re.compile(r"\]\([^)]*\)")
 URL = re.compile(r"https?://\S+")
 
-# The glossary names the retired words. The root DIRECTION.md changes only
-# through a code-owner-approved pull request, which converts it separately
-# (cbusillo/launchplane#2720); drop it from this set once that lands.
-EXCLUDED = re.compile(r"^DIRECTION\.md$|^docs/role-words\.md$")
+# The glossary names the retired words.
+EXCLUDED = re.compile(r"^docs/role-words\.md$")
 
 
 def strip_comments(line: str, in_comment: bool) -> tuple[str, bool]:

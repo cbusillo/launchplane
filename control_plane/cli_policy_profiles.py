@@ -44,7 +44,6 @@ from control_plane.runtime_key_safety import (
     latest_active_runtime_key_safety_policy,
 )
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.workflows.launchplane import LAUNCHPLANE_PREVIEW_ENABLE_LABEL
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -214,7 +213,6 @@ def summarize_product_profile_record(record: LaunchplaneProductProfileRecord) ->
         "lane_count": len(record.lanes),
         "preview_enabled": record.preview.enabled,
         "preview_context": record.preview.context,
-        "preview_enable_label": record.preview.enable_label,
         "updated_at": record.updated_at,
         "source": record.source,
     }
@@ -300,7 +298,7 @@ def product_profiles() -> None:
     "--request-file",
     type=click.Path(path_type=Path, exists=True, dir_okay=False),
     required=True,
-    help="Managed reconciliation request JSON produced from operator-managed desired state.",
+    help="Managed reconciliation request JSON produced from admin-managed desired state.",
 )
 @click.option(
     "--idempotency-key",
@@ -351,7 +349,7 @@ def authz_policies_repository_scope_evidence(database_url: str, request_file: st
     scope_request = _load_authz_repository_scope_request(Path(request_file))
     click.echo(
         "Evidence source: configured PostgreSQL credentials; this does not prove that the "
-        "operator is authorized by the active policy.",
+        "admin is authorized by the active policy.",
         err=True,
     )
     try:
@@ -752,12 +750,6 @@ def product_profiles_show(database_url: str, product: str) -> None:
 )
 @click.option("--preview-enabled/--preview-disabled", default=False, show_default=True)
 @click.option("--preview-context", default="", help="Preview context when previews are enabled.")
-@click.option(
-    "--preview-enable-label",
-    default=LAUNCHPLANE_PREVIEW_ENABLE_LABEL,
-    show_default=True,
-    help="Pull request label that opts this product into Launchplane previews.",
-)
 @click.option("--preview-slug-template", default="pr-{number}", show_default=True)
 @click.option("--updated-at", default="", help="Override updated timestamp.")
 @click.option("--source-label", default="cli:product-profiles:upsert", show_default=True)
@@ -774,7 +766,6 @@ def product_profiles_upsert(
     lanes_json: str,
     preview_enabled: bool,
     preview_context: str,
-    preview_enable_label: str,
     preview_slug_template: str,
     updated_at: str,
     source_label: str,
@@ -794,7 +785,6 @@ def product_profiles_upsert(
             preview=ProductPreviewProfile(
                 enabled=preview_enabled,
                 context=preview_context,
-                enable_label=preview_enable_label,
                 slug_template=preview_slug_template,
             ),
             updated_at=updated_at.strip() or utc_now_timestamp(),

@@ -15,7 +15,7 @@ from control_plane.authz_grant_service import (
     AuthzPolicyConflictError,
     AuthzPolicyRequestError,
     AuthzPolicySafetyError,
-    authz_policy_administrator_quorum_satisfied,
+    authz_admin_quorum_satisfied,
     build_authz_candidate_policy_structural_diff,
     execute_managed_authz_policy_reconcile,
     plan_managed_authz_policy_reconcile,
@@ -281,7 +281,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(strict_immutable_github_human_administrator_ids(policy), {101, 102, 103})
-        self.assertTrue(authz_policy_administrator_quorum_satisfied(policy=policy))
+        self.assertTrue(authz_admin_quorum_satisfied(policy=policy))
         self.assertEqual(
             strict_immutable_github_human_administrator_ids(
                 policy.model_copy(update={"administrator_quorum": 4})
@@ -289,7 +289,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
             {101, 102, 103},
         )
         self.assertFalse(
-            authz_policy_administrator_quorum_satisfied(
+            authz_admin_quorum_satisfied(
                 policy=policy.model_copy(update={"administrator_quorum": 4})
             )
         )

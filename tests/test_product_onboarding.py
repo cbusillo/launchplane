@@ -174,7 +174,6 @@ def _manifest_payload() -> dict[str, object]:
         "preview": {
             "enabled": True,
             "context": "example-site-preview",
-            "enable_label": "preview-requested",
             "slug_template": "pr-{number}",
             "domain_certificate_type": "letsencrypt",
         },
@@ -978,7 +977,6 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertEqual(
             profile.lanes[1].odoo_data_policy.upstream_source, "example-site/prod/upstream"
         )
-        self.assertEqual(profile.preview.enable_label, "preview-requested")
         self.assertEqual(profile.preview.domain_certificate_type, "letsencrypt")
         self.assertEqual(profile.expected_config.runtime_environment_keys[0].key, "PUBLIC_BASE_URL")
         self.assertEqual(

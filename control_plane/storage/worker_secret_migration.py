@@ -367,7 +367,7 @@ def remove_copied_secrets(
 ) -> int:
     """Remove only the copies ``copy_global_secret_to_contexts`` created; returns count.
 
-    A copy is recognised by its migration-made current version, so one the operator has
+    A copy is recognised by its migration-made current version, so one an admin has
     rotated since is kept. Each record is locked while it is checked and deleted.
     """
     removed = 0

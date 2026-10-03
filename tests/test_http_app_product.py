@@ -3196,12 +3196,12 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(status, 403, payload)
                 error = cast(dict[str, object], payload["error"])
                 self.assertEqual(error["code"], "live_product_requires_operator")
-                self.assertIn("changed by the operator", str(error["message"]))
+                self.assertIn("changed by an admin", str(error["message"]))
                 self.assertEqual(stored.expected_config.managed_secret_bindings, ())
 
     async def test_apply_product_expected_config_workflow_still_allowed_on_live(self) -> None:
         # This route accepts only bearer callers (workflows, local admins, local operators);
-        # the live refusal applies to the local operator credential alone.
+        # the live refusal applies to the local_operator credential alone.
         status, payload, stored = await self._post_expected_config_for_production_use(
             production_use="live", mode="apply", workflow=True
         )

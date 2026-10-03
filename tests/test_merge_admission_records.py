@@ -46,6 +46,7 @@ from control_plane.merge_train_github import MergeTrainGitHubMergeRejectedError
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.test_merge_readiness import (
+    _historical_required_readiness,
     BASE_SHA,
     CANDIDATE_SHA,
     HEAD_SHA,
@@ -149,7 +150,11 @@ def _already_contained_outcome(
 
 class MergeLandingOutcomeContractTests(unittest.TestCase):
     def test_legacy_outcome_binding_survives_optional_batch_evidence(self) -> None:
-        outcome = _ambiguous_outcome()
+        with patch(
+            "tests.test_merge_admission_records._merge_admission",
+            return_value=_merge_admission(readiness=_historical_required_readiness()),
+        ):
+            outcome = _ambiguous_outcome()
         # Captured before batch evidence was added: persisted outcomes must
         # remain readable without rewriting their immutable binding.
         self.assertEqual(
@@ -429,7 +434,7 @@ class MergeAdmissionStoreContract:
 
     def test_legacy_required_readiness_payload_preserves_admission_identity(self) -> None:
         test_case = cast(unittest.TestCase, cast(object, self))
-        admission = _merge_admission()
+        admission = _merge_admission(readiness=_historical_required_readiness())
         payload = admission.model_dump(mode="json")
         readiness = cast(dict[str, object], payload["readiness"])
         readiness.pop("engineering_review_authority")
@@ -445,8 +450,8 @@ class MergeAdmissionStoreContract:
 
     def test_advisory_readiness_changes_admission_identity(self) -> None:
         test_case = cast(unittest.TestCase, cast(object, self))
-        required = _merge_admission()
-        advisory = _merge_admission(readiness=_evaluate(engineering_review_authority="advisory"))
+        required = _merge_admission(readiness=_historical_required_readiness())
+        advisory = _merge_admission()
 
         test_case.assertNotEqual(
             advisory.readiness.readiness_digest, required.readiness.readiness_digest
@@ -1012,7 +1017,7 @@ class GuardedMergeAdmissionScenarioTests(unittest.TestCase):
         guard = self._guard()
         admission = self._admit(guard)
         error = MergeTrainGitHubMergeRejectedError(
-            pull_request_number=admission.pull_request_number, head_behind_base=True
+            pull_request_number=admission.pull_request_number, observed_merge_state="behind"
         )
 
         outcome = guard.record_provider_failure(

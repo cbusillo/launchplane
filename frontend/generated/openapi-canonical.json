@@ -30989,11 +30989,6 @@
             "title": "Domain Certificate Type",
             "type": "string"
           },
-          "enable_label": {
-            "default": "launchplane-preview",
-            "title": "Enable Label",
-            "type": "string"
-          },
           "enabled": {
             "default": false,
             "title": "Enabled",
@@ -74581,6 +74576,19 @@
                   "ProductConfigSecretInput": {
                     "additionalProperties": true,
                     "properties": {
+                      "adopt_from_provider": {
+                        "anyOf": [
+                          {
+                            "const": true,
+                            "type": "boolean"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "description": "Store the lane's current provider env value for binding_key; the service reads it, and no value is sent or returned.",
+                        "title": "Adopt From Provider"
+                      },
                       "binding_key": {
                         "anyOf": [
                           {
@@ -75847,11 +75855,6 @@
                         "title": "Preview Context",
                         "type": "string"
                       },
-                      "preview_label": {
-                        "default": "launchplane-preview",
-                        "title": "Preview Label",
-                        "type": "string"
-                      },
                       "product": {
                         "title": "Product",
                         "type": "string"
@@ -76381,11 +76384,6 @@
                           "letsencrypt"
                         ],
                         "title": "Domain Certificate Type",
-                        "type": "string"
-                      },
-                      "enable_label": {
-                        "default": "launchplane-preview",
-                        "title": "Enable Label",
                         "type": "string"
                       },
                       "enabled": {

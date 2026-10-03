@@ -644,7 +644,7 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             self.assertEqual(stored.attempt, 3)
             self.assertEqual(
                 stored.error_message,
-                "Odoo production backup restore with prior result evidence requires operator "
+                "Odoo production backup restore with prior result evidence requires admin "
                 "reconciliation.",
             )
 
@@ -685,7 +685,7 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             self.assertEqual(stored.status, "reconciliation_required")
             self.assertEqual(stored.phase, "database_restore_started")
             self.assertEqual(stored.error_code, "operation_reconciliation_required")
-            self.assertIn("operator reconciliation", stored.error_message)
+            self.assertIn("admin reconciliation", stored.error_message)
 
     def test_worker_fails_closed_when_grant_is_removed_after_enqueue(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1286,7 +1286,7 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
                 reconciliation_required.error_code,
                 "operation_reconciliation_required",
             )
-            self.assertIn("operator reconciliation", reconciliation_required.error_message)
+            self.assertIn("admin reconciliation", reconciliation_required.error_message)
             self.assertEqual(reconciliation_required.lease_owner, "")
 
     def test_reconcile_rejects_invalid_max_attempts(self) -> None:
@@ -1329,7 +1329,7 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
                         "status": "reconciliation_required",
                         "phase": "apply",
                         "error_code": "operation_reconciliation_required",
-                        "error_message": "Provider state requires operator reconciliation.",
+                        "error_message": "Provider state requires admin reconciliation.",
                     }
                 )
             )

@@ -120,7 +120,6 @@ DEPLOYABLE = "2" * 40
 OLDER = "1" * 40
 OFF_HISTORY = "9" * 40
 PR_HEAD = "a" * 40
-LABEL = "launchplane-preview"
 
 
 def _digest(commit: str) -> str:
@@ -222,7 +221,6 @@ def _profile(product: str = "site", *, repository_id: str = "") -> dict[str, obj
         image={"repository": IMAGE_REPOSITORY},
         repository_id=repository_id,
         repository_owner_id="1" if repository_id else "",
-        preview={**cast(dict[str, object], payload["preview"]), "enable_label": LABEL},
     )
     return payload
 
@@ -473,7 +471,7 @@ class ProductReconcileTestCase(unittest.TestCase):
                 anchor_repo="site",
                 anchor_pr_number=number,
                 anchor_pr_url=f"https://github.com/{REPOSITORY}/pull/{number}",
-                preview_label=LABEL,
+                preview_label=f"cm/site/pr-{number}",
                 canonical_url=f"https://pr-{number}.example.test",
                 state=state,
                 created_at="2026-09-29T10:00:00Z",

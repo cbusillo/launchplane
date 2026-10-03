@@ -230,11 +230,20 @@ Each repository policy contains:
   for stack child disposition and must differ from `enqueue_label` and
   `blocked_label`.
 - `merge_method`: GitHub merge strategy, one of `merge`, `squash`, or `rebase`.
-- `engineering_review_mode`: Whether engineering-review evidence is `advisory`
-  or `required` for guarded merge admission. Existing policies default to
-  `advisory`, matching the current shadow-only review contract. A future
-  enforcement rollout must replace the active DB-backed policy deliberately
-  with `required`.
+- `engineering_review_mode`: Advisory review evidence only (`advisory`, the
+  default). New policy imports and target preparation reject `required`, which
+  is retired by the overall DIRECTION.md. Historical policy records retain
+  their original values and digests, but even an active legacy `required`
+  policy cannot make engineering-review evidence block a merge. To prepare a
+  new target from a legacy active policy, import a replacement policy with
+  every repository set to `advisory`; preparation reports
+  `merge_train_engineering_review_mode_retired` until that replacement.
+  Historical privileged-operation requests remain readable; planning and
+  executing a policy import reject retired required-review candidates.
+  A pending legacy import must be cancelled and replaced with an advisory
+  candidate. Retrying its original required-mode preparation or policy import
+  is rejected; historical records remain available through policy and operation
+  list/detail reads.
 - `provider_delivery_protection_expectation`: Optional exact provider-protection
   expectation for ordinary guarded delivery. Absence preserves legacy policy
   bytes and digests and supplies no ordinary readiness capability. Only the
@@ -627,6 +636,24 @@ cleanly into the candidate built before it, the controller reports
 An exhausted final-publication readback also fails closed, with no individual
 failed pull request: its checkpoint identifies the publication phase and the
 retained construction ref.
+
+GitHub refuses to merge into a base that requires conversation resolution
+while any review thread is unresolved. The snapshot reader reads that rule from
+classic protection through the base branch's `refUpdateRule`, which GitHub shows
+without the Administration permission the train token does not hold, and from
+the branch's active rulesets, which need only Metadata read. When the rule is on, each open,
+non-draft pull request's review threads are read, and one with an unresolved
+thread is ineligible with a reason that counts them; file paths stay out of
+public reasons. A thread opened by code scanning tells the author to fix the
+code rather than resolve the thread.
+The other entries plan and land without it, and resolving the thread brings it
+back. An unreadable rule is not taken as absent: unresolved threads still make
+the entry ineligible, and the reason says the rule could not be read. A planned
+entry that gains a thread before landing blocks admission with
+`pull_request_conversations_unresolved`. The batch PR is checked the same way
+after its checks pass and before any admission; an unresolved thread there,
+such as a code-scanning finding on the combined change, blocks with
+`batch_pull_request_conversations_unresolved` instead of a refused merge.
 
 ## Example Policy Entries
 

@@ -26,6 +26,8 @@ from control_plane.merge_train_github import (
 from control_plane.release_review_github import owner_test_notes
 from tests.test_merge_train_github import (
     _combined_status,
+    _conversation_rule,
+    _review_threads,
     _git_commit,
     _protected_branch_with_checks,
     _required_check_run,
@@ -53,6 +55,8 @@ class _BatchProvider:
         self.member_bodies: dict[int, str] = {}
         self.requests: list[tuple[str, str, dict[str, object] | None]] = []
         self.before_merge: Callable[[], None] = lambda: None
+        self.requires_conversation_resolution = False
+        self.batch_threads: tuple[tuple[bool, str], ...] = ()
 
     @property
     def merge_calls(self) -> list[tuple[str, str, dict[str, object] | None]]:
@@ -86,6 +90,15 @@ class _BatchProvider:
 
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
         self.requests.append((method, path, deepcopy(body)))
+        if method == "POST" and path == "/graphql":
+            assert body is not None
+            variables = cast(dict[str, object], body["variables"])
+            if "number" not in variables:
+                return _conversation_rule(self.requires_conversation_resolution)
+            assert variables["number"] == self.number
+            return _review_threads(*self.batch_threads)
+        if method == "GET" and "/rules/branches/" in path:
+            return []
         if method == "GET" and "/pulls?" in path:
             return [self.pull_request(self.number)] if self.created else []
         if method == "POST" and path.endswith("/pulls"):
@@ -473,6 +486,27 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
             self.land()
         self.assertEqual(self.guard.outcomes, {1: "batch_not_dispatched"})
         self.assertEqual(self.provider.merge_calls, [])
+
+    def test_unresolved_batch_conversation_blocks_before_any_admission(self) -> None:
+        self.provider.requires_conversation_resolution = True
+        self.provider.batch_threads = ((False, "github-advanced-security"),)
+        with self.assertRaises(MergeAdmissionDeniedError) as blocked:
+            self.land()
+        self.assertEqual(
+            blocked.exception.reason_code, "batch_pull_request_conversations_unresolved"
+        )
+        self.assertIn("fix the code-scanning finding", str(blocked.exception))
+        self.assertEqual(self.guard.admissions, {})
+        self.assertEqual(self.provider.merge_calls, [])
+
+        self.provider.batch_threads = ((True, "github-advanced-security"),)
+        landed = self.land()
+        self.assertTrue(all(entry.status == "merged" for entry in landed.entries))
+
+    def test_batch_threads_do_not_block_when_the_base_does_not_require_resolution(self) -> None:
+        self.provider.batch_threads = ((False, "reviewer"),)
+        landed = self.land()
+        self.assertTrue(all(entry.status == "merged" for entry in landed.entries))
 
     def test_provider_refusal_applies_to_both_admissions_without_member_merges(self) -> None:
         self.provider.refuse = True

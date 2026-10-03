@@ -665,6 +665,7 @@ from control_plane.storage import landing_authority
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
     SecretCopySourceConflictError,
+    SecretRecordConflictError,
     ProductProfileConflictError,
     require_bundle_context_owner,
     ProductAuthorityBundle,
@@ -3342,7 +3343,6 @@ class LaunchplanePreviewDesiredStateRow(Base):
     context: Mapped[str] = mapped_column(String, nullable=False)
     discovered_at: Mapped[str] = mapped_column(String, nullable=False)
     repository: Mapped[str] = mapped_column(String, nullable=False)
-    label: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     desired_count: Mapped[int] = mapped_column(Integer, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
@@ -6117,6 +6117,18 @@ class PostgresRecordStore(HumanSessionStore):
                     or SecretBinding.model_validate(binding_row.payload) != expected_source.binding
                 ):
                     raise SecretCopySourceConflictError("Secret copy source changed before commit.")
+            for secret_id in bundle.absent_secret_ids:
+                if (
+                    session.scalar(
+                        select(LaunchplaneSecretRow)
+                        .where(LaunchplaneSecretRow.secret_id == secret_id)
+                        .with_for_update()
+                    )
+                    is not None
+                ):
+                    raise SecretRecordConflictError(
+                        "A secret adopted from the provider was recorded before commit."
+                    )
             for delete_item in bundle.delete_runtime_environments:
                 row = session.scalar(
                     self._runtime_environment_statement(
@@ -6224,7 +6236,20 @@ class PostgresRecordStore(HumanSessionStore):
                     self._secret_version_row(version),
                     step_name="write_secret_version",
                 )
+            absent_secret_ids = frozenset(bundle.absent_secret_ids)
             for secret_record in bundle.secret_records:
+                if secret_record.secret_id in absent_secret_ids:
+                    # Create-only: no lock covers an absent row, so insert and let a
+                    # concurrent writer's committed row fail it on the primary key.
+                    session.add(self._secret_row(secret_record))
+                    try:
+                        session.flush()
+                    except IntegrityError as error:
+                        raise SecretRecordConflictError(
+                            "A secret adopted from the provider was recorded before commit."
+                        ) from error
+                    self._after_product_authority_bundle_step("write_secret_record")
+                    continue
                 self._merge_authority_row(
                     session, self._secret_row(secret_record), step_name="write_secret_record"
                 )
@@ -9128,7 +9153,7 @@ class PostgresRecordStore(HumanSessionStore):
                             "error_code": "operation_reconciliation_required",
                             "error_message": (
                                 f"Odoo stable bootstrap operation lease expired in "
-                                f"phase {record.phase!r}; provider state requires operator "
+                                f"phase {record.phase!r}; provider state requires admin "
                                 "reconciliation before the lane can be released."
                             ),
                         }
@@ -9559,7 +9584,7 @@ class PostgresRecordStore(HumanSessionStore):
                             "error_code": "operation_reconciliation_required",
                             "error_message": (
                                 f"Odoo stable target replacement operation lease expired in "
-                                f"phase {record.phase!r}; provider state requires operator "
+                                f"phase {record.phase!r}; provider state requires admin "
                                 "reconciliation before the lane can be released."
                             ),
                         }
@@ -10082,7 +10107,7 @@ class PostgresRecordStore(HumanSessionStore):
                             "error_code": "operation_reconciliation_required",
                             "error_message": (
                                 "Odoo production backup restore lease expired in "
-                                f"phase {record.phase!r}; provider state requires operator "
+                                f"phase {record.phase!r}; provider state requires admin "
                                 "reconciliation before the lane can be released."
                             ),
                         }
@@ -10392,7 +10417,7 @@ class PostgresRecordStore(HumanSessionStore):
         """Requeue an operation whose lease expired before any provider effect; hold the rest.
 
         Past the safe phases the operation may have changed prod, so it waits as
-        ``reconciliation_required`` for an operator instead of running again.
+        ``reconciliation_required`` for an admin instead of running again.
         """
 
         statement = select(row_type).where(
@@ -11222,7 +11247,7 @@ class PostgresRecordStore(HumanSessionStore):
                             "error_code": "operation_reconciliation_required",
                             "error_message": (
                                 "Odoo retained-volume backup import lease expired in "
-                                f"phase {record.phase!r}; provider state requires operator "
+                                f"phase {record.phase!r}; provider state requires admin "
                                 "reconciliation before the lane can be released."
                             ),
                         }
@@ -15661,8 +15686,6 @@ class PostgresRecordStore(HumanSessionStore):
                 context=record.context,
                 discovered_at=record.discovered_at,
                 repository=record.repository,
-                # Retired with the preview label (#2735); the column stays for older rows.
-                label="",
                 status=record.status,
                 desired_count=record.desired_count,
                 payload=self._payload_dict(record),
