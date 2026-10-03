@@ -896,6 +896,10 @@ test.describe("operator journeys", () => {
     await publicOriginField
       .getByLabel("New value")
       .fill("https://example.invalid");
+    await page.getByRole("button", { name: "Add a site setting" }).click();
+    await page.getByLabel("Setting name").fill("SITE_MODE");
+    await page.getByLabel("Setting value").fill("full");
+    await page.getByLabel("Provider keys to retire").fill("LEGACY_TUNING");
     await page
       .getByLabel("Change reason")
       .fill("Verify the deterministic browser dry-run.");
@@ -919,6 +923,9 @@ test.describe("operator journeys", () => {
     ).toBeEnabled();
     await expect(
       page.getByText("Dry-run evidence", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Provider keys retired", { exact: true }),
     ).toBeVisible();
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "safe-change-confirmation");

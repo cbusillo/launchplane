@@ -5886,6 +5886,7 @@ export type ApplyProductEnvironmentConfigData = {
         managed_secrets?: Array<ProductEnvironmentManagedSecretInput>;
         mode: 'dry-run' | 'apply';
         reason?: string;
+        retired_provider_keys?: Array<string>;
         runtime_settings?: {
             [key: string]: string | number | number | boolean;
         };

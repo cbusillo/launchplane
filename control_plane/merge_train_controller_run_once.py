@@ -44,6 +44,7 @@ from control_plane.contracts.merge_train_structural_provenance import (
 from control_plane.merge_train import (
     apply_merge_train_branch_update_intent,
     MergeTrainDryRunResult,
+    MergeTrainDryRunSnapshot,
     build_merge_train_dry_run_result,
     discover_merge_train_stack,
     merge_train_stack_child_readiness_check,
@@ -881,6 +882,55 @@ def latest_merge_train_stack_collapse_plan_record_for_completed_landing(
     return latest_merge_train_stack_collapse_progress_record(compatible_records)
 
 
+def _stack_collapse_record_landed_after_root_refresh(
+    *,
+    record_store: MergeTrainStackCollapsePlanRecordStore,
+    github_client: GitHubMergeTrainClient,
+    repository: str,
+    base_branch: str,
+    landing_plan: MergeTrainBatchLandingPlan,
+    policy_sha256: str,
+) -> MergeTrainStackCollapsePlanRecord | None:
+    """Find a collapse whose root's branch was refreshed before the root landed.
+
+    The refresh moves the root's head past the plan's collapsed head, so the
+    exact-head match above fails. The plan still applies when its root merged in
+    this landing from a head that descends from the collapsed head: the
+    children's commits landed with the root, whatever the merge method.
+    """
+    merged_root_heads = {
+        entry.pull_request_number: entry.expected_head_sha
+        for entry in landing_plan.entries
+        if entry.status == "merged"
+    }
+    contained: dict[tuple[str, str], bool] = {}
+    landed_records: list[MergeTrainStackCollapsePlanRecord] = []
+    for record in record_store.list_merge_train_stack_collapse_plan_records(
+        repository=repository,
+        base_branch=base_branch,
+        status="active",
+        limit=100,
+    ):
+        if not (
+            record.plan.status in {"waiting_for_root_checks", "ready_for_train"}
+            and record.plan.policy_key == landing_plan.policy_key
+            and record.plan.policy_sha256 == policy_sha256 == landing_plan.policy_sha256
+            and record.plan.root_pull_request_number in merged_root_heads
+        ):
+            continue
+        lineage = (
+            stack_collapse_expected_root_head_sha(record.plan),
+            merged_root_heads[record.plan.root_pull_request_number],
+        )
+        if lineage not in contained:
+            contained[lineage] = github_client.branch_contains_commit(
+                repository=repository, branch_ref=lineage[1], commit_sha=lineage[0]
+            )
+        if contained[lineage]:
+            landed_records.append(record)
+    return latest_merge_train_stack_collapse_progress_record(tuple(landed_records))
+
+
 def _advance_active_landing_record(
     *,
     request: MergeTrainControllerRunOnceEnvelope,
@@ -1431,6 +1481,13 @@ def _finish_landed_merge_train_batch(
         )
     collapse_record = latest_merge_train_stack_collapse_plan_record_for_completed_landing(
         record_store=stack_collapse_store,
+        repository=request.repository,
+        base_branch=request.base_branch,
+        landing_plan=landed_plan,
+        policy_sha256=policy_sha256,
+    ) or _stack_collapse_record_landed_after_root_refresh(
+        record_store=stack_collapse_store,
+        github_client=github_client,
         repository=request.repository,
         base_branch=request.base_branch,
         landing_plan=landed_plan,
@@ -2238,8 +2295,9 @@ def _advance_without_candidate_record(
         base_branch=request.base_branch,
         plan_status="waiting_for_root_checks",
     )
+    snapshot: MergeTrainDryRunSnapshot | None = None
     if waiting_collapse_record is not None:
-        waiting_result = _advance_waiting_stack_collapse_record(
+        waiting_result, snapshot = _advance_waiting_stack_collapse_record(
             github_client=github_client,
             request=request,
             policy=policy,
@@ -2294,6 +2352,7 @@ def _advance_without_candidate_record(
         trace_id=trace_id,
         recorded_at=recorded_at,
         lease=lease,
+        snapshot=snapshot,
     )
 
 
@@ -2311,7 +2370,14 @@ def _advance_waiting_stack_collapse_record(
     trace_id: str,
     recorded_at: str,
     lease: MergeTrainControllerLeaseContext,
-) -> dict[str, object] | None:
+) -> tuple[dict[str, object] | None, MergeTrainDryRunSnapshot]:
+    """Admit a collapsed root once its checks pass, or step aside.
+
+    The plan waits only while the root's own checks are pending. A root that
+    needs a branch update, is blocked, or has left the queue goes back to the
+    live queue with the snapshot already read, so the controller refreshes it
+    or moves on to the other ready pull requests instead of waiting forever.
+    """
     snapshot = github_client.read_merge_train_snapshot(
         repository=request.repository,
         base_branch=request.base_branch,
@@ -2329,7 +2395,7 @@ def _advance_waiting_stack_collapse_record(
         or root_pull_request.head_sha
         != stack_collapse_expected_root_head_sha(waiting_collapse_record.plan)
     ):
-        return None
+        return None, snapshot
     try:
         validate_merge_train_stack_collapse_record_for_controller(
             collapse_record=waiting_collapse_record,
@@ -2340,7 +2406,7 @@ def _advance_waiting_stack_collapse_record(
         raise MergeTrainControllerRequestError(str(error)) from error
     root_snapshot = snapshot.model_copy(update={"pull_requests": (root_pull_request,)})
     dry_run_result = build_merge_train_dry_run_result(policy=policy, snapshot=root_snapshot)
-    if dry_run_result.intended_next_action != "merge":
+    if dry_run_result.intended_next_action == "wait_for_checks":
         return {
             "repository": request.repository,
             "base_branch": request.base_branch,
@@ -2348,7 +2414,9 @@ def _advance_waiting_stack_collapse_record(
             "controller_action": "wait_for_root_checks",
             "merge_train_stack_collapse_plan_record_id": waiting_collapse_record.record_id,
             "dry_run_result": dry_run_result.model_dump(mode="json"),
-        }
+        }, snapshot
+    if dry_run_result.intended_next_action != "merge":
+        return None, snapshot
     if not request.mutate:
         return {
             "repository": request.repository,
@@ -2357,7 +2425,7 @@ def _advance_waiting_stack_collapse_record(
             "controller_action": "admit_collapsed_root",
             "merge_train_stack_collapse_plan_record_id": waiting_collapse_record.record_id,
             "dry_run_result": dry_run_result.model_dump(mode="json"),
-        }
+        }, snapshot
 
     lease.checkpoint(
         active_action="admit_collapsed_root",
@@ -2412,7 +2480,7 @@ def _advance_waiting_stack_collapse_record(
         "controller_action": "admit_collapsed_root",
         "dry_run_result": dry_run_result.model_dump(mode="json"),
         "candidate": candidate.model_dump(mode="json"),
-    }
+    }, snapshot
 
 
 def _advance_planned_stack_collapse_record(
@@ -2605,11 +2673,13 @@ def _advance_from_live_snapshot(
     trace_id: str,
     recorded_at: str,
     lease: MergeTrainControllerLeaseContext,
+    snapshot: MergeTrainDryRunSnapshot | None = None,
 ) -> dict[str, object]:
-    snapshot = github_client.read_merge_train_snapshot(
-        repository=request.repository,
-        base_branch=request.base_branch,
-    )
+    if snapshot is None:
+        snapshot = github_client.read_merge_train_snapshot(
+            repository=request.repository,
+            base_branch=request.base_branch,
+        )
     dry_run_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
     selected_pr = dry_run_result.selected_pr
     if selected_pr is not None and merge_train_snapshot_has_stack_topology(
