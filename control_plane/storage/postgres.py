@@ -6270,7 +6270,10 @@ class PostgresRecordStore(HumanSessionStore):
                     for record in (*bundle.product_profiles, *bundle.expected_product_profiles)
                 ),
             )
-            if bundle.required_context_owner is not None:
+            if (
+                bundle.required_context_owner is not None
+                or bundle.required_product_config_target is not None
+            ):
                 require_bundle_context_owner(
                     bundle,
                     (
