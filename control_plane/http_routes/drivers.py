@@ -50,6 +50,12 @@ from control_plane.odoo_prod_retained_volume_backup_import_http import (
 from control_plane.odoo_target_replacement_apply_http import (
     ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
 )
+from control_plane.operation_status_read import (
+    OPERATION_STATUS_READ_ACTION,
+    OPERATION_STATUS_READ_PRODUCT,
+    operation_result_read_view,
+    operation_status_read_view,
+)
 from control_plane.service_auth import (
     AuthorizationTarget,
     LaunchplaneIdentity,
@@ -388,6 +394,49 @@ def _ensure_driver_read_allowed(
         )
 
 
+def _operation_status_execute_allowed(
+    *,
+    dependencies: ReadRouteDependencies,
+    identity: LaunchplaneIdentity,
+    trace_id: str,
+    execute_action: str,
+    product: str,
+    context: str,
+    instance: str,
+    denied_message: str,
+) -> bool:
+    """True for the full record; False for the structured read view; 403 otherwise.
+
+    The grant that starts an operation still reads its full record. A caller
+    with only ``operations.read`` on the operation's context and instance reads
+    its structured status, the same scope that reads the context's recent
+    deployments.
+    """
+    target = AuthorizationTarget(scope="instance", instances=(instance,))
+    if dependencies.authorization_allows(
+        identity=identity,
+        action=execute_action,
+        product=product,
+        context=context,
+        target=target,
+    ):
+        return True
+    if dependencies.authorization_allows(
+        identity=identity,
+        action=OPERATION_STATUS_READ_ACTION,
+        product=OPERATION_STATUS_READ_PRODUCT,
+        context=context,
+        target=target,
+    ):
+        return False
+    raise dependencies.http_error(
+        status_code=403,
+        trace_id=trace_id,
+        code="authorization_denied",
+        message=denied_message,
+    )
+
+
 def register_operation_status_read_routes(
     app: ApiRouteRegistrar,
     *,
@@ -416,21 +465,30 @@ def register_operation_status_read_routes(
                 code="not_found",
                 message=str(error),
             ) from error
-        if not dependencies.authorization_allows(
+        if not _operation_status_execute_allowed(
+            dependencies=dependencies,
             identity=identity,
-            action=native_routes._descriptor_driver_route_authz_action(ODOO_STABLE_BOOTSTRAP_ROUTE),
+            trace_id=trace_id,
+            execute_action=native_routes._descriptor_driver_route_authz_action(
+                ODOO_STABLE_BOOTSTRAP_ROUTE
+            ),
             product=operation.product,
             context=operation.context,
-            target=AuthorizationTarget(scope="instance", instances=(operation.instance,)),
+            instance=operation.instance,
+            denied_message=(
+                "Workflow cannot read Odoo stable bootstrap operation status "
+                "for the requested product/context."
+            ),
         ):
-            raise dependencies.http_error(
-                status_code=403,
+            return OdooStableBootstrapOperationStatusResponse(
                 trace_id=trace_id,
-                code="authorization_denied",
-                message=(
-                    "Workflow cannot read Odoo stable bootstrap operation status "
-                    "for the requested product/context."
+                operation=operation_status_read_view(
+                    operation,
+                    poll_url=ODOO_STABLE_BOOTSTRAP_OPERATION_STATUS_ROUTE.format(
+                        operation_id=operation.operation_id.strip()
+                    ),
                 ),
+                result=operation_result_read_view(operation.result),
             )
         result = operation.result.model_dump(mode="json") if operation.result else None
         return OdooStableBootstrapOperationStatusResponse(
@@ -466,23 +524,30 @@ def register_operation_status_read_routes(
                 code="not_found",
                 message=str(error),
             ) from error
-        if not dependencies.authorization_allows(
+        if not _operation_status_execute_allowed(
+            dependencies=dependencies,
             identity=identity,
-            action=native_routes._descriptor_driver_route_authz_action(
+            trace_id=trace_id,
+            execute_action=native_routes._descriptor_driver_route_authz_action(
                 ODOO_TARGET_REPLACEMENT_APPLY_ROUTE
             ),
             product=operation.product,
             context=operation.context,
-            target=AuthorizationTarget(scope="instance", instances=(operation.instance,)),
+            instance=operation.instance,
+            denied_message=(
+                "Workflow cannot read Odoo target replacement operation status "
+                "for the requested product/context."
+            ),
         ):
-            raise dependencies.http_error(
-                status_code=403,
+            return OdooStableTargetReplacementOperationStatusResponse(
                 trace_id=trace_id,
-                code="authorization_denied",
-                message=(
-                    "Workflow cannot read Odoo target replacement operation status "
-                    "for the requested product/context."
+                operation=operation_status_read_view(
+                    operation,
+                    poll_url=ODOO_STABLE_TARGET_REPLACEMENT_OPERATION_STATUS_ROUTE.format(
+                        operation_id=operation.operation_id.strip()
+                    ),
                 ),
+                result=operation_result_read_view(operation.result),
             )
         result = operation.result.model_dump(mode="json") if operation.result else None
         return OdooStableTargetReplacementOperationStatusResponse(
@@ -514,23 +579,30 @@ def register_operation_status_read_routes(
                 code="not_found",
                 message=str(error),
             ) from error
-        if not dependencies.authorization_allows(
+        if not _operation_status_execute_allowed(
+            dependencies=dependencies,
             identity=identity,
-            action=native_routes._descriptor_driver_route_authz_action(
+            trace_id=trace_id,
+            execute_action=native_routes._descriptor_driver_route_authz_action(
                 ODOO_PROD_BACKUP_RESTORE_APPLY_ROUTE
             ),
             product=operation.product,
             context=operation.context,
-            target=AuthorizationTarget(scope="instance", instances=(operation.instance,)),
+            instance=operation.instance,
+            denied_message=(
+                "Workflow cannot read Odoo production backup restore operation status "
+                "for the requested product/context."
+            ),
         ):
-            raise dependencies.http_error(
-                status_code=403,
+            return OdooProdBackupRestoreOperationStatusResponse(
                 trace_id=trace_id,
-                code="authorization_denied",
-                message=(
-                    "Workflow cannot read Odoo production backup restore operation status "
-                    "for the requested product/context."
+                operation=operation_status_read_view(
+                    operation,
+                    poll_url=ODOO_PROD_BACKUP_RESTORE_OPERATION_STATUS_ROUTE.format(
+                        operation_id=operation.operation_id.strip()
+                    ),
                 ),
+                result=operation_result_read_view(operation.result),
             )
         result = operation.result.model_dump(mode="json") if operation.result else None
         return OdooProdBackupRestoreOperationStatusResponse(
@@ -573,26 +645,33 @@ def register_operation_status_read_routes(
             if operation.operation_kind == "plan"
             else ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_APPLY_ROUTE
         )
-        if not dependencies.authorization_allows(
+        if not _operation_status_execute_allowed(
+            dependencies=dependencies,
             identity=identity,
-            action=native_routes._descriptor_driver_route_authz_action(route_path),
+            trace_id=trace_id,
+            execute_action=native_routes._descriptor_driver_route_authz_action(route_path),
             product=operation.product,
             context=operation.context,
-            target=AuthorizationTarget(scope="instance", instances=(operation.instance,)),
+            instance=operation.instance,
+            denied_message=(
+                "Workflow cannot read Odoo retained-volume backup import operation "
+                "status for the requested product/context."
+            ),
         ):
-            raise dependencies.http_error(
-                status_code=403,
+            return OdooProdRetainedVolumeBackupImportOperationStatusResponse(
                 trace_id=trace_id,
-                code="authorization_denied",
-                message=(
-                    "Workflow cannot read Odoo retained-volume backup import operation "
-                    "status for the requested product/context."
+                operation=operation_status_read_view(
+                    operation,
+                    poll_url=ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_OPERATION_STATUS_ROUTE.format(
+                        operation_id=operation.operation_id.strip()
+                    ),
                 ),
+                result=operation_result_read_view(operation.result),
             )
         result = operation.result.model_dump(mode="json") if operation.result else None
         return OdooProdRetainedVolumeBackupImportOperationStatusResponse(
             trace_id=trace_id,
-            operation=(odoo_prod_retained_volume_backup_import_operation_status_payload(operation)),
+            operation=odoo_prod_retained_volume_backup_import_operation_status_payload(operation),
             result=result,
         )
 
