@@ -395,7 +395,7 @@ class MergeTrainBranchRefreshRecordTests(unittest.TestCase):
         store.ensure_schema()
         records = [
             build_merge_train_branch_refresh_record(
-                repository=_REPOSITORY,
+                repository=_REPOSITORY.upper(),
                 base_branch="main",
                 pull_request_number=number,
                 expected_head_sha=_ACCEPTED_HEAD,

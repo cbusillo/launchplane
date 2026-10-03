@@ -51,6 +51,7 @@ from control_plane.github_response_headers import notify_github_quota_response_h
 from control_plane.github_request_timing import timed_github_request
 from control_plane.merge_train_dependency_updates import DependencyUpdateClass
 from control_plane.merge_train_dependency_updates import classify_dependency_update
+from control_plane.source_control_change import change_fingerprint
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train import MergeTrainLabelActor
@@ -2344,7 +2345,26 @@ class GitHubMergeTrainSnapshotReader:
                 ),
                 "GitHub base ancestry comparison",
             )
-            return comparison.get("status") in {"ahead", "identical"}
+            if comparison.get("status") not in {"ahead", "identical"}:
+                return False
+
+            def read(path: str) -> object:
+                return self.transport.request(method="GET", path=path)
+
+            before = change_fingerprint(
+                repository=repository_path,
+                base=record.merged_base_sha,
+                head=record.expected_head_sha,
+                read=read,
+                include_blobs=False,
+            )
+            return before is not None and before == change_fingerprint(
+                repository=repository_path,
+                base=record.merged_base_sha,
+                head=record.result_head_sha,
+                read=read,
+                include_blobs=False,
+            )
         return False
 
     def _force_pushed_by_other(

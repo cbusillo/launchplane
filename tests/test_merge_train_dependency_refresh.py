@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 import unittest
 
 from control_plane.contracts.merge_train_branch_refresh_record import (
@@ -30,6 +31,14 @@ REFRESH_HEAD = "2" * 40
 BASE = "3" * 40
 
 
+def _change(blob: str = "blob", patch_text: str | None = "-old\n+new") -> dict[str, object]:
+    return {
+        "files": [
+            {"filename": "package.json", "status": "modified", "sha": blob, "patch": patch_text}
+        ]
+    }
+
+
 def _refresh_record(**updates: object) -> MergeTrainBranchRefreshRecord:
     record = build_merge_train_branch_refresh_record(
         repository=REPOSITORY,
@@ -57,14 +66,17 @@ class DependencyRefreshTests(unittest.TestCase):
         commits: list[dict[str, object]],
         records: tuple[MergeTrainBranchRefreshRecord, ...] = (),
         ancestry: tuple[object, ...] = (),
+        changes: tuple[object, ...] = (),
         timeline: list[dict[str, object]] | None = None,
         head: str = REFRESH_HEAD,
         use_store: bool = True,
     ) -> str | None:
-        pull_request = _github_pull_request(16, author_association="CONTRIBUTOR", head_sha=head)
+        pull_request = _github_pull_request(
+            16, author_association="CONTRIBUTOR", head_sha=head, base_sha=BASE
+        )
         pull_request["user"] = {"id": BOT_ID, "login": "dependabot[bot]", "type": "Bot"}
         responses: tuple[object, ...] = (
-            _github_branch(),
+            _github_branch(sha=BASE),
             [pull_request],
             pull_request,
             MergeTrainGitHubError("permission not found", status_code=404),
@@ -82,7 +94,11 @@ class DependencyRefreshTests(unittest.TestCase):
                 if "/commits?" in path:
                     return commits
                 if "/compare/" in path:
-                    result = next(comparisons)
+                    result = (
+                        next(comparisons)
+                        if path.endswith(f"...{BASE}")
+                        else (next(change_comparisons) if changes else _change())
+                    )
                     if isinstance(result, Exception):
                         raise result
                     return result
@@ -93,6 +109,7 @@ class DependencyRefreshTests(unittest.TestCase):
                 return super().request(method=method, path=path, body=body)
 
         comparisons = iter(ancestry)
+        change_comparisons = iter(changes)
         transport = Transport(responses=responses)
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(state_dir=Path(directory))
@@ -113,6 +130,68 @@ class DependencyRefreshTests(unittest.TestCase):
             ),
             "patch_or_minor",
         )
+
+    def test_refresh_records_are_found_regardless_of_repository_case(self) -> None:
+        self.assertEqual(
+            self._classify(
+                commits=[_github_commit(BOT_ID, INDIRECT_PATCH, sha=OLD_HEAD), _refresh_commit()],
+                records=(_refresh_record(repository=REPOSITORY.upper()),),
+                ancestry=({"status": "ahead"},),
+            ),
+            "patch_or_minor",
+        )
+
+    def test_unrelated_base_edits_in_the_same_file_preserve_admission(self) -> None:
+        self.assertEqual(
+            self._classify(
+                commits=[_github_commit(BOT_ID, INDIRECT_PATCH, sha=OLD_HEAD), _refresh_commit()],
+                records=(_refresh_record(),),
+                ancestry=({"status": "ahead"},),
+                changes=(_change("before-merge"), _change("after-merge")),
+            ),
+            "patch_or_minor",
+        )
+
+    def test_refresh_that_changes_the_dependency_delta_requires_review(self) -> None:
+        cases: tuple[tuple[object, object], ...] = (
+            (_change(), _change(patch_text="extra code")),
+            (_change(), _change(patch_text=None)),
+            (_change(), {"files": []}),
+        )
+        for changes in cases:
+            with self.subTest(changes=changes):
+                self.assertEqual(
+                    self._classify(
+                        commits=[
+                            _github_commit(BOT_ID, INDIRECT_PATCH, sha=OLD_HEAD),
+                            _refresh_commit(),
+                        ],
+                        records=(_refresh_record(),),
+                        ancestry=({"status": "ahead"},),
+                        changes=changes,
+                    ),
+                    "needs_review",
+                )
+
+    def test_refresh_record_read_failure_withholds_admission(self) -> None:
+        with (
+            patch.object(
+                FilesystemRecordStore,
+                "list_merge_train_branch_refresh_records",
+                side_effect=OSError("unavailable"),
+            ),
+            self.assertLogs("control_plane.merge_train_github", "WARNING"),
+        ):
+            self.assertEqual(
+                self._classify(
+                    commits=[
+                        _github_commit(BOT_ID, INDIRECT_PATCH, sha=OLD_HEAD),
+                        _refresh_commit(),
+                    ],
+                    records=(_refresh_record(),),
+                ),
+                "needs_review",
+            )
 
     def test_multiple_recorded_refreshes_preserve_admission(self) -> None:
         newest = "4" * 40

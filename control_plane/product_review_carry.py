@@ -33,14 +33,12 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.product_review import ProductReviewCarry, ProductReviewDecisionRecord
 from control_plane.merge_train_branch_refresh import MergeTrainBranchRefreshReadStore
 from control_plane.product_review import ProductReviewStore
+from control_plane.source_control_change import change_fingerprint as _change_fingerprint
 
 # A busy train may refresh a pull request more than once before anyone looks.
 MAX_REFRESHES: Final = 10
-# The provider lists at most this many files in a comparison; more is not exact.
-_COMPARE_FILE_LIMIT: Final = 300
 
 SourceControlRead = Callable[[str], object]
-ChangeFingerprint = tuple[tuple[str, str, str, str, str], ...]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -197,42 +195,6 @@ def _on_base_branch(
     branch = quote(base_branch, safe="")
     comparison = _object(read(f"/repos/{_path(repository)}/compare/{commit}...{branch}"))
     return comparison.get("status") in {"ahead", "identical"}
-
-
-def _change_fingerprint(
-    *, repository: str, base: str, head: str, read: SourceControlRead
-) -> ChangeFingerprint | None:
-    """The pull request's change against `base`: from their merge base to `head`.
-
-    Equal fingerprints mean equal resulting blobs and equal patches, so the change
-    is byte-identical. A file the provider gives no patch for (binary, or too large)
-    is not exact, and neither is a truncated file list.
-    """
-
-    comparison = _object(
-        read(f"/repos/{_path(repository)}/compare/{base}...{head.strip().lower()}")
-    )
-    files = comparison.get("files")
-    if not isinstance(files, list) or len(files) >= _COMPARE_FILE_LIMIT:
-        return None
-    fingerprint: list[tuple[str, str, str, str, str]] = []
-    for item in files:
-        entry = _object(item)
-        status = _text(entry.get("status"))
-        patch = entry.get("patch")
-        pure_rename = status == "renamed" and entry.get("changes") == 0
-        if not isinstance(patch, str) and not pure_rename:
-            return None
-        fingerprint.append(
-            (
-                _text(entry.get("filename")),
-                _text(entry.get("previous_filename")),
-                status,
-                _text(entry.get("sha")),
-                patch if isinstance(patch, str) else "",
-            )
-        )
-    return tuple(sorted(fingerprint))
 
 
 def _object(value: object, key: str = "") -> dict[str, object]:

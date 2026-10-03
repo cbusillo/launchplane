@@ -9,6 +9,7 @@ from control_plane.contracts.merge_train_branch_refresh_record import (
 )
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from tests.test_merge_train_dependency_updates import INDIRECT_PATCH
+from tests.test_merge_train_dependency_refresh import _change
 from tests.test_merge_train_github import (
     _github_pull_request,
     _github_branch,
@@ -399,7 +400,7 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                     pull_request,
                     {"permission": "read"},
                     [_github_commit(bot_id, INDIRECT_PATCH, sha=old_head), refresh],
-                    *(({"status": "identical"}, []) if recorded else ()),
+                    *(({"status": "identical"}, _change(), _change(), []) if recorded else ()),
                     _combined_status(),
                     {"check_runs": [_check_run("completed", "success")]},
                 )
