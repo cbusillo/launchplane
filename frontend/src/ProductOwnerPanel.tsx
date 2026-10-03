@@ -446,7 +446,7 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
 
   return (
     <section className="product-config-panel product-profile-field-panel" aria-labelledby={`product-${field}-title`}>
-      <header className="product-config-panel-header"><div>
+      <header className="product-config-panel-header"><span aria-hidden="true"><UserCheck /></span><div>
         <p className="eyebrow">Client settings</p><h2 id={`product-${field}-title`}>{title}</h2>
         <p>{field === "image"
           ? "Change where this product publishes new images. Recorded rollback artifacts remain available."
