@@ -1069,6 +1069,32 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             ("DELETE", f"/repos/example/merge-train-repo/git/refs/heads/{probe_branch}"),
         )
 
+    def test_conflict_probe_deletes_its_ref_when_creating_it_has_no_answer(self) -> None:
+        # GitHub may have created the ref before the connection dropped.
+        repository = "example/merge-train-repo"
+        probe_ref = _probe_ref(repository)
+        probe_branch = probe_ref.removeprefix("refs/heads/")
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                MergeTrainGitHubError("timed out", status_code=504),
+                None,  # Delete the probe ref.
+            )
+        )
+
+        with self.assertRaises(MergeTrainGitHubError):
+            GitHubMergeTrainClient(transport=transport).probe_batch_entry_conflicts(
+                repository=repository,
+                base_branch="main",
+                base_sha="base-main",
+                queue=(_queue_entry(1),),
+                probe_ref=probe_ref,
+            )
+
+        self.assertEqual(
+            (transport.requests[-1].method, transport.requests[-1].path),
+            ("DELETE", f"/repos/example/merge-train-repo/git/refs/heads/{probe_branch}"),
+        )
+
     def test_conflict_probe_ref_is_unique_to_a_lease_acquisition(self) -> None:
         refs = {
             merge_train_conflict_probe_ref(

@@ -641,13 +641,16 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         effect_executor = self.semantic_effect_executor
         if checkpoint is not None:
             checkpoint(None)
-        effect_executor.prepare_candidate_ref(
-            CandidateRefPrepareEffect(lineage=lineage, candidate_ref=probe_ref, base_sha=base_sha)
-        )
         merged_pull_request_numbers: list[int] = []
         held_out: list[MergeTrainBatchHeldOutEntry] = []
         probe_sha = base_sha
         try:
+            # Inside the cleanup: a create that got no answer may still have written the ref.
+            effect_executor.prepare_candidate_ref(
+                CandidateRefPrepareEffect(
+                    lineage=lineage, candidate_ref=probe_ref, base_sha=base_sha
+                )
+            )
             for queue_entry in queue:
                 if checkpoint is not None:
                     checkpoint(queue_entry.number)
