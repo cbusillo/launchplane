@@ -876,7 +876,17 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
 
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertTrue(run.web_restarted, run.docker_log)
-        self.assertIn("inspect web running", run.docker_log)
+        start_index = run.docker_log.index(f"start {WEB_CONTAINER_ID}")
+        self.assertIn("inspect web running", run.docker_log[start_index + 1 :])
+
+    def test_maintenance_and_bootstrap_fail_when_web_cannot_restart(self) -> None:
+        for script in (_render_post_deploy_script(None), _render_script()):
+            with self.subTest(script=script.splitlines()[1:4]):
+                run = self._run(script, FAKE_WEB_START_FAILURE="1")
+
+                self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertTrue(run.web_restarted, run.docker_log)
+                self.assertNotIn("odoo_restore_completed", run.stdout)
 
     def test_restore_that_exits_non_zero_is_not_marked_complete(self) -> None:
         run = self._run(

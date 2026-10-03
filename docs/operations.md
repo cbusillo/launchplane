@@ -2741,7 +2741,9 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
 - Launchplane passes one typed payload to the Odoo settings apply path; legacy
   `ENV_OVERRIDE_*` values are migration input only, not the deploy-time
   settings contract.
-- A restore passes only with positive evidence. The schedule script prints
+- Every Odoo data-workflow schedule (restore, maintenance, and bootstrap)
+  requires web recovery to succeed before reporting success.
+  A restore passes only with positive evidence. The schedule script prints
   `odoo_restore_completed=true` after the workflow exits 0, the integration
   read-back passes, and web recovery succeeds with a fresh `running` read-back.
   A failed start, failed status read, or web that stays stopped fails the schedule;
