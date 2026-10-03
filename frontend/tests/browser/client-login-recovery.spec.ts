@@ -24,7 +24,7 @@ async function respondWithPlan(route: Route) {
   } } });
 }
 
-for (const interruption of ["lost", "lost-reload", "navigation"] as const) {
+for (const interruption of ["lost", "lost-reload", "reload-submitting", "navigation"] as const) {
   test(`Client-login dry run recovers after ${interruption}`, async ({ page }) => {
     await mockProduct(page);
     const requests: Array<{ body: Record<string, unknown>; key: string }> = [];
@@ -32,7 +32,7 @@ for (const interruption of ["lost", "lost-reload", "navigation"] as const) {
     await page.route("**/v1/product-profiles/atlas-commerce/owner", async route => {
       requests.push({ body: route.request().postDataJSON(), key: route.request().headers()["idempotency-key"] });
       if (requests.length === 1) {
-        if (interruption === "navigation") held = route;
+        if (interruption === "navigation" || interruption === "reload-submitting") held = route;
         else await route.abort("failed");
         return;
       }
@@ -43,9 +43,13 @@ for (const interruption of ["lost", "lost-reload", "navigation"] as const) {
     await panel.getByLabel("GitHub login").fill("first-client");
     await panel.getByLabel("Change reason").fill("First read-only preview.");
     await panel.getByRole("button", { name: "Preview change", exact: true }).click();
-    if (interruption === "navigation") await expect.poll(() => requests.length).toBe(1);
+    if (interruption === "navigation" || interruption === "reload-submitting") await expect.poll(() => requests.length).toBe(1);
     else await expect(panel.getByRole("status")).toContainText("Failed to fetch");
-    if (interruption !== "lost") await page.reload();
+    if (interruption === "navigation") {
+      await page.getByRole("link", { name: "Product Ops", exact: true }).click();
+      await expect(panel).toHaveCount(0);
+      await page.locator(".product-directory-row").filter({ hasText: "Atlas Commerce" }).click();
+    } else if (interruption !== "lost") await page.reload();
     await panel.getByLabel("GitHub login").fill("revised-client");
     await panel.getByLabel("Change reason").fill("Revised read-only preview.");
     await panel.getByRole("button", { name: "Preview change", exact: true }).click();
