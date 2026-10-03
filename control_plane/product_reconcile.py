@@ -47,6 +47,8 @@ from control_plane.contracts.promotion_record import env_key_names
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.odoo_target_replacement_failures import deploy_failure_description
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
@@ -289,7 +291,13 @@ class TestingProviderHooks:
 class _TestingLaneAuthorityStore(
     secrets.SecretBindingSelectionStore, RuntimeEnvironmentRecordStore, Protocol
 ):
-    pass
+    def read_provider_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> ProviderTargetRecord: ...
+
+    def read_dokploy_target_id_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetIdRecord: ...
 
 
 @dataclass(frozen=True)
@@ -626,14 +634,15 @@ def _deploy_generic_web_testing(
     # every deploy and rollback records a new one, so a lane changed since gets the
     # desired image again instead of a replay of an earlier success.
     starting_point = _current_testing_deployment_id(record_store=record_store, lane=lane) or "none"
-    authority = _generic_web_testing_authority(record_store=record_store, lane=lane)
-    idempotency_key = (
-        f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:{TESTING_INSTANCE}:"
-        f"{desired.manifest.image.digest}:authority-{authority}:from-{starting_point}"
-    )
     trace_id = f"{RECONCILE_SOURCE}-{uuid4().hex}"
-    plan.update(held=False, deploy_idempotency_key=idempotency_key)
+    plan["held"] = False
     try:
+        authority = _generic_web_testing_authority(record_store=record_store, lane=lane)
+        idempotency_key = (
+            f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:{TESTING_INSTANCE}:"
+            f"{desired.manifest.image.digest}:authority-{authority}:from-{starting_point}"
+        )
+        plan["deploy_idempotency_key"] = idempotency_key
         result = run_durable_provider_operation(
             store=cast(DurableProviderOperationStore, record_store),
             scope=reconcile_reservation_scope(profile.product),
@@ -705,6 +714,26 @@ def _generic_web_testing_authority(
         target_authority: object = None
     else:
         target_authority = target.model_dump(mode="json", exclude={"updated_at", "source_label"})
+    try:
+        provider_target = authority_store.read_provider_target_record(
+            context_name=lane.context, instance_name=lane.instance
+        )
+    except FileNotFoundError:
+        provider_authority: object = None
+    else:
+        provider_authority = provider_target.model_dump(
+            mode="json", exclude={"updated_at", "source_label"}
+        )
+    try:
+        target_id = authority_store.read_dokploy_target_id_record(
+            context_name=lane.context, instance_name=lane.instance
+        )
+    except FileNotFoundError:
+        target_id_authority: object = None
+    else:
+        target_id_authority = target_id.model_dump(
+            mode="json", exclude={"updated_at", "source_label"}
+        )
     settings = [
         record.model_dump(mode="json", exclude={"updated_at", "source_label"})
         for record in authority_store.list_runtime_environment_records()
@@ -726,6 +755,8 @@ def _generic_web_testing_authority(
         json.dumps(
             {
                 "target": target_authority,
+                "provider_target": provider_authority,
+                "target_id": target_id_authority,
                 "settings": sorted(settings, key=lambda record: json.dumps(record, sort_keys=True)),
                 "secrets": {
                     key: {

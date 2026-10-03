@@ -23,6 +23,8 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecord,
     DokployTargetStaffTestingHold,
 )
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.odoo_preview_runtime_plan import OdooPreviewRuntimePlan
 from control_plane.contracts.odoo_stable_target_replacement import (
     LAUNCHPLANE_REQUIRED_ODOO_MODULES,
@@ -1279,6 +1281,50 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
 
     def test_failed_deploy_retries_after_global_settings_change(self) -> None:
         self.retry_after_settings_change("global", "", "")
+
+    def test_failed_deploy_retries_after_provider_target_binding_repair(self) -> None:
+        provider_target = ProviderTargetRecord(
+            context="cm",
+            instance="testing",
+            provider_id=self.deploys.provider_id,
+            target_category="service",
+            target_id=self.deploys.target_id,
+            display_name=self.deploys.target_name,
+            provider_target_type="managed-service",
+            updated_at="2026-10-02T00:00:00Z",
+        )
+        target_id = DokployTargetIdRecord(
+            context="cm",
+            instance="testing",
+            target_id=self.deploys.target_id,
+            updated_at="2026-10-02T00:00:00Z",
+        )
+        self.store.write_provider_target_record(provider_target)
+        self.store.write_dokploy_target_id_record(target_id)
+        failed = self.failed_deploy()
+        self.deploys.target_id = "repaired-target"
+        self.store.write_provider_target_record(
+            provider_target.model_copy(update={"target_id": self.deploys.target_id})
+        )
+        self.store.write_dokploy_target_id_record(
+            target_id.model_copy(update={"target_id": self.deploys.target_id})
+        )
+        self.retry_after_lane_change(failed)
+        self.assertEqual(
+            self.deploys.resolved_targets[-1].resolved_target.target_id, self.deploys.target_id
+        )
+
+    def test_missing_key_configuration_refuses_before_a_provider_effect(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        with patch.dict(
+            os.environ,
+            {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "", "LAUNCHPLANE_SECRET_KEYS_JSON": ""},
+        ):
+            refused = self.run_once()
+        self.assertEqual(refused.state, "failed")
+        self.assertEqual(refused.last_plan["deploy_operation_status"], "refused")
+        self.assertEqual(self.deploys.runtime_identities, [])
 
     def test_failed_deploy_retries_after_context_settings_change(self) -> None:
         self.retry_after_settings_change("context", "cm", "")

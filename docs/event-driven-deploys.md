@@ -96,15 +96,19 @@ reservation. The webhook request never waits on a deploy.
     provider outcome is unknown stays reserved for generic-web deploy recovery
     and fails the reconcile until it settles; one that failed with a recorded
     result is not retried until a newer build or the lane changes. Changes to
-    the tracked target's source/configuration, applicable global/context/lane
+    the tracked target's source/configuration and provider binding, applicable global/context/lane
     runtime settings, or effective runtime-secret bindings/versions allow a
     real retry of the same digest. Target and settings writes identify their
     configuration by content, excluding audit timestamps. The service's existing
     keyed fingerprint protects plaintext target/settings values; managed-secret
     values are neither read nor hashed for the key. Identical stored authority
-    replays the failure. The existing
+    replays the failure. Rotating the service's active encryption key also changes
+    this keyed identity and permits a fresh attempt of a known failure. The existing
     provider-target reservation still fences an unknown or concurrent operation
-    even when authority changes. Provider-only edits outside Launchplane's
+    even when authority changes, while the provider target stays the same.
+    Retargeting to a different provider application has a different fence;
+    it does not settle an unknown operation on the previous application.
+    Provider-only edits outside Launchplane's
     records do not authorize a retry. A refusal
     before any provider change (a missing target, say) is tried again at the
     next event or sweep. The plan records `deploy_operation_status`,
