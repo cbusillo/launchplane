@@ -25,7 +25,8 @@ retry reloads the persisted decision and verifies the current Git target.
 Engineering review is always advisory for current merge readiness. The overall
 DIRECTION.md retires reviewer approval as a merge gate; new policies reject
 `required`. Historical policy and admission records preserve their original
-values and digests. Other merge gates remain independent of review evidence.
+values and digests. Technical checks, other policy fingerprints, candidate
+provenance, and lease evidence retain their existing gates.
 
 Routes remain:
 

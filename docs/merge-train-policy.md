@@ -235,8 +235,9 @@ Each repository policy contains:
   Historical privileged-operation requests remain readable; planning and
   executing a policy import reject retired required-review candidates.
   A pending legacy import must be cancelled and replaced with an advisory
-  candidate. Retrying its original required-mode preparation is rejected;
-  the operation remains available through the operation list and detail reads.
+  candidate. Retrying its original required-mode preparation or policy import
+  is rejected; historical records remain available through policy and operation
+  list/detail reads.
 - `provider_delivery_protection_expectation`: Optional exact provider-protection
   expectation for ordinary guarded delivery. Absence preserves legacy policy
   bytes and digests and supplies no ordinary readiness capability. Only the
