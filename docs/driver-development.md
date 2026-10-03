@@ -318,8 +318,10 @@ categories make identity/access drift visible without storing provider topology
 or secret values in the public contract. Keep this workflow canary-scoped until
 broader route ownership and approval UX are explicit.
 
-Admins with `ingress_route.plan` for the target product/context can inspect
-those audit records through the native FastAPI service reads. List records with
+Callers with `ingress_route.plan` for the target product/context can inspect
+those audit records through the native FastAPI service reads. A caller with only
+`route_binding.read` reads them without provider host ids, the certificate
+reference or the request's reason, and cannot filter by `provider_host_id`. List records with
 `GET /v1/ingress/route-audits/records?product=launchplane&context=example-prod`
 and optional `status`, `mode`, `provider_host_id`, `trace_id`,
 `idempotency_key`, and `limit` filters. Read one record with
