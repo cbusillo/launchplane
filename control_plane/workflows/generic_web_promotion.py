@@ -34,6 +34,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
+from control_plane.contracts.record_failures import record_failure_summary
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     BackupGateEvidence,
@@ -449,7 +450,6 @@ def execute_generic_web_prod_promotion(
             lane=destination_lane,
             request=request,
             rollback_target=rollback_target,
-            failure=failure,
             production_changed=deploy_result.deploy_status == "pass"
             or deploy_result.provider_effect_attempted,
             deploy_provider=deploy_provider,
@@ -507,7 +507,7 @@ def execute_generic_web_prod_promotion(
         inventory_record_id=inventory_record_id,
         target_id=deploy_result.target_id,
         dry_run=False,
-        error_message=rollback.evidence.detail or failure,
+        error_message=f"{failure} {rollback.error_message or rollback.evidence.detail}".strip(),
     )
     if final_result.promotion_status != "pass" or not request.release_tag:
         return final_result
@@ -568,6 +568,7 @@ class _RollbackOutcome:
     evidence: RollbackExecutionEvidence = field(default_factory=RollbackExecutionEvidence)
     health: HealthcheckEvidence = field(default_factory=HealthcheckEvidence)
     error: Exception | None = None
+    error_message: str = ""
 
 
 def _resolve_rollback_target(
@@ -629,7 +630,6 @@ def _roll_back_production(
     lane: ProductLaneProfile,
     request: GenericWebProdPromotionRequest,
     rollback_target: _RollbackTarget,
-    failure: str,
     production_changed: bool,
     deploy_provider: GenericWebDeployProvider | None,
     provider_operation_title: str,
@@ -641,16 +641,17 @@ def _roll_back_production(
     if not production_changed:
         return _RollbackOutcome(
             evidence=RollbackExecutionEvidence(
-                detail=f"{failure} Production was not changed, so no rollback was needed.",
+                detail=record_failure_summary("rollback_not_needed"),
                 target_deployment_record_id=target_id,
             )
         )
     if planned_deploy is None:
         return _RollbackOutcome(
             evidence=RollbackExecutionEvidence(
-                detail=f"{failure} No automatic rollback: {rollback_target.unavailable_reason}.",
+                detail=record_failure_summary("rollback_unavailable"),
                 target_deployment_record_id=target_id,
-            )
+            ),
+            error_message=f"No automatic rollback: {rollback_target.unavailable_reason}.",
         )
     started_at = utc_now_timestamp()
     try:
@@ -680,7 +681,7 @@ def _roll_back_production(
             evidence=RollbackExecutionEvidence(
                 attempted=True,
                 status="fail",
-                detail=f"{failure} Rollback to {target_id} did not complete: {error}",
+                detail=record_failure_summary("rollback_failed"),
                 target_deployment_record_id=target_id,
                 started_at=started_at,
                 finished_at=utc_now_timestamp(),
@@ -692,15 +693,13 @@ def _roll_back_production(
             evidence=RollbackExecutionEvidence(
                 attempted=True,
                 status="fail",
-                detail=(
-                    f"{failure} Rollback deploy of {target_id} failed: "
-                    f"{deploy_result.error_message or 'no detail'}"
-                ),
+                detail=record_failure_summary("rollback_deploy_failed"),
                 target_deployment_record_id=target_id,
                 deployment_record_id=deploy_result.deployment_record_id,
                 started_at=started_at,
                 finished_at=utc_now_timestamp(),
-            )
+            ),
+            error_message=f"Rollback deploy of {target_id} failed: {deploy_result.error_message or 'no detail'}",
         )
     rollback_record = _read_deployment_record(
         record_store=record_store,
@@ -737,12 +736,7 @@ def _roll_back_production(
                 promoted_from_instance=rollback_target.previous_inventory.promoted_from_instance,
             )
         )
-    detail = f"{failure} Rolled production back to {target_id}."
-    if not healthy:
-        detail = (
-            f"{failure} Rolled production back to {target_id}, but it failed its health "
-            f"check: {health_error or _health_failure_detail(rollback_health) or 'unhealthy'}"
-        )
+    detail = record_failure_summary("rollback_passed" if healthy else "rollback_health_failed")
     return _RollbackOutcome(
         evidence=RollbackExecutionEvidence(
             attempted=True,
@@ -754,6 +748,12 @@ def _roll_back_production(
             finished_at=utc_now_timestamp(),
         ),
         health=rollback_health,
+        error_message=(
+            f"Rolled production back to {target_id}."
+            if healthy
+            else f"Rolled production back to {target_id}, but it failed its health check: "
+            f"{health_error or _health_failure_detail(rollback_health) or 'unhealthy'}"
+        ),
     )
 
 

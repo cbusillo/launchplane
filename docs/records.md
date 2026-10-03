@@ -343,7 +343,6 @@ migrations, and archived authority-cutover rows remain readable. The retired
 evaluators and service routes are removed; these records cannot decide a merge
 or release. Current Client identity comes from the product profile.
 
-
 ## Retired Client Acceptance Event Records
 
 `OwnerAcceptanceEventRecord` remains a historical, read-only compatibility
@@ -365,7 +364,6 @@ payloads and digests in `launchplane_change_impact_policies` and its audit store
 Record contracts and storage compatibility remain; the classifier and policy
 service endpoints are deleted. Active merge admission reads Git identities
 independently and current engineering decisions use two authority-bound reviews.
-
 
 ## Transactional Outbox
 
@@ -1492,7 +1490,14 @@ records what it decided and did as `last_plan`:
   before the provider apply, the PR is read again; if it closed, lost its label,
   or moved its head, the reservation is released with no provider effect and
   the request returns to `pending` (`deferred: pull_request_moved`). A blocked plan or a failed provider result
-  records the request `failed` with the plan.
+  records the request `failed` with the plan. Preview failures write
+  `last_failed_error_code` and `last_failed_error_summary`; `last_error` and PR
+  feedback use that fixed summary, never provider, script or exception text.
+  Codes distinguish blocked plans, invalid runtime settings (validated key names
+  remain in `missing_keys`), refused provenance, failed applies, unknown provider
+  outcomes, and reconciliation failures. An unknown outcome uses
+  `reconcile_required`; its fixed description is reconstructed from the durable
+  reservation state on every observation, including after a restart.
 - both: `pr_feedback` records what the reconcile said on the PR, posted with a
   pull-request-only token from the same merge-train App: status, PR number,
   body `sha256`, `delivery_status`, comment action and id, and error. A
@@ -1632,6 +1637,11 @@ state/
 
 ## Promotion Record
 
+Generic-web automatic rollback's `rollback.detail` is a fixed code and
+Launchplane description, separate from the promotion's original `failure`.
+Rollback target and deployment ids remain in their structured fields. No deploy
+provider message or rollback health exception is embedded in the detail.
+
 - One file per promotion attempt.
 - Record source, destination, artifact id, gate evidence, deploy evidence, and
   destination health.
@@ -1739,6 +1749,16 @@ state/
   records by themselves.
 
 ## Deployment Record
+
+Failed Odoo stable bootstrap and production backup restore deployments use
+`failure` for a code and a fixed Launchplane description. Bootstrap codes
+separate execution, post-deploy and readiness failures; restore codes separate
+execution, post-deploy, verification and runtime-identity failures. Their
+bootstrap/post-deploy detail strings contain fixed descriptions. Restore no
+longer writes raw `runtime_source.restore_error`; verification-only replay also
+removes that legacy field. Synchronous workflow results retain their existing
+error messages. This changes new record writes, without a live historical-record
+backfill or authorization change.
 
 - One file per direct ship attempt owned by `launchplane`.
 - Record the requested source git ref, target, deploy status, recorded
@@ -2528,7 +2548,6 @@ bootstrap secret remain solely as a transport compatibility boundary for signed
 trusted-maintenance evidence. The receiver verifies the signature and ignores
 `issue_comment` commands; it cannot record approval or merge. No webhook,
 credential, runtime grant, or stored record is changed by this code retirement.
-
 
 ## Launchplane Preview Enablement Record
 

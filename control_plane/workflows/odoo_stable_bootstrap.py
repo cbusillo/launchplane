@@ -19,6 +19,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
+from control_plane.contracts.record_failures import record_failure
 from control_plane.contracts.promotion_record import (
     BootstrapEvidence,
     HealthcheckEvidence,
@@ -170,10 +171,24 @@ def _write_failed_bootstrap_deployment(
     deployment_record_id: str,
     started_at: str,
     resolved_target: ResolvedTargetEvidence,
+    failure_code: str,
     bootstrap: BootstrapEvidence | None = None,
     post_deploy_update: PostDeployUpdateEvidence | None = None,
     destination_health: HealthcheckEvidence | None = None,
 ) -> None:
+    failure = record_failure(failure_code)
+    if bootstrap is not None:
+        bootstrap = bootstrap.model_copy(update={"detail": failure.description})
+    if post_deploy_update is not None:
+        post_deploy_update = post_deploy_update.model_copy(
+            update={
+                "detail": (
+                    record_failure("bootstrap_post_deploy_failed").description
+                    if post_deploy_update.status != "pass"
+                    else "Odoo post-deploy completed after stable bootstrap."
+                )
+            }
+        )
     record_store.write_deployment_record(
         build_deployment_record(
             request=ship_request,
@@ -186,7 +201,7 @@ def _write_failed_bootstrap_deployment(
             bootstrap=bootstrap,
             post_deploy_update=post_deploy_update,
             destination_health=destination_health,
-        )
+        ).model_copy(update={"failure": record_failure(failure_code)})
     )
 
 
@@ -472,6 +487,7 @@ def execute_odoo_stable_bootstrap(
         )
     except click.ClickException as error:
         _write_failed_bootstrap_deployment(
+            failure_code="bootstrap_failed",
             record_store=record_store,
             ship_request=ship_request,
             deployment_record_id=deployment_record_id,
@@ -518,6 +534,7 @@ def execute_odoo_stable_bootstrap(
             detail=str(error),
         )
         _write_failed_bootstrap_deployment(
+            failure_code="bootstrap_post_deploy_failed",
             record_store=record_store,
             ship_request=ship_request,
             deployment_record_id=deployment_record_id,
@@ -558,6 +575,7 @@ def execute_odoo_stable_bootstrap(
     )
     if post_deploy_result.post_deploy_status != "pass":
         _write_failed_bootstrap_deployment(
+            failure_code="bootstrap_post_deploy_failed",
             record_store=record_store,
             ship_request=ship_request,
             deployment_record_id=deployment_record_id,
@@ -616,6 +634,7 @@ def execute_odoo_stable_bootstrap(
             status="fail",
         )
         _write_failed_bootstrap_deployment(
+            failure_code="bootstrap_verification_failed",
             record_store=record_store,
             ship_request=ship_request,
             deployment_record_id=deployment_record_id,
