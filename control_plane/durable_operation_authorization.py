@@ -58,6 +58,9 @@ class DurableOperationAuthorizationGuard:
     # Only a worker path that Launchplane's reconciler may queue passes this; every
     # other guard refuses a launchplane_reconcile grant.
     reconcile_grant_allows: Callable[[DurableOperationAuthorization], bool] | None = None
+    # Likewise, only a worker path a Client release may queue passes this; every
+    # other guard refuses a client_release_acceptance grant.
+    client_release_grant_allows: Callable[[DurableOperationAuthorization], bool] | None = None
 
     def authorize_execution(self) -> None:
         try:
@@ -109,6 +112,18 @@ class DurableOperationAuthorizationGuard:
                     message=(
                         "Launchplane's reconcile grant does not cover this operation "
                         "or destination."
+                    ),
+                )
+            return
+        if self.authorization.grant == "client_release_acceptance":
+            if self.client_release_grant_allows is None or not self.client_release_grant_allows(
+                self.authorization
+            ):
+                raise DurableOperationAuthorizationDeniedError(
+                    code="operation_authorization_client_release_refused",
+                    message=(
+                        "The Client's release acceptance no longer covers this operation: "
+                        "a newer decision, a changed Client, or held releases."
                     ),
                 )
             return
@@ -722,7 +737,13 @@ def launchplane_identity_from_durable_caller(
             email="",
             organizations=frozenset(caller.organizations),
             teams=frozenset(caller.teams),
-            role="admin" if caller.role == "admin" else "read_only",
+            role=(
+                "admin"
+                if caller.role == "admin"
+                else "owner"
+                if caller.role == "client"
+                else "read_only"
+            ),
         )
     if caller.identity_type == "terminal_agent":
         return TerminalAgentIdentity(subject=caller.subject, token_label=caller.token_label)

@@ -24,7 +24,10 @@ browser session through the CSRF-checked browser-mutation dependency; terminal
 agent tokens are refused. A caller needs exactly one matching managed rule,
 except a signed-in admin, whose backup records a
 `policy_administrator` grant that the worker re-checks against the active policy
-before the capture's first effect.
+before the capture's first effect. Launchplane's own worker queues a backup for
+a Client's accepted release under a `client_release_acceptance` grant, which the
+backup worker re-checks against the release decision; see
+[release review](release-review.md#acceptance-starts-the-release).
 
 `GET /v1/production-backup-gates/operations/{operation_id}` takes the same
 product/context/instance as query parameters and requires
