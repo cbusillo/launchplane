@@ -13,7 +13,10 @@ from control_plane.contracts.deploy_reference import (
     provider_image_reference,
     validate_provider_deploy_reference,
 )
-from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.deployment_record import (
+    DeploymentRecord,
+    IntegrationKeyReadbackEvidence,
+)
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -23,6 +26,7 @@ from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDe
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.drivers.registry import read_driver_descriptor
+from control_plane.integration_key_readback import integration_key_readback
 from control_plane.workflows.generic_web_deploy_provider import GenericWebDeployProvider
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebDeployRuntimeArtifactProvider,
@@ -507,6 +511,7 @@ def execute_generic_web_deploy(
     provider_effect_attempted = False
     provider_deployment_observation: GenericWebProviderDeploymentObservation | None = None
     post_deploy_update = PostDeployUpdateEvidence()
+    key_readback: IntegrationKeyReadbackEvidence | None = None
 
     def mark_provider_effect_started() -> None:
         nonlocal provider_effect_attempted
@@ -550,6 +555,11 @@ def execute_generic_web_deploy(
                     "Generic web provider deployment did not return exact successful evidence."
                 )
         deploy_completed = True
+        key_readback = integration_key_readback(
+            record_store=record_store,
+            context_name=resolved_lane.context,
+            instance_name=resolved_lane.instance,
+        )
         if post_deploy_executor is not None:
             post_deploy_update = _run_post_deploy_extension(
                 control_plane_root=control_plane_root,
@@ -622,7 +632,7 @@ def execute_generic_web_deploy(
             delegated_executor=resolved_deploy_provider.delegated_executor,
             post_deploy_update=post_deploy_update,
             runtime_identity=runtime_identity,
-        )
+        ).model_copy(update={"integration_key_readback": key_readback})
         record_store.write_deployment_record(deployment_record)
         if deploy_completed:
             record_store.write_environment_inventory(
@@ -684,7 +694,7 @@ def execute_generic_web_deploy(
             deployment_record_id=record_id,
             deployed_at=recorded_finished_at,
         ),
-    )
+    ).model_copy(update={"integration_key_readback": key_readback})
     record_store.write_deployment_record(deployment_record)
     record_store.write_environment_inventory(
         build_environment_inventory(

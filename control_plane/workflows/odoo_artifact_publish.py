@@ -222,6 +222,7 @@ def _enforce_runtime_key_safety_for_publish_payload(
                 environment_class=runtime_key_safety_environment_class(instance_name),
             ),
             required_binding_keys=binding_keys,
+            unreasoned_shared_integration_keys="report",
         )
     except ValueError as exc:
         raise click.ClickException(
