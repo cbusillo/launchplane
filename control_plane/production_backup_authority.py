@@ -265,6 +265,34 @@ def plan_production_backup_policy_append(
     )
 
 
+class ProductionBackupAuthorityScopeError(PermissionError):
+    """A caller limited to one product's lane submitted a revision outside it."""
+
+
+def lane_bound_target_revision_refusal(
+    *,
+    policy_records: tuple[ProductionBackupPolicyRecord, ...],
+    envelope: ProductionBackupAuthorityWriteEnvelope,
+) -> str:
+    """Refuse target revisions outside the submitted policy's own targets.
+
+    Target records are global, so a revision submitted with one product's
+    policy would otherwise change what another product's policy resolves.
+    Referencing a shared target without revising it stays allowed.
+    """
+    policy = envelope.policy
+    revised = {target.target_id for target in envelope.targets}
+    if not revised <= set(policy.target_ids):
+        return "Every submitted target must be one this backup policy uses."
+    lane = (policy.product, policy.context, policy.instance)
+    for record in policy_records:
+        if record.status != "active" or (record.product, record.context, record.instance) == lane:
+            continue
+        if revised & set(record.target_ids):
+            return "A submitted target is used by another product's backup policy."
+    return ""
+
+
 def plan_production_backup_authority_write(
     *,
     record_store: ProductionBackupAuthorityStore,

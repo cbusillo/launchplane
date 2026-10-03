@@ -2,12 +2,14 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.dokploy_target_record import IntegrationAllowanceKind
 from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretClass
 
 SecretScope = Literal["global", "context", "context_instance"]
 SecretPolicy = Literal["write_only"]
 SecretStatus = Literal["configured", "disabled"]
 SecretEventType = Literal["created", "rotated", "imported", "validated", "disabled", "relabelled"]
+SecretSharingKind = IntegrationAllowanceKind | Literal["site_shared"]
 
 
 class SecretRecord(BaseModel):
@@ -75,6 +77,39 @@ class SecretVersion(BaseModel):
         return self
 
 
+class SecretSharingReason(BaseModel):
+    """Why a production integration key may sit on one non-production lane.
+
+    The kinds are the lane integration allowances' (``dev_store``,
+    ``read_only_source``, ``pre_live``) plus ``site_shared`` for a key the site's
+    stable lanes share on purpose. ``evidence`` says who verified the key's
+    permissions, when, and what they saw. Launchplane cannot check a token's
+    permissions; a person does and records it here.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: SecretSharingKind
+    reason: str
+    evidence: str
+    recorded_by: str = ""
+    recorded_at: str = ""
+
+    @model_validator(mode="after")
+    def _validate_reason(self) -> "SecretSharingReason":
+        self.reason = self.reason.strip()
+        self.evidence = self.evidence.strip()
+        self.recorded_by = self.recorded_by.strip()
+        self.recorded_at = self.recorded_at.strip()
+        if not self.reason:
+            raise ValueError("A secret sharing reason requires reason.")
+        if not self.evidence:
+            raise ValueError(
+                "A secret sharing reason requires evidence: who verified the key, when, and what."
+            )
+        return self
+
+
 class SecretBinding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -90,6 +125,9 @@ class SecretBinding(BaseModel):
     # The writer's key-safety classification for a secret stored on one exact
     # lane. Runtime key safety uses it only for that lane's own bindings.
     declared_secret_class: RuntimeSecretClass | None = None
+    # Why the declared class is safe, for a production integration key shared
+    # with a non-production lane. Metadata only; never part of the value.
+    sharing_reason: SecretSharingReason | None = None
     created_at: str
     updated_at: str
 
@@ -109,6 +147,8 @@ class SecretBinding(BaseModel):
             self.context.strip() and self.instance.strip()
         ):
             raise ValueError("secret binding declared_secret_class requires context and instance")
+        if self.sharing_reason is not None and self.declared_secret_class is None:
+            raise ValueError("secret binding sharing_reason requires declared_secret_class")
         return self
 
 

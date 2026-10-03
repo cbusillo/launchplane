@@ -76,6 +76,18 @@ class MergeTrainGitHubStaleHeadError(MergeTrainGitHubError):
     """Raised when GitHub state no longer matches guarded merge evidence."""
 
 
+class MergeTrainGitHubCandidateEntryConflictError(MergeTrainGitHubStaleHeadError):
+    """A queued pull request's head does not merge cleanly into the batch candidate."""
+
+    def __init__(self, *, pull_request_number: int, head_sha: str) -> None:
+        self.pull_request_number = pull_request_number
+        self.head_sha = head_sha
+        super().__init__(
+            f"Pull request #{pull_request_number} conflicts with the batch candidate built so far.",
+            status_code=409,
+        )
+
+
 class MergeTrainGitHubMergeRejectedError(MergeTrainGitHubError):
     """A conclusive merge refusal with bounded, separately observed diagnosis."""
 
@@ -1766,18 +1778,25 @@ class LegacyMergeTrainEffectExecutor:
 
     def merge_candidate_head(self, effect: CandidateHeadMergeEffect) -> CandidateHeadMergeOutcome:
         repository_path = _repository_path(effect.lineage.repository)
-        payload = self.client.transport.request(
-            method="POST",
-            path=f"/repos/{repository_path}/merges",
-            body={
-                "base": _branch_name_from_ref(effect.candidate_ref),
-                "head": effect.head_sha,
-                "commit_message": (
-                    f"Launchplane merge train {effect.lineage.batch_id}: "
-                    f"merge PR #{effect.pull_request_number}"
-                ),
-            },
-        )
+        try:
+            payload = self.client.transport.request(
+                method="POST",
+                path=f"/repos/{repository_path}/merges",
+                body={
+                    "base": _branch_name_from_ref(effect.candidate_ref),
+                    "head": effect.head_sha,
+                    "commit_message": (
+                        f"Launchplane merge train {effect.lineage.batch_id}: "
+                        f"merge PR #{effect.pull_request_number}"
+                    ),
+                },
+            )
+        except MergeTrainGitHubStaleHeadError as error:
+            # The merges API answers 409 only for a merge conflict.
+            raise MergeTrainGitHubCandidateEntryConflictError(
+                pull_request_number=effect.pull_request_number,
+                head_sha=effect.head_sha,
+            ) from error
         if payload is None:
             return CandidateHeadMergeOutcome(result_sha=None)
         if not isinstance(payload, dict):

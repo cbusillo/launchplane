@@ -332,6 +332,7 @@ def evaluate_runtime_key_safety_for_live_target_sync(
                 secret_bindings=bindings,
                 secret_rules=policy_record.rules,
                 integration_key_markers=policy_record.integration_key_markers,
+                unreasoned_shared_integration_keys="report",
             )
         else:
             evaluation = evaluate_runtime_key_safety_from_store(
@@ -339,6 +340,7 @@ def evaluate_runtime_key_safety_for_live_target_sync(
                 policy_record=policy_record,
                 target=target,
                 required_binding_keys=binding_keys,
+                unreasoned_shared_integration_keys="report",
             )
     except ValueError as error:
         if not require_policy:
@@ -359,6 +361,7 @@ def evaluate_runtime_key_safety_for_live_target_sync(
         "target": evaluation.target.model_dump(mode="json"),
         "checked_binding_keys": list(evaluation.checked_binding_keys),
         "findings": [finding.model_dump(mode="json") for finding in evaluation.findings],
+        "reported": [finding.model_dump(mode="json") for finding in evaluation.reported],
     }
     if evaluation.status != "pass":
         finding_codes = sorted({finding.code for finding in evaluation.findings})

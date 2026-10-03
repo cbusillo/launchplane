@@ -24,6 +24,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
 from control_plane.contracts.secret_record import SecretAuditEvent, SecretRecord, SecretVersion
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.secret_record import SecretScope
+from control_plane.contracts.secret_record import SecretSharingReason
 from control_plane.runtime_key_safety import (
     evaluate_runtime_key_safety,
     is_secret_shaped_runtime_key,
@@ -296,6 +297,7 @@ def plan_product_config_authority_bundle(
                 instance_name=str(secret["instance"]),
                 description=str(secret["description"]),
                 declared_secret_class=cast(RuntimeSecretClass | None, secret["secret_class"]),
+                sharing_reason=_product_config_sharing_reason(secret, actor=actor),
                 actor=actor,
                 source_label=source_label,
             )
@@ -615,6 +617,12 @@ def _product_config_secret_inputs(
         secret_class = _product_config_declared_secret_class(
             raw_secret.get("secret_class"), scope=validated_scope, index=index
         )
+        sharing_reason = _product_config_sharing_reason_input(
+            raw_secret.get("sharing_reason"),
+            secret_class=secret_class,
+            instance_name=secret_instance,
+            index=index,
+        )
         normalized.append(
             {
                 "scope": validated_scope,
@@ -626,6 +634,7 @@ def _product_config_secret_inputs(
                 "instance": secret_instance,
                 "description": str(raw_secret.get("description", "") or "").strip(),
                 "secret_class": secret_class,
+                "sharing_reason": sharing_reason,
             }
         )
     return tuple(normalized)
@@ -647,6 +656,60 @@ def _product_config_declared_secret_class(
             "for one exact lane (scope context_instance)."
         )
     return cast(RuntimeSecretClass, raw_value.strip())
+
+
+def _product_config_sharing_reason_input(
+    raw_value: object,
+    *,
+    secret_class: RuntimeSecretClass | None,
+    instance_name: str,
+    index: int,
+) -> dict[str, str] | None:
+    """Validate why a declared class is safe; who recorded it is added at apply."""
+    if raw_value is None:
+        return None
+    if secret_class is None:
+        raise ProductConfigError(
+            f"Product config secret #{index} sharing_reason explains a secret_class; "
+            "set secret_class too."
+        )
+    if not isinstance(raw_value, dict) or set(raw_value) - {"kind", "reason", "evidence"}:
+        raise ProductConfigError(
+            f"Product config secret #{index} sharing_reason must be an object with "
+            "kind, reason and evidence."
+        )
+    try:
+        reason = SecretSharingReason.model_validate(raw_value)
+    except ValueError as error:
+        raise ProductConfigError(
+            f"Product config secret #{index} sharing_reason is invalid: kind must be one of "
+            "dev_store, read_only_source, pre_live or site_shared, and reason and evidence "
+            "are required."
+        ) from error
+    if reason.kind == "pre_live" and runtime_key_safety_environment_class(instance_name) not in {
+        "testing",
+        "dev",
+    }:
+        raise ProductConfigError(
+            f"Product config secret #{index} sharing_reason pre_live is only for a testing "
+            "or dev lane."
+        )
+    return {"kind": reason.kind, "reason": reason.reason, "evidence": reason.evidence}
+
+
+def _product_config_sharing_reason(
+    secret: dict[str, object], *, actor: str, recorded_at: str = ""
+) -> SecretSharingReason | None:
+    sharing_reason = secret["sharing_reason"]
+    if sharing_reason is None:
+        return None
+    return SecretSharingReason.model_validate(
+        {
+            **cast(dict[str, str], sharing_reason),
+            "recorded_by": actor,
+            "recorded_at": recorded_at or utc_now_timestamp(),
+        }
+    )
 
 
 def _validate_product_config_secret_scope_route(
@@ -734,6 +797,7 @@ def _plan_product_config_secret_write(
     instance_name: str = "",
     description: str = "",
     declared_secret_class: RuntimeSecretClass | None = None,
+    sharing_reason: SecretSharingReason | None = None,
     actor: str = "",
     source_label: str = "manual",
 ) -> _ProductConfigSecretWritePlan:
@@ -769,6 +833,7 @@ def _plan_product_config_secret_write(
         context=context_name,
         instance=instance_name,
         declared_secret_class=declared_secret_class,
+        sharing_reason=sharing_reason,
         created_at=created_at,
         updated_at=now,
     )
@@ -856,6 +921,7 @@ def _evaluate_product_config_runtime_key_safety(
         ),
         secret_rules=policy_record.rules,
         integration_key_markers=policy_record.integration_key_markers,
+        unreasoned_shared_integration_keys="refuse",
     )
     summary: dict[str, object] = {
         "required": True,
@@ -919,6 +985,7 @@ def _planned_runtime_secret_bindings(
                 instance=str(secret["instance"]),
                 status="configured",
                 declared_secret_class=cast(RuntimeSecretClass | None, secret["secret_class"]),
+                sharing_reason=_product_config_sharing_reason(secret, actor="", recorded_at=now),
                 created_at=existing_binding.created_at if existing_binding is not None else now,
                 updated_at=now,
             )
@@ -1037,6 +1104,8 @@ def _summarize_product_config_secret_input(
     }
     if secret["secret_class"] is not None:
         summary["secret_class"] = secret["secret_class"]
+    if secret["sharing_reason"] is not None:
+        summary["sharing_reason"] = secret["sharing_reason"]
     if secret_id:
         summary["secret_id"] = secret_id
     return summary

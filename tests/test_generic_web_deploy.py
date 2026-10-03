@@ -22,6 +22,10 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretSafetyRule,
+)
 from control_plane.contracts.secret_record import (
     SecretAuditEvent,
     SecretBinding,
@@ -107,6 +111,32 @@ class _GenericWebDeployStore:
             if (existing.context, existing.instance) != (record.context, record.instance)
         ]
         self.inventories.append(record)
+
+
+class _IntegrationKeyGenericWebDeployStore(_GenericWebDeployStore):
+    def __init__(
+        self,
+        profile: LaunchplaneProductProfileRecord,
+        *,
+        secret_bindings: tuple[SecretBinding, ...],
+    ) -> None:
+        super().__init__(profile)
+        self.secret_bindings = secret_bindings
+
+    def list_secret_bindings(self, **_filters: object) -> tuple[SecretBinding, ...]:
+        return self.secret_bindings
+
+    def list_runtime_key_safety_policy_records(
+        self, *, status: str = "", limit: int | None = None
+    ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]:
+        return (
+            RuntimeKeySafetyPolicyRecord(
+                record_id="policy-1",
+                source="test",
+                updated_at="2026-10-02T00:00:00Z",
+                rules=(RuntimeSecretSafetyRule(binding_key="UNRELATED", secret_class="testing"),),
+            ),
+        )
 
 
 class _DokployGenericWebDeployStore(_GenericWebDeployStore):
@@ -802,6 +832,36 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(
             store.deployments[0].delegated_executor,
             "control-plane.fake-cloud",
+        )
+
+    def test_execute_generic_web_deploy_records_integration_key_readback(self) -> None:
+        store = _IntegrationKeyGenericWebDeployStore(
+            _profile(),
+            secret_bindings=(
+                _runtime_secret_binding(
+                    secret_id="secret-repairshopr",
+                    binding_key="REPAIRSHOPR_API_TOKEN",
+                    context="sellyouroutboard-testing",
+                    instance="testing",
+                ).model_copy(update={"declared_secret_class": "shared_safe"}),
+            ),
+        )
+
+        result = execute_generic_web_deploy(
+            control_plane_root=Path("."),
+            record_store=store,
+            request=_request(),
+            deploy_provider=_FakeGenericWebDeployProvider(),
+        )
+
+        # Reported on the record without refusing the deploy for one release.
+        self.assertEqual(result.deploy_status, "pass")
+        readback = store.deployments[0].integration_key_readback
+        assert readback is not None
+        self.assertEqual(readback.status, "reported")
+        self.assertEqual(
+            [(finding.binding_key, finding.code) for finding in readback.findings],
+            [("REPAIRSHOPR_API_TOKEN", "sharing_reason_missing")],
         )
 
     def test_execute_generic_web_deploy_uses_deploy_reference_for_runtime_image(self) -> None:

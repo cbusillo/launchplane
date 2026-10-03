@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 import hashlib
 import json
 from typing import Literal
@@ -705,3 +706,32 @@ def product_profile_record_sha256(record: LaunchplaneProductProfileRecord) -> st
         sort_keys=True,
     )
     return hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
+
+
+LAUNCHPLANE_SERVICE_PRODUCT_CONTEXT = "launchplane"
+
+
+def product_context_owner_map(
+    profiles: Iterable[LaunchplaneProductProfileRecord],
+) -> dict[str, frozenset[str]]:
+    """Map each lane or historical context, case-folded, to the products using it."""
+    owners: dict[str, set[str]] = {}
+    for profile in profiles:
+        contexts = {lane.context for lane in profile.lanes} | set(profile.historical_contexts)
+        for context in contexts:
+            if context.strip():
+                owners.setdefault(context.strip().lower(), set()).add(profile.product)
+    return {context: frozenset(products) for context, products in owners.items()}
+
+
+def is_exclusive_product_context(
+    *, context: str, product: str, owners: dict[str, frozenset[str]]
+) -> bool:
+    """True when ``context`` is canonical, not Launchplane's, and only ``product`` uses it."""
+    return (
+        bool(context.strip())
+        and not any(character in context for character in "*?[")
+        and context == context.strip().lower()
+        and context != LAUNCHPLANE_SERVICE_PRODUCT_CONTEXT
+        and owners.get(context) == frozenset((product,))
+    )

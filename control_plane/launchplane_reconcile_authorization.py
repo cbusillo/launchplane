@@ -83,9 +83,10 @@ def launchplane_reconcile_authorization_allows(
 def launchplane_reconcile_preview_destination_allowed(
     *, record_store: object, product: str, context: str, preview_slug: str
 ) -> bool:
-    """A reconcile may change only the product's own previews, in its preview context."""
+    """A reconcile may change only an Odoo or generic-web product's own previews, in its
+    preview context."""
     profile = _reconcilable_profile(
-        record_store, product.strip(), uses_driver=product_profile_uses_odoo_driver
+        record_store, product.strip(), uses_driver=product_profile_uses_generic_web_base
     )
     slug = preview_slug.strip().lower()
     return (

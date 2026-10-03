@@ -2971,6 +2971,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             app_store = PostgresRecordStore(database_url=database_url)
+            _write_local_operator_product_profile(app_store)
             app = create_launchplane_fastapi_app(
                 verifier=_RejectingVerifier(),
                 authz_policy=_local_operator_policy(
@@ -3003,6 +3004,64 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["result"]["mode"], "dry-run")
+
+    async def test_product_config_local_operator_stays_on_its_products_own_lane(self) -> None:
+        context_scoped = _meta_product_config_payload(reason="Context-scoped secret.")
+        _product_config_secrets(context_scoped)[0]["scope"] = "context"
+        for payload, owner in (
+            (context_scoped, "sellyouroutboard"),
+            (_meta_product_config_payload(reason="Context of another product."), "other-site"),
+        ):
+            with self.subTest(owner=owner), TemporaryDirectory() as temporary_directory_name:
+                database_url = _sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+                app_store = PostgresRecordStore(database_url=database_url)
+                app_store.ensure_schema()
+                app_store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        {
+                            **_generic_site_profile_payload(),
+                            "product": owner,
+                            "lanes": [{"instance": "prod", "context": "sellyouroutboard"}],
+                        }
+                    )
+                )
+                app = create_launchplane_fastapi_app(
+                    verifier=_RejectingVerifier(),
+                    authz_policy=_local_operator_policy(
+                        actions=("product_config.plan",),
+                        products=("sellyouroutboard",),
+                        contexts=("sellyouroutboard",),
+                        subject="configured-local-owner",
+                        token_label="configured-write-token",
+                    ),
+                    record_store_factory=lambda: app_store,
+                    bearer_identity_config=BearerIdentityConfig(
+                        local_operator_token="local-operator-token",
+                        local_operator_subject="configured-local-owner",
+                        local_operator_token_label="configured-write-token",
+                    ),
+                )
+                with patch.dict(
+                    os.environ,
+                    {
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"
+                    },
+                    clear=True,
+                ):
+                    response = await _post_product_config_apply(
+                        app,
+                        payload,
+                        authorization="Bearer local-operator-token",
+                        idempotency_key=f"product-config-lane-scope-{owner}",
+                    )
+                app_store.close()
+
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertEqual(
+                    response.json()["error"]["code"], "local_operator_lane_scope_required"
+                )
 
     async def test_product_config_terminal_agent_rejects_before_payload_validation(
         self,
@@ -3169,6 +3228,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
             app_store = PostgresRecordStore(database_url=database_url)
+            _write_local_operator_product_profile(app_store)
             app_store.ensure_schema()
             app = create_launchplane_fastapi_app(
                 verifier=_RejectingVerifier(),
@@ -3221,6 +3281,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             app_store = PostgresRecordStore(database_url=database_url)
+            _write_local_operator_product_profile(app_store)
             app = create_launchplane_fastapi_app(
                 verifier=_RejectingVerifier(),
                 authz_policy=_local_operator_policy(
@@ -3283,6 +3344,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
             app_store = PostgresRecordStore(database_url=database_url)
+            _write_local_operator_product_profile(app_store)
             app_store.ensure_schema()
             app = create_launchplane_fastapi_app(
                 verifier=_RejectingVerifier(),
@@ -3654,3 +3716,18 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
             environment_route["requestBody"]["content"]["application/json"]["schema"]["title"],
             "ProductEnvironmentConfigApplyEnvelope",
         )
+
+
+def _write_local_operator_product_profile(store: PostgresRecordStore) -> None:
+    """The operator's agent writes only to a context its product owns."""
+    store.ensure_schema()
+    store.write_product_profile_record(
+        LaunchplaneProductProfileRecord.model_validate(
+            {
+                **_generic_site_profile_payload(),
+                "product": "sellyouroutboard",
+                "display_name": "SellYourOutboard",
+                "lanes": [{"instance": "prod", "context": "sellyouroutboard"}],
+            }
+        )
+    )

@@ -34,6 +34,7 @@ from tests.merge_train_policy_fixtures import build_test_merge_train_policy_reco
 from control_plane.merge_train_controller_run_once import MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION
 from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.merge_train_github import MergeTrainGitHubMergeRejectedError
+from control_plane.merge_train_github import MergeTrainGitHubCandidateEntryConflictError
 from control_plane.merge_train_github import MergeTrainGitHubStaleHeadError
 from control_plane.merge_train_github import merge_train_construction_ref
 from control_plane.service_auth import (
@@ -2925,6 +2926,153 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             [1, 2],
         )
 
+    async def test_conflicting_entry_is_held_out_and_the_rest_lands(self) -> None:
+        class ConflictingSecondEntryClient(_FakeMergeTrainGitHubClient):
+            def build_batch_candidate(self, **kwargs: Any) -> Any:
+                candidate = kwargs["candidate"]
+                for entry in candidate.entries:
+                    if entry.pull_request_number == 2:
+                        raise MergeTrainGitHubCandidateEntryConflictError(
+                            pull_request_number=2, head_sha=entry.head_sha
+                        )
+                return super().build_batch_candidate(**kwargs)
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            results = []
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _FakeExpandedMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    ConflictingSecondEntryClient,
+                ),
+            ):
+                for _ in range(7):
+                    response = await _post_merge_train_controller_run_once(app, request_payload)
+                    results.append(response.json()["result"])
+
+        self.assertEqual(
+            [result["controller_action"] for result in results],
+            [
+                "plan_candidate",
+                "candidate_failed",
+                "plan_candidate",
+                "build_candidate",
+                "observe_candidate",
+                "plan_landing",
+                "land_batch",
+            ],
+        )
+        self.assertEqual(results[1]["error"]["code"], "merge_train_candidate_entry_conflict")
+        replacement = results[2]["candidate"]
+        self.assertEqual([entry["pull_request_number"] for entry in replacement["entries"]], [1])
+        self.assertEqual(
+            replacement["held_out"],
+            [{"pull_request_number": 2, "head_sha": "head-2", "reason": "entry_conflict"}],
+        )
+        self.assertEqual(
+            [entry["pull_request_number"] for entry in results[-1]["landing_plan"]["entries"]],
+            [1],
+        )
+
+    async def test_held_out_entry_stays_out_when_the_queue_changes(self) -> None:
+        third_queued = {"value": False}
+
+        class GrowingQueueReader(_FakeExpandedMergeTrainSnapshotReader):
+            def read_merge_train_snapshot(
+                self, *, repository: str, base_branch: str
+            ) -> MergeTrainDryRunSnapshot:
+                snapshot = super().read_merge_train_snapshot(
+                    repository=repository, base_branch=base_branch
+                )
+                if not third_queued["value"]:
+                    return snapshot
+                third = snapshot.pull_requests[0].model_copy(
+                    update={
+                        "number": 3,
+                        "url": f"https://github.com/{repository}/pull/3",
+                        "created_at": "2026-05-08T11:00:00Z",
+                        "head_sha": "head-3",
+                        "head_ref": "feature/third",
+                    }
+                )
+                return snapshot.model_copy(
+                    update={"pull_requests": (*snapshot.pull_requests, third)}
+                )
+
+        class ConflictingSecondEntryClient(_FakeMergeTrainGitHubClient):
+            def build_batch_candidate(self, **kwargs: Any) -> Any:
+                candidate = kwargs["candidate"]
+                for entry in candidate.entries:
+                    if entry.pull_request_number == 2:
+                        raise MergeTrainGitHubCandidateEntryConflictError(
+                            pull_request_number=2, head_sha=entry.head_sha
+                        )
+                return super().build_batch_candidate(**kwargs)
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            results = []
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    GrowingQueueReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    ConflictingSecondEntryClient,
+                ),
+            ):
+                for _ in range(3):
+                    response = await _post_merge_train_controller_run_once(app, request_payload)
+                    results.append(response.json()["result"])
+                third_queued["value"] = True
+                response = await _post_merge_train_controller_run_once(app, request_payload)
+                results.append(response.json()["result"])
+
+        self.assertEqual(
+            [result["controller_action"] for result in results],
+            ["plan_candidate", "candidate_failed", "plan_candidate", "plan_candidate"],
+        )
+        replanned = results[-1]["candidate"]
+        self.assertEqual([entry["pull_request_number"] for entry in replanned["entries"]], [1, 3])
+        self.assertEqual([entry["pull_request_number"] for entry in replanned["held_out"]], [2])
+
     async def test_failed_candidate_does_not_block_a_behind_base_queue_head(self) -> None:
         branch_updates: list[tuple[int, str]] = []
 
@@ -3803,6 +3951,185 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             land_payload["result"]["stack_collapse_plan"]["child_dispositions"][0]["status"],
             "closed",
+        )
+
+    async def _run_controller_after_collapse(
+        self, *, root_update: dict[str, object], mutate: bool
+    ) -> tuple[dict[str, Any], list[int]]:
+        """Run the controller once against a collapsed root waiting for its checks.
+
+        GitHub has closed the merged child, and an independent ready pull
+        request is queued behind the root.
+        """
+        branch_updates: list[int] = []
+
+        class CollapsedRootReader(_FakeCollapsedRootStackedMergeTrainSnapshotReader):
+            def read_merge_train_snapshot(
+                self, *, repository: str, base_branch: str
+            ) -> MergeTrainDryRunSnapshot:
+                snapshot = super().read_merge_train_snapshot(
+                    repository=repository, base_branch=base_branch
+                )
+                root = snapshot.pull_requests[0]
+                independent = root.model_copy(
+                    update={
+                        "number": 3,
+                        "url": f"https://github.com/{repository}/pull/3",
+                        "created_at": "2026-05-08T12:00:00Z",
+                        "head_sha": "head-independent",
+                        "head_ref": "feature/independent",
+                    }
+                )
+                return snapshot.model_copy(
+                    update={"pull_requests": (root.model_copy(update=root_update), independent)}
+                )
+
+        class BranchUpdatingClient(_FakeMergeTrainGitHubClient):
+            def update_pull_request_branch(
+                self, *, repository: str, pull_request_number: int, expected_head_sha: str
+            ) -> None:
+                branch_updates.append(pull_request_number)
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            _seed_executed_merge_train_stack_collapse_plan_record(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    CollapsedRootReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    BranchUpdatingClient,
+                ),
+            ):
+                response = await _post_merge_train_controller_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": mutate,
+                    },
+                )
+        self.assertEqual(response.status_code, 202)
+        return response.json()["result"], branch_updates
+
+    async def test_refreshes_a_behind_base_collapsed_root_instead_of_waiting(self) -> None:
+        dry_run, _ = await self._run_controller_after_collapse(
+            root_update={"branch_update_required": True}, mutate=False
+        )
+        mutated, branch_updates = await self._run_controller_after_collapse(
+            root_update={"branch_update_required": True}, mutate=True
+        )
+
+        self.assertEqual(dry_run["controller_action"], "update_branch")
+        self.assertEqual(dry_run["dry_run_result"]["queue_order"], [1, 3])
+        self.assertEqual(mutated["controller_action"], "update_branch")
+        self.assertEqual(branch_updates, [1])
+
+    async def test_unlabelled_collapsed_root_lets_the_queue_proceed(self) -> None:
+        result, branch_updates = await self._run_controller_after_collapse(
+            root_update={"labels": (), "label_actors": ()}, mutate=True
+        )
+
+        self.assertEqual(result["controller_action"], "plan_candidate")
+        self.assertEqual(
+            [entry["pull_request_number"] for entry in result["candidate"]["entries"]], [3]
+        )
+        self.assertEqual(branch_updates, [])
+
+    async def test_refreshed_collapsed_root_lands_with_its_children_disposed(self) -> None:
+        refreshed = {"value": False}
+
+        class RefreshableRootReader(_FakeCollapsedRootStackedMergeTrainSnapshotReader):
+            def read_merge_train_snapshot(
+                self, *, repository: str, base_branch: str
+            ) -> MergeTrainDryRunSnapshot:
+                snapshot = super().read_merge_train_snapshot(
+                    repository=repository, base_branch=base_branch
+                )
+                root = snapshot.pull_requests[0]
+                if refreshed["value"]:
+                    root = root.model_copy(update={"head_sha": "refreshed-root-head"})
+                else:
+                    root = root.model_copy(update={"branch_update_required": True})
+                return snapshot.model_copy(update={"pull_requests": (root,)})
+
+        class RefreshingClient(_FakeMergeTrainGitHubClient):
+            def update_pull_request_branch(
+                self, *, repository: str, pull_request_number: int, expected_head_sha: str
+            ) -> None:
+                refreshed["value"] = True
+
+            def branch_contains_commit(
+                self, *, repository: str, branch_ref: str, commit_sha: str
+            ) -> bool:
+                return (branch_ref, commit_sha) == ("refreshed-root-head", "stack-merge-2-into-1")
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            _seed_executed_merge_train_stack_collapse_plan_record(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            results = []
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    RefreshableRootReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    RefreshingClient,
+                ),
+            ):
+                for _ in range(6):
+                    response = await _post_merge_train_controller_run_once(app, request_payload)
+                    results.append(response.json()["result"])
+
+        self.assertEqual(
+            [result["controller_action"] for result in results],
+            [
+                "update_branch",
+                "plan_candidate",
+                "build_candidate",
+                "observe_candidate",
+                "plan_landing",
+                "land_batch",
+            ],
+        )
+        landed = results[-1]
+        self.assertEqual(landed["stack_collapse_plan"]["status"], "ready_for_train")
+        self.assertEqual(
+            [
+                disposition["status"]
+                for disposition in landed["stack_collapse_plan"]["child_dispositions"]
+            ],
+            ["closed"],
         )
 
     async def test_cleanup_failure_after_landing_is_reported_without_rollback(self) -> None:

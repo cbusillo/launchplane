@@ -54,8 +54,11 @@ from control_plane.contracts.ordinary_agent_delivery_authorization_inputs import
     OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse,
 )
 from control_plane.authz_candidate_preparation import (
+    AGENT_PRODUCT_SETUP_CANDIDATE_ID,
+    AGENT_PRODUCT_SETUP_MAX_PRODUCTS,
     AuthorizationCandidateId,
     AuthorizationCandidatePreparationError,
+    agent_product_setup_grants_match_records,
     authorization_candidate_request_matches,
     compile_authorization_candidate,
     compile_ordinary_agent_delivery_policy_candidate,
@@ -148,6 +151,9 @@ class PrivilegedOperationRouteDependencies:
     policy_reader: Callable[[], LaunchplaneAuthzPolicy]
     policy_record_reader: Callable[[], object] | None = None
     read_configured_terminal_identity: Callable[[], TerminalAgentIdentity | None] = lambda: None
+    read_configured_local_operator_identity: Callable[[], LocalOperatorIdentity | None] = lambda: (
+        None
+    )
 
 
 class PrivilegedOperationPlanEnvelope(BaseModel):
@@ -232,10 +238,22 @@ class AuthorizationCandidatePrepareEnvelope(BaseModel):
     candidate_id: AuthorizationCandidateId
     intent: Literal["add", "remove"]
     source_event_id: str = Field(min_length=1, max_length=128)
+    products: tuple[Annotated[str, Field(min_length=1, max_length=128)], ...] = Field(
+        default=(),
+        max_length=AGENT_PRODUCT_SETUP_MAX_PRODUCTS,
+        description=(
+            "Product identifiers selected for agent product setup. Accepted only when "
+            "adding agent-product-setup; the server validates each one."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_envelope(self) -> "AuthorizationCandidatePrepareEnvelope":
         self.source_event_id = normalize_privileged_operation_source_event_id(self.source_event_id)
+        if self.products and (
+            self.candidate_id != AGENT_PRODUCT_SETUP_CANDIDATE_ID or self.intent != "add"
+        ):
+            raise ValueError("Products are accepted only when adding agent product setup.")
         return self
 
 
@@ -579,12 +597,21 @@ def register_privileged_operation_routes(
         events: tuple[PrivilegedOperationEventRecord, ...],
         generated_at: datetime,
         trace_id: str,
+        record_store: object,
     ) -> PrivilegedOperationSemanticReview:
         try:
             return privileged_operation_semantic_review(
                 record=record,
                 events=events,
                 generated_at=generated_at,
+                configured_local_operator_identity=(
+                    dependencies.read_configured_local_operator_identity()
+                ),
+                product_setup_grants_verified=lambda grants: (
+                    agent_product_setup_grants_match_records(
+                        record_store=record_store, grants=grants
+                    )
+                ),
             )
         except PrivilegedOperationSemanticReviewError as error:
             raise dependencies.common.http_error(
@@ -1072,6 +1099,7 @@ def register_privileged_operation_routes(
                     ),
                     generated_at=generated_at,
                     trace_id=trace_id,
+                    record_store=record_store,
                 )
                 for record in records
             )
@@ -1162,6 +1190,7 @@ def register_privileged_operation_routes(
                 events=events,
                 generated_at=datetime.now(timezone.utc),
                 trace_id=trace_id,
+                record_store=record_store,
             ),
         )
 
@@ -1582,6 +1611,11 @@ def register_privileged_operation_routes(
                         request=request,
                         github_id=identity.github_id,
                         intent=envelope.intent,
+                        products=envelope.products,
+                        configured_local_operator_identity=(
+                            dependencies.read_configured_local_operator_identity()
+                        ),
+                        record_store=record_store,
                     )
                 ):
                     raise PrivilegedOperationConflictError(
@@ -1599,6 +1633,10 @@ def register_privileged_operation_routes(
                 intent=envelope.intent,
                 record_store=record_store,
                 configured_terminal_identity=dependencies.read_configured_terminal_identity(),
+                configured_local_operator_identity=(
+                    dependencies.read_configured_local_operator_identity()
+                ),
+                products=envelope.products,
             )
             if state == "already_satisfied":
                 return AuthorizationCandidatePrepareResponse(
@@ -1638,6 +1676,19 @@ def register_privileged_operation_routes(
                 "activation_history_truncated": (
                     "authorization_candidate_activation_history_truncated",
                     "Agent delivery activation history exceeds the safe preparation window.",
+                ),
+                "candidate_principal_unavailable": (
+                    "authorization_candidate_principal_unavailable",
+                    "The service has no exact configured local operator identity for the "
+                    "operator's agent.",
+                ),
+                "candidate_products_required": (
+                    "authorization_candidate_products_required",
+                    "Choose at least one product.",
+                ),
+                "candidate_product_unavailable": (
+                    "authorization_candidate_product_unavailable",
+                    "A selected product is not a recorded product with one product context.",
                 ),
             }
             code, message = preparation_errors.get(

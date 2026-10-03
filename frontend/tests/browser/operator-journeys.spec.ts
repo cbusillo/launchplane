@@ -896,6 +896,10 @@ test.describe("operator journeys", () => {
     await publicOriginField
       .getByLabel("New value")
       .fill("https://example.invalid");
+    await page.getByRole("button", { name: "Add a site setting" }).click();
+    await page.getByLabel("Setting name").fill("SITE_MODE");
+    await page.getByLabel("Setting value").fill("full");
+    await page.getByLabel("Provider keys to retire").fill("LEGACY_TUNING");
     await page
       .getByLabel("Change reason")
       .fill("Verify the deterministic browser dry-run.");
@@ -919,6 +923,9 @@ test.describe("operator journeys", () => {
     ).toBeEnabled();
     await expect(
       page.getByText("Dry-run evidence", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Provider keys retired", { exact: true }),
     ).toBeVisible();
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "safe-change-confirmation");
@@ -1530,6 +1537,76 @@ test.describe("operator journeys", () => {
     expect(sourceEventIds).toHaveLength(3);
     expect(sourceEventIds[1]).toBe(sourceEventIds[0]);
     expect(sourceEventIds[2]).toBe(sourceEventIds[0]);
+  });
+
+  test("agent product setup preparation lists every product and sends their ids", async ({ page }) => {
+    const requests: Array<Record<string, unknown>> = [];
+    await page.route("**/v1/auth/session", async (route) => {
+      await route.fulfill({ json: { csrf_token: "fixture-agent-product-setup-csrf" } });
+    });
+    await page.route(
+      "**/v1/privileged-operations/authorization-candidates/prepare",
+      async (route) => {
+        const body = route.request().postDataJSON() as Record<string, unknown>;
+        requests.push(body);
+        await route.fulfill({
+          json: {
+            trace_id: `trace-agent-product-setup-${String(body.intent)}`,
+            state: "already_satisfied",
+          },
+        });
+      },
+    );
+
+    await page.goto("/ui/engineering/privileged-operations?fixture=products");
+    await page.getByRole("button", { name: "Access policy" }).click();
+
+    const setupCard = page
+      .locator("section.privileged-operation-card")
+      .filter({
+        has: page.getByRole("heading", { name: "Prepare agent product setup" }),
+      });
+    await expect(setupCard).toBeVisible();
+    await expect(
+      setupCard.getByText("cannot change the Client or release review", { exact: false }),
+    ).toBeVisible();
+    await expect(
+      setupCard.getByText("changes nothing until it is approved", { exact: false }),
+    ).toBeVisible();
+    await expect(setupCard.getByRole("checkbox")).toHaveCount(3);
+    await expect(setupCard.getByText("Example Live")).toBeVisible();
+    const addButton = setupCard.getByRole("button", { name: "Prepare product setup access" });
+    await expect(addButton).toBeDisabled();
+
+    await setupCard.getByRole("checkbox", { name: /Example Shop/ }).check();
+    await addButton.click();
+    await expect(
+      setupCard.getByText("Agent product setup already covers exactly these products."),
+    ).toBeVisible();
+    await setupCard.getByRole("button", { name: "Prepare product setup removal" }).click();
+    await expect(
+      setupCard.getByText("Agent product setup is already removed."),
+    ).toBeVisible();
+
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toMatchObject({
+      candidate_id: "agent-product-setup",
+      intent: "add",
+      products: ["example-shop"],
+    });
+    expect(Object.keys(requests[0]).sort()).toEqual([
+      "candidate_id",
+      "intent",
+      "products",
+      "source_event_id",
+    ]);
+    expect(Object.keys(requests[1]).sort()).toEqual([
+      "candidate_id",
+      "intent",
+      "source_event_id",
+    ]);
+    expect(requests[1].intent).toBe("remove");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false);
   });
 
   test("project evidence preparation has independent add and removal cards", async ({ page }) => {
