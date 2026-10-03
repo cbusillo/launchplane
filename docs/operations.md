@@ -2600,8 +2600,8 @@ context only, and `context_instance` has both context and instance.
   integrations keep their restored settings through devkit's credential clearing.
   `dev_store` is excluded: the restored production values are cleared before the
   lane's development account is applied. Production and previews receive an
-  empty list, as does a lane without eligible allowances. This input is set for
-  the restore execution only, rather than persisted in the target environment.
+  empty list, as does a lane without eligible allowances. This input is passed
+  in the restore schedule script, rather than persisted in the target environment.
 - The integration read-back enforces the allowances. The deploy, restore, stable
   bootstrap and target replacement data-workflow schedules run it with web
   stopped, before web starts again, on every Odoo lane that is not production,
