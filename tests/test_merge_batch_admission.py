@@ -258,13 +258,7 @@ class ProtectedBatchGuardTests(unittest.TestCase):
                 client = GitHubMergeTrainClient(transport=provider)
                 client.ensure_batch_pull_request(candidate=candidate)
 
-                def run(
-                    trace_id: str,
-                    policy: MergeTrainPolicyRecord = policy,
-                    evaluator: Any = evaluator,
-                    client: GitHubMergeTrainClient = client,
-                    store: FilesystemRecordStore = store,
-                ) -> Any:
+                def run(trace_id: str) -> Any:
                     return execute_merge_train_controller_with_client(
                         request=MergeTrainControllerRunOnceEnvelope(
                             repository=candidate.repository, mutate=True

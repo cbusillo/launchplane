@@ -1572,8 +1572,11 @@ def _resume_unrecorded_landing_retirement(
     they may have changed while the controller was down; closing again is a
     no-op on a closed PR.
     """
-    retirement_source = str(lease.record.step_payload.get("retirement_source") or "")
-    if retirement_source not in {"policy-changed-landing", "lineage-changed-landing"}:
+    retirement_source = lease.record.step_payload.get("retirement_source")
+    if not isinstance(retirement_source, str) or retirement_source not in {
+        "policy-changed-landing",
+        "lineage-changed-landing",
+    }:
         return None
     candidate_record = _candidate_record_for_landing_plan(
         record_store=candidate_store, landing_plan_record=landing_record
