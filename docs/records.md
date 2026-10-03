@@ -947,6 +947,12 @@ a deploy reservation stays valid after the move, so rollback, deploy recovery
 and promotion evidence still work. Promotion refuses a testing lane that runs an
 image outside the current repository.
 
+`POST /v1/product-profiles/{product}/production-use` changes only the production-use
+classification and profile metadata under `product_profile.write`. Dry run returns a
+digest of the full starting profile, requested value, and reason; Apply must match it.
+Atomic compare-and-write and idempotency evidence record the caller, before/after,
+reason and timestamps. The Client panel reads the resulting profile back.
+
 Expected-config metadata changes use
 `POST /v1/product-profiles/expected-config/apply`. The request carries
 `mode: "dry-run"` or `mode: "apply"`, a product key, a reason, runtime key or

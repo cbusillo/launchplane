@@ -1,3 +1,4 @@
+import { LaunchplaneApiError } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import type {
   OrdinaryAgentMergeTrainTargetInputsResponse,
@@ -3249,16 +3250,18 @@ export function releaseDecisionForFixture(
 
 // Development-only profile controls; this module is excluded from production builds.
 const fixtureProfileFields = new Map<string, string>();
-export function productProfileFieldForFixture(fixture: DataFixtureMode, product: string, field: "image" | "production"): string {
+export function productProfileFieldForFixture(fixture: DataFixtureMode, product: string, field: "image" | "production"): { value: string; suggested: string } {
   assertFixtureAvailable(fixture);
-  return fixtureProfileFields.get(`${product}:${field}`) ?? (field === "image" ? "ghcr.io/example/old-package" : "unknown");
+  const value = fixtureProfileFields.get(`${product}:${field}`) ?? (field === "image" ? "ghcr.io/example/old-package" : "unknown");
+  return { value, suggested: field === "image" ? `ghcr.io/${productsForFixture(fixture).find(item => item.product === product)?.repository ?? "example/atlas-commerce"}` : value };
 }
 export async function applyProductProfileFieldForFixture(
   fixture: DataFixtureMode, product: string, field: "image" | "production",
   payload: { mode?: "dry-run" | "apply"; reason: string; image_repository?: string; production_use?: string },
 ): Promise<AcceptedEvidenceResponse> {
-  const before = productProfileFieldForFixture(fixture, product, field);
-  const after = field === "image" ? payload.image_repository : payload.production_use;
+  const { value: before, suggested } = productProfileFieldForFixture(fixture, product, field);
+  const after = field === "image" ? payload.image_repository?.trim().replace(/\/+$/, "") : payload.production_use;
+  if (field === "image" && after !== suggested) throw new LaunchplaneApiError(`The image repository must be ${suggested}.`, 400, "fixture-image", "image_repository_not_repository_named");
   const prefix = field === "image" ? "image_repository" : "production_use";
   const applied = payload.mode === "apply";
   if (applied && after) fixtureProfileFields.set(`${product}:${field}`, after);

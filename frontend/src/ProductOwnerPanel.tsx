@@ -362,15 +362,16 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
   const [reason, setReason] = useState(reviewed?.request.reason ?? "");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const draftKey = JSON.stringify([value.trim(), reason.trim()]);
+  const draftKey = JSON.stringify([field === "image" ? value.trim().replace(/\/+$/, "") : value.trim(), reason.trim()]);
 
-  async function readValue(signal?: AbortSignal): Promise<string> {
+  async function readValue(signal?: AbortSignal): Promise<{ value: string; suggested: string }> {
     if (fixtureMode) {
       const fixtures = await loadDevFixtures();
       return fixtures.productProfileFieldForFixture(fixtureMode, product, field);
     }
     const { profile } = await readProductProfile(product, signal);
-    return field === "image" ? profile.image.repository : profile.production_use;
+    return { value: field === "image" ? profile.image.repository : profile.production_use,
+      suggested: field === "image" ? `ghcr.io/${profile.repository.trim().toLowerCase()}` : profile.production_use };
   }
 
   async function execute(payload: ProfileFieldRequest, options: Parameters<typeof applyProductOwner>[2]) {
@@ -393,7 +394,7 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
   useEffect(() => {
     const controller = new AbortController();
     readValue(controller.signal).then((stored) => {
-      if (!controller.signal.aborted) { setCurrent(stored); if (!reviewed) setValue(stored); }
+      if (!controller.signal.aborted) { setCurrent(stored.value); if (!reviewed) setValue(stored.suggested); }
     }).catch((failure: unknown) => {
       if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : "Profile read failed.");
     });
@@ -406,6 +407,11 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
       else sessionStorage.removeItem(storageKey);
     } catch { setError("This browser cannot preserve the reviewed draft. Keep this page open until Apply is confirmed."); }
   }, [reviewed, storageKey]);
+
+  useEffect(() => {
+    if (applyOperation.state.phase === "failed" && !applyOperation.state.requiresIdempotencyContinuity &&
+        applyOperation.state.failure?.code === "stale") setReviewed(null);
+  }, [applyOperation.state]);
 
   async function preview() {
     setError(""); setNotice(""); setReviewed(null);
@@ -433,11 +439,11 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
     setReviewed(null);
     try {
       const stored = await readValue();
-      setCurrent(stored); setValue(stored);
-      if (stored !== reviewed.plan.after) {
+      setCurrent(stored.value); setValue(stored.value);
+      if (stored.value !== reviewed.plan.after) {
         setError("Apply returned, but read-back differs from the reviewed value. Review a new dry run.");
       } else {
-        setNotice(`Applied and read back. ${title}: ${stored}.`);
+        setNotice(`Applied and read back. ${title}: ${stored.value}.`);
       }
     } catch (failure) {
       setError(`Apply returned; read-back could not be confirmed. ${failure instanceof Error ? failure.message : "Read failed."}`);
