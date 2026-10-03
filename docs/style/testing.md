@@ -98,6 +98,16 @@ runners can discover different targets, so shards that each planned for
 themselves could overlap or miss tests (#2618). Without `--plan-file`, `run` and
 `aggregate` still discover and plan locally.
 
+CI also runs daily against the default branch. Scheduled runs always execute
+fresh checks, including Python dependency audits, image scans and PostgreSQL
+tests; they never reuse an earlier successful tree. The `ci-gate` summary lists
+each job's result and the Actions run remains failed when a gate fails.
+Inspect scheduled runs in Actions to diagnose calendar-driven failures before
+an unrelated pull request encounters them. Email notification delivery depends
+on the schedule actor and that account's settings; delivery to the Director is
+not guaranteed. Reporting uses the existing read-only workflow token; it does
+not create issues or dependency updates.
+
 For pushes to `main` and `launchplane/train/**`, the `verified-tree` job can
 reuse a completed, successful GitHub Actions `ci-gate` on the exact pushed
 commit. Its check suite must identify that same commit on main without a PR
