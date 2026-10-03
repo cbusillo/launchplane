@@ -2630,7 +2630,8 @@ context only, and `context_instance` has both context and instance.
     completed (so it applied the payload) and the read-back then passed. A failed
     workflow leaves web waiting even when the database reads clean. An unset or
     empty optional payload is supported, but a failed Docker exec reading it
-    fails recovery without writing a pass or starting web. So a provider
+    fails the schedule. Recovery must successfully read the payload before it
+    can write a pass or start web. So a provider
     deploy that runs before the schedule (a ship deploy, a
     changed target environment, target replacement, a preview refresh) or any
     restart after a refusal leaves web waiting instead of serving. A backup

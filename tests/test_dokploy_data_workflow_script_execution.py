@@ -129,24 +129,12 @@ def main(argv):
         return 0
     if program[:1] == ["/bin/bash"]:
         return 0
-    if program[:1] == ["printenv"]:
-        if "FAKE_PAYLOAD_READ_EXIT" in os.environ:
-            print("partial-payload", end="")
-            return int(os.environ["FAKE_PAYLOAD_READ_EXIT"])
-        # The container's own environment comes from the compose .env file.
-        container_environment = {}
-        if "FAKE_CONTAINER_PAYLOAD" in os.environ:
-            container_environment[program[1]] = os.environ["FAKE_CONTAINER_PAYLOAD"]
-        value = {**container_environment, **exec_environment}.get(program[1])
-        if value is None:
-            return 1
-        print(value)
-        return 0
     if program[:2] == ["sh", "-c"] and "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64" in program[2]:
         log("read overrides payload")
         if "FAKE_PAYLOAD_READ_EXIT" in os.environ:
             print("partial-payload", end="")
             return int(os.environ["FAKE_PAYLOAD_READ_EXIT"])
+        # The container's own environment comes from the compose .env file.
         container_environment = {"PATH": os.environ["PATH"]}
         if "FAKE_CONTAINER_PAYLOAD" in os.environ:
             container_environment["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"] = os.environ["FAKE_CONTAINER_PAYLOAD"]
