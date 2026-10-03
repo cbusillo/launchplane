@@ -26,7 +26,11 @@ from control_plane.release_review import (
     require_release_approval,
     require_unchanged_production_artifact,
 )
-from control_plane.release_review_github import owner_test_notes, read_release_changes
+from control_plane.release_review_github import (
+    nest_owner_test_notes,
+    owner_test_notes,
+    read_release_changes,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.stores import sqlite_database_url
@@ -248,6 +252,21 @@ class ReleaseReviewTests(unittest.TestCase):
         self.assertEqual(review.checklist.untracked_commits, (HEAD,))
         self.assertFalse(review.approved)
 
+    def test_batch_constituent_without_notes_is_still_a_blocker(self) -> None:
+        def batch_notes(path: str) -> object:
+            result = github_read(path)
+            if isinstance(result, list):
+                result[0]["body"] = (
+                    "## Owner test notes\n\n### #7 Header\n\nOpen the home page.\n\n"
+                    "### #8 Footer\n\n#8 has no Owner test notes."
+                )
+            return result
+
+        review = build_release_review(store=self.store, profile=profile(), read=batch_notes)
+        self.assertIn("Pull request #8, landed in #42, has no Owner test notes.", review.blockers)
+        self.assertNotIn("Pull request #42 has no Owner test notes.", review.blockers)
+        self.assertFalse(review.approved)
+
     def test_unknown_production_use_requires_review_prelaunch_is_explicit(self) -> None:
         live = profile().model_copy(update={"production_use": "unknown"})
         self.store.write_product_profile_record(live)
@@ -397,6 +416,42 @@ class ReleaseGitHubTests(unittest.TestCase):
                 "## Owner test notes\nCheck checkout.\n## Tests\nPassed.\n## Owner test notes\nCheck booking."
             ),
             "Check checkout.\nCheck booking.",
+        )
+
+    def test_nested_notes_cannot_end_or_swallow_the_enclosing_section(self) -> None:
+        nested = nest_owner_test_notes(
+            "Check cart.\n## Phone\nSmall screen\n```\n# Example\nopen fence",
+            min_heading_level=4,
+        )
+        self.assertEqual(
+            owner_test_notes(f"## Owner test notes\n### #1\n{nested}\n## Other\nLeak"),
+            "### #1\nCheck cart.\n#### Phone\nSmall screen\n```\n# Example\nopen fence\n```",
+        )
+
+    def test_longer_fences_keep_shorter_fences_and_headings_as_example_text(self) -> None:
+        body = (
+            "## Owner test notes\nCheck the menu.\n````md\n```\n## Not a boundary\n```\n"
+            "````\nThen the footer.\n## Other\nLeak"
+        )
+        notes = owner_test_notes(body)
+        self.assertEqual(notes, body.split("\n", 1)[1].rsplit("\n## Other", 1)[0])
+        nested = nest_owner_test_notes("Show:\n~~~~\n~~~\n# Example", min_heading_level=4)
+        self.assertEqual(
+            owner_test_notes(f"## Owner test notes\n{nested}\n## Other\nLeak"),
+            "Show:\n~~~~\n~~~\n# Example\n~~~~",
+        )
+
+    def test_indented_headings_are_boundaries_and_are_demoted(self) -> None:
+        self.assertEqual(
+            owner_test_notes("   ## Owner test notes\nCheck cart.\n ## Other\nLeak"),
+            "Check cart.",
+        )
+        nested = nest_owner_test_notes(
+            "Check cart.\n ## Mobile checkout\nPay.", min_heading_level=4
+        )
+        self.assertEqual(
+            owner_test_notes(f"## Owner test notes\n### #1\n{nested}\n## Other\nLeak"),
+            "### #1\nCheck cart.\n #### Mobile checkout\nPay.",
         )
 
     def test_incomplete_comparison_fails_closed(self) -> None:
