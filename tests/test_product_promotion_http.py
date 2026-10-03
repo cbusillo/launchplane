@@ -874,7 +874,6 @@ class FastApiProductPromotionTests(unittest.IsolatedAsyncioTestCase):
                         "preview": ProductPreviewProfile(
                             enabled=True,
                             context="atlas-commerce",
-                            enable_label="launchplane-preview",
                         ),
                     }
                 )

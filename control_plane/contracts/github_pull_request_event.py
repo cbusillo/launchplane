@@ -25,12 +25,9 @@ class GitHubPullRequestEvent(BaseModel):
     pr_number: int = Field(ge=1)
     pr_url: str
     occurred_at: str = ""
-    pr_body: str = ""
     state: PullRequestState
     merged: bool = False
     head_sha: str
-    label_names: tuple[str, ...] = ()
-    action_label: str = ""
 
     @model_validator(mode="after")
     def _validate_event(self) -> "GitHubPullRequestEvent":
@@ -40,6 +37,4 @@ class GitHubPullRequestEvent(BaseModel):
             raise ValueError("github pull request event requires pr_url")
         if not self.head_sha.strip():
             raise ValueError("github pull request event requires head_sha")
-        if self.action == "labeled" and not self.action_label.strip():
-            raise ValueError("labeled github pull request event requires action_label")
         return self
