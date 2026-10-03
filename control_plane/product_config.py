@@ -320,6 +320,7 @@ def plan_product_config_authority_bundle(
     secret_records: list[SecretRecord] = []
     secret_bindings: list[SecretBinding] = []
     secret_audit_events: list[SecretAuditEvent] = []
+    adopted_secret_ids: list[str] = []
     for index, secret in enumerate(secrets):
         planned_action, existing_secret_id = _product_config_secret_current_action(
             record_store=record_store,
@@ -360,6 +361,7 @@ def plan_product_config_authority_bundle(
                         }
                     )
             if index in adopted_secret_values:
+                adopted_secret_ids.append(secret_id)
                 for event in secret_plan["secret_audit_events"]:
                     event.metadata.update({"value_source": "provider_env"})
             secret_versions.extend(secret_plan["secret_versions"])
@@ -434,6 +436,7 @@ def plan_product_config_authority_bundle(
     bundle = ProductAuthorityBundle(
         expected_product_profiles=(copy_profile,) if copy_profile is not None else (),
         secret_copy_sources=tuple(copy_expectations),
+        absent_secret_ids=tuple(adopted_secret_ids),
         required_context_owners=tuple(sorted(copy_contexts | {(product, context_name)}))
         if copy_profile is not None
         else (),

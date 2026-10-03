@@ -18,6 +18,12 @@ from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.provider_key_adoption import LaneProviderEnv
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.secret_record import SecretRecord
+from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    SecretRecordConflictError,
+)
 from tests.http_app_test_support import _asgi_request, _RejectingVerifier
 from tests.support.auth import _identity, _local_operator_policy, _StubVerifier
 from tests.support.profiles import _generic_site_profile_payload
@@ -263,6 +269,33 @@ class ProviderSecretAdoptionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "provider_secret_already_recorded")
         self.assertEqual(self._lane_values("prod"), {"OLD_TOKEN": "recorded"})
 
+    async def test_a_secret_recorded_before_commit_stops_the_adoption(self) -> None:
+        adopted = [_adopted_secret("REPAIRSHOPR_TOKEN")]
+        await self._post(self._payload("dry-run", adopted))
+        original_write = self.store.write_product_authority_bundle
+
+        def record_then_write(bundle: ProductAuthorityBundle) -> None:
+            _, other_bundle = control_plane_product_config.plan_product_config_authority_bundle(
+                record_store=self.store,
+                payload={
+                    "product": "example-site",
+                    "context": "example-site",
+                    "instance": "prod",
+                    "secrets": [{"binding_key": "REPAIRSHOPR_TOKEN", "value": "recorded-first"}],
+                },
+                mode="apply",
+                actor="other-writer",
+                source_label="test",
+            )
+            original_write(other_bundle)
+            original_write(bundle)
+
+        with patch.object(self.store, "write_product_authority_bundle", record_then_write):
+            response = await self._post(self._payload("apply", adopted), key="raced")
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], "provider_secret_already_recorded")
+        self.assertEqual(self._lane_values("prod"), {"REPAIRSHOPR_TOKEN": "recorded-first"})
+
     async def test_a_workflow_caller_can_apply_its_reviewed_adoption(self) -> None:
         workflow_app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
@@ -343,6 +376,30 @@ class ProviderSecretAdoptionPlanTests(unittest.TestCase):
                 lane_provider_env_reader=None,
             )
         self.assertEqual(raised.exception.code, "provider_env_unavailable")
+
+    def test_filesystem_bundle_refuses_a_recorded_adoption_target(self) -> None:
+        record = SecretRecord(
+            secret_id="secret-recorded",
+            scope="context_instance",
+            integration="runtime_environment",
+            name="REPAIRSHOPR_TOKEN",
+            context="example-site",
+            instance="prod",
+            current_version_id="version-recorded",
+            created_at="2026-10-03T00:00:00Z",
+            updated_at="2026-10-03T00:00:00Z",
+        )
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_secret_record(record)
+            with self.assertRaises(SecretRecordConflictError):
+                store.write_product_authority_bundle(
+                    ProductAuthorityBundle(
+                        secret_records=(record.model_copy(update={"updated_by": "adopter"}),),
+                        absent_secret_ids=(record.secret_id,),
+                    )
+                )
+            self.assertEqual(store.read_secret_record(record.secret_id), record)
 
     def test_only_adopted_entries_read_the_provider(self) -> None:
         def unexpected_read() -> LaneProviderEnv:

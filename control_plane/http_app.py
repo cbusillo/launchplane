@@ -803,6 +803,7 @@ from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.factory import storage_backend_name
 from control_plane.storage.product_authority_bundle import (
     SecretCopySourceConflictError,
+    SecretRecordConflictError,
     ProductAuthorityBundle,
     ProductContextOwnershipError,
     ProductProfileConflictError,
@@ -15648,6 +15649,16 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="secret_copy_source_changed",
                 message="The secret copy source changed. Read metadata and review a fresh dry-run.",
+            ) from error
+        except SecretRecordConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="provider_secret_already_recorded",
+                message=(
+                    "A secret named for provider adoption was recorded before commit. "
+                    "Review a fresh dry-run."
+                ),
             ) from error
         except ProductProfileConflictError as error:
             raise _launchplane_http_error(

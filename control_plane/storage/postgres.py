@@ -665,6 +665,7 @@ from control_plane.storage import landing_authority
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
     SecretCopySourceConflictError,
+    SecretRecordConflictError,
     ProductProfileConflictError,
     require_bundle_context_owner,
     ProductAuthorityBundle,
@@ -6117,6 +6118,18 @@ class PostgresRecordStore(HumanSessionStore):
                     or SecretBinding.model_validate(binding_row.payload) != expected_source.binding
                 ):
                     raise SecretCopySourceConflictError("Secret copy source changed before commit.")
+            for secret_id in bundle.absent_secret_ids:
+                if (
+                    session.scalar(
+                        select(LaunchplaneSecretRow)
+                        .where(LaunchplaneSecretRow.secret_id == secret_id)
+                        .with_for_update()
+                    )
+                    is not None
+                ):
+                    raise SecretRecordConflictError(
+                        "A secret adopted from the provider was recorded before commit."
+                    )
             for delete_item in bundle.delete_runtime_environments:
                 row = session.scalar(
                     self._runtime_environment_statement(

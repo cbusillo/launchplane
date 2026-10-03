@@ -742,6 +742,9 @@ both refuse, with a fixed message and no value:
   secret), or the destination secret already exists under another binding key,
   so adoption never replaces a recorded value.
 
+Adoption only ever creates a secret. If the destination secret is recorded
+between planning and commit, the commit stops with a 409
+`provider_secret_already_recorded` and writes nothing; review a fresh dry run.
 Apply needs a prior matching dry run, and reads the provider again, so a value
 changed on the provider after the dry run is the one stored. Authorization is the
 lane's `product_config.plan` and `product_config.apply`. Nothing is synced or

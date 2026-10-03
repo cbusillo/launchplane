@@ -49,6 +49,10 @@ class SecretCopySourceConflictError(ValueError):
     """A reviewed copy source changed before the destination committed."""
 
 
+class SecretRecordConflictError(ValueError):
+    """A secret the bundle may only create was recorded before it committed."""
+
+
 class SecretCopySourceExpectation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -130,6 +134,9 @@ class ProductAuthorityBundle(BaseModel):
     secret_bindings: tuple[SecretBinding, ...] = ()
     secret_audit_events: tuple[SecretAuditEvent, ...] = ()
     secret_copy_sources: tuple[SecretCopySourceExpectation, ...] = ()
+    # Secret ids that must still be absent when the bundle commits: a secret
+    # adopted from the provider is only ever created, never rotated.
+    absent_secret_ids: tuple[str, ...] = ()
     environment_inventory: tuple[EnvironmentInventory, ...] = ()
     release_tuples: tuple[ReleaseTupleRecord, ...] = ()
     delete_runtime_environments: tuple[RuntimeEnvironmentDelete, ...] = ()
