@@ -2289,6 +2289,7 @@ class MergeTrainPolicyImportEnvelope(BaseModel):
         self.product = self.product.strip() or "launchplane"
         if self.product != "launchplane":
             raise ValueError("merge train policy import requires product 'launchplane'")
+        self.record.policy.require_advisory_review()
         self.reason = self.reason.strip()
         if self.mode == "apply" and not self.reason:
             raise ValueError("merge train policy import apply requires reason")

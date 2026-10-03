@@ -7,7 +7,6 @@ from control_plane.contracts.engineering_review_decision import EngineeringRevie
 from control_plane.contracts.engineering_review_run import EngineeringReviewRunRecord
 from control_plane.contracts.merge_readiness import (
     MergeReadinessAdvisoryObservation,
-    MergeReadinessAuthorityMode,
     MergeReadinessCandidateEvidence,
     MergeReadinessCandidateFacet,
     MergeReadinessEngineeringEvidenceReference,
@@ -64,7 +63,6 @@ def evaluate_merge_readiness(
     technical_checks: MergeReadinessTechnicalCheckEvidence,
     engineering_decision: EngineeringReviewDecisionRecord | None,
     engineering_evidence: tuple[MergeReadinessEngineeringEvidenceReference, ...],
-    engineering_review_authority: MergeReadinessAuthorityMode = "required",
     policy_fingerprints: MergeReadinessPolicyFingerprints,
     candidate_evidence: MergeReadinessCandidateEvidence,
     fence_evidence: MergeReadinessFenceEvidence,
@@ -78,9 +76,7 @@ def evaluate_merge_readiness(
     )
     policy_facet = _policy_facet(
         policy_fingerprints,
-        advisory_dimensions=(
-            ("engineering_review",) if engineering_review_authority == "advisory" else ()
-        ),
+        advisory_dimensions=("engineering_review",),
     )
     candidate_facet = _candidate_facet(target=target, evidence=candidate_evidence)
     fence_facet = _fence_facet(
@@ -90,7 +86,6 @@ def evaluate_merge_readiness(
     )
     facet_states = (
         technical_facet.state,
-        *(() if engineering_review_authority == "advisory" else (engineering_facet.state,)),
         policy_facet.state,
         candidate_facet.state,
         fence_facet.state,
@@ -111,7 +106,7 @@ def evaluate_merge_readiness(
         )
     )
     return MergeReadinessResult(
-        engineering_review_authority=engineering_review_authority,
+        engineering_review_authority="advisory",
         target=target,
         state=merge_readiness_worst_state(facet_states),
         reason_codes=reason_codes,
@@ -129,7 +124,6 @@ def evaluate_merge_readiness_from_live_evidence(
     target: MergeReadinessTarget,
     engineering_decision: EngineeringReviewDecisionRecord | None,
     engineering_runs: tuple[EngineeringReviewRunRecord, ...],
-    engineering_review_authority: MergeReadinessAuthorityMode = "required",
     technical_checks: TenantAdmissionTechnicalChecks | None,
     policy_fingerprints: MergeReadinessPolicyFingerprints,
     candidate_record: MergeTrainBatchCandidateRecord | None,
@@ -156,7 +150,6 @@ def evaluate_merge_readiness_from_live_evidence(
             decision=engineering_decision,
             runs=engineering_runs,
         ),
-        engineering_review_authority=engineering_review_authority,
         policy_fingerprints=policy_fingerprints,
         candidate_evidence=_candidate_evidence(
             target=target,
