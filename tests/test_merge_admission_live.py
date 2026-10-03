@@ -1,7 +1,22 @@
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
+
+from control_plane.contracts.merge_train_branch_refresh_record import (
+    build_merge_train_branch_refresh_record,
+)
+from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from tests.test_merge_train_dependency_updates import INDIRECT_PATCH
+from tests.test_merge_train_dependency_refresh import _change
+from tests.test_merge_train_github import (
+    _github_pull_request,
+    _github_branch,
+    _github_commit,
+    _combined_status,
+    _check_run,
+)
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.repository_evidence import (
@@ -328,6 +343,107 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
         self.assertEqual(result.readiness.state, "ready")
         self.assertEqual(result.structural_result.status, "exact")
         self.assertEqual(result.readiness.owner_facets, ())
+
+    def test_landing_rediscovers_a_dependabot_update_after_a_recorded_refresh(self) -> None:
+        bot_id = 49699333
+        old_head = "1" * 40
+        record = build_test_merge_train_policy_record(repository=OWNER_REPOSITORY)
+        policy_payload = record.policy.model_dump()
+        policy_payload["policies"][0]["enqueue"].update(
+            {
+                "trusted_automation_github_user_ids": [bot_id],
+                "dependency_update_github_user_ids": [bot_id],
+            }
+        )
+        policy_record = MergeTrainPolicyRecord.model_validate(
+            record.model_dump() | {"policy": policy_payload, "policy_sha256": ""}
+        )
+        evidence = _repository_evidence()
+        candidate_record, landing_record, controller_state, _ = _guard_records(
+            policy_sha256=policy_record.policy_sha256,
+            repository=OWNER_REPOSITORY,
+            pull_request_number=2022,
+            base_sha=OWNER_BASE_SHA,
+            head_sha=evidence.target.head_sha,
+            tree_sha=evidence.target.tree_sha,
+        )
+        pull_request = _github_pull_request(
+            2022,
+            head_sha=evidence.target.head_sha,
+            base_sha=OWNER_BASE_SHA,
+            repository=OWNER_REPOSITORY,
+            author_association="CONTRIBUTOR",
+        )
+        pull_request["labels"] = []
+        pull_request["user"] = {"id": bot_id, "login": "dependabot[bot]", "type": "Bot"}
+        refresh = _github_commit(1234, "Merge main", sha=evidence.target.head_sha) | {
+            "parents": [{"sha": old_head}, {"sha": OWNER_BASE_SHA}],
+        }
+        for recorded in (False, True):
+            with self.subTest(recorded=recorded), TemporaryDirectory() as directory:
+                store = FilesystemRecordStore(state_dir=Path(directory))
+                if recorded:
+                    store.write_merge_train_branch_refresh_record(
+                        build_merge_train_branch_refresh_record(
+                            repository=OWNER_REPOSITORY,
+                            base_branch="main",
+                            pull_request_number=2022,
+                            expected_head_sha=old_head,
+                            result_head_sha=evidence.target.head_sha,
+                            merged_base_sha=OWNER_BASE_SHA,
+                            requested_at=datetime.now(timezone.utc),
+                        )
+                    )
+                responses: tuple[object, ...] = (
+                    _github_branch(sha=OWNER_BASE_SHA),
+                    [pull_request],
+                    pull_request,
+                    {"permission": "read"},
+                    [_github_commit(bot_id, INDIRECT_PATCH, sha=old_head), refresh],
+                    *(({"status": "identical"}, _change(), _change(), []) if recorded else ()),
+                    _combined_status(),
+                    {"check_runs": [_check_run("completed", "success")]},
+                )
+                client = _PassingTechnicalCheckClient()
+                client.transport = RecordingMergeTrainGitHubTransport(responses=responses)
+                evaluator = LiveMergeAdmissionEvaluator(
+                    store=store,
+                    repository_evidence_provider=_EvidenceProvider(evidence),
+                    technical_check_client=client,
+                    policy_record_provider=lambda: policy_record,
+                )
+                with (
+                    patch(
+                        "control_plane.merge_admission_live.read_active_authz_policy_record",
+                        return_value=_authz_policy_record(),
+                    ),
+                    patch(
+                        "control_plane.merge_admission_live.require_engineering_review_decision_store",
+                        return_value=_EmptyEngineeringReviewStore(),
+                    ),
+                ):
+
+                    def evaluate() -> MergeAdmissionEvaluation:
+                        return evaluator.evaluate(
+                            candidate_record=candidate_record,
+                            landing_plan_record=landing_record,
+                            entry=landing_record.landing_plan.entries[0],
+                            observed_base_sha=OWNER_BASE_SHA,
+                            observed_base_tree_sha="5" * 40,
+                            observed_head_sha=evidence.target.head_sha,
+                            observed_head_tree_sha=evidence.target.tree_sha,
+                            controller_state=controller_state,
+                            expected_lease_owner=controller_state.lease_owner,
+                            stack_collapse_record=None,
+                            evaluated_at="2026-08-11T03:01:00Z",
+                        )
+
+                    if recorded:
+                        result = evaluate()
+                        self.assertEqual(result.readiness.state, "ready")
+                    else:
+                        with self.assertRaisesRegex(MergeAdmissionDeniedError, "Live merge queue"):
+                            evaluate()
 
     def test_a_pull_request_queued_behind_the_plan_does_not_block_landing(self) -> None:
         # A newer PR labeled while the batch lands waits for the next candidate (#2637).

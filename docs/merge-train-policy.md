@@ -276,7 +276,7 @@ the queue.
 `dependency_update_github_user_ids` names dependency-update bots, for example
 Dependabot. Each id must also be in `trusted_automation_github_user_ids`. A pull
 request from one of them enqueues without the enqueue label only when every
-commit on it is authored by that bot and signed by GitHub (committer
+change commit on it is authored by that bot and signed by GitHub (committer
 `web-flow`, verified), nobody else force-pushed the branch, the commits match the
 pull request head the train read, and every dependency the update names stays
 within one major version. Transitive lockfile changes are not classified; the
@@ -288,6 +288,23 @@ unparseable message, or a commit by anyone else leaves the pull request
 ineligible with `dependency update needs agent review`. The label still
 enqueues any trusted pull request as before. An empty list, the default, changes
 nothing and is omitted from the policy digest.
+
+The train's own base-refresh merge commits do not count as dependency changes
+when a persisted branch-refresh record binds the exact commit, repository, PR,
+and base branch. The live commit must be GitHub-signed, its two parents must
+match the recorded previous head and merged base, the previous head must occur
+in the same PR commit list, and that merged base must still be an ancestor of
+the PR's observed base. The change against that merged base must have identical
+file names, statuses, and text patches before and after the refresh. Unrelated
+base edits can change a file's resulting blob while keeping that patch when
+hunk positions and context are unchanged. Shifted hunk positions or context
+require agent review; patchless pure renames still require an identical blob.
+Unreadable, binary, or truncated comparisons require review. This proof is used
+in controller snapshots and landing admission. Older standalone phase and CLI snapshot readers do not consult these
+records and remain conservative; use the controller dry-run to assess a refreshed
+dependency update. Missing records or failed reads withhold automatic admission;
+unrecorded merges and other authors still need agent review. Checks are read
+again on the refreshed head before landing.
 
 ## Failure Semantics
 

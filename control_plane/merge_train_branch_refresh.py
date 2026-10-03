@@ -7,7 +7,10 @@ from control_plane.contracts.merge_train_branch_refresh_record import (
     MergeTrainBranchRefreshRecord,
     build_merge_train_branch_refresh_record,
 )
-from control_plane.merge_train_github import MergeTrainBranchRefreshRecorder
+from control_plane.merge_train_github import (
+    MergeTrainBranchRefreshRecorder,
+    MergeTrainBranchRefreshReadStore as MergeTrainBranchRefreshReadStore,
+)
 
 
 class MergeTrainBranchRefreshWriteStore(Protocol):
@@ -16,17 +19,19 @@ class MergeTrainBranchRefreshWriteStore(Protocol):
     ) -> object: ...
 
 
-class MergeTrainBranchRefreshReadStore(Protocol):
-    def list_merge_train_branch_refresh_records(
-        self, *, repository: str, pull_request_number: int
-    ) -> tuple[MergeTrainBranchRefreshRecord, ...]: ...
-
-
 def optional_merge_train_branch_refresh_store(
     record_store: object,
 ) -> MergeTrainBranchRefreshWriteStore | None:
     if callable(getattr(record_store, "write_merge_train_branch_refresh_record", None)):
         return cast(MergeTrainBranchRefreshWriteStore, record_store)
+    return None
+
+
+def optional_merge_train_branch_refresh_read_store(
+    record_store: object,
+) -> MergeTrainBranchRefreshReadStore | None:
+    if callable(getattr(record_store, "list_merge_train_branch_refresh_records", None)):
+        return cast(MergeTrainBranchRefreshReadStore, record_store)
     return None
 
 

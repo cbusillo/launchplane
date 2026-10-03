@@ -1958,7 +1958,8 @@ class FilesystemRecordStore:
             for record in self._list_models(
                 MergeTrainBranchRefreshRecord, "launchplane_merge_train_branch_refreshes"
             )
-            if record.repository == repository and record.pull_request_number == pull_request_number
+            if record.repository.casefold() == repository.casefold()
+            and record.pull_request_number == pull_request_number
         ]
         records.sort(key=lambda record: (record.requested_at, record.record_id), reverse=True)
         return tuple(records)

@@ -17568,7 +17568,7 @@ class PostgresRecordStore(HumanSessionStore):
             model_type=MergeTrainBranchRefreshRecord,
             orm_model=LaunchplaneMergeTrainBranchRefreshRow,
             filters=[
-                LaunchplaneMergeTrainBranchRefreshRow.repository == repository,
+                func.lower(LaunchplaneMergeTrainBranchRefreshRow.repository) == repository.lower(),
                 LaunchplaneMergeTrainBranchRefreshRow.pull_request_number == pull_request_number,
             ],
             order_by=(

@@ -55,6 +55,7 @@ from control_plane.merge_train import (
     build_merge_train_dry_run_result,
 )
 from control_plane.merge_train_github import GitHubMergeTrainClient, GitHubMergeTrainSnapshotReader
+from control_plane.merge_train_branch_refresh import optional_merge_train_branch_refresh_read_store
 from control_plane.merge_train_policy_source import (
     MergeTrainPolicyStoreMissingError,
     resolve_merge_train_policy_record,
@@ -230,7 +231,8 @@ class LiveMergeAdmissionEvaluator:
                 (GitHubMergeTrainClient, TenantAdmissionControllerGitHubClient),
             )
             snapshot_reader = GitHubMergeTrainSnapshotReader(
-                transport=self.technical_check_client.transport
+                transport=self.technical_check_client.transport,
+                branch_refresh_store=optional_merge_train_branch_refresh_read_store(self.store),
             )
         try:
             policy_record = (
