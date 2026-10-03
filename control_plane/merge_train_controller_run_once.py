@@ -2185,14 +2185,10 @@ def _reflow_stale_candidate_record(
         )
         result["superseded_merge_train_batch_candidate_record_id"] = candidate_record.record_id
         return result
-    if (
-        candidate_record.ordinary_job_binding is None
-        and repository_policy.merge_method == "merge"
-        and any(
-            pr.owner_review_required and pr.required_checks_status != "pass"
-            for pr in dry_run_result.queue
-            if pr.eligible
-        )
+    if candidate_record.ordinary_job_binding is None and any(
+        pr.owner_review_required and pr.required_checks_status != "pass"
+        for pr in dry_run_result.queue
+        if pr.eligible
     ):
         waiting_pr = next(
             pr
@@ -3267,6 +3263,9 @@ def try_reflow_failed_merge_train_candidate(
     )
     if (
         active_candidate_record.candidate.candidate_sha
+        and active_candidate_record.ordinary_job_binding is None
+        and merge_method == "merge"
+        and len(active_candidate_record.candidate.entries) > 1
         and _merge_train_candidate_matches_dry_run_queue(
             candidate=active_candidate_record.candidate,
             dry_run_result=probe.dry_run_result,
@@ -3274,22 +3273,6 @@ def try_reflow_failed_merge_train_candidate(
         )
     ):
         if not body_retry_approved:
-            if (
-                active_candidate_record.ordinary_job_binding is not None
-                or len(candidate.entries) < 2
-                or merge_method != "merge"
-            ):
-                return _reobserve_failed_merge_train_candidate(
-                    candidate_store=candidate_store,
-                    active_candidate_record=active_candidate_record,
-                    github_client=github_client,
-                    merge_method=merge_method,
-                    repository=repository,
-                    base_branch=base_branch,
-                    recorded_at=recorded_at,
-                    trace_id=trace_id,
-                    mutate=mutate,
-                )
             # A probe reducing a changed queue back to the failed membership
             # cannot evade the unchanged-queue gates or mint another retry.
             return {

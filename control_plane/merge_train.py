@@ -286,11 +286,7 @@ def build_merge_train_dry_run_result(
             and sum(entry.eligible for entry in queue) > 1
         ),
     )
-    if (
-        batch_landing
-        and repository_policy.merge_method == "merge"
-        and intended_next_action == "merge"
-    ):
+    if batch_landing and intended_next_action == "merge":
         # Candidate CI does not include constituent Client statuses. Every
         # labelled member must be ready, even when the oldest entry passed.
         waiting_review = next(

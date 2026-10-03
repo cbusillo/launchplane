@@ -216,6 +216,39 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             self.assertEqual(store.list_merge_train_batch_candidate_records()[0].status, "active")
             client.build_batch_candidate.assert_not_called()
 
+    def test_later_review_wait_prevents_partial_squash_or_rebase_landing(self) -> None:
+        for method in ("squash", "rebase"):
+            with self.subTest(method=method):
+                policy = self.policy.model_copy(
+                    update={
+                        "policies": tuple(
+                            entry.model_copy(update={"merge_method": method})
+                            for entry in self.policy.policies
+                        )
+                    }
+                )
+                snapshot = self.snapshot.model_copy(
+                    update={
+                        "pull_requests": (
+                            self.snapshot.pull_requests[0],
+                            self.snapshot.pull_requests[1].model_copy(
+                                update={
+                                    "owner_review_required": True,
+                                    "required_checks_status": "pending",
+                                }
+                            ),
+                        )
+                    }
+                )
+                result = build_merge_train_dry_run_result(
+                    policy=policy, snapshot=snapshot, batch_landing=True
+                )
+                self.assertEqual(result.intended_next_action, "wait_for_checks")
+                self.assertEqual(
+                    result.selected_pr.number if result.selected_pr else None,
+                    snapshot.pull_requests[1].number,
+                )
+
     def test_standalone_landing_route_requires_and_passes_profile_reader(self) -> None:
         from types import SimpleNamespace
         from control_plane.merge_admission import MergeAdmissionDeniedError

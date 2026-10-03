@@ -297,7 +297,7 @@ def _held_out_messages(*, result: dict[str, Any], base_branch: str) -> list[tupl
 
 def _pull_request_numbers(result: dict[str, Any]) -> list[int]:
     if (
-        _string(result.get("controller_action")) == "wait_for_checks"
+        _string(result.get("controller_action")) in {"wait_for_checks", "block"}
         and "merge_train_batch_candidate_record_id" in result
         and "candidate" not in result
     ):
