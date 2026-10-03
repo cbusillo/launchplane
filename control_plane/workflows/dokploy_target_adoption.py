@@ -313,6 +313,7 @@ def adopt_dokploy_target(
     updated_at: str = "",
     apply: bool = False,
     fetch_target_payload: FetchDokployTargetPayload,
+    required_context_owner: tuple[str, str] | None = None,
 ) -> DokployTargetAdoptionResult:
     normalized_context = _normalize_route_part(context, "context")
     normalized_instance = _normalize_route_part(instance, "instance")
@@ -398,6 +399,7 @@ def adopt_dokploy_target(
         requested_route = (provider_target_record.context, provider_target_record.instance)
         record_store.write_product_authority_bundle(
             ProductAuthorityBundle(
+                required_context_owner=required_context_owner,
                 dokploy_targets=(target_record,),
                 dokploy_target_ids=(target_id_record,),
                 provider_target_writes=(
@@ -640,6 +642,7 @@ def create_dokploy_compose_target(
     apply: bool = False,
     mutate_provider: MutateDokployPayload,
     fetch_target_payload: FetchDokployTargetPayload,
+    required_context_owner: tuple[str, str] | None = None,
 ) -> DokployComposeTargetCreateResult:
     normalized_context = _normalize_route_part(context, "context")
     normalized_instance = _normalize_route_part(instance, "instance")
@@ -796,6 +799,7 @@ def create_dokploy_compose_target(
         updated_at=updated_at,
         apply=True,
         fetch_target_payload=fetch_target_payload,
+        required_context_owner=required_context_owner,
     )
     target_record = adoption.target_record.model_copy(
         update={
@@ -813,6 +817,7 @@ def create_dokploy_compose_target(
         )
         record_store.write_product_authority_bundle(
             ProductAuthorityBundle(
+                required_context_owner=required_context_owner,
                 dokploy_targets=(target_record,),
                 provider_target_writes=(
                     ProviderTargetWrite(

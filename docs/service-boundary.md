@@ -2436,6 +2436,23 @@ for apply and `dokploy_target.repair_domain_authority.plan` for dry-run. It
 remains fail-closed when any tracked or live identity/evidence is missing or
 changed.
 
+Besides `dokploy_target.setup` (or `dokploy_target.plan` for dry-run), checked on
+product and context `launchplane`, the route accepts the lane-scoped
+`dokploy_target.lane_setup` action for `create-compose` only. It is checked on
+the one product whose lanes or historical contexts use the request's context
+(which must be lowercase and not `launchplane`), with that context and the
+request's instance, so a grant names exactly one product's lane and stops
+matching if the context moves to another product. It covers dry-run and apply of
+creating that lane's compose, and only when the request carries no
+`expected_current_provider_target`, `project_id` or `environment_id`: the
+compose then lands in a new provider project and environment and can't replace
+a binding or join another lane's environment. It never authorizes `adopt`,
+domain reconcile or prune, or domain authority repair. Which product holds the
+context is checked again when the target records commit, under the lock product-profile
+writes take, so a context reassigned during the provider calls is refused
+(`local_operator_lane_scope_required`); the compose already created stays
+unrecorded.
+
 Dokploy target inspect uses the native FastAPI
 `GET /v1/dokploy-targets/inspect` route. The route is a read-only proof surface
 for provider identity before an adoption, creation, or repair: callers may pass
