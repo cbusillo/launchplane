@@ -386,7 +386,7 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
       : applyProductProductionUse(product, payload as ApplyProductProductionUseData["body"], options);
   }
   const operationOptions = { execute, failureCertainty: productConfigFailureCertainty, failureFor: productConfigOperationFailure };
-  const previewOperation = useBrowserOperationController({ ...operationOptions, scope: `${product}:${field}:plan` });
+  const previewOperation = useBrowserOperationController({ ...operationOptions, scope: `${product}:${field}:plan`, readOnly: true });
   const applyOperation = useBrowserOperationController({ ...operationOptions,
     failureCertainty: profileApplyFailureCertainty, scope: `${product}:${field}:apply` });
   const busy = isOperationBusy(previewOperation.state) || isOperationBusy(applyOperation.state);
@@ -411,8 +411,15 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
   }, [reviewed, storageKey]);
 
   useEffect(() => {
+    let active = true;
     if (applyOperation.state.phase === "failed" && !applyOperation.state.requiresIdempotencyContinuity &&
-        applyOperation.state.failure?.code === "stale") setReviewed(null);
+        applyOperation.state.failure?.code === "stale") {
+      setReviewed(null);
+      readValue().then((stored) => { if (active) setCurrent(stored.value); }).catch((failure: unknown) => {
+        if (active) setError(`Stale plan; the current profile could not be refreshed. ${failure instanceof Error ? failure.message : "Read failed."}`);
+      });
+    }
+    return () => { active = false; };
   }, [applyOperation.state]);
 
   async function preview() {
@@ -493,7 +500,8 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
 
 function profileApplyFailureCertainty(error: unknown, dispatched: boolean): BrowserOperationFailureCertainty {
   // Both profile routes check the same-key DB mutation before evaluating staleness.
-  // A committed request replays; an active/unknown reservation never returns stale.
+  // Its CAS binding prevents a late conflicting write; a fresh dry run is safe.
+  // Stale can race a commit, so the panel refreshes the current value without claiming success.
   if (dispatched && error instanceof LaunchplaneApiError && error.statusCode === 409 && error.code === "stale") {
     return "settled";
   }

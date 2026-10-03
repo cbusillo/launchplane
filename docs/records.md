@@ -940,7 +940,8 @@ repository's workflow token. Move a profile there with
 `POST /v1/product-profiles/{product}/image-repository` rather than a
 whole-record write. The dry run shows the repository before and after, and what
 each lane runs now. Apply must name the starting repository the dry run showed,
-and no other profile field changes. The profile's repository applies to
+including an explicitly empty string for a profile with no image repository;
+no other profile field changes. The profile's repository applies to
 artifacts a caller supplies: a deploy, a testing deploy, a promotion request.
 An immutable image Launchplane already recorded on a deployment, an inventory or
 a deploy reservation stays valid after the move, so rollback, deploy recovery

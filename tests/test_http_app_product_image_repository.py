@@ -134,3 +134,37 @@ class ProductImageRepositoryHttpTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(stored.image.repository, _OLD)
+
+    async def test_explicit_empty_starting_repository_can_be_applied(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            profile = _profile().model_copy(
+                update={
+                    "image": _profile().image.model_copy(update={"repository": ""}),
+                    "preview": _profile().preview.model_copy(update={"enabled": False}),
+                }
+            )
+            store.write_product_profile_record(profile)
+            app = _app(store)
+            dry = await _post(
+                app,
+                {
+                    "image_repository": _NEW,
+                    "reason": "Publish to the package named after the repository.",
+                },
+            )
+            self.assertEqual(dry.json()["result"]["image_repository_before"], "")
+            response = await _post(app, _apply(expected=""), "empty-repository")
+            self.assertEqual(response.status_code, 202)
+            self.assertEqual(store.read_product_profile_record(_PRODUCT).image.repository, _NEW)
+            store.close()
+
+    async def test_apply_requires_an_explicit_starting_repository(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            payload = _apply()
+            del payload["expected_image_repository"]
+            response = await _post(_app(store), payload, "missing-binding")
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(store.read_product_profile_record(_PRODUCT).image.repository, _OLD)
+            store.close()

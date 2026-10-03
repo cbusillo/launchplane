@@ -4,6 +4,7 @@ import {
   beginBrowserOperation,
   cancelBrowserOperation,
   completeBrowserOperation,
+  createBrowserOperationState,
   failBrowserOperation,
   markBrowserOperationDispatched,
   persistBrowserOperationState,
@@ -36,6 +37,7 @@ interface BrowserOperationControllerOptions<TPayload, TResponse> {
   ) => BrowserOperationFailureCertainty;
   failureFor: (error: unknown) => BrowserOperationFailure;
   scope: string;
+  readOnly?: boolean;
 }
 
 export function useBrowserOperationController<
@@ -46,12 +48,13 @@ export function useBrowserOperationController<
   failureCertainty,
   failureFor,
   scope,
+  readOnly = false,
 }: BrowserOperationControllerOptions<TPayload, TResponse>): BrowserOperationController<
   TPayload,
   TResponse
 > {
   const [state, setState] = useState<BrowserOperationState>(() =>
-    recoverBrowserOperationState(scope),
+    recoverControllerState(scope, readOnly),
   );
   const stateRef = useRef(state);
   const scopeRef = useRef(scope);
@@ -60,10 +63,12 @@ export function useBrowserOperationController<
   const executeRef = useRef(execute);
   const failureCertaintyRef = useRef(failureCertainty);
   const failureForRef = useRef(failureFor);
+  const readOnlyRef = useRef(readOnly);
 
   executeRef.current = execute;
   failureCertaintyRef.current = failureCertainty;
   failureForRef.current = failureFor;
+  readOnlyRef.current = readOnly;
 
   function updateState(next: BrowserOperationState) {
     stateRef.current = next;
@@ -87,7 +92,7 @@ export function useBrowserOperationController<
     }
     abortRef.current?.abort();
     scopeRef.current = scope;
-    updateState(recoverBrowserOperationState(scope));
+    updateState(recoverControllerState(scope, readOnly));
   }, [scope]);
 
   async function run(payload: TPayload): Promise<TResponse | null> {
@@ -132,12 +137,14 @@ export function useBrowserOperationController<
       return response;
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
-        current = cancelBrowserOperation(current);
+        current = readOnlyRef.current
+          ? failBrowserOperation(current, failureForRef.current(error), "settled")
+          : cancelBrowserOperation(current);
       } else {
         current = failBrowserOperation(
           current,
           failureForRef.current(error),
-          failureCertaintyRef.current(error, dispatched),
+          readOnlyRef.current ? "settled" : failureCertaintyRef.current(error, dispatched),
         );
       }
       updateState(current);
@@ -163,4 +170,10 @@ export function useBrowserOperationController<
   }
 
   return { cancel, reset, run, state };
+}
+
+function recoverControllerState(scope: string, readOnly: boolean): BrowserOperationState {
+  const recovered = recoverBrowserOperationState(scope);
+  // The caller opts in only for side-effect-free requests; no mutation receipt can be lost.
+  return readOnly && recovered.requiresIdempotencyContinuity ? createBrowserOperationState() : recovered;
 }

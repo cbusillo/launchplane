@@ -5814,7 +5814,7 @@ export type RevokeHumanPrivilegedOperationResponse = RevokeHumanPrivilegedOperat
 
 export type ApplyProductImageRepositoryData = {
     body: {
-        expected_image_repository?: string;
+        expected_image_repository?: string | null;
         image_repository: string;
         mode?: 'dry-run' | 'apply';
         reason: string;

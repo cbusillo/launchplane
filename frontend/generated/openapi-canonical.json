@@ -78467,9 +78467,15 @@
                 "additionalProperties": false,
                 "properties": {
                   "expected_image_repository": {
-                    "default": "",
-                    "title": "Expected Image Repository",
-                    "type": "string"
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Expected Image Repository"
                   },
                   "image_repository": {
                     "title": "Image Repository",
