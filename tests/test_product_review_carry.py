@@ -4,6 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from control_plane.contracts.merge_train_branch_refresh_record import (
+    MergeTrainBranchRefreshRecord,
     build_merge_train_branch_refresh_record,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -25,6 +26,8 @@ _PULL_REQUEST = 92
 _ACCEPTED_HEAD = "bd92ceed" + "0" * 32
 _REFRESHED_HEAD = "b064ecdc" + "0" * 32
 _SECOND_REFRESH_HEAD = "c0ffee00" + "0" * 32
+# Another merge of the same two parents with the same change, pushed by someone else.
+_OTHER_MERGE_HEAD = "d00dfeed" + "0" * 32
 _BASE_COMMIT = "1111111111111111111111111111111111111111"
 _NEWER_BASE_COMMIT = "2222222222222222222222222222222222222222"
 _OWNER_GITHUB_ID = "9001"
@@ -45,28 +48,18 @@ def _change(*, patch: str = _PATCH, blob: str = "a" * 40) -> list[dict[str, obje
 
 
 class _GitHub:
-    """A marked pull request, its commits, and comparisons as GitHub would serve them."""
+    """A marked pull request and its comparisons as GitHub would serve them."""
 
     def __init__(self) -> None:
         self.head_sha = _REFRESHED_HEAD
         self.base_branch = "main"
-        self.commits: dict[str, dict[str, object]] = {
-            _REFRESHED_HEAD: self._merge(_ACCEPTED_HEAD, _BASE_COMMIT, "2026-10-02T23:20:03Z")
-        }
-        # Commits on the base branch, and each head's change against the base commit.
+        # Commits on the base branch, and each head's change against a base commit.
         self.on_base = {_BASE_COMMIT, _NEWER_BASE_COMMIT}
         self.changes: dict[tuple[str, str], list[dict[str, object]]] = {
-            (_BASE_COMMIT, _ACCEPTED_HEAD): _change(),
-            (_BASE_COMMIT, _REFRESHED_HEAD): _change(),
+            (_BASE_COMMIT, head): _change()
+            for head in (_ACCEPTED_HEAD, _REFRESHED_HEAD, _OTHER_MERGE_HEAD)
         }
         self.statuses: list[dict[str, object]] = []
-
-    @staticmethod
-    def _merge(first_parent: str, base_commit: str, date: str) -> dict[str, object]:
-        return {
-            "parents": [{"sha": first_parent}, {"sha": base_commit}],
-            "committer": {"name": "GitHub", "date": date},
-        }
 
     def __call__(
         self,
@@ -87,8 +80,6 @@ class _GitHub:
             assert token and body is not None
             self.statuses.insert(0, dict(body))
             return body
-        if path.startswith(f"{repository_path}/git/commits/"):
-            return self.commits[path.rsplit("/", 1)[1]]
         if path.startswith(f"{repository_path}/compare/"):
             base, head = path.rsplit("/", 1)[1].split("...")
             if head == self.base_branch:
@@ -121,17 +112,25 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
             owner_github_id=_OWNER_GITHUB_ID,
             owner_github_login="site-owner",
             decided_at="2026-10-02T22:00:00.000Z",
+            base_branch="main",
         )
         self.store.write_product_review_decision_record(self.accepted)
 
     def _train_refreshed(
-        self, expected_head_sha: str = _ACCEPTED_HEAD, *, base_branch: str = "main"
+        self,
+        expected_head_sha: str = _ACCEPTED_HEAD,
+        result_head_sha: str = _REFRESHED_HEAD,
+        merged_base_sha: str = _BASE_COMMIT,
+        *,
+        base_branch: str = "main",
     ) -> str:
         record = build_merge_train_branch_refresh_record(
             repository=_REPOSITORY,
             base_branch=base_branch,
             pull_request_number=_PULL_REQUEST,
             expected_head_sha=expected_head_sha,
+            result_head_sha=result_head_sha,
+            merged_base_sha=merged_base_sha,
             requested_at=_REFRESH_REQUESTED_AT,
         )
         self.store.write_merge_train_branch_refresh_record(record)
@@ -174,7 +173,10 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         )
         carried, accepted = self._decisions()
         self.assertEqual(accepted, self.accepted)
-        self.assertEqual((carried.head_sha, carried.decision), (_REFRESHED_HEAD, "accepted"))
+        self.assertEqual(
+            (carried.head_sha, carried.decision, carried.base_branch),
+            (_REFRESHED_HEAD, "accepted", "main"),
+        )
         assert carried.carried_from is not None
         self.assertEqual(
             (
@@ -195,11 +197,9 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         self.assertEqual(len(self._decisions()), 2)
 
     def test_acceptance_carries_across_repeated_train_refreshes(self) -> None:
-        first, second = self._train_refreshed(), self._train_refreshed(_REFRESHED_HEAD)
+        first = self._train_refreshed()
+        second = self._train_refreshed(_REFRESHED_HEAD, _SECOND_REFRESH_HEAD, _NEWER_BASE_COMMIT)
         self.github.head_sha = _SECOND_REFRESH_HEAD
-        self.github.commits[_SECOND_REFRESH_HEAD] = _GitHub._merge(
-            _REFRESHED_HEAD, _NEWER_BASE_COMMIT, "2026-10-02T23:40:00Z"
-        )
         self.github.changes = {
             (_NEWER_BASE_COMMIT, _ACCEPTED_HEAD): _change(),
             (_NEWER_BASE_COMMIT, _SECOND_REFRESH_HEAD): _change(),
@@ -210,27 +210,16 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         assert carried.carried_from is not None
         self.assertEqual(carried.carried_from.refresh_record_ids, (first, second))
 
-    def test_merge_the_train_did_not_ask_for_needs_a_new_decision(self) -> None:
-        self._train_refreshed(_REFRESHED_HEAD)
-
-        self.assert_waits_for_the_client(self._publish())
-
-    def test_merge_made_before_the_train_asked_needs_a_new_decision(self) -> None:
+    def test_any_head_but_the_trains_own_merge_needs_a_new_decision(self) -> None:
+        # The train refreshed from the accepted head, but the pull request's head is
+        # another merge of the same parents with the same change, or a new commit.
         self._train_refreshed()
-        self.github.commits[_REFRESHED_HEAD] = _GitHub._merge(
-            _ACCEPTED_HEAD, _BASE_COMMIT, "2026-10-02T23:10:00Z"
-        )
+        for head in (_OTHER_MERGE_HEAD, _SECOND_REFRESH_HEAD):
+            with self.subTest(head=head):
+                self.github.head_sha = head
+                self.github.changes[(_BASE_COMMIT, head)] = _change()
 
-        self.assert_waits_for_the_client(self._publish())
-
-    def test_new_commit_on_the_accepted_head_needs_a_new_decision(self) -> None:
-        self._train_refreshed()
-        self.github.commits[_REFRESHED_HEAD] = {
-            "parents": [{"sha": _ACCEPTED_HEAD}],
-            "committer": {"date": "2026-10-02T23:20:03Z"},
-        }
-
-        self.assert_waits_for_the_client(self._publish())
+                self.assert_waits_for_the_client(self._publish())
 
     def test_changed_diff_needs_a_new_decision(self) -> None:
         self._train_refreshed()
@@ -247,17 +236,46 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
                 self.assert_waits_for_the_client(self._publish())
 
     def test_different_base_needs_a_new_decision(self) -> None:
-        self._train_refreshed()
         cases: tuple[tuple[str, str, set[str]], ...] = (
-            ("the pull request now targets another branch", "release", {_BASE_COMMIT}),
+            # Accepted on main, retargeted to release, then the train refreshed on release.
+            ("accepted on another base", "release", {_BASE_COMMIT}),
             ("the merged commit is not on the base branch", "main", set()),
         )
         for name, base_branch, on_base in cases:
             with self.subTest(name):
+                self.setUp()
+                self._train_refreshed(base_branch=base_branch)
                 self.github.base_branch = base_branch
                 self.github.on_base = on_base
 
                 self.assert_waits_for_the_client(self._publish())
+
+    def test_carried_acceptance_stops_applying_when_the_base_changes(self) -> None:
+        self._train_refreshed()
+        self.assertEqual(self._publish()["state"], "success")
+
+        # Retargeted without a new commit: the same head is a different change now.
+        self.github.base_branch = "release"
+
+        self.assertEqual((self._publish()["state"], len(self._decisions())), ("pending", 2))
+
+    def test_acceptance_without_a_recorded_base_does_not_carry(self) -> None:
+        self.store.write_product_review_decision_record(
+            self.accepted.model_copy(update={"base_branch": ""})
+        )
+        self._train_refreshed()
+
+        self.assertEqual(self._publish()["state"], "pending")
+
+    def test_a_decision_keeps_the_base_it_was_first_shown_on(self) -> None:
+        self.store.write_product_review_decision_record(
+            self.accepted.model_copy(update={"base_branch": ""})
+        )
+        self.github.head_sha = _ACCEPTED_HEAD
+
+        self.assertEqual(self._publish()["state"], "success")
+        (decision,) = self._decisions()
+        self.assertEqual(decision.base_branch, "main")
 
     def test_a_newer_decision_is_never_overridden_by_a_carry(self) -> None:
         self._train_refreshed()
@@ -286,35 +304,86 @@ def _refresh(client: GitHubMergeTrainClient) -> None:
     )
 
 
+def _pull_request(head_sha: str) -> dict[str, object]:
+    return {"head": {"sha": head_sha}}
+
+
+def _commit(*parents: str) -> dict[str, object]:
+    return {"parents": [{"sha": parent} for parent in parents]}
+
+
 class MergeTrainBranchRefreshRecordTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary_directory = TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
         self.store = FilesystemRecordStore(state_dir=Path(temporary_directory.name))
+        self.waits: list[float] = []
 
-    def test_train_records_the_refresh_it_asked_for(self) -> None:
-        before = datetime.now(timezone.utc)
-        transport = RecordingMergeTrainGitHubTransport()
+    def _client(self, transport: RecordingMergeTrainGitHubTransport) -> GitHubMergeTrainClient:
+        return GitHubMergeTrainClient(
+            transport=transport,
+            branch_refresh_recorder=merge_train_branch_refresh_recorder(
+                store=self.store, base_branch="main", trace_id="trace-1"
+            ),
+            wait=self.waits.append,
+        )
 
-        _refresh(
-            GitHubMergeTrainClient(
-                transport=transport,
-                branch_refresh_recorder=merge_train_branch_refresh_recorder(
-                    store=self.store, base_branch="main", trace_id="trace-1"
-                ),
+    def _refreshes(self) -> tuple[MergeTrainBranchRefreshRecord, ...]:
+        return self.store.list_merge_train_branch_refresh_records(
+            repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+        )
+
+    def test_train_records_the_merge_commit_its_refresh_made(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                {},
+                # GitHub has not made the merge commit yet, then it has.
+                _pull_request(_ACCEPTED_HEAD),
+                _pull_request(_REFRESHED_HEAD),
+                _commit(_ACCEPTED_HEAD, _BASE_COMMIT),
             )
         )
 
-        (record,) = self.store.list_merge_train_branch_refresh_records(
-            repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
-        )
+        _refresh(self._client(transport))
+
+        (record,) = self._refreshes()
         self.assertEqual(
-            (record.expected_head_sha, record.base_branch, record.trace_id),
-            (_ACCEPTED_HEAD, "main", "trace-1"),
+            (
+                record.expected_head_sha,
+                record.result_head_sha,
+                record.merged_base_sha,
+                record.base_branch,
+                record.trace_id,
+            ),
+            (_ACCEPTED_HEAD, _REFRESHED_HEAD, _BASE_COMMIT, "main", "trace-1"),
         )
-        requested_at = datetime.fromisoformat(record.requested_at.replace("Z", "+00:00"))
-        self.assertLessEqual(before.replace(microsecond=0), requested_at)
-        self.assertEqual([request.method for request in transport.requests], ["PUT"])
+        self.assertEqual(transport.requests[0].method, "PUT")
+        self.assertEqual(len(self.waits), 1)
+
+    def test_a_head_that_is_not_the_refresh_merge_is_not_recorded(self) -> None:
+        cases = {
+            "someone pushed a commit": _commit(_ACCEPTED_HEAD),
+            "a merge from another head": _commit(_OTHER_MERGE_HEAD, _BASE_COMMIT),
+        }
+        for name, commit in cases.items():
+            with self.subTest(name):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=({}, _pull_request(_REFRESHED_HEAD), commit)
+                )
+
+                _refresh(self._client(transport))
+
+                self.assertEqual(self._refreshes(), ())
+
+    def test_a_refresh_never_seen_is_not_recorded(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=({},) + (_pull_request(_ACCEPTED_HEAD),) * 20
+        )
+
+        with self.assertLogs("control_plane.merge_train_github", "INFO"):
+            _refresh(self._client(transport))
+
+        self.assertEqual(self._refreshes(), ())
 
     def test_database_keeps_each_pull_requests_refreshes(self) -> None:
         temporary_directory = TemporaryDirectory()
@@ -330,6 +399,8 @@ class MergeTrainBranchRefreshRecordTests(unittest.TestCase):
                 base_branch="main",
                 pull_request_number=number,
                 expected_head_sha=_ACCEPTED_HEAD,
+                result_head_sha=_REFRESHED_HEAD,
+                merged_base_sha=_BASE_COMMIT,
                 requested_at=_REFRESH_REQUESTED_AT,
             )
             for number in (_PULL_REQUEST, _PULL_REQUEST + 1)
@@ -345,39 +416,29 @@ class MergeTrainBranchRefreshRecordTests(unittest.TestCase):
         )
 
     def test_refresh_is_not_recorded_when_the_provider_refuses_it(self) -> None:
-        class _Refusing(RecordingMergeTrainGitHubTransport):
-            def request(self, **kwargs: object) -> object:
-                raise RuntimeError("expected head moved")
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(RuntimeError("expected head moved"),)
+        )
 
         with self.assertRaises(RuntimeError):
-            _refresh(
-                GitHubMergeTrainClient(
-                    transport=_Refusing(),
-                    branch_refresh_recorder=merge_train_branch_refresh_recorder(
-                        store=self.store, base_branch="main", trace_id="trace-1"
-                    ),
-                )
-            )
+            _refresh(self._client(transport))
 
-        self.assertEqual(
-            self.store.list_merge_train_branch_refresh_records(
-                repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
-            ),
-            (),
-        )
+        self.assertEqual(self._refreshes(), ())
 
     def test_a_refresh_that_cannot_be_recorded_still_happens(self) -> None:
         def unavailable(**_: object) -> None:
             raise OSError("records are unavailable")
 
-        transport = RecordingMergeTrainGitHubTransport()
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=({}, _pull_request(_REFRESHED_HEAD), _commit(_ACCEPTED_HEAD, _BASE_COMMIT))
+        )
 
         with self.assertLogs("control_plane.merge_train_github", "WARNING"):
             _refresh(
                 GitHubMergeTrainClient(transport=transport, branch_refresh_recorder=unavailable)
             )
 
-        self.assertEqual([request.method for request in transport.requests], ["PUT"])
+        self.assertEqual(transport.requests[0].method, "PUT")
 
 
 if __name__ == "__main__":

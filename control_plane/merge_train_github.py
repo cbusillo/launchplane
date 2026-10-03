@@ -61,7 +61,7 @@ logger = logging.getLogger(__name__)
 
 
 class MergeTrainBranchRefreshRecorder(Protocol):
-    """Keeps the train's own branch refreshes, after the provider accepted each one."""
+    """Keeps the train's own branch refreshes, bound to the commit the provider made."""
 
     def __call__(
         self,
@@ -69,8 +69,15 @@ class MergeTrainBranchRefreshRecorder(Protocol):
         repository: str,
         pull_request_number: int,
         expected_head_sha: str,
+        result_head_sha: str,
+        merged_base_sha: str,
         requested_at: datetime,
     ) -> None: ...
+
+
+# GitHub makes the refresh commit after it answers; read the head back this often.
+BRANCH_REFRESH_READBACK_ATTEMPTS = 10
+BRANCH_REFRESH_READBACK_INTERVAL_SECONDS = 1.0
 
 
 if TYPE_CHECKING:
@@ -210,10 +217,12 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         transport: MergeTrainGitHubTransport,
         effect_executor: MergeTrainSemanticEffectExecutor | None = None,
         branch_refresh_recorder: MergeTrainBranchRefreshRecorder | None = None,
+        wait: Callable[[float], None] = sleep,
     ) -> None:
         self.transport = transport
         self._effect_executor = effect_executor
         self._branch_refresh_recorder = branch_refresh_recorder
+        self._wait = wait
 
     def read_merge_train_snapshot(
         self, *, repository: str, base_branch: str
@@ -1511,7 +1520,6 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         self, *, repository: str, pull_request_number: int, expected_head_sha: str
     ) -> None:
         repository_path = _repository_path(repository)
-        # Taken before the request, so the commit the provider makes is never older.
         requested_at = datetime.now(timezone.utc)
         self.transport.request(
             method="PUT",
@@ -1525,10 +1533,24 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         if self._branch_refresh_recorder is None:
             return
         try:
+            result = self._read_branch_refresh_result(
+                repository_path=repository_path,
+                pull_request_number=pull_request_number,
+                expected_head_sha=expected_head_sha.strip().lower(),
+            )
+            if result is None:
+                logger.info(
+                    "The merge train refreshed a pull request but did not see its merge commit.",
+                    extra={"repository": repository, "pull_request_number": pull_request_number},
+                )
+                return
+            result_head_sha, merged_base_sha = result
             self._branch_refresh_recorder(
                 repository=repository,
                 pull_request_number=pull_request_number,
                 expected_head_sha=expected_head_sha,
+                result_head_sha=result_head_sha,
+                merged_base_sha=merged_base_sha,
                 requested_at=requested_at,
             )
         except Exception:
@@ -1538,6 +1560,45 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 exc_info=True,
                 extra={"repository": repository, "pull_request_number": pull_request_number},
             )
+
+    def _read_branch_refresh_result(
+        self, *, repository_path: str, pull_request_number: int, expected_head_sha: str
+    ) -> tuple[str, str] | None:
+        """The merge commit this refresh made and the base commit it merged, or None.
+
+        The new head counts only when it is a merge whose first parent is the head
+        the train refreshed from; anything else moved the pull request, not the train.
+        """
+        for attempt in range(BRANCH_REFRESH_READBACK_ATTEMPTS):
+            if attempt:
+                self._wait(BRANCH_REFRESH_READBACK_INTERVAL_SECONDS)
+            pull_request = _json_object(
+                self.transport.request(
+                    method="GET", path=f"/repos/{repository_path}/pulls/{pull_request_number}"
+                ),
+                "GitHub pull request response",
+            )
+            head = pull_request.get("head")
+            head_sha = str(head.get("sha") or "").strip().lower() if isinstance(head, dict) else ""
+            if not head_sha or head_sha == expected_head_sha:
+                continue
+            commit = _json_object(
+                self.transport.request(
+                    method="GET",
+                    path=f"/repos/{repository_path}/git/commits/{quote(head_sha, safe='')}",
+                ),
+                "GitHub commit response",
+            )
+            parents = commit.get("parents")
+            parent_shas = [
+                str(parent.get("sha") or "").strip().lower()
+                for parent in (parents if isinstance(parents, list) else ())
+                if isinstance(parent, dict)
+            ]
+            if len(parent_shas) != 2 or parent_shas[0] != expected_head_sha or not parent_shas[1]:
+                return None
+            return head_sha, parent_shas[1]
+        return None
 
     def merge_pull_request(
         self,

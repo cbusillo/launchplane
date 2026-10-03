@@ -3515,6 +3515,7 @@ export type ProductReviewDecisionEnvelope = {
 };
 
 export type ProductReviewDecisionRecord = {
+    base_branch: string;
     carried_from: ProductReviewCarry | null;
     decided_at: string;
     decision: 'accepted' | 'changes_requested';

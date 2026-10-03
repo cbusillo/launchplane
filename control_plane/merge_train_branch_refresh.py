@@ -40,6 +40,8 @@ def merge_train_branch_refresh_recorder(
         repository: str,
         pull_request_number: int,
         expected_head_sha: str,
+        result_head_sha: str,
+        merged_base_sha: str,
         requested_at: datetime,
     ) -> None:
         store.write_merge_train_branch_refresh_record(
@@ -48,6 +50,8 @@ def merge_train_branch_refresh_recorder(
                 base_branch=base_branch,
                 pull_request_number=pull_request_number,
                 expected_head_sha=expected_head_sha,
+                result_head_sha=result_head_sha,
+                merged_base_sha=merged_base_sha,
                 requested_at=requested_at,
                 trace_id=trace_id,
             )

@@ -32302,6 +32302,11 @@
         "additionalProperties": false,
         "description": "One Owner decision about one pull request preview.\n\nThe decision is a recorded opinion: it never merges or deploys anything.",
         "properties": {
+          "base_branch": {
+            "default": "",
+            "title": "Base Branch",
+            "type": "string"
+          },
           "carried_from": {
             "anyOf": [
               {

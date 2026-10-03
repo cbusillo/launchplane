@@ -8,11 +8,12 @@ _COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
 class MergeTrainBranchRefreshRecord(BaseModel):
-    """The merge train asked the source-control provider to merge a pull request's
-    base branch into it, while the pull request's head was ``expected_head_sha``.
+    """The merge train had the source-control provider merge a pull request's base
+    branch into it: from head ``expected_head_sha`` the provider made the merge
+    commit ``result_head_sha``, whose second parent is ``merged_base_sha``.
 
-    A Client's acceptance of that head may be carried to the commit the refresh
-    produced; this record is the proof that the train, not a person, asked for it.
+    A Client's acceptance of the earlier head may be carried to exactly that commit
+    and no other; this record is the proof that the train made it.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -23,14 +24,23 @@ class MergeTrainBranchRefreshRecord(BaseModel):
     base_branch: str
     pull_request_number: int = Field(ge=1)
     expected_head_sha: str
+    result_head_sha: str
+    merged_base_sha: str
     requested_at: str
     trace_id: str = ""
 
     @model_validator(mode="before")
     @classmethod
     def _normalize(cls, data: object) -> object:
-        if isinstance(data, dict) and isinstance(data.get("expected_head_sha"), str):
-            data = {**data, "expected_head_sha": data["expected_head_sha"].strip().lower()}
+        if isinstance(data, dict):
+            data = {
+                **data,
+                **{
+                    name: data[name].strip().lower()
+                    for name in ("expected_head_sha", "result_head_sha", "merged_base_sha")
+                    if isinstance(data.get(name), str)
+                },
+            }
         return data
 
     @model_validator(mode="after")
@@ -40,8 +50,11 @@ class MergeTrainBranchRefreshRecord(BaseModel):
                 raise ValueError(f"merge train branch refresh requires {name}")
         if "/" not in self.repository:
             raise ValueError("merge train branch refresh repository must be owner/name")
-        if not _COMMIT_SHA.fullmatch(self.expected_head_sha):
-            raise ValueError("merge train branch refresh requires a full expected_head_sha")
+        for name in ("expected_head_sha", "result_head_sha", "merged_base_sha"):
+            if not _COMMIT_SHA.fullmatch(getattr(self, name)):
+                raise ValueError(f"merge train branch refresh requires a full {name}")
+        if self.result_head_sha == self.expected_head_sha:
+            raise ValueError("merge train branch refresh result must be a new head")
         requested_at_datetime(self)
         return self
 
@@ -59,6 +72,8 @@ def build_merge_train_branch_refresh_record(
     base_branch: str,
     pull_request_number: int,
     expected_head_sha: str,
+    result_head_sha: str,
+    merged_base_sha: str,
     requested_at: datetime,
     trace_id: str = "",
 ) -> MergeTrainBranchRefreshRecord:
@@ -68,6 +83,8 @@ def build_merge_train_branch_refresh_record(
         base_branch=base_branch,
         pull_request_number=pull_request_number,
         expected_head_sha=expected_head_sha,
+        result_head_sha=result_head_sha,
+        merged_base_sha=merged_base_sha,
         requested_at=requested_at.astimezone(timezone.utc)
         .isoformat(timespec="milliseconds")
         .replace("+00:00", "Z"),

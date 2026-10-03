@@ -25,7 +25,7 @@ from control_plane.github_app_identity import (
 )
 from control_plane.product_review import ProductReviewStore
 from control_plane.github_payload import json_object, required_positive_int
-from control_plane.product_review_carry import carry_owner_acceptance
+from control_plane.product_review_carry import carry_owner_acceptance, record_decision_base
 from control_plane.product_review_feedback import publish_owner_feedback
 from control_plane.workflows.launchplane import (
     github_api_request,
@@ -67,6 +67,7 @@ def owner_review_status(
     owner: ProductOwnerProfile,
     head_sha: str,
     decisions: tuple[ProductReviewDecisionRecord, ...],
+    base_branch: str = "",
 ) -> OwnerReviewStatus:
     """Return the status for a marked pull request; `decisions` are newest first."""
 
@@ -79,6 +80,13 @@ def owner_review_status(
         (record for record in decisions if record.head_sha.strip().lower() == current_head),
         None,
     )
+    if (
+        decision is not None
+        and decision.carried_from is not None
+        and decision.base_branch != base_branch.strip()
+    ):
+        # Carried on another base: retargeting changed the change, so it no longer applies.
+        decision = None
     if decision is None:
         return OwnerReviewStatus(
             state="pending",
@@ -290,6 +298,13 @@ class OwnerReviewStatusPublisher:
         token: str,
     ) -> OwnerReviewStatus:
         try:
+            record_decision_base(
+                store=store,
+                profile=profile,
+                pull_request_number=pull_request_number,
+                head_sha=facts.head_sha,
+                base_branch=facts.base_branch,
+            )
             carry_owner_acceptance(
                 store=store,
                 profile=profile,
@@ -315,6 +330,7 @@ class OwnerReviewStatusPublisher:
                 repository=profile.repository,
                 pull_request_number=pull_request_number,
             ),
+            base_branch=facts.base_branch,
         )
         body: dict[str, object] = {
             "state": status.state,

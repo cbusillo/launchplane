@@ -2130,6 +2130,8 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                     repository=repository,
                     pull_request_number=pull_request_number,
                     expected_head_sha=expected_head_sha,
+                    result_head_sha="2" * 40,
+                    merged_base_sha="3" * 40,
                     requested_at=datetime.now(timezone.utc),
                 )
 

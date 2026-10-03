@@ -4,22 +4,23 @@ The Client accepts a change, seen on its preview. When the merge train only merg
 the base branch into the pull request, the change is the same, so asking again
 protects nothing. The acceptance carries to the new head only when all hold:
 
-1. Every commit between the accepted head and the new head is the train's own merge
-   of the base branch: exactly two parents, the first is the previous head, the
-   second is on the pull request's current base branch, and the train recorded that
-   it asked the provider to refresh this pull request from that previous head on
-   that base branch, no later than the commit was made.
+1. Every commit between the accepted head and the new head is exactly the merge
+   commit the train's own refresh produced: the train read the provider's new head
+   back after asking for the refresh and recorded it, the previous head, and the
+   base commit it merged. That base commit is on the pull request's current base
+   branch, which is the base the acceptance was given on.
 2. The pull request's change against its base is byte-identical at both heads:
    every changed file has the same name, status, resulting blob, and patch.
 3. The carry is saved as its own decision record naming the decision and head it
    came from and the train's refresh records, so it reads as carried, not re-decided.
 
-Anything else (another commit, a conflict resolution, a different base, a new
-Client, an unreadable or truncated diff) leaves the new head waiting for a decision.
+Anything else (another commit, another merge with the same parents, a conflict
+resolution, a different base, a new Client, an unreadable or truncated diff) leaves
+the new head waiting for a decision.
 """
 
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import logging
 from typing import Final, cast
 from urllib.parse import quote
@@ -27,15 +28,12 @@ from uuid import uuid4
 
 from control_plane.contracts.merge_train_branch_refresh_record import (
     MergeTrainBranchRefreshRecord,
-    requested_at_datetime,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import ProductReviewCarry, ProductReviewDecisionRecord
 from control_plane.merge_train_branch_refresh import MergeTrainBranchRefreshReadStore
 from control_plane.product_review import ProductReviewStore
 
-# Clock difference allowed between Launchplane and the provider that made the commit.
-CLOCK_SKEW: Final = timedelta(seconds=60)
 # A busy train may refresh a pull request more than once before anyone looks.
 MAX_REFRESHES: Final = 10
 # The provider lists at most this many files in a comparison; more is not exact.
@@ -70,7 +68,8 @@ def carry_owner_acceptance(
     if not decisions or any(record.head_sha.strip().lower() == head for record in decisions):
         return None
     accepted = decisions[0]
-    if not _carryable(accepted, profile):
+    if not _carryable(accepted, profile) or accepted.base_branch != base_branch.strip():
+        # Accepted on another base (or one never recorded): the change is not the same.
         return None
     refreshes = cast(
         MergeTrainBranchRefreshReadStore, store
@@ -159,40 +158,36 @@ def _base_only_refresh(
     read: SourceControlRead,
 ) -> tuple[tuple[str, ...], str] | None:
     """The train's refresh records from `accepted_head` to `head`, oldest first, and
-    the base commit the newest refresh merged; None unless every step is one."""
+    the base commit the newest refresh merged; None unless every step is one.
+
+    Each step is bound to the exact commit the train saw the provider make, so a
+    different merge of the same parents never matches a record.
+    """
 
     record_ids: list[str] = []
     newest_base_commit = ""
     current = head
     for _ in range(MAX_REFRESHES):
-        commit = _object(read(f"/repos/{_path(repository)}/git/commits/{current}"))
-        parents = commit.get("parents")
-        if not isinstance(parents, list) or len(parents) != 2:
-            return None
-        previous_head = _text(_object(parents[0]).get("sha")).lower()
-        base_commit = _text(_object(parents[1]).get("sha")).lower()
-        committed_at = _timestamp(_text(_object(commit, "committer").get("date")))
-        if not previous_head or not base_commit or committed_at is None:
-            return None
         refresh = next(
             (
                 record
                 for record in refreshes
-                if record.expected_head_sha == previous_head
-                and record.base_branch == base_branch
-                and requested_at_datetime(record) - CLOCK_SKEW <= committed_at
+                if record.result_head_sha == current and record.base_branch == base_branch
             ),
             None,
         )
         if refresh is None or not _on_base_branch(
-            repository=repository, commit=base_commit, base_branch=base_branch, read=read
+            repository=repository,
+            commit=refresh.merged_base_sha,
+            base_branch=base_branch,
+            read=read,
         ):
             return None
         record_ids.insert(0, refresh.record_id)
-        newest_base_commit = newest_base_commit or base_commit
-        if previous_head == accepted_head:
+        newest_base_commit = newest_base_commit or refresh.merged_base_sha
+        if refresh.expected_head_sha == accepted_head:
             return tuple(record_ids), newest_base_commit
-        current = previous_head
+        current = refresh.expected_head_sha
     return None
 
 
@@ -250,14 +245,33 @@ def _text(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def _timestamp(value: str) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
-
-
 def _path(repository: str) -> str:
     owner, name = repository.strip().split("/", 1)
     return f"{quote(owner, safe='')}/{quote(name, safe='')}"
+
+
+def record_decision_base(
+    *,
+    store: ProductReviewStore,
+    profile: LaunchplaneProductProfileRecord,
+    pull_request_number: int,
+    head_sha: str,
+    base_branch: str,
+) -> None:
+    """Keep the base branch on the newest decision for this head the first time it is
+    shown on the pull request, so an acceptance carries only on that base."""
+
+    head = head_sha.strip().lower()
+    if not base_branch.strip():
+        return
+    with store.product_review_lock(
+        repository=profile.repository, pull_request_number=pull_request_number
+    ):
+        latest = store.list_product_review_decision_records(
+            repository=profile.repository, pull_request_number=pull_request_number, limit=1
+        )
+        if not latest or latest[0].head_sha.strip().lower() != head or latest[0].base_branch:
+            return
+        store.write_product_review_decision_record(
+            latest[0].model_copy(update={"base_branch": base_branch.strip()})
+        )

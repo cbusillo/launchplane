@@ -51,12 +51,18 @@ merges the base branch into the pull request, the change is the same, so
 Launchplane carries the acceptance to the new head instead of asking again. It
 carries only when all of these hold:
 
-- Every commit from the accepted head to the new head is the train's own
-  merge of the base branch: exactly two parents, the first is the previous head
-  and the second is on the pull request's current base branch, and the train
-  recorded that it asked GitHub to refresh this pull request from that previous
-  head on that base branch (`launchplane_merge_train_branch_refreshes`), no later
-  than the commit was made (with one minute of clock skew).
+- Every commit from the accepted head to the new head is exactly the merge commit
+  the train's own refresh made. After asking GitHub to refresh, the train reads
+  the pull request's new head back, keeps it only if it is a two-parent merge
+  whose first parent is the head it refreshed from, and records that commit, the
+  previous head, the base commit it merged, and the base branch
+  (`launchplane_merge_train_branch_refreshes`). Another merge of the same parents,
+  however it was made, matches no record. Commit dates and committer names are
+  not used.
+- The merged base commit is on the pull request's current base branch, and that
+  branch is the base the acceptance was given on. A decision keeps the pull
+  request's base branch from the first time Launchplane shows it on the pull
+  request; a decision without one does not carry.
 - The pull request's change against its base is byte-identical at both heads:
   every changed file has the same name, status, resulting blob, and patch, in
   GitHub's comparison from the newest merged base commit. A file without a patch
@@ -66,7 +72,9 @@ carries only when all of these hold:
   with its feedback delivered.
 
 Anything else, including a new commit by anyone, a conflict resolution, or a
-different base, leaves the new head waiting for the Client. The carry is saved
+different base, leaves the new head waiting for the Client. A carried acceptance
+also stops applying if the pull request is later retargeted to another base, even
+without a new commit. The carry is saved
 as a new decision record with `carried_from` naming the decision and head it came
 from, the reason, and the train's refresh records, so it reads as carried, not
 re-decided. The `launchplane/owner-review` status on the new head says

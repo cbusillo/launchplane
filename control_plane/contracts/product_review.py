@@ -52,6 +52,9 @@ class ProductReviewDecisionRecord(BaseModel):
     decided_at: str
     feedback_url: str = ""
     feedback_requested: bool = False
+    # The pull request's base branch when the decision was first shown on it; an
+    # acceptance carries only on that base.
+    base_branch: str = ""
     carried_from: ProductReviewCarry | None = None
 
     @model_validator(mode="after")
@@ -71,7 +74,11 @@ class ProductReviewDecisionRecord(BaseModel):
         if self.decision == "changes_requested" and not self.reason.strip():
             raise ValueError("product review changes_requested decision requires a reason")
         if self.carried_from is not None and (
-            self.decision != "accepted" or self.carried_from.head_sha == self.head_sha
+            self.decision != "accepted"
+            or self.carried_from.head_sha == self.head_sha
+            or not self.base_branch.strip()
         ):
-            raise ValueError("only an acceptance is carried, and only to another head")
+            raise ValueError(
+                "only an acceptance is carried, only to another head, and only on its base"
+            )
         return self
