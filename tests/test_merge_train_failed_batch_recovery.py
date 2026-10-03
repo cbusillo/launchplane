@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
+    MergeTrainBatchHeldOutEntry,
     build_merge_train_batch_candidate,
     build_merge_train_batch_candidate_record,
 )
@@ -54,6 +55,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         candidate: MergeTrainBatchCandidate,
         *,
         mutate: bool = True,
+        conflicts: tuple[MergeTrainBatchHeldOutEntry, ...] = (),
     ) -> dict[str, Any]:
         record = build_merge_train_batch_candidate_record(
             candidate=candidate, source="test", updated_at="2026-10-03T12:00:00Z"
@@ -61,7 +63,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         store.write_merge_train_batch_candidate_record(record)
         client = Mock(wraps=self.client)
         client.read_merge_train_snapshot.return_value = self.snapshot
-        client.probe_batch_entry_conflicts.return_value = ()
+        client.probe_batch_entry_conflicts.return_value = conflicts
         result = try_reflow_failed_merge_train_candidate(
             candidate_store=store,
             active_candidate_record=record,
@@ -119,12 +121,95 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             )
             stopped = self._reflow(restarted, failed_retry)
             self.assertEqual(stopped["controller_action"], "candidate_failed")
-            self.assertEqual(stopped["recovery_reason"], "batch_body_retry_already_used")
+            self.assertEqual(stopped["reason_code"], "batch_body_retry_already_used")
             # Older failed evidence cannot reset the budget either.
             self.assertEqual(
-                self._reflow(restarted, self.candidate)["recovery_reason"],
+                self._reflow(restarted, self.candidate)["reason_code"],
                 "batch_body_retry_already_used",
             )
+
+    def test_conflict_probe_cannot_reset_used_unchanged_queue_budget(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            failed_retry = self.candidate.model_copy(
+                update={"batch_body_retry_of": "earlier-failure"}
+            )
+            third = self.snapshot.pull_requests[1].model_copy(
+                update={
+                    "number": 3,
+                    "head_sha": "third-head",
+                    "head_ref": "third-branch",
+                    "created_at": "2026-10-03T12:30:00Z",
+                }
+            )
+            self.snapshot = self.snapshot.model_copy(
+                update={"pull_requests": (*self.snapshot.pull_requests, third)}
+            )
+            result = self._reflow(
+                store,
+                failed_retry,
+                conflicts=(
+                    MergeTrainBatchHeldOutEntry(
+                        pull_request_number=3,
+                        head_sha=third.head_sha,
+                    ),
+                ),
+            )
+            self.assertEqual(result["controller_action"], "candidate_failed")
+            self.assertEqual(result["reason_code"], "unchanged_batch_after_conflict_probe")
+            self.assertEqual(len(store.list_merge_train_batch_candidate_records()), 1)
+
+    def test_standalone_landing_route_requires_and_passes_profile_reader(self) -> None:
+        from types import SimpleNamespace
+        from control_plane.merge_admission import MergeAdmissionDeniedError
+        from control_plane.merge_train_batch_landing import (
+            _execute_land_mode,
+            MergeTrainBatchLandingRunOnceEnvelope,
+        )
+        from tests.test_merge_train_structural_provenance import _entry, _records
+
+        candidate_record, landing_record = _records((_entry(1, 1), _entry(2, 2)))
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            store.write_merge_train_batch_candidate_record(candidate_record)
+            store.write_merge_train_batch_landing_plan_record(landing_record)
+            request = MergeTrainBatchLandingRunOnceEnvelope(
+                repository=candidate_record.candidate.repository,
+                base_branch="main",
+                mode="land",
+                landing_plan_record_id=landing_record.record_id,
+            )
+            kwargs: dict[str, Any] = dict(
+                request=request,
+                repository_policy=self.policy.policies[0],
+                policy_sha256=candidate_record.candidate.policy_sha256,
+                token="test",
+                trace_id="test",
+                recorded_at="2026-10-03T12:00:00Z",
+                landing_store=store,
+                stack_collapse_store=store,
+                admission_store=store,
+                admission_evaluator=Mock(),
+                controller_state_provider=Mock(),
+                mutation_checkpoint=None,
+            )
+            with patch("control_plane.merge_train_batch_landing.GitHubMergeTrainClient") as client:
+                client.return_value.land_batch_candidate.side_effect = MergeAdmissionDeniedError(
+                    "test stop"
+                )
+                with self.assertRaises(MergeAdmissionDeniedError):
+                    _execute_land_mode(candidate_store=store, **kwargs)
+                self.assertIs(client.call_args.kwargs["branch_refresh_store"], store)
+            missing_reader = SimpleNamespace(
+                list_merge_train_batch_candidate_records=store.list_merge_train_batch_candidate_records
+            )
+            with patch("control_plane.merge_train_batch_landing.GitHubMergeTrainClient") as client:
+                with self.assertRaises(MergeAdmissionDeniedError) as refused:
+                    _execute_land_mode(candidate_store=missing_reader, **kwargs)
+                self.assertEqual(
+                    refused.exception.reason_code, "client_review_profiles_unavailable"
+                )
+                client.assert_not_called()
 
     def test_later_labelled_member_waits_before_batch_planning(self) -> None:
         for status in ("pending", "fail"):
@@ -171,13 +256,13 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         ):
             result = self._reflow(FilesystemRecordStore(state_dir=Path(directory)), self.candidate)
         self.assertEqual(result["controller_action"], "candidate_failed")
-        self.assertEqual(result["recovery_reason"], "closed_batch_body_unchanged_or_unavailable")
+        self.assertEqual(result["reason_code"], "closed_batch_body_unchanged_or_unavailable")
 
     def test_unchanged_body_keeps_the_failure_stopped(self) -> None:
         with TemporaryDirectory() as directory:
             result = self._reflow(FilesystemRecordStore(state_dir=Path(directory)), self.candidate)
         self.assertEqual(result["controller_action"], "candidate_failed")
-        self.assertEqual(result["recovery_reason"], "closed_batch_body_unchanged_or_unavailable")
+        self.assertEqual(result["reason_code"], "closed_batch_body_unchanged_or_unavailable")
 
     def test_only_bound_closed_unmerged_batch_is_recovery_evidence(self) -> None:
         for state in ("open", "merged", "missing", "wrong_binding"):

@@ -2177,10 +2177,14 @@ def _reflow_stale_candidate_record(
         )
         result["superseded_merge_train_batch_candidate_record_id"] = candidate_record.record_id
         return result
-    if candidate_record.ordinary_job_binding is None and any(
-        pr.owner_review_required and pr.required_checks_status != "pass"
-        for pr in dry_run_result.queue
-        if pr.eligible
+    if (
+        candidate_record.ordinary_job_binding is None
+        and repository_policy.merge_method == "merge"
+        and any(
+            pr.owner_review_required and pr.required_checks_status != "pass"
+            for pr in dry_run_result.queue
+            if pr.eligible
+        )
     ):
         return {
             "repository": request.repository,
@@ -3118,6 +3122,7 @@ def try_reflow_failed_merge_train_candidate(
         }
     if dry_run_result.intended_next_action not in {"merge", "update_branch"}:
         return None
+    body_retry_approved = False
     queue_unchanged = _merge_train_candidate_matches_dry_run_queue(
         candidate=active_candidate_record.candidate,
         dry_run_result=dry_run_result,
@@ -3157,6 +3162,7 @@ def try_reflow_failed_merge_train_candidate(
                         changed_body = False
                     if changed_body:
                         reason = "closed_batch_body_changed"
+                        body_retry_approved = True
             if reason != "closed_batch_body_changed":
                 return {
                     "repository": repository,
@@ -3165,7 +3171,7 @@ def try_reflow_failed_merge_train_candidate(
                     "controller_action": "candidate_failed",
                     "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
                     "candidate": failed.model_dump(mode="json"),
-                    "recovery_reason": reason,
+                    "reason_code": reason,
                 }
         else:
             return _reobserve_failed_merge_train_candidate(
@@ -3244,6 +3250,18 @@ def try_reflow_failed_merge_train_candidate(
             base_sha=probe.snapshot.base_sha,
         )
     ):
+        if not body_retry_approved:
+            # A probe reducing a changed queue back to the failed membership
+            # cannot evade the unchanged-queue gates or mint another retry.
+            return {
+                "repository": repository,
+                "base_branch": base_branch,
+                "mode": "dry-run",
+                "controller_action": "candidate_failed",
+                "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
+                "candidate": active_candidate_record.candidate.model_dump(mode="json"),
+                "reason_code": "unchanged_batch_after_conflict_probe",
+            }
         # A separate ref prevents rediscovery of the failed closed batch PR.
         batch_id = candidate.batch_id + "-body-retry"
         candidate = MergeTrainBatchCandidate.model_validate(
@@ -3265,7 +3283,7 @@ def try_reflow_failed_merge_train_candidate(
         "dry_run_result": probe.dry_run_result.model_dump(mode="json"),
         "candidate": candidate.model_dump(mode="json"),
     }
-    if probe.report is not None:
+    if probe.report is not None and not body_retry_approved:
         result["conflict_probe"] = probe.report
     if mutate:
         # The probe can outlast the lease; renew it, or stop, before persisting.
