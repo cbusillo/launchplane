@@ -42,8 +42,8 @@ Product, tenant, and local-DX repos own:
 - product and addon source code
 - product tests and build definitions
 - local developer workflows
-- explicit artifact/source inputs
-- thin OIDC-authenticated Launchplane request wrappers
+- their own builds and artifact manifests, with provenance Launchplane can
+  verify (see [`artifact-provenance.md`](artifact-provenance.md))
 - product verification that must run next to source or browser context
 
 An external forge owns source hosting and engineering collaboration: Git
@@ -71,12 +71,14 @@ variation in thin request/config surfaces.
   behind an admin-owned stable address.
 - Launchplane should expose authenticated service ingress for runtime evidence,
   admin actions, and eventually driver-triggered orchestration.
-- Forge-issued workload identity should be the default machine-to-machine
-  authentication boundary for product workflows talking to Launchplane.
-  GitHub Actions OIDC is the first adapter for that contract.
-- Launchplane should authorize workflow callers from verified forge identity
-  claims such as repository, workflow, ref, environment, and event context,
-  rather than from copied long-lived static tokens.
+- Product repositories never call Launchplane. Launchplane reacts to forge
+  events, verifies which repository and commit built an artifact, and deploys
+  it (see [`event-driven-deploys.md`](event-driven-deploys.md)). Product
+  workflow-identity grants are retired.
+- Forge-issued workload identity (GitHub Actions OIDC today) authenticates
+  Launchplane's own admin and self-deploy workflows from verified claims such
+  as repository, workflow, ref, environment, and event context, rather than
+  from copied long-lived static tokens.
 - Launchplane core should own durable records, admin read models, auditability,
   and shared orchestration contracts.
 - Launchplane should own forge-neutral Client, review, dependency, admission, and
@@ -85,8 +87,8 @@ variation in thin request/config surfaces.
 - Product-specific runtime logic should live behind Launchplane-owned drivers,
   starting with Odoo and VeriReel, instead of being duplicated as near-identical
   scripts across many client repos.
-- Repo-specific variation should enter Launchplane as thin repo extensions,
-  declarative config, or small driver inputs, not as a full second copy of the
+- Repo-specific variation should enter Launchplane as product records or small
+  driver inputs, not as Launchplane-held build settings or a second copy of the
   same operational workflow in every product repo.
 - When a product-specific operation needs materially different network reach or
   host-local authority, Launchplane should prefer a narrow delegated worker
@@ -123,9 +125,8 @@ variation in thin request/config surfaces.
 - `forge adapter`: replaceable integration for source identity, change events,
   checks, comments, and guarded merge operations. The forge owns collaboration;
   Launchplane owns delivery authority and evidence.
-- `repo extension`: the minimal source-adjacent wrapper, manifest, or workflow
-  input that lets a product repo ask Launchplane to act without owning durable
-  runtime truth.
+- `repo extension`: retired. A product repository's only handoff is its own
+  build artifact and manifest; it never asks Launchplane to act.
 
 ## Launchplane Core And Drivers
 
@@ -150,16 +151,14 @@ Forge and provider adapters
   - future open-source or hosted forge adapters
   - Dokploy, GHCR, health, and backup providers
 
-Repo extensions
-  - product/repo inputs
-  - optional repo-specific config
-  - small hooks only when genuinely needed
+Product repositories (outside Launchplane)
+  - their own builds and artifact manifests
 ```
 
 The intent is to keep common operational behavior centralized in Launchplane while
 still leaving room for product-specific execution differences. A driver lives
-in Launchplane. A repo extension only supplies the minimum extra information a
-specific repo needs.
+in Launchplane. Product-specific values live in Launchplane product records; the
+product repository supplies only its build artifact.
 
 The first concrete HTTP/OIDC/API shape for that boundary is defined in
 [`service-boundary.md`](service-boundary.md).
@@ -168,12 +167,12 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
 
 - The canonical Launchplane ingress should be authenticated HTTP, not repo-to-repo
   shelling into a CLI as the long-term contract.
-- Forge workflows should authenticate with Launchplane using verified workload
+- Launchplane's own admin workflows authenticate with verified workload
   identity. GitHub Actions currently supplies that identity through OIDC.
-- Launchplane should map those claims to allowed products, contexts, actions, and
-  environments. Example: a VeriReel preview workflow may be allowed to write
-  preview evidence for `verireel-testing`, while a promotion workflow may be
-  allowed to write promotion evidence for production lanes.
+- Product workflows do not call Launchplane. Launchplane receives its GitHub
+  App's webhooks at `POST /v1/github/app-webhook` and verifies build provenance
+  itself; it needs no caller grant for the preview and testing deploys it
+  starts from those events.
 - Human/admin access in Launchplane may still use a separate auth layer, but
   machine evidence ingress should trust workflow identity first.
 - The stable cross-product contract is the typed Launchplane API payload, not the
@@ -228,6 +227,8 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
 - Launchplane now has the matching cleanup-evidence path too, so an external product
   can report confirmed preview teardown into the same durable preview identity
   without Launchplane claiming it executed that teardown itself.
+- These external-evidence paths serve product workflows that call Launchplane,
+  which is retired; they are deleted with that call-in path, not extended.
 - Launchplane owns provider-neutral environment route-binding records keyed by
   product/context/instance. These records describe desired domains, runtime
   target summary, ingress termination, and TLS ownership while keeping
@@ -259,10 +260,11 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
 - Upstream handoffs fail closed when this repo cannot accept control.
 - Immutable promotion ownership includes validating a stored backup-gate
   record for the destination environment before ship execution begins.
-- Typed production backup policy is the durable configuration prerequisite for
-  later promotion enforcement. This model slice does not execute providers or
-  replace the existing promotion gate before downstream execution and
-  enforcement work lands.
+- Odoo and generic-web production promotions require worker-completed backup
+  evidence for the exact current typed backup policy and targets before any
+  effect (`control_plane/workflows/production_promotion_backup.py`).
+  `POST /v1/production-backup-gates` runs the shared provider; see
+  [`production-backup-provider.md`](production-backup-provider.md).
 - Admin-facing status/history reads should also terminate here by composing
   inventory, deployment, promotion, and backup-gate records into a control-
   plane-owned read model.
@@ -279,7 +281,8 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
   Move required testing, rehearsal, diagnostics, and recovery into retained
   boundaries, then delete the obsolete code, docs, commands, and tests.
 - New cross-product integrations should target the Launchplane service boundary
-  and a forge workload-identity adapter, not repo-local CLI mutation.
+  driven by forge events, not repo-local CLI mutation or product-repo calls into
+  Launchplane.
 - Use SQLAlchemy ORM models plus Alembic migrations for shared-service schema
   changes. Compatibility `ensure_schema()` paths are for local, test, and
   bootstrap tolerance, not the production migration strategy.
@@ -288,8 +291,7 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
 
 ## Driver Ownership Status
 
-Product repos keep source, build, verification, and thin OIDC request wrappers,
-while Launchplane owns the durable service routes, DB-backed records,
+Product repos keep source, build, and verification, while Launchplane owns the durable service routes, DB-backed records,
 managed-secret/runtime authority, driver execution, and admin read models for
 the current Odoo and VeriReel deployment, promotion, rollback, backup, and
 preview paths.

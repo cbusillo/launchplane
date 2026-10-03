@@ -22,8 +22,9 @@ reviewed requests, but they do not grant Launchplane permission by themselves.
   retarget, or dispatch a workflow, secret, or local helper to make a denied
   operation succeed.
 
-The approved [feedback continuation foundation](every-code-feedback-resume.md)
-defines `every_code_feedback_resume.request` and
+The [feedback continuation foundation](every-code-feedback-resume.md), which is
+not continued and remains unwired in code, defines
+`every_code_feedback_resume.request` and
 `every_code_feedback_resume.execute` as separate exclusively instance-scoped
 actions. Structural immutable-ID human matching and exact authenticated worker
 matching produce policy provenance only; they create no grant, live route or
@@ -133,20 +134,17 @@ not diagnostic substitutes.
 
 ## Target Model
 
-The reconciled target in
-[issue #2240](https://github.com/cbusillo/launchplane/issues/2240) is prospective.
-For an ordinary engineering session, one small DB-backed capability set should
-authorize the coherent delegated job and its necessary diagnostic reads;
-session issuance and request narrowing should derive from that existing scope
-instead of requiring a new proposal/apply ceremony for every route. Client
-acceptance remains product-decision evidence consumed by an independently
+The delegated-session target in
+[issue #2240](https://github.com/cbusillo/launchplane/issues/2240) was closed as
+not planned; the ordinary-agent delegated-delivery design it served is retired
+(see [DIRECTION.md](../DIRECTION.md#retired)). Client acceptance remains
+product-decision evidence consumed by an independently
 authorized delivery request and never grants merge, deploy, configuration,
 secret, or policy-administration power.
 
 The currently implemented action-by-action policy evaluation, diagnostic
 routes, activation bridges, and recovery mechanisms recorded in this document
-remain the runtime contract until that replacement is implemented, reviewed,
-deployed, and activated. The administration surface described immediately below
+remain the runtime contract. The administration surface described immediately below
 is itself the target model. This target text grants no capability.
 
 The DB-native administration surface must support authenticated administrators
@@ -391,7 +389,7 @@ identity evidence, case variant that would not match the exact authorization
 evaluator, malformed timestamp, missing immutable identity evidence, or
 expired active work-request lease, or stale-only authorization membership produces
 `coverage.state=partial` with bounded count/reason gaps. Partial coverage is a
-fail-closed audit result and cannot satisfy #2177 or final #2062 review. Storage
+fail-closed audit result. Storage
 or active-policy absence still fails hard; multiple active policies fail as
 ambiguous. Landing this route grants no production access and authorizes no
 policy, workflow, secret, provider, runtime, deployment, or durable-operation
@@ -500,6 +498,12 @@ until the worker's terminal reauthorization, then revoke every canary rule and
 read the active policy back after terminal verification or any post-activation
 worker stop.
 
+The ordinary-agent delegated-delivery design is retired (see
+[DIRECTION.md](../DIRECTION.md#retired)), and
+[#2437](https://github.com/cbusillo/launchplane/issues/2437) deletes its code.
+The ordinary-agent activation text below describes that code until then; do not
+activate or extend it.
+
 Ordinary-agent activation additionally requires the delivery migration before
 the worker image and a separate successful
 `ordinary_agent_delivery_cleanup_succeeded` event from that image. Deploying the
@@ -552,9 +556,7 @@ presence of this mediated typed handler and is not itself authority or a raw
 write bypass. Qualification and guarded-worker support remain separate.
 
 Activation remains a separately Director-approved DB-native administration event;
-it is not authorized by landing code. Keep #2204 open until actual migration,
-rollback, read-back, and soak evidence exists, and keep #2177 open until its
-handoff criteria are complete.
+it is not authorized by landing code.
 
 ### Preparing Agent Delivery Administration
 
@@ -746,6 +748,10 @@ checks, worker execution, CAS and read-back install it. Installing it is a
 grant, so it is a Director decision.
 
 ### Inspecting Pilot Preparation Inputs
+
+This and the next section describe the retired ordinary-agent pilot's code,
+which [#2437](https://github.com/cbusillo/launchplane/issues/2437) deletes. Do
+not use or extend it.
 
 The Agent delivery workbench offers **Check setup prerequisites** when preparing
 delivery. Its parameterless read uses the existing managed

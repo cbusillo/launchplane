@@ -33,10 +33,8 @@ routing and safety evidence only; it never becomes live runtime authority.
 
 ## Caller Profiles
 
-This section describes current runtime caller profiles. The reconciled target in
-issue `#2240` makes Codex CLI and Codex Lab equal clients of one
-session-scoped service contract; it does not make a client executable an
-authority source.
+This section describes current runtime caller profiles. The session-scoped
+target in issue `#2240` was closed as not planned.
 
 Agent context callers are identified as compact agent consumers:
 
@@ -61,8 +59,10 @@ Agent context callers are identified as compact agent consumers:
 - `limited_remote_user`: authenticated GitHub human with read-only role. This
   profile fails closed to read and safe-write action families even if a policy
   rule is accidentally broad.
-- `human_admin`: authenticated GitHub human admin. Admin capability still flows
-  through exact action/product/context policy rules.
+- `human_admin`: authenticated GitHub human admin. The strict immutable-ID
+  admin rule allows every action (see
+  [The Admin](authorization-authority.md#the-admin)); any other admin-role rule
+  still flows through exact action/product/context policy rules.
 
 These profiles are diagnostics and safety rails. They do not replace exact
 Launchplane authz policy matching.
@@ -84,6 +84,10 @@ It aggregates existing read models into named sections:
 - exact tenant admission evaluation when the caller supplies the complete
   product, context, numeric repository and repository owner IDs, repository, pull-request
   number, head SHA, and base branch
+
+The work-graph and Every Code sections serve retired designs (see
+[DIRECTION.md](../DIRECTION.md#retired)); they remain until their code is
+deleted and are not to be extended.
 
 Each section reports `available`, `unauthorized`, or `unavailable`. The endpoint
 writes no records, fetches no issue bodies, and should preserve the underlying

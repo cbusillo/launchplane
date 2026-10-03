@@ -71,10 +71,13 @@ The browser-only activation self-check is intentionally absent from this
 agent/admin allow-list. It accepts only the signed-in human's Launchplane
 session cookie and has no bearer helper or agent surface.
 
-The ordinary finite-job status GET is included for `ordinary_agent_client`
-consumers and retains its ordinary-credential identity dependency. The separate
-signed-human job-status route remains outside this agent contract. Including a
-read operation does not grant job admission or execution authority.
+The allow-list still includes the retired ordinary-agent client operations
+(enrollment proposal and read, credential claim, session proposal, read and
+cancel, and finite-job admission and status) for the `ordinary_agent_client`,
+`terminal_agent_client`, and `private_agent_client` surfaces until
+[#2437](https://github.com/cbusillo/launchplane/issues/2437) deletes that code.
+The separate signed-human job-status route remains outside this agent contract.
+Including an operation does not grant job admission or execution authority.
 
 ## Normalization Version 1
 
