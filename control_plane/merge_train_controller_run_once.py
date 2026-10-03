@@ -1560,9 +1560,6 @@ def _finish_landed_merge_train_batch(
     )
     result["merge_train_stack_collapse_plan_record_id"] = newest_record.record_id
     result["stack_collapse_plan"] = newest_record.plan.model_dump(mode="json")
-    result["stack_collapse_plans"] = [
-        record.plan.model_dump(mode="json") for record in reconciled_records
-    ]
     return result
 
 
@@ -2861,6 +2858,9 @@ def _advance_from_live_snapshot(
                 snapshot=snapshot,
             )
             if restored_result is not None:
+                if not request.mutate:
+                    # A retired record is not an actionable phase handle.
+                    restored_result.pop("merge_train_stack_collapse_plan_record_id", None)
                 return restored_result
     if selected_pr is not None and merge_train_snapshot_has_stack_topology(
         snapshot=snapshot, dry_run_result=dry_run_result

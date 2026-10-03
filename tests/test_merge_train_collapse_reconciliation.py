@@ -206,6 +206,19 @@ class CollapseReconciliationTests(unittest.IsolatedAsyncioTestCase):
                     store.list_merge_train_stack_collapse_plan_records(status="active")
                 )
                 changed_child = False
+                retired_dry_run = await _post_merge_train_controller_run_once(
+                    app, {**payload, "mutate": False}
+                )
+                self.assertEqual(retired_dry_run.status_code, 202, retired_dry_run.text)
+                self.assertEqual(
+                    retired_dry_run.json()["result"]["controller_action"], "admit_collapsed_root"
+                )
+                self.assertNotIn(
+                    "merge_train_stack_collapse_plan_record_id", retired_dry_run.json()["result"]
+                )
+                self.assertFalse(
+                    store.list_merge_train_stack_collapse_plan_records(status="active")
+                )
                 blocked = True
                 response = await _post_merge_train_controller_run_once(app, payload)
                 self.assertEqual(response.status_code, 202, response.text)
@@ -414,7 +427,11 @@ class CollapseReconciliationTests(unittest.IsolatedAsyncioTestCase):
                         continue
                     self.assertEqual(response.status_code, 202, response.text)
                     results.append(response.json()["result"])
-            plans = results[-1]["stack_collapse_plans"]
+            plans = [
+                record.plan.model_dump(mode="json")
+                for record in store.list_merge_train_stack_collapse_plan_records()
+                if record.plan.status == "ready_for_train"
+            ]
             self.assertEqual({plan["root_pull_request_number"] for plan in plans}, {1, 11})
             self.assertTrue(all(plan["status"] == "ready_for_train" for plan in plans))
             self.assertEqual(comments, [2, 12])

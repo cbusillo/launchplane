@@ -950,8 +950,8 @@ Controller actions have these retry/stop semantics:
   again, its newest applicable plan supplies the current child-head expectations.
   Each stack and child has
   its own persisted checkpoint, so an interruption resumes unfinished children
-  without repeating completed stacks. `stack_collapse_plans` lists every
-  reconciled plan; the singular fields report the newest plan for existing readers.
+  without repeating completed stacks. The response's singular fields report
+  the newest plan; all reconciled plans remain in the stored collapse history.
 - `admit_collapsed_root`: The collapsed root PR is ready to enter the batch
   candidate path. Mutate once, then call again.
 - `stack_unsupported`: A stack exists but is not a supported same-repo linear
