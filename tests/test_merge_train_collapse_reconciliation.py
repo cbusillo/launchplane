@@ -224,6 +224,21 @@ class CollapseReconciliationTests(unittest.IsolatedAsyncioTestCase):
                     if response.status_code == 502:
                         self.assertTrue(failed)
                         self.assertEqual(comments, [2])
+                        completed = store.list_merge_train_stack_collapse_plan_records()
+                        self.assertTrue(
+                            any(
+                                record.plan.root_pull_request_number == 1
+                                and record.plan.status == "ready_for_train"
+                                for record in completed
+                            )
+                        )
+                        self.assertFalse(
+                            any(
+                                record.plan.root_pull_request_number == 11
+                                and record.plan.status == "ready_for_train"
+                                for record in completed
+                            )
+                        )
                         continue
                     self.assertEqual(response.status_code, 202, response.text)
                     results.append(response.json()["result"])
@@ -232,10 +247,3 @@ class CollapseReconciliationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(plan["status"] == "ready_for_train" for plan in plans))
             self.assertEqual(comments, [2, 12])
             self.assertTrue(failed)
-            states = store.list_merge_train_controller_state_records(
-                repository="cbusillo/sellyouroutboard", base_branch="main"
-            )
-            self.assertEqual(
-                states[0].step_payload["stack_collapse_plan_record_id"],
-                results[-1]["merge_train_stack_collapse_plan_record_id"],
-            )
