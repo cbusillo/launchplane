@@ -35143,15 +35143,19 @@ class PostgresRecordStore(HumanSessionStore):
             self._lock_product_authority_bundle_write(session)
             if not self.database_url.startswith("sqlite"):
                 # Include insertions and generation writes, not only existing preview rows.
-                session.execute(
-                    text(
-                        "LOCK TABLE launchplane_product_profiles, launchplane_provider_targets, "
-                        "launchplane_dokploy_target_ids, launchplane_dokploy_targets, "
-                        "launchplane_previews, launchplane_preview_generations, "
-                        "launchplane_product_reconcile_requests "
-                        "IN SHARE ROW EXCLUSIVE MODE"
+                tables = ", ".join(
+                    model.__tablename__
+                    for model in (
+                        LaunchplaneProductProfileRow,
+                        LaunchplaneProviderTargetRow,
+                        LaunchplaneDokployTargetIdRow,
+                        LaunchplaneDokployTargetRow,
+                        LaunchplanePreviewRow,
+                        LaunchplanePreviewGenerationRow,
+                        LaunchplaneProductReconcileRequestRow,
                     )
                 )
+                session.execute(text(f"LOCK TABLE {tables} IN SHARE ROW EXCLUSIVE MODE"))
             profiles = session.scalars(select(LaunchplaneProductProfileRow)).all()
             if session.scalar(
                 select(LaunchplaneProductReconcileRequestRow)
