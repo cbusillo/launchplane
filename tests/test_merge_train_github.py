@@ -33,6 +33,7 @@ from control_plane.contracts.merge_train_structural_provenance import (
 )
 from control_plane.merge_train import MergeTrainLabelActor
 from control_plane.merge_train_github import GitHubMergeTrainClient
+from control_plane.merge_train_github import MergeTrainGitHubCandidateEntryConflictError
 from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader
 from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.merge_train_github import MergeTrainGitHubMergeRejectedError
@@ -974,9 +975,12 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             )
         )
 
-        with self.assertRaises(MergeTrainGitHubStaleHeadError):
+        with self.assertRaises(MergeTrainGitHubCandidateEntryConflictError) as raised:
             GitHubMergeTrainClient(transport=transport).build_batch_candidate(candidate=candidate)
 
+        self.assertEqual(
+            (raised.exception.pull_request_number, raised.exception.head_sha), (2, "head-2")
+        )
         self.assertEqual(
             [request.method for request in transport.requests],
             ["POST", "GET", "GET", "GET", "POST", "GET", "GET", "POST"],

@@ -544,6 +544,14 @@ releases the controller lease without replaying the rejected merge. The same
 queue-change rule then governs replacement planning; an unchanged queue remains
 stopped for Director attention.
 
+A merge conflict is the exception. When an entry does not merge cleanly into
+the candidate built before it, the controller reports
+`merge_train_candidate_entry_conflict` and records that pull request and head as
+`held_out` on the failed candidate. The replacement candidate leaves it out and
+carries the hold-out forward, so the rest of the queue lands. A new head on the
+held-out pull request brings it back into the queue; until then, its author
+resolves the conflict, typically after the others land.
+
 An exhausted final-publication readback also fails closed, with no individual
 failed pull request: its checkpoint identifies the publication phase and the
 retained construction ref.

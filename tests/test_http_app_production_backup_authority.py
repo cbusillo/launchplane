@@ -5,7 +5,7 @@ from urllib.parse import urlencode
 
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.production_backup_authority import ProductionBackupAuthorityWriteEnvelope
-from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.support.auth import _StubVerifier, _identity
@@ -223,6 +223,110 @@ class ProductionBackupAuthorityHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(migration.status_code, 200, migration.text)
             self.assertEqual(migration.json()["result"]["status"], "would_apply")
+
+    async def test_local_operator_revises_only_its_own_policy_targets(self) -> None:
+        policy = _authz_policy().model_dump(mode="json")
+        policy["github_actions"][0]["products"] = ["example-product", "other-product"]
+        policy["github_actions"][0]["contexts"] = ["example-product", "other-product"]
+        policy["local_operators"] = [
+            {
+                "managed_set_id": "operator.agent-product-setup",
+                "managed_rule_id": "example-product.prod-backup-policy",
+                "subjects": ["operator-agent"],
+                "token_labels": ["operator-agent-token"],
+                "products": ["example-product"],
+                "contexts": ["example-product"],
+                "instances": ["prod"],
+                "actions": ["production_backup_authority.write"],
+            }
+        ]
+        with TemporaryDirectory() as temporary_directory:
+            database_path = Path(temporary_directory) / "launchplane.sqlite3"
+            store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{database_path.as_posix()}"
+            )
+            store.ensure_schema()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="example/example-product",
+                        workflow_ref=_WORKFLOW_REF,
+                        job_workflow_ref=_JOB_WORKFLOW_REF,
+                        event_name="workflow_dispatch",
+                        environment="prod",
+                        repository_id="1001",
+                        repository_owner_id="1000",
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(policy),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    local_operator_token="local-operator-token",
+                    local_operator_subject="operator-agent",
+                    local_operator_token_label="operator-agent-token",
+                ),
+            )
+            operator = {"Authorization": "Bearer local-operator-token"}
+            workflow = {"Authorization": "Bearer valid-token"}
+            own = _dry_run_envelope().model_dump(mode="json")
+
+            allowed = await http_request(
+                app, "POST", "/v1/production-backup-authority/apply", headers=operator, payload=own
+            )
+            self.assertEqual(allowed.status_code, 200, allowed.text)
+
+            extra = _dry_run_envelope().model_dump(mode="json")
+            foreign = dict(extra["targets"][0])
+            foreign.update({"target_id": "foreign-target", "record_id": ""})
+            foreign.pop("target_digest", None)
+            extra["targets"] = [*extra["targets"], foreign]
+            refused = await http_request(
+                app,
+                "POST",
+                "/v1/production-backup-authority/apply",
+                headers=operator,
+                payload=extra,
+            )
+            self.assertEqual(refused.status_code, 403, refused.text)
+            self.assertEqual(refused.json()["error"]["code"], "local_operator_lane_scope_required")
+
+            other = _dry_run_envelope().model_dump(mode="json")
+            other["policy"].update(
+                {
+                    "product": "other-product",
+                    "context": "other-product",
+                    "record_id": "",
+                    "policy_id": "",
+                    "policy_digest": "",
+                }
+            )
+            reviewed = await http_request(
+                app,
+                "POST",
+                "/v1/production-backup-authority/apply",
+                headers=workflow,
+                payload=other,
+            )
+            self.assertEqual(reviewed.status_code, 200, reviewed.text)
+            applied = await http_request(
+                app,
+                "POST",
+                "/v1/production-backup-authority/apply",
+                headers=workflow | {"Idempotency-Key": "other-product-policy"},
+                payload=other
+                | {
+                    "mode": "apply",
+                    "reviewed_authority_digest": reviewed.json()["result"]["authority_digest"],
+                },
+            )
+            self.assertEqual(applied.status_code, 200, applied.text)
+
+            shared = await http_request(
+                app, "POST", "/v1/production-backup-authority/apply", headers=operator, payload=own
+            )
+            self.assertEqual(shared.status_code, 403, shared.text)
+            self.assertEqual(shared.json()["error"]["code"], "local_operator_lane_scope_required")
+            store.close()
 
     async def test_openapi_exposes_bounded_authority_routes(self) -> None:
         with TemporaryDirectory() as temporary_directory:

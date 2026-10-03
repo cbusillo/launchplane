@@ -239,6 +239,7 @@ from control_plane.production_backup_authority import (
     validate_production_backup_policy_binding,
 )
 from control_plane.storage.product_authority_bundle import (
+    require_bundle_context_owner,
     ProductAuthorityBundle,
     ProviderTargetWrite,
     RuntimeEnvironmentConflictError,
@@ -482,6 +483,7 @@ class FilesystemRecordStore:
         if not bundle.requires_write():
             return
         with self._product_authority_bundle_lock():
+            require_bundle_context_owner(bundle, self._list_product_profile_records_locked())
             stage_id = f"{_utc_now_timestamp().replace(':', '').replace('-', '')}-{time.time_ns()}"
             stage_dir = self._product_authority_bundle_stage_root() / stage_id
             records_dir = stage_dir / "records"
@@ -4512,15 +4514,20 @@ class FilesystemRecordStore:
         driver_id: str = "",
     ) -> tuple[LaunchplaneProductProfileRecord, ...]:
         with self._product_authority_bundle_lock():
-            record_dir = self._record_dir("launchplane_product_profiles")
-            records: list[LaunchplaneProductProfileRecord] = []
-            if record_dir.exists():
-                for record_path in sorted(record_dir.glob("*.json")):
-                    record = self._read_product_profile_record_path(record_path)
-                    if not driver_id or record.driver_id == driver_id:
-                        records.append(record)
-            records.sort(key=lambda record: record.product)
-            return tuple(records)
+            return self._list_product_profile_records_locked(driver_id=driver_id)
+
+    def _list_product_profile_records_locked(
+        self, *, driver_id: str = ""
+    ) -> tuple[LaunchplaneProductProfileRecord, ...]:
+        record_dir = self._record_dir("launchplane_product_profiles")
+        records: list[LaunchplaneProductProfileRecord] = []
+        if record_dir.exists():
+            for record_path in sorted(record_dir.glob("*.json")):
+                record = self._read_product_profile_record_path(record_path)
+                if not driver_id or record.driver_id == driver_id:
+                    records.append(record)
+        records.sort(key=lambda record: record.product)
+        return tuple(records)
 
     def _read_product_profile_record_path(
         self, record_path: Path
