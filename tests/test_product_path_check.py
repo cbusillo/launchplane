@@ -1,4 +1,5 @@
 import unittest
+from typing import cast
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -42,7 +43,7 @@ from control_plane.service_auth import (
 )
 from control_plane.http_routes.path_check import register_product_path_check_read_routes
 from control_plane.http_routes.products import ProductReadRouteDependencies
-from control_plane.http_routes.support import ReadRouteDependencies
+from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _asgi_request, _local_operator_bearer_config
 from tests.support.auth import _StubVerifier, _identity
@@ -585,7 +586,7 @@ class ProductPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(identity=type(identity).__name__):
                 app = FastAPI()
                 register_product_path_check_read_routes(
-                    app,
+                    cast(ApiRouteRegistrar, app),
                     dependencies=ProductReadRouteDependencies(
                         common=ReadRouteDependencies(
                             read_identity=lambda: identity,
