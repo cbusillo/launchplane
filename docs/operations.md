@@ -737,14 +737,13 @@ The first implemented service command is:
 ```bash
 uv run launchplane service serve \
   --state-dir ./state \
-  --database-url "$LAUNCHPLANE_DATABASE_URL" \
   --policy-file ./bootstrap-policy.toml \
   --audience "$LAUNCHPLANE_SERVICE_AUDIENCE"
 ```
 
 The service needs an explicit minimal bootstrap policy input, but the repo no
 longer tracks the live policy. Product and workflow grants should be represented
-as DB-backed authz policy records. Omitting `--database-url` always fails closed,
+as DB-backed authz policy records. Omitting `LAUNCHPLANE_DATABASE_URL` always fails closed,
 including loopback local development, rather than using file-backed JSON state
 as authority. The GitHub OIDC audience is explicit admin/process wiring;
 production code must not default it to a live domain.
