@@ -33,14 +33,21 @@ def _markdown_lines(body: str) -> Iterator[tuple[str, re.Match[str] | None, str]
         yield line, heading, fence
 
 
+TEST_NOTES_HEADINGS = frozenset({"client test notes", "owner test notes"})
+
+
 def owner_test_notes(body: str) -> str:
-    """Collect Owner notes sections, ignoring headings inside fenced examples."""
+    """Collect Client test notes sections, ignoring headings inside fenced examples.
+
+    Pull requests written before the role words changed say "Owner test notes"; both
+    headings are read.
+    """
     lines: list[str] = []
     collecting = False
     level = 0
     for line, heading, _fence in _markdown_lines(body):
         if heading:
-            if heading[2].strip().casefold() == "owner test notes":
+            if heading[2].strip().casefold() in TEST_NOTES_HEADINGS:
                 collecting = True
                 level = len(heading[1])
                 continue
@@ -51,12 +58,13 @@ def owner_test_notes(body: str) -> str:
     return "\n".join(lines).strip()
 
 
-_MISSING_NOTES = re.compile(r"^#(\d+) has no Owner test notes\.$", re.MULTILINE)
+# Batch PRs written before the role words changed say "Owner"; both are read.
+_MISSING_NOTES = re.compile(r"^#(\d+) has no (?:Client|Owner) test notes\.$", re.MULTILINE)
 
 
 def missing_owner_test_notes(pull_request_number: int) -> str:
     """The line a merge-train batch PR carries for a constituent without notes."""
-    return f"#{pull_request_number} has no Owner test notes."
+    return f"#{pull_request_number} has no Client test notes."
 
 
 def pull_requests_missing_owner_test_notes(notes: str) -> tuple[int, ...]:
@@ -158,7 +166,7 @@ def read_release_changes(
                     owner_test_notes=owner_test_notes(pull.get("body") or ""),
                 )
                 if item.pull_request_number in items and items[item.pull_request_number] != item:
-                    raise ValueError("Owner test notes changed while compiling the release.")
+                    raise ValueError("Client test notes changed while compiling the release.")
                 items[item.pull_request_number] = item
                 covered.add(sha)
             if len(pulls) < 100:

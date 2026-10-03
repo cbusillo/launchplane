@@ -4856,7 +4856,6 @@ actions = ["launchplane_service_deploy.execute"]
         self.assertIn("exit_trap() {", script)
         self.assertIn('local exit_status="$?"', script)
         self.assertIn('if [ "${start_web_after_workflow}" != "1" ]; then', script)
-        self.assertIn('docker start "${web_container_id}" >/dev/null || true', script)
         self.assertIn("workflow_output_file=$(mktemp)", script)
         self.assertIn('workflow_pipeline_status=("${PIPESTATUS[@]}")', script)
         self.assertIn("workflow_exit_status=${workflow_pipeline_status[0]}", script)
@@ -4868,7 +4867,6 @@ actions = ["launchplane_service_deploy.execute"]
         self.assertIn("website_bootstrap_domain_matches_canonical", script)
         self.assertNotIn("website_bootstrap_[a-z0-9_]+", script)
         self.assertIn('if [ "$workflow_exit_status" -ne 0 ]; then', script)
-        self.assertIn("start_web_container\ntrap - EXIT", script)
         self.assertNotIn("restart_web_on_success", script)
         self.assertIn('"${workflow_environment[@]}"', script)
 

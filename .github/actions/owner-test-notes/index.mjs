@@ -1,6 +1,9 @@
 import fs from "node:fs";
 import process from "node:process";
 
+// Pull requests written before the role words changed say "Owner test notes".
+const HEADINGS = new Set(["client test notes", "owner test notes"]);
+
 function ownerTestNotes(body) {
   const notes = [];
   let collecting = false;
@@ -13,7 +16,7 @@ function ownerTestNotes(body) {
     }
     const heading = fence ? null : /^(#{1,6})\s+(.+?)\s*#*\s*$/u.exec(line);
     if (heading) {
-      if (heading[2].trim().toLowerCase() === "owner test notes") {
+      if (HEADINGS.has(heading[2].trim().toLowerCase())) {
         collecting = true;
         level = heading[1].length;
         continue;
@@ -27,14 +30,14 @@ function ownerTestNotes(body) {
 
 function main() {
   if (process.env.GITHUB_EVENT_NAME !== "pull_request") {
-    throw new Error("Owner test notes must run on a pull_request event.");
+    throw new Error("Client test notes must run on a pull_request event.");
   }
   const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
   const body = event.pull_request?.body;
   if (!ownerTestNotes(typeof body === "string" ? body : "")) {
-    throw new Error('Add an "Owner test notes" heading and instructions. "Nothing for the owner to test" is valid.');
+    throw new Error('Add a "Client test notes" heading and instructions. "Nothing for the Client to test" is valid.');
   }
-  console.log("Owner test notes are present. Their content is reviewed by the Owner at release.");
+  console.log("Client test notes are present. Their content is reviewed by the Client at release.");
 }
 
 try {

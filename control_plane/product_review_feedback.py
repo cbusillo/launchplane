@@ -1,4 +1,4 @@
-"""GitHub projection of immutable Owner decisions, including their complete prose."""
+"""GitHub projection of immutable Client decisions, including their complete prose."""
 
 from collections.abc import Callable
 import json
@@ -11,9 +11,9 @@ from control_plane.github_payload import required_positive_int
 
 def validate_owner_feedback_decision(decision: ProductReviewDecisionRecord) -> None:
     if not re.fullmatch(r"[a-zA-Z0-9_.:-]+", decision.record_id):
-        raise ValueError("Owner feedback requires a safe decision identifier.")
+        raise ValueError("Client feedback requires a safe decision identifier.")
     if not re.fullmatch(r"[0-9a-fA-F]{40}", decision.head_sha):
-        raise ValueError("Owner feedback requires the reviewed commit.")
+        raise ValueError("Client feedback requires the reviewed commit.")
 
 
 def owner_feedback_comment(decision: ProductReviewDecisionRecord, *, review_url: str) -> str:
@@ -30,14 +30,14 @@ def owner_feedback_comment(decision: ProductReviewDecisionRecord, *, review_url:
         (
             f"<!-- launchplane:product-review:{decision.record_id} -->",
             f"<!-- launchplane:owner-review {encoded} -->",
-            "## Owner review from Launchplane",
+            "## Client review from Launchplane",
             f"**{decision.decision.replace('_', ' ').capitalize()}** by "
             f"`{decision.owner_github_login}` (GitHub ID `{decision.owner_github_id}`).",
             f"Recorded at: {decision.decided_at}",
             f"Reviewed commit: `{decision.head_sha}`",
             f"[Decision in Launchplane]({review_url}) — record `{decision.record_id}`",
             "",
-            "### Owner's feedback",
+            "### Client's feedback",
             fence,
             literal_reason,
             fence,
@@ -64,10 +64,10 @@ def publish_owner_feedback(
     for page in range(1, 11):
         comments = api_request(path=f"{path}?per_page=100&page={page}", token=token)
         if not isinstance(comments, list):
-            raise ValueError("Owner feedback comment lookup is unavailable.")
+            raise ValueError("Client feedback comment lookup is unavailable.")
         for comment in comments:
             if not isinstance(comment, dict):
-                raise ValueError("Owner feedback comment lookup is incomplete.")
+                raise ValueError("Client feedback comment lookup is incomplete.")
             text = comment.get("body")
             if not isinstance(text, str) or not text.startswith(marker + "\n"):
                 continue
@@ -79,9 +79,9 @@ def publish_owner_feedback(
         if len(comments) < 100:
             break
     else:
-        raise ValueError("Owner feedback comment lookup exceeds the supported size.")
+        raise ValueError("Client feedback comment lookup exceeds the supported size.")
     if len(matches) > 1:
-        raise ValueError("More than one Owner feedback receipt was found.")
+        raise ValueError("More than one Client feedback receipt was found.")
     comment = (
         matches[0]
         if matches
@@ -89,7 +89,7 @@ def publish_owner_feedback(
     )
     comment_id = required_positive_int(
         comment.get("id") if isinstance(comment, dict) else None,
-        "Owner feedback delivery was not confirmed.",
+        "Client feedback delivery was not confirmed.",
         error_type=ValueError,
     )
     if matches and matches[0].get("body") != body:
@@ -103,7 +103,7 @@ def publish_owner_feedback(
             body={"body": body},
         )
         if not isinstance(updated, dict) or updated.get("id") != comment_id:
-            raise ValueError("Owner feedback repair was not confirmed.")
+            raise ValueError("Client feedback repair was not confirmed.")
     return (
         f"https://github.com/{decision.repository}/pull/{decision.pull_request_number}"
         f"#issuecomment-{comment_id}"

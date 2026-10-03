@@ -77,13 +77,13 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
     def test_marked_pull_request_without_an_owner_says_so(self) -> None:
         markdown = self._ready_markdown(owner_review_requested=True)
 
-        self.assertIn("no Owner is set for this product", markdown)
-        self.assertNotIn("@", markdown.split("## Owner review", 1)[1])
+        self.assertIn("no Client is set for this product", markdown)
+        self.assertNotIn("@", markdown.split("## Client review", 1)[1])
 
     def test_unmarked_pull_request_has_no_owner_section(self) -> None:
         markdown = self._ready_markdown(owner_login="site-owner")
 
-        self.assertNotIn("Owner review", markdown)
+        self.assertNotIn("Client review", markdown)
         self.assertNotIn("@site-owner", markdown)
 
     def test_cleanup_failure_without_resource_evidence_does_not_claim_preview_exists(

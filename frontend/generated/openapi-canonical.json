@@ -32724,7 +32724,7 @@
       },
       "ProductReviewCarry": {
         "additionalProperties": false,
-        "description": "Where a carried acceptance came from: the Client decided on another head.\n\n`merge_train_base_refresh`: the merge train only merged the base branch into the\npull request, and the pull request's change against its base is byte-identical.",
+        "description": "Where a carried acceptance came from: the Client decided on another head.\n\n`merge_train_base_refresh`: the merge train only merged the base branch into the\npull request, and the pull request's change against its base adds and removes\nthe same lines.",
         "properties": {
           "head_sha": {
             "title": "Head Sha",
@@ -32797,7 +32797,7 @@
       },
       "ProductReviewDecisionRecord": {
         "additionalProperties": false,
-        "description": "One Owner decision about one pull request preview.\n\nThe decision is a recorded opinion: it never merges or deploys anything.",
+        "description": "One Client decision about one pull request preview.\n\nThe decision is a recorded opinion: it never merges or deploys anything.",
         "properties": {
           "base_branch": {
             "default": "",
@@ -79356,7 +79356,7 @@
             "description": "Service Unavailable"
           }
         },
-        "summary": "Read the Owner review page for one pull request",
+        "summary": "Read the Client review page for one pull request",
         "tags": [
           "product-review"
         ]
@@ -79449,7 +79449,7 @@
             "description": "Service Unavailable"
           }
         },
-        "summary": "Record the product Owner's accept or request-changes decision",
+        "summary": "Record the product Client's accept or request-changes decision",
         "tags": [
           "product-review"
         ]
@@ -79552,7 +79552,7 @@
             "description": "Service Unavailable"
           }
         },
-        "summary": "Retry delivery of a saved Owner decision without recording a new decision",
+        "summary": "Retry delivery of a saved Client decision without recording a new decision",
         "tags": [
           "product-review"
         ]
