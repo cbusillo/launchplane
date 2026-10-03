@@ -619,6 +619,16 @@ def _resume_merge_train_controller_state(
             include_lineage_retirements=True,
         )
         if landed_record is None:
+            if lease.record.active_phase == "retire_stale_policy_landing":
+                return _resume_unrecorded_landing_retirement(
+                    trace_id=trace_id,
+                    recorded_at=recorded_at,
+                    github_client=github_client,
+                    candidate_store=candidate_store,
+                    landing_store=landing_store,
+                    landing_record=planned_record,
+                    lease=lease,
+                )
             return None
         if lease.record.active_phase == "retire_stale_policy_landing":
             return _finish_retired_policy_landing(
@@ -1482,11 +1492,42 @@ def _retire_changed_policy_landing(
             "landing_plan_record_id": landing_record.record_id,
             "landing_plan_id": plan.plan_id,
             "expected_effect_sha": plan.candidate_sha,
+            "retirement_source": retirement_source,
         },
     )
+    return _record_landing_retirement(
+        trace_id=trace_id,
+        recorded_at=recorded_at,
+        github_client=github_client,
+        candidate_store=candidate_store,
+        landing_store=landing_store,
+        candidate_record=candidate_record,
+        landing_record=landing_record,
+        retirement_source=retirement_source,
+        lease=lease,
+    )
+
+
+def _record_landing_retirement(
+    *,
+    trace_id: str,
+    recorded_at: str,
+    github_client: GitHubMergeTrainClient,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    landing_store: MergeTrainBatchLandingPlanRecordStore,
+    candidate_record: MergeTrainBatchCandidateRecord,
+    landing_record: MergeTrainBatchLandingPlanRecord,
+    retirement_source: str,
+    lease: MergeTrainControllerLeaseContext,
+) -> dict[str, object]:
+    plan = landing_record.landing_plan
     if plan.candidate_pull_request_number is not None:
+        # Keep the retirement phase so an interruption after the close resumes here (#2846).
         _close_service_batch_pull_request(
-            github_client=github_client, candidate_record=candidate_record, lease=lease
+            github_client=github_client,
+            candidate_record=candidate_record,
+            lease=lease,
+            active_phase="retire_stale_policy_landing",
         )
     retired_record = build_merge_train_batch_landing_plan_record(
         landing_plan=stale_merge_train_landing_plan(plan),
@@ -1496,6 +1537,44 @@ def _retire_changed_policy_landing(
     landing_store.write_merge_train_batch_landing_plan_record(retired_record)
     return _finish_retired_policy_landing(
         candidate_store=candidate_store, retired_record=retired_record, lease=lease
+    )
+
+
+def _resume_unrecorded_landing_retirement(
+    *,
+    trace_id: str,
+    recorded_at: str,
+    github_client: GitHubMergeTrainClient,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    landing_store: MergeTrainBatchLandingPlanRecordStore,
+    landing_record: MergeTrainBatchLandingPlanRecord,
+    lease: MergeTrainControllerLeaseContext,
+) -> dict[str, object] | None:
+    """Finish a retirement interrupted before its record was written.
+
+    The batch PR may already be closed, so a normal landing pass could record a
+    generic stale landing instead. Closing again is a no-op on a closed PR.
+    """
+    retirement_source = str(lease.record.step_payload.get("retirement_source") or "")
+    if retirement_source not in {"policy-changed-landing", "lineage-changed-landing"}:
+        return None
+    candidate_record = _candidate_record_for_landing_plan(
+        record_store=candidate_store, landing_plan_record=landing_record
+    )
+    if candidate_record is None:
+        raise MergeTrainControllerRequestError(
+            "Retirement resume requires the exact recorded candidate."
+        )
+    return _record_landing_retirement(
+        trace_id=trace_id,
+        recorded_at=recorded_at,
+        github_client=github_client,
+        candidate_store=candidate_store,
+        landing_store=landing_store,
+        candidate_record=candidate_record,
+        landing_record=landing_record,
+        retirement_source=retirement_source,
+        lease=lease,
     )
 
 
@@ -1859,6 +1938,7 @@ def _close_service_batch_pull_request(
     github_client: GitHubMergeTrainClient,
     candidate_record: MergeTrainBatchCandidateRecord,
     lease: MergeTrainControllerLeaseContext,
+    active_phase: str = "close_batch_pull_request",
 ) -> None:
     candidate = candidate_record.candidate
     if (
@@ -1866,7 +1946,7 @@ def _close_service_batch_pull_request(
         and len(candidate.entries) > 1
         and candidate.candidate_sha
     ):
-        lease.checkpoint(active_phase="close_batch_pull_request")
+        lease.checkpoint(active_phase=active_phase)
         github_client.close_batch_pull_request(candidate=candidate)
 
 
