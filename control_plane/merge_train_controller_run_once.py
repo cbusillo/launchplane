@@ -10,6 +10,7 @@ from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
     MergeTrainBatchEntry,
+    MergeTrainBatchHeldOutEntry,
     MergeTrainBatchLandingEntry,
     MergeTrainBatchLandingPlan,
     MergeTrainBatchLandingPlanRecord,
@@ -66,6 +67,7 @@ from control_plane.merge_train_batch_landing import (
 )
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
+    MergeTrainGitHubCandidateEntryConflictError,
     MergeTrainGitHubError,
     MergeTrainGitHubMergeRejectedError,
     MergeTrainGitHubStaleHeadError,
@@ -1944,8 +1946,17 @@ def _advance_active_candidate_record(
             except MergeTrainGitHubStaleHeadError as error:
                 controller_action = "candidate_failed"
                 candidate_build_error = error
+                held_out = active_candidate_record.candidate.held_out
+                if isinstance(error, MergeTrainGitHubCandidateEntryConflictError):
+                    held_out = (
+                        *held_out,
+                        MergeTrainBatchHeldOutEntry(
+                            pull_request_number=error.pull_request_number,
+                            head_sha=error.head_sha,
+                        ),
+                    )
                 candidate = active_candidate_record.candidate.model_copy(
-                    update={"status": "failed", "updated_at": recorded_at}
+                    update={"status": "failed", "updated_at": recorded_at, "held_out": held_out}
                 )
         else:
             candidate = active_candidate_record.candidate
@@ -1999,7 +2010,11 @@ def _advance_active_candidate_record(
             or "Merge train candidate evidence no longer matches GitHub."
         )
         result["error"] = {
-            "code": "merge_train_github_stale_state",
+            "code": (
+                "merge_train_candidate_entry_conflict"
+                if isinstance(candidate_build_error, MergeTrainGitHubCandidateEntryConflictError)
+                else "merge_train_github_stale_state"
+            ),
             "message": message,
         }
         result["details"] = {
@@ -2059,14 +2074,16 @@ def _reflow_stale_candidate_record(
         repository=request.repository,
         base_branch=request.base_branch,
     )
-    candidate_snapshot = snapshot
+    candidate_snapshot = _without_held_out_pull_requests(
+        snapshot=snapshot, held_out=candidate_record.candidate.held_out
+    )
     stack_collapse_root = candidate_record.candidate.stack_collapse_root
     if stack_collapse_root is not None:
         candidate_snapshot = snapshot.model_copy(
             update={
                 "pull_requests": tuple(
                     pull_request
-                    for pull_request in snapshot.pull_requests
+                    for pull_request in candidate_snapshot.pull_requests
                     if pull_request.number == stack_collapse_root.root_pull_request_number
                 )
             }
@@ -2874,6 +2891,16 @@ def try_reflow_failed_merge_train_candidate(
         )
     except Exception:
         return None
+    held_out = tuple(
+        entry
+        for entry in active_candidate_record.candidate.held_out
+        if any(
+            (pull_request.number, pull_request.head_sha)
+            == (entry.pull_request_number, entry.head_sha)
+            for pull_request in snapshot.pull_requests
+        )
+    )
+    snapshot = _without_held_out_pull_requests(snapshot=snapshot, held_out=held_out)
     dry_run_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
     if (
         dry_run_result.intended_next_action == "update_branch"
@@ -2926,6 +2953,7 @@ def try_reflow_failed_merge_train_candidate(
         base_sha=snapshot.base_sha,
         policy_sha256=policy_sha256,
         created_at=recorded_at,
+        held_out=held_out,
     )
     result: dict[str, object] = {
         "repository": candidate.repository,
@@ -3174,6 +3202,31 @@ def _merge_train_stack_collapse_record_matches_landing_plan(
     except ValueError:
         return False
     return True
+
+
+def _without_held_out_pull_requests(
+    *,
+    snapshot: MergeTrainDryRunSnapshot,
+    held_out: tuple[MergeTrainBatchHeldOutEntry, ...],
+) -> MergeTrainDryRunSnapshot:
+    """Leave out pull requests a candidate holds out, while their heads are unchanged.
+
+    A pull request that conflicted with the candidate built before it stays out
+    of replacement candidates, so the rest of the queue can land. A new head
+    brings it back.
+    """
+    held = {(entry.pull_request_number, entry.head_sha) for entry in held_out}
+    if not held:
+        return snapshot
+    return snapshot.model_copy(
+        update={
+            "pull_requests": tuple(
+                pull_request
+                for pull_request in snapshot.pull_requests
+                if (pull_request.number, pull_request.head_sha) not in held
+            )
+        }
+    )
 
 
 def _merge_train_candidate_matches_dry_run_queue(
