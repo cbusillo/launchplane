@@ -2288,7 +2288,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_api.update_dokploy_target_env",
-            ),
+            ) as update_env,
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_compose.ensure_compose_web_domain_route",
                 return_value="domain-cm-pr-45",
@@ -2324,7 +2324,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 request=OdooPreviewDokployApplyRequest(
                     dry_run_plan=dry_run,
                     image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
-                    environment_values=_environment_values(),
+                    environment_values={**_environment_values(), "PLATFORM_INSTANCE": "testing"},
                 ),
             )
 
@@ -2332,6 +2332,8 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(result.compose_id, "compose-cm-pr-45")
         self.assertEqual(result.domain_id, "domain-cm-pr-45")
         self.assertFalse(result.created_compose)
+        env_map = dokploy_api.parse_dokploy_env_text(update_env.call_args.kwargs["env_text"])
+        self.assertEqual(env_map["PLATFORM_INSTANCE"], "preview")
         self.assertNotIn("smoke_check", [step.name for step in result.steps])
         delete_domain.assert_not_called()
         delete_compose.assert_not_called()
