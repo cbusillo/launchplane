@@ -873,6 +873,15 @@ def latest_merge_train_stack_collapse_plan_record_for_landing(
     return latest_merge_train_stack_collapse_progress_record(compatible_records)
 
 
+def _group_stack_collapse_records(
+    records: tuple[MergeTrainStackCollapsePlanRecord, ...],
+) -> dict[str, list[MergeTrainStackCollapsePlanRecord]]:
+    groups: dict[str, list[MergeTrainStackCollapsePlanRecord]] = {}
+    for record in records:
+        groups.setdefault(record.plan.collapse_id, []).append(record)
+    return groups
+
+
 def stack_collapse_records_for_completed_landing(
     *,
     record_store: MergeTrainStackCollapsePlanRecordStore,
@@ -894,10 +903,8 @@ def stack_collapse_records_for_completed_landing(
     )
     contained: dict[tuple[str, str], bool] = {}
     landed_records: list[MergeTrainStackCollapsePlanRecord] = []
-    for collapse_id in sorted({record.plan.collapse_id for record in records}):
-        record = latest_merge_train_stack_collapse_progress_record(
-            tuple(record for record in records if record.plan.collapse_id == collapse_id)
-        )
+    for progress_records in _group_stack_collapse_records(records).values():
+        record = latest_merge_train_stack_collapse_progress_record(tuple(progress_records))
         if record is None or not (
             record.plan.status in {"waiting_for_root_checks", "ready_for_train"}
             and record.plan.policy_key == landing_plan.policy_key
@@ -1547,8 +1554,12 @@ def _finish_landed_merge_train_batch(
             )
         reconciled_records.append(collapse_record)
     # Preserve the single-stack response for existing readers.
-    result["merge_train_stack_collapse_plan_record_id"] = reconciled_records[-1].record_id
-    result["stack_collapse_plan"] = reconciled_records[-1].plan.model_dump(mode="json")
+    newest_record = max(
+        reconciled_records,
+        key=lambda record: (record.plan.created_at, record.updated_at, record.record_id),
+    )
+    result["merge_train_stack_collapse_plan_record_id"] = newest_record.record_id
+    result["stack_collapse_plan"] = newest_record.plan.model_dump(mode="json")
     result["stack_collapse_plans"] = [
         record.plan.model_dump(mode="json") for record in reconciled_records
     ]
@@ -2336,16 +2347,11 @@ def _advance_without_candidate_record(
     waiting_records = stack_collapse_store.list_merge_train_stack_collapse_plan_records(
         repository=request.repository, base_branch=request.base_branch, status="active"
     )
+    record_groups = _group_stack_collapse_records(waiting_records)
     latest_waiting_records = tuple(
         progress
-        for collapse_id in sorted({record.plan.collapse_id for record in waiting_records})
-        if (
-            progress := latest_merge_train_stack_collapse_progress_record(
-                tuple(
-                    record for record in waiting_records if record.plan.collapse_id == collapse_id
-                )
-            )
-        )
+        for records in record_groups.values()
+        if (progress := latest_merge_train_stack_collapse_progress_record(tuple(records)))
         is not None
         and progress.plan.status == "waiting_for_root_checks"
     )
@@ -2357,9 +2363,7 @@ def _advance_without_candidate_record(
         retired_collapse_ids: set[str] = set()
         for record in latest_waiting_records:
             collapse_id = record.plan.collapse_id
-            progress_records = tuple(
-                item for item in waiting_records if item.plan.collapse_id == collapse_id
-            )
+            progress_records = record_groups[collapse_id]
             observed_head = root_heads.get(record.plan.root_pull_request_number)
             if observed_head == stack_collapse_expected_root_head_sha(record.plan):
                 continue
@@ -2791,6 +2795,59 @@ def _advance_from_live_snapshot(
     snapshot = _without_held_out_pull_requests(snapshot=snapshot, held_out=held_out)
     dry_run_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
     selected_pr = dry_run_result.selected_pr
+    if selected_pr is not None:
+        restored_records = tuple(
+            record
+            for record in stack_collapse_store.list_merge_train_stack_collapse_plan_records(
+                repository=request.repository, base_branch=request.base_branch, status="superseded"
+            )
+            if "; retired:" in record.source
+            and record.plan.status == "waiting_for_root_checks"
+            and record.plan.root_pull_request_number == selected_pr.number
+            and stack_collapse_expected_root_head_sha(record.plan) == selected_pr.head_sha
+            and record.plan.policy_sha256 == policy_sha256
+            and record.plan.policy_key == dry_run_result.policy_key
+            and all(
+                pr.head_sha == disposition.expected_head_sha
+                for disposition in record.plan.child_dispositions
+                for pr in snapshot.pull_requests
+                if pr.number == disposition.pull_request_number
+            )
+        )
+        restored_record = latest_merge_train_stack_collapse_progress_record(restored_records)
+        if restored_record is not None:
+            if request.mutate:
+                lease.checkpoint(
+                    active_action=MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
+                    active_phase="resume_returned_stack_root",
+                    active_record_id=restored_record.record_id,
+                    active_pull_request_number=selected_pr.number,
+                )
+                restored_record = build_merge_train_stack_collapse_plan_record(
+                    plan=restored_record.plan.model_copy(update={"updated_at": recorded_at}),
+                    source=f"service:controller:resume-retired-collapse:{trace_id}",
+                    updated_at=recorded_at,
+                )
+                stack_collapse_store.write_merge_train_stack_collapse_plan_record(restored_record)
+            restored_result, snapshot = _advance_waiting_stack_collapse_record(
+                request=request,
+                policy=policy,
+                policy_sha256=policy_sha256,
+                repository_policy=policy.find_repository_policy(
+                    repository=request.repository, base_branch=request.base_branch
+                ),
+                transport=transport,
+                github_client=github_client,
+                candidate_store=candidate_store,
+                stack_collapse_store=stack_collapse_store,
+                waiting_collapse_record=restored_record,
+                trace_id=trace_id,
+                recorded_at=recorded_at,
+                lease=lease,
+                snapshot=snapshot,
+            )
+            if restored_result is not None:
+                return restored_result
     if selected_pr is not None and merge_train_snapshot_has_stack_topology(
         snapshot=snapshot, dry_run_result=dry_run_result
     ):

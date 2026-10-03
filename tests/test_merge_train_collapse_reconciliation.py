@@ -132,6 +132,95 @@ class CollapseReconciliationTests(unittest.IsolatedAsyncioTestCase):
                         else:
                             self.assertTrue(all(record.status == "active" for record in records))
 
+    async def test_returning_root_resumes_its_retired_wait_without_recollapse(self) -> None:
+        present = False
+        changed_child = False
+
+        class Reader(_FakeCollapsedRootStackedMergeTrainSnapshotReader):
+            def read_merge_train_snapshot(
+                self, *, repository: str, base_branch: str
+            ) -> MergeTrainDryRunSnapshot:
+                snapshot = super().read_merge_train_snapshot(
+                    repository=repository, base_branch=base_branch
+                )
+                if changed_child:
+                    snapshot = snapshot.model_copy(
+                        update={
+                            "pull_requests": tuple(
+                                pr.model_copy(update={"head_sha": "changed-child"})
+                                if pr.number == 2
+                                else pr
+                                for pr in snapshot.pull_requests
+                            )
+                        }
+                    )
+                return snapshot if present else snapshot.model_copy(update={"pull_requests": ()})
+
+        with (
+            TemporaryDirectory() as directory,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(directory) / "state"
+            _seed_merge_train_policy(state_dir)
+            _seed_executed_merge_train_stack_collapse_plan_record(state_dir)
+            store = FilesystemRecordStore(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            with (
+                patch("control_plane.merge_train_github.GitHubMergeTrainSnapshotReader", Reader),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
+            ):
+                response = await _post_merge_train_controller_run_once(app, payload)
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertFalse(
+                    store.list_merge_train_stack_collapse_plan_records(status="active")
+                )
+                present = True
+                changed_child = True
+                changed_response = await _post_merge_train_controller_run_once(
+                    app, {**payload, "mutate": False}
+                )
+                self.assertEqual(changed_response.status_code, 202, changed_response.text)
+                self.assertEqual(
+                    changed_response.json()["result"]["controller_action"], "plan_stack_collapse"
+                )
+                self.assertFalse(
+                    store.list_merge_train_stack_collapse_plan_records(status="active")
+                )
+                changed_child = False
+                dry_response = await _post_merge_train_controller_run_once(
+                    app, {**payload, "mutate": False}
+                )
+                self.assertEqual(dry_response.status_code, 202, dry_response.text)
+                self.assertEqual(
+                    dry_response.json()["result"]["controller_action"], "admit_collapsed_root"
+                )
+                self.assertFalse(
+                    store.list_merge_train_stack_collapse_plan_records(status="active")
+                )
+                response = await _post_merge_train_controller_run_once(app, payload)
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertEqual(
+                    response.json()["result"]["controller_action"], "admit_collapsed_root"
+                )
+                active = store.list_merge_train_stack_collapse_plan_records(status="active")
+                self.assertTrue(active)
+                self.assertTrue(
+                    all(record.plan.status == "waiting_for_root_checks" for record in active)
+                )
+
     async def test_reconciles_every_root_and_resumes_after_second_stack_failure(self) -> None:
         comments: list[int] = []
         failed = False
