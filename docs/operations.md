@@ -1934,6 +1934,10 @@ The Launchplane service entrypoint runs
 startup migration through a PostgreSQL advisory lock and advances only to the
 image's explicit migration target. This keeps hosted service startup fail-closed
 on schema drift while preserving expand/contract rollout and rollback boundaries.
+Compose supplies the database URL through its service environment file. The
+entrypoint keeps it in the environment for migration and HTTP startup;
+`launchplane service serve` refuses `--database-url` arguments without printing
+their values. Set `LAUNCHPLANE_DATABASE_URL` in the service environment instead.
 The self-deploy workflow should not run shared database migrations from the
 GitHub runner. Its deployed-runtime smoke requires the observed database
 revision to appear in the image's reported compatible-revision set before the
