@@ -1679,8 +1679,8 @@ def register_privileged_operation_routes(
                 ),
                 "candidate_principal_unavailable": (
                     "authorization_candidate_principal_unavailable",
-                    "The service has no exact configured local operator identity for the "
-                    "operator's agent.",
+                    "The service has no exact configured local_operator identity for the "
+                    "Director's agent.",
                 ),
                 "candidate_products_required": (
                     "authorization_candidate_products_required",

@@ -214,7 +214,7 @@ def verify_odoo_stable_readiness(
 def _http_text(url: str, *, timeout_seconds: int) -> tuple[int, str, str]:
     request = Request(url, headers={"User-Agent": "Launchplane-Odoo-Verify/1"})
     try:
-        with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310 - operator-configured URLs only.
+        with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310 - admin-configured URLs only.
             body = response.read(1024 * 512).decode("utf-8", errors="replace")
             content_type = response.headers.get("Content-Type", "")
             return response.status, body, content_type

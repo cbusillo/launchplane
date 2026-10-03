@@ -31,7 +31,7 @@ WaitForHealthcheck = Callable[[str, int], HealthcheckPass]
 
 def wait_for_json_healthcheck(*, url: str, timeout_seconds: int) -> HealthcheckPass:
     request = Request(url, method="GET")
-    with urlopen(request, timeout=min(5, timeout_seconds)) as response:  # noqa: S310 - operator-configured URL.
+    with urlopen(request, timeout=min(5, timeout_seconds)) as response:  # noqa: S310 - admin-configured URL.
         body = response.read(1024 * 256)
         if not 200 <= response.status < 300:
             raise click.ClickException(f"http {response.status}")

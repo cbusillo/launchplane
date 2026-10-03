@@ -982,7 +982,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             semantic_review = review.json()["review"]
             self.assertEqual(semantic_review["title"], expected_title)
             if expected_title == "Managed authorization policy review":
-                self.assertNotIn("operator's agent", semantic_review["change"]["summary"])
+                self.assertNotIn("Director's agent", semantic_review["change"]["summary"])
                 self.assertNotIn("Dokploy", semantic_review["change"]["summary"])
 
     async def test_agent_product_setup_candidate_noops_and_removal(self) -> None:

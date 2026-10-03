@@ -1333,7 +1333,7 @@ def evaluate_runner_host_hygiene(
         summary=(
             "runner host hygiene satisfies report-only policy"
             if status == "healthy"
-            else "runner host hygiene needs operator attention"
+            else "runner host hygiene needs admin attention"
         ),
         next_steps=_next_steps(status),
     )
@@ -2234,7 +2234,7 @@ def _adapter_next_steps(*, status: RunnerHostHygieneAdapterBoundaryStatus) -> tu
     if status == "blocked":
         return ("resolve adapter boundary blockers before wiring a host mutation path",)
     return (
-        "review the adapter proposal with operators before implementation",
+        "review the adapter proposal with an admin before implementation",
         "implement the narrow host adapter behind the approved execution lane",
         "write planned, completed, or failed audit records to Launchplane-owned storage",
     )

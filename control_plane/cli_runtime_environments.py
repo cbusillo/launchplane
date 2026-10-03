@@ -365,7 +365,7 @@ def environments_list(database_url: str) -> None:
     "--include-secret-values",
     is_flag=True,
     default=False,
-    help="Print resolved secret-shaped values. Use only in trusted operator shells.",
+    help="Print resolved secret-shaped values. Use only in trusted admin shells.",
 )
 def environments_resolve(
     context_name: str,

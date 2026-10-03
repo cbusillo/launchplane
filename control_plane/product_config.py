@@ -93,7 +93,7 @@ class _ProductConfigSecretWritePlan(TypedDict):
 
 
 class ProductConfigError(ValueError):
-    """Operator-facing product config validation or planning failure."""
+    """Admin-facing product config validation or planning failure."""
 
     def __init__(self, message: str, *, code: str = "invalid_request") -> None:
         super().__init__(message)

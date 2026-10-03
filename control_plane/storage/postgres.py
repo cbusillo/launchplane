@@ -9128,7 +9128,7 @@ class PostgresRecordStore(HumanSessionStore):
                             "error_code": "operation_reconciliation_required",
                             "error_message": (
                                 f"Odoo stable bootstrap operation lease expired in "
-                                f"phase {record.phase!r}; provider state requires operator "
+                                f"phase {record.phase!r}; provider state requires admin "
                                 "reconciliation before the lane can be released."
                             ),
                         }
@@ -9559,7 +9559,7 @@ class PostgresRecordStore(HumanSessionStore):
                             "error_code": "operation_reconciliation_required",
                             "error_message": (
                                 f"Odoo stable target replacement operation lease expired in "
-                                f"phase {record.phase!r}; provider state requires operator "
+                                f"phase {record.phase!r}; provider state requires admin "
                                 "reconciliation before the lane can be released."
                             ),
                         }
@@ -10082,7 +10082,7 @@ class PostgresRecordStore(HumanSessionStore):
                             "error_code": "operation_reconciliation_required",
                             "error_message": (
                                 "Odoo production backup restore lease expired in "
-                                f"phase {record.phase!r}; provider state requires operator "
+                                f"phase {record.phase!r}; provider state requires admin "
                                 "reconciliation before the lane can be released."
                             ),
                         }
@@ -10392,7 +10392,7 @@ class PostgresRecordStore(HumanSessionStore):
         """Requeue an operation whose lease expired before any provider effect; hold the rest.
 
         Past the safe phases the operation may have changed prod, so it waits as
-        ``reconciliation_required`` for an operator instead of running again.
+        ``reconciliation_required`` for an admin instead of running again.
         """
 
         statement = select(row_type).where(
@@ -11222,7 +11222,7 @@ class PostgresRecordStore(HumanSessionStore):
                             "error_code": "operation_reconciliation_required",
                             "error_message": (
                                 "Odoo retained-volume backup import lease expired in "
-                                f"phase {record.phase!r}; provider state requires operator "
+                                f"phase {record.phase!r}; provider state requires admin "
                                 "reconciliation before the lane can be released."
                             ),
                         }

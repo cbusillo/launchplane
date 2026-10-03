@@ -344,7 +344,7 @@ class ProductRollbackPathCheckTests(unittest.TestCase):
             profile=self.profile,
             record_store=self.store,
             action_allowed=self.actions,
-            caller_is_policy_administrator=lambda: allowed,
+            caller_is_admin=lambda: allowed,
             read_release_review=self.review,
             generated_at="2026-10-03T00:00:00Z",
         )
@@ -447,7 +447,7 @@ class ProductRollbackPathCheckTests(unittest.TestCase):
             profile=self.profile,
             record_store=self.store,
             action_allowed=Mock(side_effect=RuntimeError("private")),
-            caller_is_policy_administrator=lambda: False,
+            caller_is_admin=lambda: False,
             read_release_review=Mock(),
             generated_at="2026-10-03T00:00:00Z",
         )
@@ -466,7 +466,7 @@ class ProductRollbackPathCheckTests(unittest.TestCase):
             profile=self.profile,
             record_store=self.store,
             action_allowed=lambda *_args: True,
-            caller_is_policy_administrator=lambda: True,
+            caller_is_admin=lambda: True,
             read_release_review=Mock(),
             generated_at="2026-10-03T00:00:00Z",
             caller_can_use_generic_rollback=False,
