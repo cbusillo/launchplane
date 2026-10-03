@@ -27,6 +27,9 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane import authz_grant_service, authz_policy_activation
 from control_plane.authz_candidate_preparation import (
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS,
@@ -918,6 +921,110 @@ def _owner_acceptance_system_event(
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_compose_source_completion_holds_ownership_across_provider_update(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            profile = _public_ingress_profile().model_copy(
+                update={
+                    "lanes": (
+                        ProductLaneProfile(
+                            context="postgres-public-ingress-test", instance="testing"
+                        ),
+                    )
+                }
+            )
+            store.write_product_profile_record(profile)
+            target = DokployTargetRecord(
+                context=profile.lanes[0].context,
+                instance="testing",
+                target_type="compose",
+                source_type="github",
+                updated_at=profile.updated_at,
+            )
+            target_id = DokployTargetIdRecord(
+                context=target.context,
+                instance=target.instance,
+                target_id="compose-testing",
+                updated_at=profile.updated_at,
+            )
+            provider = ProviderTargetRecord.from_dokploy_records(
+                target_record=target, target_id_record=target_id
+            )
+            store.write_dokploy_target_record(target)
+            store.write_dokploy_target_id_record(target_id)
+            store.write_provider_target_record(provider)
+            entered_provider = threading.Event()
+            release_provider = threading.Event()
+            owner_write_started = threading.Event()
+            owner_write_finished = threading.Event()
+            second = PostgresRecordStore(database_url=store.database_url)
+            errors: list[BaseException] = []
+            replacement = target.model_copy(
+                update={
+                    "source_type": "git",
+                    "custom_git_url": f"https://github.com/{profile.repository}.git",
+                    "custom_git_branch": "main",
+                    "compose_path": "./compose.yml",
+                }
+            )
+
+            def apply_provider() -> None:
+                entered_provider.set()
+                if not release_provider.wait(timeout=5):
+                    raise TimeoutError("Source provider callback timed out")
+
+            def complete_source() -> None:
+                try:
+                    store.complete_dokploy_compose_source(
+                        expected_profile=profile,
+                        expected_record=target,
+                        expected_target_id=target_id,
+                        expected_provider_target=provider,
+                        replacement_record=replacement,
+                        apply_provider=apply_provider,
+                    )
+                except BaseException as error:
+                    errors.append(error)
+
+            def change_repository() -> None:
+                owner_write_started.set()
+                try:
+                    second.write_product_profile_record(
+                        profile.model_copy(update={"repository": "example/new-source"})
+                    )
+                except BaseException as error:
+                    errors.append(error)
+                finally:
+                    owner_write_finished.set()
+
+            completion_thread = threading.Thread(target=complete_source)
+            owner_thread = threading.Thread(target=change_repository)
+            completion_thread.start()
+            try:
+                self.assertTrue(entered_provider.wait(timeout=5))
+                owner_thread.start()
+                self.assertTrue(owner_write_started.wait(timeout=5))
+                self.assertFalse(owner_write_finished.wait(timeout=0.1))
+            finally:
+                release_provider.set()
+                completion_thread.join(timeout=5)
+                if owner_thread.ident is not None:
+                    owner_thread.join(timeout=5)
+                second.close()
+            self.assertEqual(errors, [])
+            self.assertTrue(owner_write_finished.is_set())
+            self.assertEqual(
+                store.read_dokploy_target_record(
+                    context_name=target.context, instance_name=target.instance
+                ),
+                replacement,
+            )
+            self.assertEqual(
+                store.read_provider_target_record(
+                    context_name=target.context, instance_name=target.instance
+                ),
+                provider,
+            )
+
     def test_profile_guard_rejects_a_bundle_after_another_connection_changes_the_owner(
         self,
     ) -> None:

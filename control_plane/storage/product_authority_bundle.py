@@ -15,6 +15,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     is_exclusive_product_context,
     product_context_owner_map,
+    product_target_owner_products,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_environment_record import (
@@ -140,6 +141,9 @@ class ProductAuthorityBundle(BaseModel):
     # bundle commits; checked under the same lock as product-profile writes.
     required_context_owner: tuple[str, str] | None = None
     required_context_owners: tuple[tuple[str, str], ...] = ()
+    # (product, context, instance); an empty instance checks the whole context.
+    # This also covers authorized admins configuring Launchplane itself.
+    required_product_config_target: tuple[str, str, str] | None = None
 
     @model_validator(mode="after")
     def validate_runtime_environment_routes(self) -> ProductAuthorityBundle:
@@ -204,12 +208,21 @@ def require_bundle_context_owner(
     required_owners = bundle.required_context_owners + (
         (bundle.required_context_owner,) if bundle.required_context_owner is not None else ()
     )
-    if not required_owners:
+    if not required_owners and bundle.required_product_config_target is None:
         return
+    profiles = tuple(profiles)
     owners = product_context_owner_map(profiles)
     for product, context in required_owners:
         if not is_exclusive_product_context(context=context, product=product, owners=owners):
             raise ProductContextOwnershipError("The context must belong to the named product only.")
+    if bundle.required_product_config_target is not None:
+        product, context, instance = bundle.required_product_config_target
+        if product_target_owner_products(profiles, context=context, instance=instance) != frozenset(
+            (product,)
+        ):
+            raise ProductProfileConflictError(
+                "Product config target ownership changed before commit."
+            )
 
 
 class ProductAuthorityBundleStore(Protocol):

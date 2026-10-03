@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import json
 from hashlib import sha256
 import logging
@@ -12,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from control_plane.contracts.advisory_check_projection import is_launchplane_projected_check
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
 from control_plane.contracts.merge_train_batch import MergeTrainBatchEntry
+from control_plane.contracts.merge_train_batch import MergeTrainBatchHeldOutEntry
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingEntry
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
@@ -54,9 +56,31 @@ from control_plane.merge_train import MergeTrainLabelActor
 from control_plane.merge_train import MergeTrainMergeableState
 from control_plane.merge_train import MergeTrainPullRequestSnapshot
 from control_plane.merge_train import MergeTrainPullRequestState
+from control_plane.merge_train import MergeTrainQueueEntry
 from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionDeniedError
 
 logger = logging.getLogger(__name__)
+
+
+class MergeTrainBranchRefreshRecorder(Protocol):
+    """Keeps the train's own branch refreshes, bound to the commit the provider made."""
+
+    def __call__(
+        self,
+        *,
+        repository: str,
+        pull_request_number: int,
+        expected_head_sha: str,
+        result_head_sha: str,
+        merged_base_sha: str,
+        requested_at: datetime,
+    ) -> None: ...
+
+
+# GitHub makes the refresh commit after it answers; read the head back this often.
+BRANCH_REFRESH_READBACK_ATTEMPTS = 10
+BRANCH_REFRESH_READBACK_INTERVAL_SECONDS = 1.0
+
 
 if TYPE_CHECKING:
     from control_plane.tenant_admission_controller import TenantAdmissionTechnicalChecks
@@ -206,9 +230,13 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         *,
         transport: MergeTrainGitHubTransport,
         effect_executor: MergeTrainSemanticEffectExecutor | None = None,
+        branch_refresh_recorder: MergeTrainBranchRefreshRecorder | None = None,
+        wait: Callable[[float], None] = sleep,
     ) -> None:
         self.transport = transport
         self._effect_executor = effect_executor
+        self._branch_refresh_recorder = branch_refresh_recorder
+        self._wait = wait
 
     def read_merge_train_snapshot(
         self, *, repository: str, base_branch: str
@@ -607,6 +635,85 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 error.status_code,
             )
         return _validated_model_update(candidate, status="ready_for_checks")
+
+    def probe_batch_entry_conflicts(
+        self,
+        *,
+        repository: str,
+        base_branch: str,
+        base_sha: str,
+        queue: tuple[MergeTrainQueueEntry, ...],
+        probe_ref: str,
+        checkpoint: Callable[[int | None], None] | None = None,
+    ) -> tuple[MergeTrainBatchHeldOutEntry, ...]:
+        """Find queued heads that do not merge cleanly onto the heads ahead of them.
+
+        GitHub cannot test-merge two pull requests without writing a ref, and a
+        pull request's mergeability is computed only against its base. The probe
+        resets a dedicated construction ref to the base and merges each head in
+        queue order. A conflicting merge writes no commit, so the probe records
+        that head and continues. The probe ref is deleted afterwards; the
+        canonical train ref and pull request branches are never written.
+
+        `probe_ref` belongs to one controller lease acquisition, so a pass that
+        lost its lease cannot reset or delete another pass's probe. `checkpoint`
+        runs before the ref is reset and before each merge, with the pull
+        request about to merge; it renews the lease and raises once the lease
+        is lost, which stops the probe and still deletes its own ref.
+        """
+        lineage = MergeTrainEffectLineage(
+            repository=repository, base_branch=base_branch, batch_id="conflict-probe"
+        )
+        effect_executor = self.semantic_effect_executor
+        if checkpoint is not None:
+            checkpoint(None)
+        merged_pull_request_numbers: list[int] = []
+        held_out: list[MergeTrainBatchHeldOutEntry] = []
+        probe_sha = base_sha
+        try:
+            # Inside the cleanup: a create that got no answer may still have written the ref.
+            effect_executor.prepare_candidate_ref(
+                CandidateRefPrepareEffect(
+                    lineage=lineage, candidate_ref=probe_ref, base_sha=base_sha
+                )
+            )
+            for queue_entry in queue:
+                if checkpoint is not None:
+                    checkpoint(queue_entry.number)
+                try:
+                    merge_outcome = effect_executor.merge_candidate_head(
+                        CandidateHeadMergeEffect(
+                            lineage=lineage,
+                            candidate_ref=probe_ref,
+                            rolling_parent_sha=probe_sha,
+                            pull_request_number=queue_entry.number,
+                            head_sha=queue_entry.head_sha,
+                        )
+                    )
+                except MergeTrainGitHubCandidateEntryConflictError:
+                    held_out.append(
+                        MergeTrainBatchHeldOutEntry(
+                            pull_request_number=queue_entry.number,
+                            head_sha=queue_entry.head_sha,
+                            conflicts_with=tuple(merged_pull_request_numbers),
+                        )
+                    )
+                    continue
+                merged_pull_request_numbers.append(queue_entry.number)
+                probe_sha = merge_outcome.result_sha or probe_sha
+        finally:
+            try:
+                effect_executor.delete_candidate_ref(
+                    CandidateRefDeleteEffect(lineage=lineage, candidate_ref=probe_ref)
+                )
+            except MergeTrainGitHubError as error:
+                # A leftover probe ref has no authority; nothing reads it again.
+                logger.warning(
+                    "Conflict probe ref cleanup failed for %s (GitHub status %s).",
+                    probe_ref,
+                    error.status_code,
+                )
+        return tuple(held_out)
 
     def observe_batch_candidate_checks(
         self, *, candidate: MergeTrainBatchCandidate
@@ -1506,6 +1613,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         self, *, repository: str, pull_request_number: int, expected_head_sha: str
     ) -> None:
         repository_path = _repository_path(repository)
+        requested_at = datetime.now(timezone.utc)
         self.transport.request(
             method="PUT",
             path=f"/repos/{repository_path}/pulls/{pull_request_number}/update-branch",
@@ -1515,6 +1623,75 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 )
             },
         )
+        if self._branch_refresh_recorder is None:
+            return
+        try:
+            result = self._read_branch_refresh_result(
+                repository_path=repository_path,
+                pull_request_number=pull_request_number,
+                expected_head_sha=expected_head_sha.strip().lower(),
+            )
+            if result is None:
+                logger.info(
+                    "The merge train refreshed a pull request but did not see its merge commit.",
+                    extra={"repository": repository, "pull_request_number": pull_request_number},
+                )
+                return
+            result_head_sha, merged_base_sha = result
+            self._branch_refresh_recorder(
+                repository=repository,
+                pull_request_number=pull_request_number,
+                expected_head_sha=expected_head_sha,
+                result_head_sha=result_head_sha,
+                merged_base_sha=merged_base_sha,
+                requested_at=requested_at,
+            )
+        except Exception:
+            # The refresh happened; only carrying a Client's acceptance across it is lost.
+            logger.warning(
+                "The merge train refreshed a pull request but could not record it.",
+                exc_info=True,
+                extra={"repository": repository, "pull_request_number": pull_request_number},
+            )
+
+    def _read_branch_refresh_result(
+        self, *, repository_path: str, pull_request_number: int, expected_head_sha: str
+    ) -> tuple[str, str] | None:
+        """The merge commit this refresh made and the base commit it merged, or None.
+
+        The new head counts only when it is a merge whose first parent is the head
+        the train refreshed from; anything else moved the pull request, not the train.
+        """
+        for attempt in range(BRANCH_REFRESH_READBACK_ATTEMPTS):
+            if attempt:
+                self._wait(BRANCH_REFRESH_READBACK_INTERVAL_SECONDS)
+            pull_request = _json_object(
+                self.transport.request(
+                    method="GET", path=f"/repos/{repository_path}/pulls/{pull_request_number}"
+                ),
+                "GitHub pull request response",
+            )
+            head = pull_request.get("head")
+            head_sha = str(head.get("sha") or "").strip().lower() if isinstance(head, dict) else ""
+            if not head_sha or head_sha == expected_head_sha:
+                continue
+            commit = _json_object(
+                self.transport.request(
+                    method="GET",
+                    path=f"/repos/{repository_path}/git/commits/{quote(head_sha, safe='')}",
+                ),
+                "GitHub commit response",
+            )
+            parents = commit.get("parents")
+            parent_shas = [
+                str(parent.get("sha") or "").strip().lower()
+                for parent in (parents if isinstance(parents, list) else ())
+                if isinstance(parent, dict)
+            ]
+            if len(parent_shas) != 2 or parent_shas[0] != expected_head_sha or not parent_shas[1]:
+                return None
+            return head_sha, parent_shas[1]
+        return None
 
     def merge_pull_request(
         self,
@@ -2625,6 +2802,20 @@ def _base_branch_sha(
 def merge_train_construction_ref(candidate_ref: str) -> str:
     """Locate native construction evidence from the canonical candidate identity."""
     return "refs/heads/launchplane/construct/" + sha256(candidate_ref.encode("utf-8")).hexdigest()
+
+
+def merge_train_conflict_probe_ref(
+    *, repository: str, base_branch: str, lease_owner: str, lease_acquired_at: str
+) -> str:
+    """Locate a conflict probe in the construction namespace.
+
+    The ref is unique to one controller lease acquisition. A pass that outlived
+    its lease cannot reset or delete the probe of the pass that adopted it.
+    """
+    probe_identity = (
+        f"conflict-probe:{repository.lower()}:{base_branch}:{lease_owner}:{lease_acquired_at}"
+    )
+    return "refs/heads/launchplane/construct/" + sha256(probe_identity.encode()).hexdigest()
 
 
 def _verify_candidate_publication(

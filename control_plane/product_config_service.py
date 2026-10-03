@@ -21,6 +21,7 @@ from control_plane.contracts.product_environment_read_model import (
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
+    product_target_owner_products,
     product_config_requirement_applies_to_lane,
 )
 from control_plane.contracts.secret_record import SecretBinding
@@ -42,6 +43,42 @@ class ProductConfigServiceError:
     status_code: int
     code: str
     message: str
+
+
+def resolve_product_config_profile(
+    record_store: PostgresRecordStore,
+    *,
+    product: str,
+    context: str,
+    instance: str,
+    context_wide: bool = False,
+) -> LaunchplaneProductProfileRecord:
+    """Bind a config target to its stored product, independent of the driver."""
+    try:
+        profile = record_store.read_product_profile_record(product)
+    except FileNotFoundError as error:
+        raise control_plane_product_config.ProductConfigError(
+            "Product config target is not owned by the named product.",
+            code="product_config_lane_not_owned",
+        ) from error
+    if not context or not any(
+        lane.context == context and (not instance or lane.instance == instance)
+        for lane in profile.lanes
+    ):
+        raise control_plane_product_config.ProductConfigError(
+            "Product config target is not owned by the named product.",
+            code="product_config_lane_not_owned",
+        )
+    if product_target_owner_products(
+        record_store.list_product_profile_records(),
+        context=context,
+        instance="" if context_wide else instance,
+    ) != frozenset((product,)):
+        raise control_plane_product_config.ProductConfigError(
+            "Product config requires the named product to own the target alone.",
+            code="product_config_lane_not_owned",
+        )
+    return profile
 
 
 def product_config_write_prerequisites(
@@ -280,6 +317,9 @@ def product_config_service_error(
     if error_code == "authorization_denied":
         status_code = 403
         error_message = "The caller cannot read the resolved secret copy source."
+    if error_code == "product_config_lane_not_owned":
+        status_code = 403
+        error_message = "Product config target is not owned by the named product."
     if error_code == "secret_configuration_required":
         status_code = 503
         error_message = "Launchplane service is missing required secret write configuration."

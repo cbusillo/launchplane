@@ -936,6 +936,19 @@ product page rather than a whole-record write: the admin supplies a GitHub
 login, Launchplane resolves and stores the immutable numeric GitHub id, and no
 other profile field changes.
 
+The profile `image.repository` is where a product publishes its images. A
+product publishes to the GHCR package named after its repository, with that
+repository's workflow token. Move a profile there with
+`POST /v1/product-profiles/{product}/image-repository` rather than a
+whole-record write. The dry run shows the repository before and after, and what
+each lane runs now. Apply must name the starting repository the dry run showed,
+and no other profile field changes. The profile's repository applies to
+artifacts a caller supplies: a deploy, a testing deploy, a promotion request.
+An immutable image Launchplane already recorded on a deployment, an inventory or
+a deploy reservation stays valid after the move, so rollback, deploy recovery
+and promotion evidence still work. Promotion refuses a testing lane that runs an
+image outside the current repository.
+
 Expected-config metadata changes use
 `POST /v1/product-profiles/expected-config/apply`. The request carries
 `mode: "dry-run"` or `mode: "apply"`, a product key, a reason, runtime key or
@@ -1382,6 +1395,15 @@ pull request number, the preview URL and head revision the Client looked at, the
 decision (`accepted` or `changes_requested` with its reason), the Client's GitHub
 id and login, and `decided_at`. The newest record for a repository and pull
 request is the current decision. The record authorizes nothing.
+
+A record with `carried_from` was not decided again: it carries an acceptance to
+a new head after a base-only refresh by the merge train (see
+[carried acceptance](owner-acceptance.md#carried-acceptance)). `carried_from`
+names the decision record and head it came from, the reason
+(`merge_train_base_refresh`), and the merge train branch refresh records that
+produced the new head. Its `decided_at` is when Launchplane carried it.
+`base_branch` is the pull request's base branch when the decision was first shown
+on it; an acceptance carries, and a carried acceptance applies, only on that base.
 
 ## Product Reconcile Request Records
 
@@ -2744,6 +2766,17 @@ preflights.
   id is not copied into the compact public queue response.
   The record is evidence for a single Level 1 ordered-queue service call, not
   queue authority for a later pass.
+- Merge train branch refreshes are persisted as
+  `launchplane_merge_train_branch_refreshes` records, one each time the train's
+  GitHub client has GitHub merge a pull request's base branch into it
+  (`update-branch`). Each record stores the repository, base branch, pull request
+  number, the head SHA the train expected, the merge commit GitHub made
+  (`result_head_sha`, read back from the pull request after the request) and the
+  base commit it merged, the request time, and the controller trace id. It is
+  written only when the read-back head is a two-parent merge from the expected
+  head; otherwise, or if the write fails, nothing is recorded and the refresh
+  still stands. It is the proof that exactly that commit was made by the train,
+  used to carry a Client's acceptance across it.
 - Merge train pull-request feedback is persisted as
   `launchplane_merge_train_pr_feedback` records. Each record stores the
   repository/base branch, PR number/url, feedback event, hidden managed-comment

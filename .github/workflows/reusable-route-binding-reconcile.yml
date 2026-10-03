@@ -160,7 +160,7 @@ jobs:
             echo "confirmation must be APPLY LAUNCHPLANE ROUTE BINDING RECONCILE" >&2
             exit 1
           fi
-          if [ -z "${IDEMPOTENCY_KEY// }" ]; then
+          if [[ -z "${IDEMPOTENCY_KEY//[[:space:]]/}" ]]; then
             echo "idempotency_key is required for apply." >&2
             exit 1
           fi

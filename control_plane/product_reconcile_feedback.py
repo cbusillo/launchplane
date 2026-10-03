@@ -35,7 +35,7 @@ from control_plane.contracts.product_reconcile import ProductReconcileRequestRec
 from control_plane.preview_pr_feedback_notifications import (
     deliver_preview_pr_feedback_notifications,
 )
-from control_plane.product_review_status import owner_review_reference_url
+from control_plane.product_review_status import OwnerReviewStatus, owner_review_reference_url
 from control_plane.testing_lane_hold import STAFF_TESTING_HOLD_REASON
 from control_plane.workflows.launchplane import github_api_request, upsert_github_issue_comment
 from control_plane.workflows.preview_pr_feedback import render_preview_pr_feedback_markdown
@@ -48,6 +48,9 @@ _LOGGER = logging.getLogger(__name__)
 
 TestingFeedbackStatus = Literal["queued", "deployed", "waiting", "failed"]
 FeedbackTokenFactory = Callable[[object, LaunchplaneProductProfileRecord], str]
+# Writes the pull request's Owner-review status (carrying an acceptance across a
+# merge train base refresh first); best-effort, returns the status written.
+OwnerReviewStatusWriter = Callable[[LaunchplaneProductProfileRecord, int], OwnerReviewStatus | None]
 
 
 class ReconcileFeedbackStore(Protocol):
@@ -76,6 +79,7 @@ def post_reconcile_feedback(
     public_origin: Callable[[], str],
     source: str,
     recorded_at: str,
+    owner_review_status: OwnerReviewStatusWriter | None = None,
 ) -> dict[str, object] | None:
     """Post this reconcile's result on its PR; return what to keep as the plan's ``pr_feedback``.
 
@@ -94,6 +98,7 @@ def post_reconcile_feedback(
             plan=plan,
             error=error,
             public_origin=public_origin,
+            owner_review_status=owner_review_status,
         )
         if feedback is None:
             return previous_entry
@@ -135,6 +140,7 @@ def _decide_feedback(
     plan: dict[str, object],
     error: str,
     public_origin: Callable[[], str],
+    owner_review_status: OwnerReviewStatusWriter | None = None,
 ) -> _Feedback | None:
     if plan.get("deferred"):
         # A busy lane or a moved PR runs again and says what it did then.
@@ -146,6 +152,7 @@ def _decide_feedback(
             plan=plan,
             error=error,
             public_origin=public_origin,
+            owner_review_status=owner_review_status,
         )
     return _testing_feedback(plan=plan, error=error)
 
@@ -157,6 +164,7 @@ def _preview_feedback(
     plan: dict[str, object],
     error: str,
     public_origin: Callable[[], str],
+    owner_review_status: OwnerReviewStatusWriter | None = None,
 ) -> _Feedback | None:
     action = plan.get("action")
     revision = _text(plan.get("head_sha"))
@@ -190,12 +198,22 @@ def _preview_feedback(
     assert request.pull_request_number is not None
     owner_review = ""
     owner_review_url = ""
+    owner_review_accepted = ""
     if status == "ready" and plan.get("owner_review_requested") is True:
         owner_review, owner_review_url = _owner_review(
             profile=profile,
             pull_request_number=request.pull_request_number,
             public_origin=public_origin,
         )
+        written = (
+            owner_review_status(profile, request.pull_request_number)
+            if owner_review_status is not None and owner_review == "mentioned"
+            else None
+        )
+        if written is not None and written.state == "success":
+            # Said without the @, so an accepted change does not page the Owner again.
+            owner_review = "accepted"
+            owner_review_accepted = written.description.replace("@", "")
     body = render_preview_pr_feedback_markdown(
         marker=PREVIEW_FEEDBACK_MARKER,
         status=status,
@@ -204,9 +222,10 @@ def _preview_feedback(
         revision=revision,
         failure_summary=failure_summary,
         waiting_for=waiting_for,
-        owner_review_requested=owner_review in {"mentioned", "owner_not_set"},
+        owner_review_requested=owner_review in {"mentioned", "owner_not_set", "accepted"},
         owner_login=profile.owner.github_login,
         owner_review_url=owner_review_url,
+        owner_review_accepted=owner_review_accepted,
     )
     return _Feedback(
         status=status,
