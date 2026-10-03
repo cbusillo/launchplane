@@ -1982,6 +1982,12 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
                 Path(temporary_directory_name) / "launchplane.sqlite3"
             )
             app_store = PostgresRecordStore(database_url=database_url)
+            _write_product_config_profile(
+                app_store,
+                product="example-product",
+                context="example-product-test",
+                instance="testing",
+            )
             app_store.ensure_schema()
             baseline = RuntimeEnvironmentRecord(
                 scope="context",
@@ -2046,6 +2052,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
             _write_runtime_key_safety_policy(database_url=database_url)
             app_store = PostgresRecordStore(database_url=database_url)
+            _write_product_config_profile(app_store)
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_product_config_policy(action="product_config.plan"),
@@ -2083,6 +2090,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
             _write_runtime_key_safety_policy(database_url=database_url)
             app_store = PostgresRecordStore(database_url=database_url)
+            _write_product_config_profile(app_store)
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_product_config_policy(action="product_config.apply"),
@@ -2152,6 +2160,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             app_store = PostgresRecordStore(database_url=database_url)
+            _write_product_config_profile(app_store, product="launchplane", context="launchplane")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_product_config_policy(
@@ -2217,6 +2226,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
                 target_name="syo-prod-app",
             )
             app_store = PostgresRecordStore(database_url=database_url)
+            _write_product_config_profile(app_store)
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_product_config_policy(action="product_config.apply"),
@@ -2262,6 +2272,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             app_store = PostgresRecordStore(database_url=database_url)
+            _write_product_config_profile(app_store, context="sellyouroutboard")
             oauth_config = _github_oauth_config()
             session_store = InMemoryHumanSessionStore()
             session_manager = HumanSessionManager(
@@ -2319,6 +2330,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
             app_store = PostgresRecordStore(database_url=database_url)
+            _write_product_config_profile(app_store, context="sellyouroutboard")
             app_store.ensure_schema()
             oauth_config = _github_oauth_config()
             session_manager = HumanSessionManager(
@@ -3095,6 +3107,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
             app_store = PostgresRecordStore(database_url=database_url)
+            _write_product_config_profile(app_store)
             app_store.ensure_schema()
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
@@ -3120,6 +3133,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
             app_store = PostgresRecordStore(database_url=database_url)
+            _write_product_config_profile(app_store)
             app_store.ensure_schema()
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
@@ -3494,6 +3508,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
             _write_runtime_key_safety_policy(database_url=database_url)
             app_store = PostgresRecordStore(database_url=database_url)
+            _write_product_config_profile(app_store)
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_product_config_policy(action="product_config.apply"),
@@ -3544,6 +3559,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
             _write_runtime_key_safety_policy(database_url=database_url)
             app_store = PostgresRecordStore(database_url=database_url)
+            _write_product_config_profile(app_store)
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_product_config_policy(action="product_config.plan"),
@@ -3592,6 +3608,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
             _write_runtime_key_safety_policy(database_url=database_url)
             app_store = PostgresRecordStore(database_url=database_url)
+            _write_product_config_profile(app_store)
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_product_config_policy(action="product_config.plan"),
@@ -3617,6 +3634,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
                     database_url = _sqlite_database_url(root / "launchplane.sqlite3")
                     _write_runtime_key_safety_policy(database_url=database_url)
                     app_store = PostgresRecordStore(database_url=database_url)
+                    _write_product_config_profile(app_store)
                     app = create_launchplane_fastapi_app(
                         verifier=_StubVerifier(_identity()),
                         authz_policy=_product_config_policy(action="product_config.plan"),
@@ -3728,6 +3746,24 @@ def _write_local_operator_product_profile(store: PostgresRecordStore) -> None:
                 "product": "sellyouroutboard",
                 "display_name": "SellYourOutboard",
                 "lanes": [{"instance": "prod", "context": "sellyouroutboard"}],
+            }
+        )
+    )
+
+
+def _write_product_config_profile(
+    store: PostgresRecordStore,
+    *,
+    product: str = "sellyouroutboard",
+    context: str = "sellyouroutboard-prod",
+    instance: str = "prod",
+) -> None:
+    store.ensure_schema()
+    store.write_product_profile_record(
+        LaunchplaneProductProfileRecord.model_validate(
+            {
+                **_generic_site_profile_payload(product),
+                "lanes": [{"context": context, "instance": instance}],
             }
         )
     )
