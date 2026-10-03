@@ -121,7 +121,10 @@ reservation. The webhook request never waits on a deploy.
   - A refused or failed destroy is attempted at most three times for the same
     preview lifecycle record, product-profile revision, context, and destroy
     reason. Busy operations, unknown provider outcomes that still need
-    observation, transport exceptions, and moved PRs do not consume attempts. Later events and sweeps record a held
+    observation, retryable transport exceptions, transient storage errors, and
+    moved PRs do not consume attempts. A terminal provider failure result still
+    consumes an attempt even if its provider-side cause was an outage; the
+    automatic limit does not reinterpret unstructured provider messages. Later events and sweeps record a held
     destroy with reason `preview_destroy_retry_limit` and complete the request
     without calling the destroy path. The plan retains `destroy_failed_attempts`,
     `last_failed_error_code`, `last_failed_error_summary`, and

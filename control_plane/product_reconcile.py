@@ -1111,7 +1111,9 @@ def reconcile_preview_target(
         ):
             raise
         _LOGGER.warning("Preview destroy of %s raised: %s", profile.product, error)
-        count_failure = not isinstance(error, OSError)
+        count_failure = isinstance(error, FileNotFoundError) or not isinstance(
+            error, (OSError, BuildProvenanceError, SQLAlchemyError)
+        )
         code = (
             error.code if isinstance(error, ProductReconcileError) else "preview_reconcile_failed"
         )

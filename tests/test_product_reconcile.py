@@ -16,7 +16,11 @@ from urllib.error import HTTPError
 
 import click
 
-from control_plane.build_provenance import BUILD_WORKFLOW_PATH, GitHubBuildProvenanceTransport
+from control_plane.build_provenance import (
+    BUILD_WORKFLOW_PATH,
+    BuildProvenanceError,
+    GitHubBuildProvenanceTransport,
+)
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetPolicies,
     DokployTargetRecord,
@@ -1502,8 +1506,9 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
     def test_transport_failure_during_destroy_does_not_consume_attempts(self) -> None:
         self.write_preview()
         self.github.pull_request["state"] = "closed"
-        with patch.object(
-            self.provider, "build_inputs", side_effect=OSError("network unavailable")
+        with patch(
+            "control_plane.product_reconcile._pull_request_moved",
+            side_effect=BuildProvenanceError("GitHub unavailable"),
         ):
             for _attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1):
                 self.request("preview", 5)
