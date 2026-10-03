@@ -638,6 +638,25 @@ class GenericWebDeployTests(unittest.TestCase):
                 artifact_id="ghcr.io/cbusillo/other-app:sha-abc123",
             )
 
+    def test_a_recorded_digest_from_a_previous_repository_stays_valid(self) -> None:
+        previous = f"ghcr.io/cbusillo/sellyouroutboard-app@sha256:{'e' * 64}"
+
+        self.assertEqual(
+            normalize_generic_web_artifact_id(
+                profile=_profile(), artifact_id=previous, recorded=True
+            ),
+            previous,
+        )
+        # A caller may not name it, and a recorded tag is not immutable.
+        with self.assertRaises(click.ClickException):
+            normalize_generic_web_artifact_id(profile=_profile(), artifact_id=previous)
+        with self.assertRaises(click.ClickException):
+            normalize_generic_web_artifact_id(
+                profile=_profile(),
+                artifact_id="ghcr.io/cbusillo/sellyouroutboard-app:sha-abc123",
+                recorded=True,
+            )
+
     def test_normalize_generic_web_artifact_id_rejects_worker_profile_without_image(
         self,
     ) -> None:
