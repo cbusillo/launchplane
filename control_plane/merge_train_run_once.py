@@ -4,6 +4,7 @@ from typing import Callable, Protocol, cast
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.merge_train_policy import (
+    MergeTrainMergeMethod,
     MergeTrainPolicy,
     MergeTrainRepositoryPolicy,
 )
@@ -12,6 +13,9 @@ from control_plane.contracts.merge_train_run_record import (
     build_merge_train_run_record,
 )
 from control_plane.merge_train import build_merge_train_dry_run_result
+from control_plane.merge_train_branch_refresh import (
+    require_merge_train_client_review_read_store,
+)
 from control_plane.merge_train_controller_run_once import (
     MergeTrainControllerStateRecordStore,
     merge_train_controller_mutation_fence,
@@ -19,6 +23,7 @@ from control_plane.merge_train_controller_run_once import (
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     GitHubMergeTrainSnapshotReader,
+    MergeTrainBranchRefreshReadStore,
     UrllibMergeTrainGitHubTransport,
 )
 from control_plane.workflows.merge_train_worker import (
@@ -67,6 +72,31 @@ class MergeTrainRunOnceResult:
     run_record: MergeTrainRunRecord
 
 
+class _ClientReviewedMergeClient:
+    """Merge only after Client review is re-read on the head about to land."""
+
+    def __init__(self, client: GitHubMergeTrainClient) -> None:
+        self._client = client
+
+    def merge_pull_request(
+        self,
+        *,
+        repository: str,
+        pull_request_number: int,
+        head_sha: str,
+        merge_method: MergeTrainMergeMethod,
+    ) -> str:
+        self._client.require_current_client_review(
+            repository=repository, pull_request_number=pull_request_number, head_sha=head_sha
+        )
+        return self._client.merge_pull_request(
+            repository=repository,
+            pull_request_number=pull_request_number,
+            head_sha=head_sha,
+            merge_method=merge_method,
+        )
+
+
 def execute_merge_train_run_once(
     *,
     request: MergeTrainRunOnceEnvelope,
@@ -75,13 +105,19 @@ def execute_merge_train_run_once(
     token: str,
     trace_id: str,
     recorded_at: str,
+    review_store: MergeTrainBranchRefreshReadStore,
     mutation_checkpoint: Callable[[], None] | None = None,
 ) -> MergeTrainRunOnceResult:
+    review_store = require_merge_train_client_review_read_store(
+        review_store, route="Merge train run-once"
+    )
     transport = UrllibMergeTrainGitHubTransport(
         token=token,
         api_base_url=request.github_api_base_url,
     )
-    snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+    snapshot = GitHubMergeTrainSnapshotReader(
+        transport=transport, branch_refresh_store=review_store
+    ).read_merge_train_snapshot(
         repository=request.repository,
         base_branch=request.base_branch,
     )
@@ -96,14 +132,16 @@ def execute_merge_train_run_once(
     if request.mutate:
         if mutation_checkpoint is not None:
             mutation_checkpoint()
-        github_client = GitHubMergeTrainClient(transport=transport)
+        github_client = GitHubMergeTrainClient(
+            transport=transport, branch_refresh_store=review_store
+        )
         worker_step_result = run_merge_train_worker_step(
             policy=policy,
             snapshot=snapshot,
             clients=MergeTrainWorkerClients(
                 label_client=github_client,
                 branch_client=github_client,
-                merge_client=github_client,
+                merge_client=_ClientReviewedMergeClient(github_client),
             ),
         )
         route_result["worker_step_result"] = worker_step_result.model_dump(mode="json")
@@ -137,6 +175,7 @@ def execute_recorded_merge_train_run_once(
     trace_id: str,
     recorded_at: str,
     run_record_store: MergeTrainRunRecordStore,
+    review_store: MergeTrainBranchRefreshReadStore,
     controller_state_store: MergeTrainControllerStateRecordStore | None,
     before_release: Callable[[MergeTrainRunOnceResult], None] | None = None,
 ) -> MergeTrainRunOnceResult:
@@ -153,6 +192,7 @@ def execute_recorded_merge_train_run_once(
             token=token,
             trace_id=trace_id,
             recorded_at=recorded_at,
+            review_store=review_store,
         )
         run_record_store.write_merge_train_run_record(result.run_record)
         if before_release is not None:
@@ -187,6 +227,7 @@ def execute_recorded_merge_train_run_once(
             token=token,
             trace_id=trace_id,
             recorded_at=lease.record.updated_at,
+            review_store=review_store,
             mutation_checkpoint=checkpoint_legacy_mutation,
         )
         run_record_store.write_merge_train_run_record(result.run_record)

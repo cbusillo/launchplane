@@ -3612,6 +3612,20 @@ runtime/target authority, preserves secret and deletion evidence, disables
 preview configuration, and marks the profile `retired`. Do not delete the
 profile.
 
+Tracked retirement blocks active previews in the profile's preview context for
+both the short repository anchor written by preview dispatch/reconciliation and
+historical full `owner/repo` anchors, compared without case sensitivity. Pending,
+active, failed, paused and teardown-pending previews block it: failure does not
+prove runtime absence. Previews in other contexts or for other repository anchors
+do not block that product; destroyed previews do not block it.
+Clear a blocker through the product's supported preview teardown route and verify
+provider absence. If a historical full-form or mixed-case anchor leaves the record
+unchanged, submit authorized destroyed evidence to
+`POST /v1/evidence/previews/destroyed` with its exact stored context, `anchor_repo`
+and PR number, then re-plan retirement. Evidence records teardown; it does not
+destroy the provider application. Do not mark evidence destroyed before teardown
+is verified or bypass a denied write with another identity.
+
 The service also accepts an explicit `no_target: true` retirement intent, with
 an empty `expected_target_sha256`. This narrow case requires an active generic-web
 profile with one lane, an application-name configuration, no tracked target IDs

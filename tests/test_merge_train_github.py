@@ -2933,7 +2933,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     ),
                 )
                 self.assertFalse(
-                    reader._owner_review_required(
+                    reader.client_review_required(
                         labels=("owner-review",), repository="cbusillo/sellyouroutboard"
                     )
                 )

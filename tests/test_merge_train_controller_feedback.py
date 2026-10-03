@@ -4,6 +4,9 @@ from typing import Any, cast
 from unittest import TestCase
 
 from control_plane import merge_train_controller_feedback as feedback
+from control_plane.merge_train import build_merge_train_dry_run_result
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy
+from tests.support.merge_train import _FakeExpandedMergeTrainSnapshotReader
 
 
 class MergeTrainControllerFeedbackTests(TestCase):
@@ -61,6 +64,51 @@ class MergeTrainControllerFeedbackTests(TestCase):
         )
         self.assertIn("#92", cast(str, payloads[2]["message"]))
         self.assertIn("`main`", cast(str, payloads[3]["message"]))
+
+    def test_client_review_wait_reaches_the_pr_before_a_candidate_exists(self) -> None:
+        snapshot = _FakeExpandedMergeTrainSnapshotReader(
+            transport=object()
+        ).read_merge_train_snapshot(repository="cbusillo/sellyouroutboard", base_branch="main")
+        labelled = snapshot.pull_requests[1]
+        for status, event in (("pending", "waiting"), ("fail", "blocked")):
+            with self.subTest(status=status):
+                dry_run_result = build_merge_train_dry_run_result(
+                    policy=build_test_merge_train_policy(),
+                    snapshot=snapshot.model_copy(
+                        update={
+                            "pull_requests": (
+                                snapshot.pull_requests[0],
+                                labelled.model_copy(
+                                    update={
+                                        "owner_review_required": True,
+                                        "required_checks_status": status,
+                                    }
+                                ),
+                            )
+                        }
+                    ),
+                    batch_landing=True,
+                )
+                # The controller's initial planning result: no candidate, no record.
+                payloads = feedback.build_feedback_payloads(
+                    response={
+                        "result": {
+                            "repository": dry_run_result.repository,
+                            "base_branch": dry_run_result.base_branch,
+                            "mode": "dry-run",
+                            "controller_action": dry_run_result.intended_next_action,
+                            "dry_run_result": dry_run_result.model_dump(mode="json"),
+                        },
+                        "records": {},
+                    }
+                )
+                self.assertEqual(
+                    [(payload["pull_request_number"], payload["event"]) for payload in payloads],
+                    [(labelled.number, event)],
+                )
+                message = cast(str, payloads[0]["message"])
+                self.assertIn("review", message)
+                self.assertNotIn(dry_run_result.blocked_label, message)
 
     def test_build_feedback_payloads_marks_pending_checks_waiting(self) -> None:
         response: dict[str, Any] = {

@@ -28,6 +28,7 @@ import click
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane import secrets
+from control_plane.runtime_environments import RuntimeEnvironmentRecordStore
 from control_plane.build_provenance import (
     BUILD_WORKFLOW_PATH,
     BuildProvenanceError,
@@ -46,6 +47,13 @@ from control_plane.contracts.promotion_record import env_key_names
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.odoo_target_replacement_failures import deploy_failure_description
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.idempotency_record import (
+    LaunchplaneIdempotencyRecord,
+    parse_launchplane_mutation_timestamp,
+)
+from control_plane.storage.postgres import ExistingMutationReservationLookupResult
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
@@ -283,6 +291,29 @@ class TestingProviderHooks:
     generic_web_deploy_provider: Callable[[], GenericWebDeployProvider] = (
         default_generic_web_deploy_provider
     )
+
+
+class _TestingLaneAuthorityStore(
+    ProductReconcileStore,
+    secrets.SecretBindingSelectionStore,
+    RuntimeEnvironmentRecordStore,
+    Protocol,
+):
+    def read_provider_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> ProviderTargetRecord: ...
+
+    def read_dokploy_target_id_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetIdRecord: ...
+
+    def list_held_provider_target_reservations(
+        self,
+    ) -> tuple[LaunchplaneIdempotencyRecord, ...]: ...
+
+    def lookup_existing_mutation_reservation(
+        self, *, route_path: str, idempotency_key: str, request_fingerprint: str
+    ) -> ExistingMutationReservationLookupResult: ...
 
 
 @dataclass(frozen=True)
@@ -576,7 +607,7 @@ def _deploy_generic_web_testing(
     It runs the deploy route's durable provider operation under the reconcile's
     reservation scope. A deploy whose provider outcome is unknown stays reserved
     for generic-web deploy recovery and is never bypassed; a recorded result for
-    the same image and starting point is replayed, not run again.
+    the same image, lane authority and starting point is replayed, not run again.
     """
     if control_plane_root is None:
         raise ProductReconcileError("A generic-web testing deploy needs the control-plane root.")
@@ -619,30 +650,86 @@ def _deploy_generic_web_testing(
     # every deploy and rollback records a new one, so a lane changed since gets the
     # desired image again instead of a replay of an earlier success.
     starting_point = _current_testing_deployment_id(record_store=record_store, lane=lane) or "none"
-    idempotency_key = (
-        f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:{TESTING_INSTANCE}:"
-        f"{desired.manifest.image.digest}:from-{starting_point}"
-    )
     trace_id = f"{RECONCILE_SOURCE}-{uuid4().hex}"
-    plan.update(held=False, deploy_idempotency_key=idempotency_key)
+    plan["held"] = False
     try:
+        authority = _generic_web_testing_authority(record_store=record_store, lane=lane)
+        idempotency_key = (
+            f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:{TESTING_INSTANCE}:"
+            f"{desired.manifest.image.digest}:authority-{authority}:from-{starting_point}"
+        )
+        plan["deploy_idempotency_key"] = idempotency_key
+        request_fingerprint = _fingerprint(envelope.model_dump(mode="json"))
+        adapter = GenericWebDeployProviderMutationAdapter(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            deploy_request=envelope,
+            profile=profile,
+            lane=lane,
+            trace_id=trace_id,
+            deploy_provider=testing_hooks.generic_web_deploy_provider(),
+        )
+        # The reconcile request's lane lease serializes these decisions. A new
+        # authority key must not bypass an unresolved old attempt, even after a
+        # binding repair points at a different provider application. The same
+        # key still goes through the runner's normal observation/recovery path.
+        # Recover an old key automatically only when its provider target and
+        # request identity match; recovery must never act on a repointed app.
+        lane_prefix = f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:{TESTING_INSTANCE}:"
+        for reservation in cast(
+            _TestingLaneAuthorityStore, record_store
+        ).list_held_provider_target_reservations():
+            if (
+                reservation.scope == reconcile_reservation_scope(profile.product)
+                and reservation.route_path == GENERIC_WEB_DEPLOY_ROUTE
+                and reservation.idempotency_key.startswith(lane_prefix)
+                and reservation.idempotency_key != idempotency_key
+            ):
+                if (
+                    reservation.provider_target_key == adapter.target_key()
+                    and reservation.request_fingerprint == request_fingerprint
+                ):
+                    idempotency_key = reservation.idempotency_key
+                    plan["deploy_idempotency_key"] = idempotency_key
+                    continue
+                if reservation.state == "running":
+                    lookup = cast(
+                        _TestingLaneAuthorityStore, record_store
+                    ).lookup_existing_mutation_reservation(
+                        route_path=reservation.route_path,
+                        idempotency_key=reservation.idempotency_key,
+                        request_fingerprint=reservation.request_fingerprint,
+                    )
+                    if lookup.status == "found" and lookup.record is not None:
+                        reservation = lookup.record
+                        if reservation.state == "completed":
+                            continue
+                        if reservation.state == "running" and parse_launchplane_mutation_timestamp(
+                            reservation.lease_expires_at, field_name="lease_expires_at"
+                        ) <= parse_launchplane_mutation_timestamp(
+                            lookup.observed_at, field_name="observed_at"
+                        ):
+                            # Read-only classification; recovery owns the stored transition.
+                            reservation = reservation.model_copy(
+                                update={"state": "reconcile_required"}
+                            )
+                    elif lookup.status == "missing":
+                        continue
+                    else:
+                        reservation = reservation.model_copy(update={"state": "reconcile_required"})
+                return _generic_web_testing_outcome(
+                    plan=plan,
+                    result=DurableProviderOperationResult("target_busy", reservation, 409, {}),
+                )
         result = run_durable_provider_operation(
             store=cast(DurableProviderOperationStore, record_store),
             scope=reconcile_reservation_scope(profile.product),
             route_path=GENERIC_WEB_DEPLOY_ROUTE,
             idempotency_key=idempotency_key,
-            request_fingerprint=_fingerprint(envelope.model_dump(mode="json")),
+            request_fingerprint=request_fingerprint,
             lease_owner=trace_id,
             response_trace_id=trace_id,
-            adapter=GenericWebDeployProviderMutationAdapter(
-                control_plane_root=control_plane_root,
-                record_store=record_store,
-                deploy_request=envelope,
-                profile=profile,
-                lane=lane,
-                trace_id=trace_id,
-                deploy_provider=testing_hooks.generic_web_deploy_provider(),
-            ),
+            adapter=adapter,
         )
     except (FileNotFoundError, ValueError, click.ClickException) as error:
         # Refused before any provider change; the next event or sweep tries again. The
@@ -676,6 +763,85 @@ def _deploy_generic_web_testing(
         )
     plan.update(current_artifact_id=current_artifact_id, current_image_digest=current_digest)
     return outcome
+
+
+def _generic_web_testing_authority(
+    *, record_store: ProductReconcileStore, lane: ProductLaneProfile
+) -> str:
+    """Identify stored configuration and effective managed-secret versions.
+
+    Ignore audit timestamps: identical configuration must keep replaying. Protect
+    legacy plaintext target/settings values with the service's keyed fingerprint;
+    managed-secret values are never read. Include inherited settings, but exclude
+    other lanes and Launchplane's worker/service credentials.
+    """
+    authority_store = cast(_TestingLaneAuthorityStore, record_store)
+    try:
+        target = record_store.read_dokploy_target_record(
+            context_name=lane.context, instance_name=lane.instance
+        )
+    except FileNotFoundError:
+        target_authority: object = None
+    else:
+        target_authority = target.model_dump(mode="json", exclude={"updated_at", "source_label"})
+    try:
+        provider_target = authority_store.read_provider_target_record(
+            context_name=lane.context, instance_name=lane.instance
+        )
+    except FileNotFoundError:
+        provider_authority: object = None
+    else:
+        provider_authority = provider_target.model_dump(
+            mode="json", exclude={"updated_at", "source_label"}
+        )
+    try:
+        target_id = authority_store.read_dokploy_target_id_record(
+            context_name=lane.context, instance_name=lane.instance
+        )
+    except FileNotFoundError:
+        target_id_authority: object = None
+    else:
+        target_id_authority = target_id.model_dump(
+            mode="json", exclude={"updated_at", "source_label"}
+        )
+    settings = [
+        record.model_dump(mode="json", exclude={"updated_at", "source_label"})
+        for record in authority_store.list_runtime_environment_records()
+        if record.scope == "global"
+        or (record.scope == "context" and record.context == lane.context)
+        or (
+            record.scope == "instance"
+            and record.context == lane.context
+            and record.instance == lane.instance
+        )
+    ]
+    bindings = secrets.resolve_effective_secret_bindings_from_store(
+        record_store=authority_store,
+        integration=secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+        context_name=lane.context,
+        instance_name=lane.instance,
+    )
+    return secrets.keyed_secret_payload_fingerprint(
+        json.dumps(
+            {
+                "target": target_authority,
+                "provider_target": provider_authority,
+                "target_id": target_id_authority,
+                "settings": sorted(settings, key=lambda record: json.dumps(record, sort_keys=True)),
+                "secrets": {
+                    key: {
+                        "binding": binding.model_dump(
+                            mode="json", exclude={"created_at", "updated_at"}
+                        ),
+                        "version_id": record.current_version_id,
+                    }
+                    for key, (binding, record) in bindings.items()
+                },
+            },
+            sort_keys=True,
+        ),
+        purpose="generic-web-testing-authority",
+    )
 
 
 def _current_testing_deployment_id(

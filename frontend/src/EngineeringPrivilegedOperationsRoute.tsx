@@ -13,7 +13,6 @@ import {
   readPrivilegedOperationRawDetail,
   revokePrivilegedOperation,
   type AuthorizationCandidateId,
-  type PrivilegedOperationDescriptorId,
   type PrivilegedOperationListResponse,
   type PrivilegedOperationSemanticReview,
   type OrdinaryAgentDeliveryActivationOptionsResponse,
@@ -32,6 +31,12 @@ import {
   EngineeringRouteFrame,
 } from "./EngineeringRouteUi";
 import { formatTime } from "./format";
+import {
+  loadSelectedOperationPlans,
+  selectedPlanType,
+  type SelectedOperationPlans,
+  type PrivilegedOperationDescriptorId,
+} from "./privileged-operation-selection";
 import { EngineeringOrdinaryAgentJobRoute } from "./EngineeringOrdinaryAgentJobRoute";
 import { EngineeringOrdinaryAgentPreparationInputs } from "./EngineeringOrdinaryAgentPreparationInputs";
 import { EngineeringOrdinaryAgentTargetPreparation } from "./EngineeringOrdinaryAgentTargetPreparation";
@@ -60,38 +65,60 @@ function DefaultPrivilegedOperationsRoute({
   const reviewFixture = query.get("review") === "product-evidence"
     ? "product-evidence"
     : "default";
-  const [descriptorId, setDescriptorId] =
-    useState<PrivilegedOperationDescriptorId>(
-      query.get("descriptor_id") === "ordinary-agent-delivery-activation"
-        ? "ordinary-agent-delivery-activation"
-        : "managed-secret-reencryption",
+  const [selectedDescriptorId, setDescriptorId] =
+    useState<PrivilegedOperationDescriptorId | null>(
+      selectedPlanType(query.get("descriptor_id")),
     );
+  const openedDescriptorId = useRef<PrivilegedOperationDescriptorId | null>(null);
   const loader = useCallback(
     async (
       signal: AbortSignal,
-      _reason: EngineeringLoadReason,
-    ): Promise<PrivilegedOperationListResponse> => {
-      if (fixtureMode) {
+      reason: EngineeringLoadReason,
+    ): Promise<SelectedOperationPlans> => {
+      if (fixtureMode && operationId !== null) {
         await fixtureDelay(signal);
-        return privilegedOperationFixture(fixtureMode, descriptorId, reviewFixture);
+        const descriptorId = selectedDescriptorId ?? "managed-secret-reencryption";
+        return {
+          descriptorId,
+          plans: privilegedOperationFixture(fixtureMode, descriptorId, reviewFixture),
+        };
       }
       if (operationId !== null) {
         const result = await readPrivilegedOperationReview(operationId, signal);
         return {
-          status: result.status,
-          trace_id: result.trace_id,
-          total: 1,
-          reviews: [result.review],
+          descriptorId: result.review.descriptor_id,
+          plans: {
+            status: result.status,
+            trace_id: result.trace_id,
+            total: 1,
+            reviews: [result.review],
+          },
         };
       }
-      return readPrivilegedOperationPlans(signal, descriptorId);
+      const selection = selectedDescriptorId ??
+        (reason === "refresh" ? openedDescriptorId.current : null);
+      const result = await loadSelectedOperationPlans(selection, signal, async descriptorId => {
+        if (fixtureMode) {
+          await fixtureDelay(signal);
+          return privilegedOperationFixture(fixtureMode, descriptorId, reviewFixture);
+        }
+        return readPrivilegedOperationPlans(signal, descriptorId);
+      });
+      signal.throwIfAborted();
+      openedDescriptorId.current = result.descriptorId;
+      return result;
     },
-    [descriptorId, fixtureMode, operationId, reviewFixture],
+    [selectedDescriptorId, fixtureMode, operationId, reviewFixture],
   );
   const resource = useEngineeringResource(
     loader,
-    `privileged-operations:${operationId ?? descriptorId}:${fixtureMode}:${reviewFixture}`,
+    `privileged-operations:${operationId ?? selectedDescriptorId ?? "initial"}:${fixtureMode}:${reviewFixture}`,
   );
+
+  const descriptorId = selectedDescriptorId ?? resource.state.data?.descriptorId ?? null;
+  function selectDescriptorId(next: PrivilegedOperationDescriptorId) {
+    if (next !== descriptorId) setDescriptorId(next);
+  }
 
   return (
     <EngineeringRouteFrame
@@ -106,14 +133,14 @@ function DefaultPrivilegedOperationsRoute({
           >
             <button
               aria-pressed={descriptorId === "managed-secret-reencryption"}
-              onClick={() => setDescriptorId("managed-secret-reencryption")}
+              onClick={() => selectDescriptorId("managed-secret-reencryption")}
               type="button"
             >
               Secret rotation
             </button>
             <button
               aria-pressed={descriptorId === "managed-authz-policy-set"}
-              onClick={() => setDescriptorId("managed-authz-policy-set")}
+              onClick={() => selectDescriptorId("managed-authz-policy-set")}
               type="button"
             >
               Access policy
@@ -123,7 +150,7 @@ function DefaultPrivilegedOperationsRoute({
                 descriptorId === "managed-merge-train-policy-import"
               }
               onClick={() =>
-                setDescriptorId("managed-merge-train-policy-import")
+                selectDescriptorId("managed-merge-train-policy-import")
               }
               type="button"
             >
@@ -134,7 +161,7 @@ function DefaultPrivilegedOperationsRoute({
                 descriptorId === "ordinary-agent-delivery-activation"
               }
               onClick={() =>
-                setDescriptorId("ordinary-agent-delivery-activation")
+                selectDescriptorId("ordinary-agent-delivery-activation")
               }
               type="button"
             >
@@ -164,7 +191,13 @@ function DefaultPrivilegedOperationsRoute({
         refresh={resource.refresh}
         state={resource.state}
       >
-        {(data) => (
+        {(data) => data.plans === null ? (
+          <EngineeringEmpty
+            title="No readable plan types"
+            icon={ShieldAlert}
+            detail="You do not have read access to secret rotation, access policy, or merge-train policy plans. Choose a tab to see its access details."
+          />
+        ) : (
           <>
             {descriptorId === "ordinary-agent-delivery-activation" &&
             operationId === null ? (
@@ -187,7 +220,7 @@ function DefaultPrivilegedOperationsRoute({
                 refresh={resource.refresh}
               />
             ) : null}
-            <PrivilegedOperationPlanList data={data} refresh={resource.refresh} />
+            <PrivilegedOperationPlanList data={data.plans} refresh={resource.refresh} />
           </>
         )}
       </EngineeringResourceGate>
@@ -246,8 +279,9 @@ function AgentProductSetupCandidateCard({
 }) {
   const loader = useCallback(
     async (signal: AbortSignal): Promise<AgentProductSetupChoice[]> => {
+      if (fixtureMode) await fixtureDelay(signal);
       const profiles = fixtureMode
-        ? (await fixtureDelay(signal), agentProductSetupProfilesFixture())
+        ? agentProductSetupProfilesFixture()
         : (await listProductProfiles(signal)).profiles;
       return profiles
         .map((profile) => ({
