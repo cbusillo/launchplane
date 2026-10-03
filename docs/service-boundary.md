@@ -2459,7 +2459,9 @@ domain reconcile or prune, or domain authority repair. Which product holds the
 context is checked again when the target records commit, under the lock product-profile
 writes take, so a context reassigned during the provider calls is refused
 (`local_operator_lane_scope_required`); the compose already created stays
-unrecorded.
+unrecorded. When repository source has already been applied during creation,
+this refusal is reported as `dokploy_source_partial_outcome` (502) instead,
+so the caller knows the provider changed and records were not adopted.
 
 For a generic-web compose's repository source, `create-compose` accepts
 `custom_git_branch` and an explicit `compose_path`. Branches and relative paths
@@ -2484,13 +2486,17 @@ and record write. It changes only source fields and their target-record
 provenance; target-id, provider binding, runtime settings and domains remain
 unchanged. `autoDeploy` is disabled, so source setup starts no deployment.
 Dry-run performs the same source/identity checks without writes; apply retains
-the confirmation, reason and idempotency requirements above. Apply replay with
-the same key returns its saved result. If the provider accepts an update but
+the confirmation, reason and idempotency requirements above. Successful apply
+replay with the same key returns its saved result. Partial failures are not saved
+as idempotency responses; do not retry them with either the same key or a new key
+before admin reconciliation. If the provider accepts an update but
 read-back or the record commit fails, the route reports
 `dokploy_source_partial_outcome` (502) for admin reconciliation; do not replace the target or overwrite its configured
 source by retrying with a new key. No new grant, credential, deploy or production
-operation is part of source completion. After delivery, RepairShopr Sync's
-setup session can complete its tracked testing source through this operation.
+operation is part of source completion. After service delivery and the bounded helper support tracked in
+[cbusillo/codex-skills#1067](https://github.com/cbusillo/codex-skills/issues/1067),
+RepairShopr Sync's setup session can complete its tracked testing source through
+this operation. The existing creation-only helper cannot call completion.
 
 Dokploy target inspect uses the native FastAPI
 `GET /v1/dokploy-targets/inspect` route. The route is a read-only proof surface
