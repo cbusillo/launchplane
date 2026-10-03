@@ -12,7 +12,6 @@ from control_plane.contracts.product_health_monitoring_migration import health_c
 
 
 ProductLifecycleState = Literal["active", "retiring", "retired"]
-PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL = "launchplane-preview"
 OdooDataAuthority = Literal["unknown", "resettable", "restorable", "authoritative"]
 OdooRebuildSourceMode = Literal["empty", "upstream_restore"]
 
@@ -289,7 +288,6 @@ class ProductPreviewProfile(BaseModel):
 
     enabled: bool = False
     context: str = ""
-    enable_label: str = PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL
     slug_template: str = "pr-{number}"
     app_name_prefix: str = ""
     template_instance: str = "testing"
@@ -305,14 +303,18 @@ class ProductPreviewProfile(BaseModel):
     migration_command: str = ""
     seed_command: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_retired_enable_label(cls, value: object) -> object:
+        # Profiles saved before #2735 name the pull request label that opted into previews.
+        if isinstance(value, dict) and "enable_label" in value:
+            return {key: item for key, item in value.items() if key != "enable_label"}
+        return value
+
     @model_validator(mode="after")
     def _validate_preview(self) -> "ProductPreviewProfile":
         if self.enabled and not self.context.strip():
             raise ValueError("enabled product preview profile requires context")
-        enable_label = self.enable_label.strip() or PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL
-        if self.enabled and not enable_label:
-            raise ValueError("enabled product preview profile requires enable_label")
-        self.enable_label = enable_label
         if self.enabled and "{number}" not in self.slug_template:
             raise ValueError("enabled product preview profile slug_template requires {number}")
         if self.enabled and not self.template_instance.strip():

@@ -186,7 +186,6 @@ def _odoo_compose_profile() -> LaunchplaneProductProfileRecord:
         preview=ProductPreviewProfile(
             enabled=True,
             context="cm",
-            enable_label="preview",
             slug_template="pr-{number}",
             app_name_prefix="cm-odoo-preview",
             template_instance="testing",

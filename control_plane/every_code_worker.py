@@ -29,7 +29,6 @@ from control_plane.contracts.every_code_pr_feedback_record import (
 )
 from control_plane.contracts.every_code_preview_gate_record import (
     EveryCodePreviewGateRecord,
-    build_every_code_preview_gate_id,
 )
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
@@ -40,7 +39,6 @@ from control_plane.contracts.every_code_work_request import (
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.workflows.launchplane import (
     github_pull_request_reference,
-    launchplane_anchor_repo_preview_label,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -48,7 +46,6 @@ from control_plane.workflows.ship import utc_now_timestamp
 EveryCodeWorkerStatus = Literal["empty", "running", "blocked"]
 EveryCodeWorkerFinishStatus = Literal["done", "blocked"]
 TERMINAL_EVERY_CODE_STATES = {"done", "blocked"}
-EVERY_CODE_PREVIEW_GATE_TIMEOUT_SECONDS = 24 * 60 * 60
 
 
 class EveryCodeWorkerStore(Protocol):
@@ -720,30 +717,6 @@ class EveryCodePrFeedbackApplyResult:
 
 
 @dataclass(frozen=True)
-class EveryCodePreviewGateResult:
-    checked: int = 0
-    labeled: int = 0
-    pending: int = 0
-    blocked: int = 0
-    skipped: int = 0
-    cancelled: int = 0
-    reset: int = 0
-    reviewer_backfilled: int = 0
-
-    def as_payload(self) -> dict[str, object]:
-        return {
-            "checked": self.checked,
-            "labeled": self.labeled,
-            "pending": self.pending,
-            "blocked": self.blocked,
-            "skipped": self.skipped,
-            "cancelled": self.cancelled,
-            "reset": self.reset,
-            "reviewer_backfilled": self.reviewer_backfilled,
-        }
-
-
-@dataclass(frozen=True)
 class EveryCodePrFailureRouteResult:
     checked: int = 0
     routed: int = 0
@@ -1069,69 +1042,6 @@ def _every_code_github_env(
             f"Every Code GitHub actor mismatch: expected {expected_actor!r}, got {actual_actor!r}"
         )
     return github_env
-
-
-def _remove_every_code_source_issue_labels(
-    *,
-    record: EveryCodeWorkRequestRecord,
-    runner: Runner,
-    github_token_env: str = EVERY_CODE_GITHUB_TOKEN_ENV_KEY,
-    github_actor_env: str = EVERY_CODE_GITHUB_ACTOR_ENV_KEY,
-) -> str:
-    repository = record.repository.strip()
-    if not repository or record.issue_number <= 0:
-        return ""
-    try:
-        github_env = _every_code_github_env(
-            github_token_env=github_token_env,
-            github_actor_env=github_actor_env,
-            runner=runner,
-        )
-    except EveryCodeWorkerChildProcessError as error:
-        return error.failure.operator_message()
-    except RuntimeError as exc:
-        return redact_untrusted_text(
-            str(exc),
-            fallback="Could not verify Every Code GitHub label-cleanup actor.",
-        )
-    errors: list[str] = []
-    for label in (record.trigger_label.strip(), "preview-ready"):
-        if not label:
-            continue
-        try:
-            result = runner(
-                (
-                    "gh",
-                    "issue",
-                    "edit",
-                    str(record.issue_number),
-                    "--repo",
-                    repository,
-                    "--remove-label",
-                    label,
-                ),
-                github_env,
-            )
-        except OSError as exc:
-            failure = normalize_child_process_failure(
-                operation="Remove Every Code source issue label",
-                tool="github_cli",
-                exception=exc,
-            )
-            errors.append(f"{label}: {failure.operator_message()}")
-            continue
-        if result.returncode != 0:
-            failure = normalize_child_process_failure(
-                operation="Remove Every Code source issue label",
-                tool="github_cli",
-                returncode=result.returncode,
-                stdout=result.stdout,
-                stderr=result.stderr,
-            )
-            errors.append(f"{label}: {failure.operator_message()}")
-    if errors:
-        return "Could not remove Every Code source issue labels: " + "; ".join(errors)
-    return ""
 
 
 def default_every_code_command(record: EveryCodeWorkRequestRecord) -> str:
@@ -1751,14 +1661,6 @@ def run_every_code_worker_loop(
                         service_url=service_url,
                         worker_token_env=worker_token_env,
                         tmux_binary=tmux_binary,
-                        runner=runner,
-                    ),
-                ),
-                _try_every_code_worker_maintenance(
-                    "Every Code preview readiness maintenance",
-                    lambda: request_ready_every_code_pr_preview_labels(
-                        record_store=record_store,
-                        repository=repository,
                         runner=runner,
                     ),
                 ),
@@ -3069,281 +2971,6 @@ def finish_every_code_work_request(
     )
 
 
-def request_ready_every_code_pr_preview_labels(
-    *,
-    record_store: EveryCodeWorkerStore,
-    repository: str = "",
-    limit: int = 50,
-    gate_timeout_seconds: int = EVERY_CODE_PREVIEW_GATE_TIMEOUT_SECONDS,
-    runner: Runner | None = None,
-) -> EveryCodePreviewGateResult:
-    normalized_repository = repository.strip()
-    records = (
-        *record_store.list_every_code_work_request_records(
-            state="running",
-            repository=normalized_repository,
-            limit=limit,
-        ),
-        *record_store.list_every_code_work_request_records(
-            state="done",
-            repository=normalized_repository,
-            limit=limit,
-        ),
-    )
-    if not records:
-        return EveryCodePreviewGateResult()
-
-    run = runner or _run_subprocess
-    checked = 0
-    labeled = 0
-    pending = 0
-    blocked = 0
-    skipped = 0
-    cancelled = 0
-    reset = 0
-    reviewer_backfilled = 0
-    for record in records:
-        if _every_code_work_request_closed_before_preview(record):
-            label_cleanup_error = _remove_every_code_source_issue_labels(
-                record=record,
-                runner=run,
-            )
-            reason = "Source issue closed before preview was ready."
-            if label_cleanup_error:
-                reason = f"{reason} {label_cleanup_error}"
-            cancelled += _cancel_every_code_preview_gates_for_record(
-                record_store=record_store,
-                record=record,
-                reason=reason,
-            )
-            continue
-        result_pr_url = _every_code_preview_pr_url_for_record(record, runner=run)
-        if not result_pr_url:
-            skipped += 1
-            continue
-        reference = github_pull_request_reference(pr_url=result_pr_url)
-        if reference is None:
-            skipped += 1
-            continue
-        payload = _github_pr_view_payload(
-            owner=reference["owner"],
-            repo=reference["repo"],
-            pr_number=reference["pr_number"],
-            runner=run,
-        )
-        if payload is None:
-            checked += 1
-            blocked += 1
-            continue
-        gate, gate_reset = _reconcile_every_code_preview_gate_record(
-            record_store=record_store,
-            record=record,
-            pr_number=reference["pr_number"],
-            pr_url=result_pr_url,
-            payload=payload,
-        )
-        if gate_reset:
-            reset += 1
-        readiness = every_code_pr_preview_readiness_from_payload(
-            record_store=record_store,
-            repository=record.repository,
-            payload=payload,
-        )
-        now = utc_now_timestamp()
-        if readiness == "ready":
-            checked += 1
-            ready_gate = gate.model_copy(
-                update={
-                    "status": "ready",
-                    "updated_at": now,
-                    "ready_at": gate.ready_at or now,
-                    "last_checked_at": now,
-                    "pending_reason": "",
-                    "blocked_reason": "",
-                    "check_summary": _every_code_check_summary(payload),
-                }
-            )
-            record_store.write_every_code_preview_gate_record(ready_gate)
-            summary = request_every_code_pr_preview_label(
-                record_store=record_store,
-                result_pr_url=result_pr_url,
-                runner=run,
-            )
-            if summary.startswith("Requested Launchplane preview"):
-                record_store.write_every_code_preview_gate_record(
-                    ready_gate.model_copy(
-                        update={
-                            "status": "labeled",
-                            "updated_at": now,
-                            "labeled_at": now,
-                        }
-                    )
-                )
-                labeled += 1
-            elif summary:
-                record_store.write_every_code_preview_gate_record(
-                    ready_gate.model_copy(
-                        update={
-                            "status": "blocked",
-                            "updated_at": now,
-                            "blocked_at": now,
-                            "blocked_reason": summary,
-                        }
-                    )
-                )
-                blocked += 1
-            else:
-                skipped += 1
-        elif readiness == "pending":
-            checked += 1
-            if _every_code_preview_gate_timed_out(
-                gate,
-                now=now,
-                timeout_seconds=gate_timeout_seconds,
-            ):
-                record_store.write_every_code_preview_gate_record(
-                    gate.model_copy(
-                        update={
-                            "status": "blocked",
-                            "updated_at": now,
-                            "blocked_at": gate.blocked_at or now,
-                            "last_checked_at": now,
-                            "pending_reason": "",
-                            "blocked_reason": "Timed out waiting for GitHub checks to become preview-ready.",
-                            "check_summary": _every_code_check_summary(payload),
-                        }
-                    )
-                )
-                blocked += 1
-                continue
-            record_store.write_every_code_preview_gate_record(
-                gate.model_copy(
-                    update={
-                        "status": "pending",
-                        "updated_at": now,
-                        "last_checked_at": now,
-                        "pending_reason": _every_code_pending_gate_reason(payload),
-                        "blocked_reason": "",
-                        "check_summary": _every_code_check_summary(payload),
-                    }
-                )
-            )
-            pending += 1
-        elif readiness == "blocked":
-            checked += 1
-            record_store.write_every_code_preview_gate_record(
-                gate.model_copy(
-                    update={
-                        "status": "blocked",
-                        "updated_at": now,
-                        "blocked_at": gate.blocked_at or now,
-                        "last_checked_at": now,
-                        "pending_reason": "",
-                        "blocked_reason": _every_code_blocked_gate_reason(payload),
-                        "check_summary": _every_code_check_summary(payload),
-                    }
-                )
-            )
-            blocked += 1
-        elif readiness == "cancelled":
-            checked += 1
-            record_store.write_every_code_preview_gate_record(
-                gate.model_copy(
-                    update={
-                        "status": "cancelled",
-                        "updated_at": now,
-                        "cancelled_at": gate.cancelled_at or now,
-                        "last_checked_at": now,
-                        "pending_reason": "",
-                        "blocked_reason": "Pull request is no longer open.",
-                        "check_summary": _every_code_check_summary(payload),
-                    }
-                )
-            )
-            cancelled += 1
-        else:
-            if readiness == "skipped" and _github_pr_payload_has_label(
-                payload,
-                launchplane_anchor_repo_preview_label(
-                    record_store=record_store,
-                    repo=reference["repo"],
-                ),
-            ):
-                reviewer_backfilled += _backfill_every_code_preview_reviewer(
-                    record=record,
-                    owner=reference["owner"],
-                    repo=reference["repo"],
-                    pr_number=reference["pr_number"],
-                    runner=run,
-                )
-            skipped += 1
-    return EveryCodePreviewGateResult(
-        checked=checked,
-        labeled=labeled,
-        pending=pending,
-        blocked=blocked,
-        skipped=skipped,
-        cancelled=cancelled,
-        reset=reset,
-        reviewer_backfilled=reviewer_backfilled,
-    )
-
-
-def _every_code_work_request_closed_before_preview(
-    record: EveryCodeWorkRequestRecord,
-) -> bool:
-    if record.state != "done":
-        return False
-    summary = (record.result_summary or record.error_message).strip().lower()
-    return summary.startswith("source issue closed") or summary.startswith(
-        "source pull request closed"
-    )
-
-
-def _cancel_every_code_preview_gates_for_record(
-    *,
-    record_store: EveryCodeWorkerStore,
-    record: EveryCodeWorkRequestRecord,
-    reason: str,
-) -> int:
-    now = utc_now_timestamp()
-    cancelled = 0
-    for gate in record_store.list_every_code_preview_gate_records(
-        request_id=record.request_id,
-        limit=100,
-    ):
-        if gate.status in {"labeled", "cancelled"}:
-            continue
-        record_store.write_every_code_preview_gate_record(
-            gate.model_copy(
-                update={
-                    "status": "cancelled",
-                    "updated_at": now,
-                    "cancelled_at": gate.cancelled_at or now,
-                    "pending_reason": "",
-                    "blocked_reason": reason,
-                }
-            )
-        )
-        cancelled += 1
-    return cancelled
-
-
-def _every_code_preview_gate_timed_out(
-    gate: EveryCodePreviewGateRecord,
-    *,
-    now: str,
-    timeout_seconds: int,
-) -> bool:
-    if timeout_seconds <= 0:
-        return False
-    created_at = _parse_utc_timestamp(gate.created_at)
-    checked_at = _parse_utc_timestamp(now)
-    if created_at is None or checked_at is None:
-        return False
-    return (checked_at - created_at).total_seconds() >= timeout_seconds
-
-
 def _parse_utc_timestamp(timestamp: str) -> datetime | None:
     normalized = timestamp.strip()
     if not normalized:
@@ -3355,49 +2982,6 @@ def _parse_utc_timestamp(timestamp: str) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
-
-
-def _backfill_every_code_preview_reviewer(
-    *,
-    record: EveryCodeWorkRequestRecord,
-    owner: str,
-    repo: str,
-    pr_number: int,
-    runner: Runner,
-) -> int:
-    issue_author = _github_issue_author_login(
-        owner=owner,
-        repo=repo,
-        issue_number=record.issue_number,
-        runner=runner,
-    )
-    if not issue_author:
-        return 0
-    pr_author = _github_pr_author_login(
-        owner=owner,
-        repo=repo,
-        pr_number=pr_number,
-        runner=runner,
-    )
-    if pr_author.casefold() == issue_author.casefold():
-        return 0
-    requested_reviewers = _github_requested_reviewer_logins(
-        owner=owner,
-        repo=repo,
-        pr_number=pr_number,
-        runner=runner,
-    )
-    if issue_author.casefold() in requested_reviewers:
-        return 0
-    return int(
-        _request_github_pull_request_reviewer(
-            owner=owner,
-            repo=repo,
-            pr_number=pr_number,
-            reviewer=issue_author,
-            runner=runner,
-        )
-    )
 
 
 def _github_issue_author_login(
@@ -3416,71 +3000,6 @@ def _github_issue_author_login(
         return ""
     login = user.get("login")
     return login.strip() if isinstance(login, str) else ""
-
-
-def _github_pr_author_login(
-    *,
-    owner: str,
-    repo: str,
-    pr_number: int,
-    runner: Runner,
-) -> str:
-    payload = _gh_api_payload(
-        runner=runner,
-        path=f"repos/{owner}/{repo}/pulls/{pr_number}",
-    )
-    user = payload.get("user")
-    if not isinstance(user, dict):
-        return ""
-    login = user.get("login")
-    return login.strip() if isinstance(login, str) else ""
-
-
-def _github_requested_reviewer_logins(
-    *,
-    owner: str,
-    repo: str,
-    pr_number: int,
-    runner: Runner,
-) -> frozenset[str]:
-    payload = _gh_api_payload(
-        runner=runner,
-        path=f"repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers",
-    )
-    users = payload.get("users")
-    if not isinstance(users, list):
-        return frozenset()
-    logins: set[str] = set()
-    for item in users:
-        if not isinstance(item, dict):
-            continue
-        login = item.get("login")
-        if isinstance(login, str) and login.strip():
-            logins.add(login.strip().casefold())
-    return frozenset(logins)
-
-
-def _request_github_pull_request_reviewer(
-    *,
-    owner: str,
-    repo: str,
-    pr_number: int,
-    reviewer: str,
-    runner: Runner,
-) -> bool:
-    result = _run_gh_api(
-        runner=runner,
-        args=(
-            "gh",
-            "api",
-            f"repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers",
-            "--method",
-            "POST",
-            "--field",
-            f"reviewers[]={reviewer}",
-        ),
-    )
-    return result is not None
 
 
 def _gh_api_payload(*, runner: Runner, path: str) -> dict[str, object]:
@@ -3506,65 +3025,6 @@ def _run_gh_api(
     if result.returncode != 0:
         return None
     return result
-
-
-def _reconcile_every_code_preview_gate_record(
-    *,
-    record_store: EveryCodeWorkerStore,
-    record: EveryCodeWorkRequestRecord,
-    pr_number: int,
-    pr_url: str,
-    payload: dict[str, object],
-) -> tuple[EveryCodePreviewGateRecord, bool]:
-    head_sha = str(payload.get("headRefOid") or "").strip() or "unknown"
-    gate_id = build_every_code_preview_gate_id(
-        repository=record.repository,
-        pr_number=pr_number,
-        head_sha=head_sha,
-    )
-    existing_gates = record_store.list_every_code_preview_gate_records(
-        request_id=record.request_id,
-        pr_number=pr_number,
-        limit=50,
-    )
-    for gate in existing_gates:
-        if gate.gate_id == gate_id:
-            return gate, False
-    now = utc_now_timestamp()
-    gate = EveryCodePreviewGateRecord(
-        gate_id=gate_id,
-        request_id=record.request_id,
-        repository=record.repository,
-        issue_number=record.issue_number,
-        issue_url=record.issue_url,
-        issue_author="",
-        pr_number=pr_number,
-        pr_url=pr_url,
-        head_sha=head_sha,
-        status="pending",
-        created_at=now,
-        updated_at=now,
-        last_checked_at=now,
-        pending_reason="Waiting for GitHub checks to complete.",
-        check_summary=_every_code_check_summary(payload),
-    )
-    record_store.write_every_code_preview_gate_record(gate)
-    cancelled = 0
-    for previous_gate in existing_gates:
-        if previous_gate.status in {"labeled", "cancelled"}:
-            continue
-        record_store.write_every_code_preview_gate_record(
-            previous_gate.model_copy(
-                update={
-                    "status": "cancelled",
-                    "updated_at": now,
-                    "cancelled_at": previous_gate.cancelled_at or now,
-                    "blocked_reason": "Superseded by a newer pull request head SHA.",
-                }
-            )
-        )
-        cancelled += 1
-    return gate, cancelled > 0
 
 
 def route_every_code_pr_check_failures(
@@ -3703,66 +3163,6 @@ def route_every_code_pr_check_failures(
     )
 
 
-def every_code_pr_preview_readiness(
-    *,
-    record_store: EveryCodeWorkerStore,
-    result_pr_url: str,
-    runner: Runner | None = None,
-) -> Literal["ready", "pending", "blocked", "skipped", "cancelled"]:
-    reference = github_pull_request_reference(pr_url=result_pr_url.strip())
-    if reference is None:
-        return "skipped"
-    preview_label = launchplane_anchor_repo_preview_label(
-        record_store=record_store,
-        repo=reference["repo"],
-    )
-    if not preview_label:
-        return "skipped"
-    payload = _github_pr_view_payload(
-        owner=reference["owner"],
-        repo=reference["repo"],
-        pr_number=reference["pr_number"],
-        runner=runner or _run_subprocess,
-    )
-    if payload is None:
-        return "blocked"
-    return every_code_pr_preview_readiness_from_payload(
-        record_store=record_store,
-        repository=f"{reference['owner']}/{reference['repo']}",
-        payload=payload,
-    )
-
-
-def every_code_pr_preview_readiness_from_payload(
-    *,
-    record_store: EveryCodeWorkerStore,
-    repository: str,
-    payload: dict[str, object],
-) -> Literal["ready", "pending", "blocked", "skipped", "cancelled"]:
-    reference_repo = repository.strip().split("/", 1)[-1]
-    preview_label = launchplane_anchor_repo_preview_label(
-        record_store=record_store,
-        repo=reference_repo,
-    )
-    if not preview_label:
-        return "skipped"
-    if str(payload.get("state") or "").upper() != "OPEN":
-        return "cancelled"
-    if _github_pr_payload_has_label(payload, preview_label):
-        return "skipped"
-    check_rollup = payload.get("statusCheckRollup")
-    if not isinstance(check_rollup, list):
-        return "pending"
-    relevant_checks = _every_code_relevant_pr_checks(check_rollup)
-    if not relevant_checks:
-        return "ready"
-    if any(_github_check_status(item) != "COMPLETED" for item in relevant_checks):
-        return "pending"
-    if all(_github_check_conclusion(item) == "SUCCESS" for item in relevant_checks):
-        return "ready"
-    return "blocked"
-
-
 def _every_code_relevant_pr_checks(
     check_rollup: list[object],
 ) -> list[dict[str, object]]:
@@ -3773,50 +3173,6 @@ def _every_code_relevant_pr_checks(
         and _github_check_conclusion(item) != "SKIPPED"
         and not is_launchplane_projected_check(_github_check_name(item))
     ]
-
-
-def _every_code_check_summary(payload: dict[str, object]) -> str:
-    check_rollup = payload.get("statusCheckRollup")
-    if not isinstance(check_rollup, list):
-        return "GitHub check status is not available yet."
-    checks = _every_code_relevant_pr_checks(check_rollup)
-    if not checks:
-        return "No required GitHub checks reported."
-    return "; ".join(
-        f"{_github_check_name(check) or 'unnamed check'}="
-        f"{_github_check_status(check) or 'UNKNOWN'}/"
-        f"{_github_check_conclusion(check) or 'PENDING'}"
-        for check in checks
-    )
-
-
-def _every_code_pending_gate_reason(payload: dict[str, object]) -> str:
-    check_rollup = payload.get("statusCheckRollup")
-    if not isinstance(check_rollup, list):
-        return "Waiting for GitHub check data."
-    pending_names = [
-        _github_check_name(check) or "unnamed check"
-        for check in _every_code_relevant_pr_checks(check_rollup)
-        if _github_check_status(check) != "COMPLETED"
-    ]
-    if pending_names:
-        return "Waiting for checks: " + ", ".join(sorted(pending_names))
-    return "Waiting for GitHub checks to settle."
-
-
-def _every_code_blocked_gate_reason(payload: dict[str, object]) -> str:
-    check_rollup = payload.get("statusCheckRollup")
-    if not isinstance(check_rollup, list):
-        return "Could not read GitHub check state."
-    failed_names = [
-        _github_check_name(check) or "unnamed check"
-        for check in _every_code_relevant_pr_checks(check_rollup)
-        if _github_check_status(check) == "COMPLETED"
-        and _github_check_conclusion(check) != "SUCCESS"
-    ]
-    if failed_names:
-        return "Checks did not pass: " + ", ".join(sorted(failed_names))
-    return "GitHub checks are blocked."
 
 
 def _github_check_status(check: dict[str, object]) -> str:
@@ -4129,64 +3485,6 @@ def _github_pr_view_payload(
     if not isinstance(payload, dict):
         return None
     return payload
-
-
-def _github_pr_payload_has_label(payload: dict[str, object], label_name: str) -> bool:
-    labels = payload.get("labels")
-    if not isinstance(labels, list):
-        return False
-    for label in labels:
-        if isinstance(label, dict) and label.get("name") == label_name:
-            return True
-    return False
-
-
-def request_every_code_pr_preview_label(
-    *,
-    record_store: EveryCodeWorkerStore,
-    result_pr_url: str,
-    runner: Runner | None = None,
-) -> str:
-    reference = github_pull_request_reference(pr_url=result_pr_url.strip())
-    if reference is None:
-        return ""
-    preview_label = launchplane_anchor_repo_preview_label(
-        record_store=record_store,
-        repo=reference["repo"],
-    )
-    if not preview_label:
-        return ""
-    run = runner or _run_subprocess
-    repo = f"{reference['owner']}/{reference['repo']}"
-    try:
-        result = run(
-            (
-                "gh",
-                "pr",
-                "edit",
-                str(reference["pr_number"]),
-                "--repo",
-                repo,
-                "--add-label",
-                preview_label,
-            ),
-            None,
-        )
-    except OSError as exc:
-        return normalize_child_process_failure(
-            operation="Request Launchplane preview label",
-            tool="github_cli",
-            exception=exc,
-        ).operator_message()
-    if result.returncode != 0:
-        return normalize_child_process_failure(
-            operation="Request Launchplane preview label",
-            tool="github_cli",
-            returncode=result.returncode,
-            stdout=result.stdout,
-            stderr=result.stderr,
-        ).operator_message()
-    return f"Requested Launchplane preview with `{preview_label}`."
 
 
 def _mark_every_code_pr_feedback(

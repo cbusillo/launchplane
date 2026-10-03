@@ -26560,11 +26560,6 @@
             "title": "Domain Certificate Type",
             "type": "string"
           },
-          "enable_label": {
-            "default": "launchplane-preview",
-            "title": "Enable Label",
-            "type": "string"
-          },
           "enabled": {
             "default": false,
             "title": "Enabled",
@@ -26646,7 +26641,6 @@
           "copied_env_keys",
           "data_transport_mode",
           "domain_certificate_type",
-          "enable_label",
           "enabled",
           "migration_command",
           "omitted_env_keys",
