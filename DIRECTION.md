@@ -25,10 +25,11 @@ with the site's runtime settings and secrets. The artifact is the only handoff
 between them.
 
 Launchplane needs no caller grant for the work it starts from source-control
-events: verifying a build and deploying it to that site's previews and testing
-lane. Requests from people or other agents still need grants. This does not
-replace the Director's approval at a stop boundary, a Client's release
-acceptance, or a backup gate.
+events (verifying a build and deploying it to that site's previews and testing
+lane) or from a Client's recorded release acceptance (the gated promotion).
+Requests from people or other agents still need grants. This does not replace
+the Director's approval at a stop boundary, a Client's release acceptance, or
+a backup gate.
 
 Code and tests are upkeep. A change that deletes code or tests without losing
 a behavior needs no other reason. A test earns its place by catching a real
@@ -41,19 +42,25 @@ merge through the protected branch and record why in the pull request.
 Launchplane records each product's Client and runs every production release
 through the same gated path: verified backup, release record, post-deploy
 checks, automatic rollback. Who accepts a release is set in
-`cbusillo/direction`. Admin is a permission, not a role; the Director normally
-holds it.
+`cbusillo/direction`, and that acceptance is what starts the release, so
+accepting is a production action: the review says so in plain words, the
+decision stays bound to the exact candidate it reviewed, an admin can hold
+releases without editing a record, and an admin override is still a hand
+promotion. A Client's issue or comment never merges, promotes, or counts as
+acceptance. Admin is a permission, not a role; the Director normally holds it.
 
 ## Stop Boundaries
 
 An agent asks the Director before:
 
 - deploying to, promoting, or changing a real live site (SellYourOutboard,
-  VeriReel, and the CM website once it launches)
+  VeriReel, and the CM website once it launches), except a release the
+  product's Client accepted, which Launchplane promotes itself through the
+  gated path
 - restoring or deleting data, or weakening a backup gate
 - creating credentials, granting access, or changing who can merge
 - spending money or creating paid resources
-- anything a Client should weigh in on
+- anything a Client should weigh in on; that question goes to the Client
 
 Everything else is ordinary engineering and needs no ceremony, including
 work on products that are not live.
@@ -63,10 +70,11 @@ record and ask only before a write, a grant, or a change.
 
 ## Journey
 
-Three real CM website changes in a row go pull request → preview → testing →
-production: the agent marks the change, Launchplane @mentions Justin, Justin
-approves the release checklist, a backup is taken, and nobody touches
-Launchplane by hand. Whatever blocks that run is the next piece of work.
+Three real CM website changes in a row go issue → pull request → preview →
+testing → production: Justin opens the issue, the agent marks the change,
+Launchplane @mentions Justin, Justin accepts the release checklist, a backup is
+taken, Launchplane promotes, and nobody touches Launchplane by hand. Whatever
+blocks that run is the next piece of work.
 
 ## Retired
 
@@ -98,9 +106,11 @@ fits this file.
   Launchplane change forces a product repository change, or a product change
   needs a new Launchplane grant.
 - `CM website live through Launchplane` proves the journey once: Client
-  acceptance at release is built, and three changes in a row go through with
-  Justin; ends if Justin has to use GitHub, the Director touches Launchplane
-  by hand, or the old approval code still decides a merge.
+  acceptance at release is built, and three changes in a row that Justin opens
+  as issues reach production with no act by Justin beyond opening the issue
+  and accepting, and none by the Director; ends if Justin has to use GitHub
+  for anything beyond opening an issue, the Director touches Launchplane by
+  hand, or the old approval code still decides a merge.
 - `Merge train that just works` proves an agent's merge lands in one pass
   without a wedge, a hand merge, or main going red on its own; ends if the
   friction log gains the same entry twice.
