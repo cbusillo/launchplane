@@ -273,10 +273,27 @@ def client_release_grant_allows(
     if covered is None:
         return False
     profile, decision = covered
+    context = _prod_context(profile)
+    checklist = decision.checklist
+    try:
+        record_store = cast(PostgresRecordStore, store)
+        testing = record_store.read_release_tuple_record(
+            context_name=context, channel_name="testing"
+        )
+        production = record_store.read_release_tuple_record(
+            context_name=context, channel_name="prod"
+        )
+    except FileNotFoundError:
+        return False
+    # Every step happens while testing carries the accepted candidate, and production
+    # runs either the checklist's production version or that candidate.
     return (
-        authorization.context == _prod_context(profile)
+        authorization.context == context
         and str(authorization.caller.github_id) == decision.actor_github_id
         and authorization.caller.role == "client"
+        and testing.artifact_id == checklist.candidate.artifact_id
+        and production.artifact_id
+        in {checklist.production.artifact_id, checklist.candidate.artifact_id}
     )
 
 
@@ -486,6 +503,7 @@ def _queue_promotion(
         product=profile.product,
         request_id=f"client-release-{step.name}-{decision.record_id}",
         infrastructure_backup_record_id=backup_record_id,
+        expected_artifact_id=decision.checklist.candidate.artifact_id,
     )
     admission = admit_odoo_prod_promotion_run(
         control_plane_root=control_plane_root,
@@ -535,9 +553,13 @@ def _queue_rollback(
     checklist = decision.checklist
     try:
         production = store.read_release_tuple_record(context_name=context, channel_name="prod")
+        testing = store.read_release_tuple_record(context_name=context, channel_name="testing")
     except FileNotFoundError as error:
         raise ClientReleaseNotReady("release_record_missing") from error
-    if production.artifact_id != checklist.candidate.artifact_id:
+    if (production.artifact_id, testing.artifact_id) != (
+        checklist.candidate.artifact_id,
+        checklist.candidate.artifact_id,
+    ):
         raise ClientReleaseNotReady("release_changed")
     target_artifact_id = checklist.production.artifact_id
     deployment = next(

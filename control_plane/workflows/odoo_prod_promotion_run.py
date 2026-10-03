@@ -85,6 +85,11 @@ def admit_odoo_prod_promotion_run(
             blocked_reason=inputs_result.error_message
             or "Odoo prod promotion inputs are not ready.",
         )
+    if request.expected_artifact_id and request.expected_artifact_id != inputs_result.artifact_id:
+        return OdooProdPromotionRunAdmission(
+            inputs_result=inputs_result,
+            blocked_reason="Testing no longer carries the accepted release; a new decision is required.",
+        )
     try:
         require_release_approval(
             control_plane_root=control_plane_root,

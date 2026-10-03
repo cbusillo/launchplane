@@ -25,6 +25,10 @@ class OdooProdPromotionRunRequest(BaseModel):
     product: str = ""
     request_id: str
     infrastructure_backup_record_id: str = ""
+    # A Client's accepted release names the artifact it accepted; the run blocks
+    # when testing no longer carries it. Omitted when empty, so other requests
+    # and their fingerprints are unchanged.
+    expected_artifact_id: str = Field(default="", exclude_if=lambda value: value == "")
     backup_timeout_seconds: int | None = Field(default=None, ge=1)
     promotion_timeout_seconds: int | None = Field(default=None, ge=1)
     health_timeout_seconds: int | None = Field(default=None, ge=1)
@@ -40,6 +44,7 @@ class OdooProdPromotionRunRequest(BaseModel):
         self.product = self.product.strip()
         self.request_id = self.request_id.strip()
         self.infrastructure_backup_record_id = self.infrastructure_backup_record_id.strip()
+        self.expected_artifact_id = self.expected_artifact_id.strip()
         if not self.context:
             raise ValueError("Odoo prod promotion run requires context.")
         if self.from_instance != "testing" or self.to_instance != "prod":

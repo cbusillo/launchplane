@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from collections.abc import Callable
-from typing import Literal
+from typing import Literal, cast
 from unittest.mock import patch
 
 from control_plane.client_release import (
@@ -40,7 +40,12 @@ from control_plane.durable_operation_authorization import (
 from control_plane.release_review import build_release_review
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.odoo_prod_promotion_inputs import OdooProdPromotionInputsResult
-from control_plane.workflows.odoo_prod_promotion_run import OdooProdPromotionRunAdmission
+from control_plane.contracts.odoo_prod_promotion_operation import OdooProdPromotionRunRequest
+from control_plane.workflows.odoo_prod_promotion_run import (
+    OdooProdPromotionRunAdmission,
+    OdooProdPromotionRunStore,
+    admit_odoo_prod_promotion_run,
+)
 from tests.test_production_backup_provider import _binding
 from tests.test_release_review import BASE, HEAD, decision, github_read, profile, seed
 
@@ -253,6 +258,9 @@ class ClientReleaseTests(unittest.TestCase):
         (promotion_id,) = self.advance()
         promotion = self.store.read_odoo_prod_promotion_operation_record(promotion_id)
         self.assertEqual(promotion.request.infrastructure_backup_record_id, backup.backup_record_id)
+        self.assertEqual(
+            promotion.request.expected_artifact_id, accepted.checklist.candidate.artifact_id
+        )
         self.finish(promotion_id)
         self.set_prod("artifact-testing")
         self.store.write_deployment_record(_deployment("deployment-prod-3", "artifact-testing"))
@@ -368,6 +376,15 @@ class ClientReleaseTests(unittest.TestCase):
             )
         )
         self.assertFalse(client_release_grant_allows(self.store, grant))
+        self.store.write_product_profile_record(current)
+        self.assertTrue(client_release_grant_allows(self.store, grant))
+        # A later testing build stops every step, the drill's rollback included.
+        testing = self.store.read_release_tuple_record(context_name=CONTEXT, channel_name="testing")
+        self.store.write_release_tuple_record(
+            testing.model_copy(update={"artifact_id": "artifact-b"})
+        )
+        self.assertFalse(client_release_grant_allows(self.store, grant))
+        self.store.write_release_tuple_record(testing)
         self.store.write_product_profile_record(
             current.model_copy(update={"release_on_acceptance": "held"})
         )
@@ -403,6 +420,39 @@ class ClientReleaseTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             DurableOperationCallerIdentity(identity_type="github_human", login="x", github_id=1)
+
+
+class AcceptedArtifactAdmissionTests(unittest.TestCase):
+    def test_a_run_for_an_accepted_artifact_blocks_when_testing_moved(self) -> None:
+        inputs = OdooProdPromotionInputsResult(
+            context=CONTEXT,
+            from_instance="testing",
+            to_instance="prod",
+            request_id="release",
+            input_status="ready",
+            artifact_id="artifact-b",
+        )
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_promotion_run.resolve_odoo_prod_promotion_inputs",
+                return_value=inputs,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_promotion_run.require_release_approval"
+            ) as approval,
+        ):
+            admission = admit_odoo_prod_promotion_run(
+                control_plane_root=Path("."),
+                record_store=cast(OdooProdPromotionRunStore, object()),
+                request=OdooProdPromotionRunRequest(
+                    context=CONTEXT,
+                    product=PRODUCT,
+                    request_id="release",
+                    expected_artifact_id="artifact-a",
+                ),
+            )
+        self.assertIn("new decision", admission.blocked_reason)
+        approval.assert_not_called()
 
 
 class ReleaseStepTests(unittest.TestCase):

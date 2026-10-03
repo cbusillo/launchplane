@@ -18507,6 +18507,11 @@
             "title": "Context",
             "type": "string"
           },
+          "expected_artifact_id": {
+            "default": "",
+            "title": "Expected Artifact Id",
+            "type": "string"
+          },
           "from_instance": {
             "default": "testing",
             "title": "From Instance",
@@ -57911,6 +57916,11 @@
                       },
                       "context": {
                         "title": "Context",
+                        "type": "string"
+                      },
+                      "expected_artifact_id": {
+                        "default": "",
+                        "title": "Expected Artifact Id",
                         "type": "string"
                       },
                       "from_instance": {

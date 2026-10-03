@@ -1544,6 +1544,7 @@ export type OdooProdPromotionRunEnvelope = {
 export type OdooProdPromotionRunRequest = {
     backup_timeout_seconds?: number | null;
     context: string;
+    expected_artifact_id?: string;
     from_instance?: string;
     health_timeout_seconds?: number | null;
     infrastructure_backup_record_id?: string;
