@@ -43,6 +43,11 @@ from control_plane import authz_policy_recovery as control_plane_authz_policy_re
 from control_plane import authz_diagnostics as control_plane_authz_diagnostics
 from control_plane import authz_repository_scope as control_plane_authz_repository_scope
 from control_plane import ingress_route_scope as control_plane_ingress_route_scope
+from control_plane.authz_candidate_preparation import (
+    is_exclusive_product_lane_context,
+    product_context_owners,
+)
+from control_plane.authz_scope import DOKPLOY_TARGET_LANE_SETUP_ACTION
 from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
     execute_dokploy_target_setup,
@@ -731,6 +736,7 @@ from control_plane.product_config_http import (
     ProductConfigApplyResponse,
     ProductConfigApplyResult,
     ProductEnvironmentConfigApplyEnvelope,
+    ProductEnvironmentConfigRefused,
     product_config_live_target_next_actions,
     product_environment_config_apply_request,
     product_environment_config_confirmation,
@@ -763,6 +769,7 @@ from control_plane.service_auth import (
     LocalAdminIdentity,
     LocalOperatorIdentity,
     TerminalAgentIdentity,
+    configured_local_operator_identity,
     configured_terminal_agent_identity,
     TokenVerifier,
     agent_authz_audit,
@@ -787,6 +794,7 @@ from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.factory import storage_backend_name
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
+    ProductContextOwnershipError,
     ProductProfileConflictError,
     RuntimeEnvironmentConflictError,
 )
@@ -1196,6 +1204,51 @@ _AUTH_GITHUB_LOGIN_ROUTE = "/auth/github/login"
 _AUTH_GITHUB_CALLBACK_ROUTE = "/auth/github/callback"
 _AUTH_LOGOUT_ROUTE = "/auth/logout"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
+
+
+def _local_operator_product_config_scope_refusal(
+    *,
+    record_store: object,
+    product_config_request: ProductConfigApplyEnvelope,
+) -> str:
+    """Keep the operator's agent on the named product's own lane.
+
+    A context-scoped secret written through an instance request also changes
+    what other lanes resolve, and a context reassigned to another product would
+    otherwise follow a grant that names the old product.
+    """
+    context = product_config_request.context
+    if context:
+        try:
+            owners = product_context_owners(record_store)
+        except TypeError:
+            return "Product profile records are unavailable to confirm the context's product."
+        if not is_exclusive_product_lane_context(
+            context=context, product=product_config_request.product, owners=owners
+        ):
+            return "The context must belong to the named product only."
+    if product_config_request.instance and any(
+        (secret.scope or "").strip() not in {"", "context_instance"}
+        for secret in product_config_request.secrets
+    ):
+        return (
+            "An instance request from the operator's agent can only write that instance's secrets."
+        )
+    return ""
+
+
+def _lane_setup_context_owner(*, record_store: object, context: str) -> str:
+    """The one product that owns ``context`` exclusively and canonically, or ''."""
+    owners = product_context_owners(record_store)
+    products = owners.get(context.strip().lower(), frozenset())
+    if len(products) != 1:
+        return ""
+    (product,) = products
+    if not is_exclusive_product_lane_context(context=context, product=product, owners=owners):
+        return ""
+    return product
+
+
 _AGENT_WRITE_INTENT_EVALUATE_ROUTE = "/v1/agent/write-intents/evaluate"
 _EVERY_CODE_WORK_REQUEST_RERUN_ROUTE = "/v1/every-code/work-requests/rerun"
 _EVERY_CODE_WORK_REQUEST_HEARTBEAT_ROUTE = "/v1/every-code/work-requests/heartbeat"
@@ -5004,6 +5057,9 @@ def create_launchplane_fastapi_app(
         read_configured_terminal_identity=lambda: configured_terminal_agent_identity(
             bearer_identity_config or BearerIdentityConfig()
         ),
+        read_configured_local_operator_identity=lambda: configured_local_operator_identity(
+            bearer_identity_config or BearerIdentityConfig()
+        ),
     )
 
     engineering_review_write_route_dependencies = EngineeringReviewWriteRouteDependencies(
@@ -5517,6 +5573,7 @@ def create_launchplane_fastapi_app(
                     ),
                 ),
                 required_binding_keys=request.secret_bindings,
+                unreasoned_shared_integration_keys="report",
             )
         except (AttributeError, ValueError):
             return secret_evidence_for_agent_write_intent(
@@ -7758,7 +7815,8 @@ def create_launchplane_fastapi_app(
         try:
             result = control_plane_integration_allowances.read_integration_allowances(
                 record_store=cast(
-                    control_plane_integration_allowances.IntegrationAllowancesStore, record_store
+                    control_plane_integration_allowances.IntegrationAllowancesReadStore,
+                    record_store,
                 ),
                 product=product,
                 context=context,
@@ -8030,6 +8088,14 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             denied_message=_TESTING_HOLD_DENIED_MESSAGE,
         )
+        if isinstance(identity, LocalOperatorIdentity) and not hold_request.hold:
+            # Lifting a hold requests a testing reconcile, which can deploy.
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="local_operator_lane_scope_required",
+                message="The operator's agent can set a testing hold but not lift one.",
+            )
         _require_lane_product_config_lane(
             record_store=record_store,
             product=hold_request.product,
@@ -14653,6 +14719,18 @@ def create_launchplane_fastapi_app(
                     " product/context."
                 ),
             )
+        if isinstance(identity, LocalOperatorIdentity):
+            scope_refusal = _local_operator_product_config_scope_refusal(
+                record_store=record_store,
+                product_config_request=product_config_request,
+            )
+            if scope_refusal:
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="local_operator_lane_scope_required",
+                    message=scope_refusal,
+                )
         if operator_identity and not product_config_request.reason:
             raise _launchplane_http_error(
                 status_code=400,
@@ -14865,6 +14943,16 @@ def create_launchplane_fastapi_app(
                 response=product_config_response,
             )
         else:
+            if isinstance(identity, LocalOperatorIdentity) and product_config_request.context:
+                # Re-checked under the profile-write lock when the bundle commits.
+                authority_bundle = authority_bundle.model_copy(
+                    update={
+                        "required_context_owner": (
+                            product_config_request.product,
+                            product_config_request.context,
+                        )
+                    }
+                )
             try:
                 database_store.write_product_authority_bundle(
                     authority_bundle_with_apply_idempotency(
@@ -14877,6 +14965,13 @@ def create_launchplane_fastapi_app(
                         response=product_config_response,
                     )
                 )
+            except ProductContextOwnershipError as error:
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="local_operator_lane_scope_required",
+                    message=str(error),
+                ) from error
             except Exception as write_error:
                 if not normalized_idempotency_key:
                     raise
@@ -15022,8 +15117,11 @@ def create_launchplane_fastapi_app(
                 message="Product environment was not found.",
             )
         idempotency_request_payload = None
-        if any(item.owner_submission_version_id for item in environment_request.managed_secrets):
-            # Pin replay to the submitted references, not their decryptable current values.
+        if environment_request.retired_provider_keys or any(
+            item.owner_submission_version_id for item in environment_request.managed_secrets
+        ):
+            # Pin replay to the submitted references, not their decryptable current values,
+            # and to the submitted retirements, not the lane's retirements they are added to.
             # Typed values still require the existing keyed secret fingerprint.
             idempotency_request_payload = {
                 **environment_request.model_dump(mode="json", exclude_none=True),
@@ -15059,6 +15157,19 @@ def create_launchplane_fastapi_app(
                     return ProductConfigApplyResponse.model_validate(
                         replay_response.model_dump(mode="json")
                     )
+        current_retired_provider_keys: tuple[str, ...] = ()
+        if environment_request.retired_provider_keys:
+            current_retired_provider_keys = next(
+                (
+                    record.retired_provider_keys
+                    for record in database_store.list_runtime_environment_records(
+                        scope="instance",
+                        context_name=lane.context,
+                        instance_name=lane.instance,
+                    )
+                ),
+                (),
+            )
         try:
             product_config_request = product_environment_config_apply_request(
                 profile=profile,
@@ -15073,7 +15184,19 @@ def create_launchplane_fastapi_app(
                         version_id=version_id,
                     )
                 ),
+                current_retired_provider_keys=current_retired_provider_keys,
+                # The same guard as declaring a key on a live product.
+                undeclared_settings_allowed=not (
+                    isinstance(identity, LocalOperatorIdentity) and profile.production_use == "live"
+                ),
             )
+        except ProductEnvironmentConfigRefused as error:
+            raise _launchplane_http_error(
+                status_code=error.status_code,
+                trace_id=trace_id,
+                code=error.code,
+                message=str(error),
+            ) from error
         except OwnerSecretSubmissionUnavailable as error:
             raise _launchplane_http_error(
                 status_code=409,
@@ -23209,12 +23332,34 @@ def create_launchplane_fastapi_app(
             record_store=record_store,
             trace_id=trace_id,
         )
-        can_setup_target = resolved_authz_policy_runtime.policy.allows(
+        # A lane-scoped grant may only create a new compose, in a new provider
+        # project and environment, for its own lane: adopting, re-pointing,
+        # replacing or reusing existing placement could reach another lane's
+        # resources. It is checked on the one product that owns the context.
+        lane_owner = _lane_setup_context_owner(
+            record_store=database_store, context=setup_request.context
+        )
+        service_scoped = resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action="dokploy_target.setup",
             product=setup_request.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         )
+        lane_scoped_only = not service_scoped and (
+            setup_request.operation == "create-compose"
+            and setup_request.expected_current_provider_target is None
+            and not setup_request.project_id
+            and not setup_request.environment_id
+            and bool(lane_owner)
+            and resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action=DOKPLOY_TARGET_LANE_SETUP_ACTION,
+                product=lane_owner,
+                context=setup_request.context,
+                target=AuthorizationTarget(scope="instance", instances=(setup_request.instance,)),
+            )
+        )
+        can_setup_target = service_scoped or lane_scoped_only
         can_repair_domain_authority = setup_request.operation == "repair-domain-authority" and (
             can_setup_target
             or resolved_authz_policy_runtime.policy.allows(
@@ -23298,7 +23443,18 @@ def create_launchplane_fastapi_app(
                 control_plane_root_path=resolved_control_plane_root,
                 record_store=database_store,
                 request=setup_request,
+                # A lane-scoped caller's owner is re-checked when records commit.
+                required_context_owner=(
+                    (lane_owner, setup_request.context) if lane_scoped_only else None
+                ),
             )
+        except ProductContextOwnershipError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="local_operator_lane_scope_required",
+                message=str(error),
+            ) from error
         except (ValueError, click.ClickException) as error:
             raise _launchplane_http_error(
                 status_code=400,

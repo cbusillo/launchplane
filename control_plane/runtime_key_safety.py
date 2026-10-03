@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from fnmatch import fnmatchcase
 from typing import Protocol
@@ -14,6 +15,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeSecretClass,
     RuntimeSecretSafetyRule,
     RuntimeSecretSafetyTargetScope,
+    UnreasonedSharedIntegrationKeyMode,
 )
 from control_plane.contracts.secret_record import SecretBinding
 
@@ -56,8 +58,15 @@ def is_secret_shaped_runtime_key(key_name: str) -> bool:
     )
 
 
+# A keyword connection string's password, as in libpq ``host=db password=...``
+# or ODBC ``Server=db;Pwd=...``.
+_KEYWORD_PASSWORD_PATTERN = re.compile(r"(?:^|[\s;])(?:password|pwd)\s*=\s*[^\s;]", re.IGNORECASE)
+
+
 def runtime_value_carries_credentials(value: str) -> bool:
     """Whether a value embeds a password, as in ``smtp://user:password@host``."""
+    if _KEYWORD_PASSWORD_PATTERN.search(value):
+        return True
     try:
         return bool(urlsplit(value.strip()).password)
     except ValueError:
@@ -186,6 +195,7 @@ def evaluate_preview_copied_runtime_key_safety(
         ),
         secret_rules=policy_record.rules,
         integration_key_markers=policy_record.integration_key_markers,
+        unreasoned_shared_integration_keys="report",
     )
 
 
@@ -229,6 +239,7 @@ def evaluate_runtime_key_safety_from_store(
     target: RuntimeKeySafetyTarget,
     required_binding_keys: Iterable[str],
     policy_record: RuntimeKeySafetyPolicyRecord | None = None,
+    unreasoned_shared_integration_keys: UnreasonedSharedIntegrationKeyMode = "refuse",
 ) -> RuntimeKeySafetyEvaluation:
     policy = policy_record or latest_active_runtime_key_safety_policy(record_store)
     return evaluate_runtime_key_safety(
@@ -240,6 +251,7 @@ def evaluate_runtime_key_safety_from_store(
         ),
         secret_rules=policy.rules,
         integration_key_markers=policy.integration_key_markers,
+        unreasoned_shared_integration_keys=unreasoned_shared_integration_keys,
     )
 
 
@@ -250,12 +262,14 @@ def evaluate_runtime_key_safety(
     secret_bindings: Iterable[SecretBinding],
     secret_rules: Iterable[RuntimeSecretSafetyRule],
     integration_key_markers: Iterable[str] = (),
+    unreasoned_shared_integration_keys: UnreasonedSharedIntegrationKeyMode = "refuse",
 ) -> RuntimeKeySafetyEvaluation:
     extra_integration_key_markers = tuple(integration_key_markers)
     checked_binding_keys = _normalize_required_binding_keys(required_binding_keys)
     rules_by_binding_key = _rules_by_binding_key(secret_rules)
     bindings_by_binding_key = _bindings_by_binding_key(secret_bindings)
     findings: list[RuntimeKeySafetyFinding] = []
+    reported: list[RuntimeKeySafetyFinding] = []
 
     if target.environment_class == "unknown":
         findings.append(
@@ -309,33 +323,58 @@ def evaluate_runtime_key_safety(
             )
             continue
 
-        rule = rules_by_binding_key.get(binding.binding_key)
-        if rule is None and _binding_stored_for_exact_stable_lane(
-            binding=binding,
+        binding_findings = _evaluate_binding(
             target=target,
+            binding=binding,
+            rule=rules_by_binding_key.get(binding.binding_key),
             extra_integration_key_markers=extra_integration_key_markers,
-        ):
-            findings.extend(_evaluate_declared_secret_class(target=target, binding=binding))
-            continue
-        if rule is None:
-            findings.append(
-                RuntimeKeySafetyFinding(
-                    code="unclassified_binding",
-                    binding_key=binding.binding_key,
-                    binding_id=binding.binding_id,
-                    secret_id=binding.secret_id,
-                    detail=f"Managed secret binding {binding.binding_key!r} has no runtime key safety rule.",
-                )
-            )
-            continue
-
-        findings.extend(_evaluate_binding_rule(target=target, binding=binding, rule=rule))
+        )
+        findings.extend(binding_findings)
+        # A declared shared_safe production key needs its reason whether the lane
+        # or a policy rule classifies it.
+        missing_reason = _missing_sharing_reason(
+            target=target,
+            binding=binding,
+            extra_integration_key_markers=extra_integration_key_markers,
+        )
+        if missing_reason is not None and not binding_findings:
+            if unreasoned_shared_integration_keys == "refuse":
+                findings.append(missing_reason)
+            else:
+                reported.append(missing_reason)
 
     return RuntimeKeySafetyEvaluation(
         status="fail" if findings else "pass",
         target=target,
         checked_binding_keys=checked_binding_keys,
         findings=tuple(findings),
+        reported=tuple(reported),
+    )
+
+
+def _evaluate_binding(
+    *,
+    target: RuntimeKeySafetyTarget,
+    binding: SecretBinding,
+    rule: RuntimeSecretSafetyRule | None,
+    extra_integration_key_markers: tuple[str, ...],
+) -> tuple[RuntimeKeySafetyFinding, ...]:
+    if rule is not None:
+        return _evaluate_binding_rule(target=target, binding=binding, rule=rule)
+    if _binding_stored_for_exact_stable_lane(
+        binding=binding,
+        target=target,
+        extra_integration_key_markers=extra_integration_key_markers,
+    ):
+        return _evaluate_declared_secret_class(target=target, binding=binding)
+    return (
+        RuntimeKeySafetyFinding(
+            code="unclassified_binding",
+            binding_key=binding.binding_key,
+            binding_id=binding.binding_id,
+            secret_id=binding.secret_id,
+            detail=f"Managed secret binding {binding.binding_key!r} has no runtime key safety rule.",
+        ),
     )
 
 
@@ -392,6 +431,37 @@ def _evaluate_declared_secret_class(
                 f"{declared_class!r}, which is not allowed for "
                 f"{target.environment_class!r} environments."
             ),
+        ),
+    )
+
+
+# A production integration key a writer declared shared_safe on a non-production
+# lane is the one case where a lane's own binding carries a production key on
+# purpose. The class alone says nothing about why, so it needs a recorded reason.
+def _missing_sharing_reason(
+    *,
+    target: RuntimeKeySafetyTarget,
+    binding: SecretBinding,
+    extra_integration_key_markers: tuple[str, ...],
+) -> RuntimeKeySafetyFinding | None:
+    if (
+        target.environment_class == "prod"
+        or binding.declared_secret_class != "shared_safe"
+        or binding.sharing_reason is not None
+        or not is_integration_runtime_key(
+            binding.binding_key, extra_markers=extra_integration_key_markers
+        )
+    ):
+        return None
+    return RuntimeKeySafetyFinding(
+        code="sharing_reason_missing",
+        binding_key=binding.binding_key,
+        binding_id=binding.binding_id,
+        secret_id=binding.secret_id,
+        secret_class=binding.declared_secret_class,
+        detail=(
+            f"Integration key {binding.binding_key!r} is declared 'shared_safe' on a "
+            f"{target.environment_class!r} lane with no recorded sharing reason and evidence."
         ),
     )
 

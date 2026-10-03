@@ -4,7 +4,7 @@ A reconcile reads GitHub's record of the product's builds and Launchplane's own
 records, decides what should change, and does it under Launchplane's own
 reconcile grant (``launchplane_reconcile_authorization``): it queues an Odoo
 testing lane's stable target replacement, deploys a generic-web testing lane,
-and applies or destroys the PR's preview. It records what it decided and did as
+and applies or destroys the PR's Odoo or generic-web preview. It records what it decided and did as
 the plan on its request.
 """
 
@@ -18,6 +18,7 @@ import json
 import logging
 import re
 from pathlib import Path
+from threading import Event, Thread
 from typing import Literal, Protocol, cast
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
@@ -72,6 +73,19 @@ from control_plane.generic_web_deploy_http import (
 )
 from control_plane.generic_web_deploy_provider_adapter import (
     GenericWebDeployProviderMutationAdapter,
+)
+from control_plane.generic_web_preview_http import (
+    GenericWebPreviewDestroyEnvelope,
+    GenericWebPreviewRefreshEnvelope,
+    apply_generic_web_preview_destroy_result,
+    apply_generic_web_preview_refresh_result,
+)
+from control_plane.generic_web_verification_http import (
+    GenericWebPreviewVerificationEnvelope,
+    apply_generic_web_preview_verification_result,
+)
+from control_plane.drivers.generic_web_preview_dispatch import (
+    GenericWebPreviewVerificationRequest,
 )
 from control_plane.github_app_identity import (
     GitHubAppIdentity,
@@ -148,6 +162,11 @@ from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebDeployProvider,
     default_generic_web_deploy_provider,
 )
+from control_plane.workflows.generic_web_preview import (
+    GenericWebPreviewDestroyRequest,
+    GenericWebPreviewRefreshRequest,
+    resolve_generic_web_preview_slug,
+)
 from control_plane.workflows.launchplane import PreviewMutationRecordStore, find_preview_record
 from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsRequest,
@@ -155,17 +174,21 @@ from control_plane.workflows.odoo_preview_runtime import (
 )
 
 PRODUCT_RECONCILE_SWEEP_SECONDS = 30 * 60
-# Long enough for a preview apply that waits for its deploy; a crashed worker's
-# request is reclaimed after this, well inside one sweep.
+# A running reconcile renews its lease every third of it, so a long preview apply
+# keeps it; a crashed worker's request is reclaimed after this, well inside one sweep.
 PRODUCT_RECONCILE_LEASE_SECONDS = 20 * 60
 RECONCILE_SOURCE = "launchplane-reconcile"
 TESTING_DEPLOY_MAX_FAILED_ATTEMPTS = 3
 TESTING_DEPLOY_MAX_ATTEMPT_CHAIN = 20
 PREVIEW_APPLY_TIMEOUT_SECONDS = 600
+# A generic-web refresh waits for the deploy and then for health, each up to this
+# long, inside the request's lease.
+GENERIC_WEB_PREVIEW_TIMEOUT_SECONDS = 300
 TESTING_BUILD_RUN_PAGE_SIZE = 50
 TESTING_VERIFY_LIMIT = 3
 _ENDED_PREVIEW_STATES = frozenset({"destroyed", "teardown_pending"})
 OPEN_PULL_REQUEST_SWEEP_PAGES = 5
+_LEASE_LOST = "This worker no longer holds the reconcile request's lease; nothing more was changed."
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -186,6 +209,10 @@ class ProductReconcileStore(Protocol):
         plan: dict[str, object],
         error: str = "",
     ) -> ProductReconcileRequestRecord: ...
+
+    def renew_product_reconcile_lease(
+        self, target_key: str, lease_owner: str, lease_seconds: int
+    ) -> bool: ...
 
     def request_product_reconcile(
         self, target: ProductReconcileTarget, requested_at: str
@@ -226,6 +253,7 @@ class ProductReconcileStore(Protocol):
 
 
 TransportFactory = Callable[[object, LaunchplaneProductProfileRecord], BuildProvenanceTransport]
+GenericWebPreviewChange = Callable[..., tuple[dict[str, object], dict[str, object]]]
 
 
 @dataclass(frozen=True)
@@ -235,6 +263,8 @@ class PreviewProviderHooks:
     build_inputs: Callable[..., dict[str, object]] = build_odoo_preview_apply_inputs_result
     execute_apply: ExecuteOdooPreviewApply = execute_odoo_preview_apply_result
     observe_apply: ObserveOdooPreviewApply = observe_odoo_preview_apply_result
+    refresh_generic_web: GenericWebPreviewChange = apply_generic_web_preview_refresh_result
+    destroy_generic_web: GenericWebPreviewChange = apply_generic_web_preview_destroy_result
 
 
 @dataclass(frozen=True)
@@ -262,7 +292,7 @@ class ReconcileOutcome:
 @dataclass(frozen=True)
 class _PreviewDecision:
     plan: dict[str, object]
-    verified: VerifiedBuildArtifact | None = None
+    verified: VerifiedBuildArtifact | VerifiedGenericWebBuild | None = None
     lifecycle_token: str = "none"
     observed: dict[str, object] = field(default_factory=dict)
 
@@ -984,6 +1014,8 @@ def reconcile_preview_target(
     pull_request_number: int,
     control_plane_root: Path | None,
     preview_hooks: PreviewProviderHooks,
+    previous_plan: dict[str, object] | None = None,
+    lease_held: Callable[[], bool] = lambda: True,
 ) -> ReconcileOutcome:
     """Apply or destroy the PR's preview so it matches what the PR asks for now."""
     decision = _plan_preview_target(
@@ -996,11 +1028,24 @@ def reconcile_preview_target(
     plan = decision.plan
     if plan["action"] not in {"apply", "destroy"}:
         return ReconcileOutcome(plan)
-    if not product_profile_uses_odoo_driver(profile):
+    odoo = product_profile_uses_odoo_driver(profile)
+    if not odoo and not reconciles_as_generic_web(profile):
         plan.update(held=True, reason="no_reconcile_preview_for_driver")
         return ReconcileOutcome(plan)
     if control_plane_root is None:
         raise ProductReconcileError("A preview reconcile needs the control-plane root.")
+    if not odoo:
+        return _run_generic_web_preview_operation(
+            record_store=record_store,
+            profile=profile,
+            transport=transport,
+            decision=decision,
+            pull_request_number=pull_request_number,
+            control_plane_root=control_plane_root,
+            preview_hooks=preview_hooks,
+            previous_plan=previous_plan or {},
+            lease_held=lease_held,
+        )
     return _run_preview_operation(
         record_store=record_store,
         profile=profile,
@@ -1061,15 +1106,27 @@ def _plan_preview_target(
     # The agent that opened the PR marks it for the Owner with a label.
     plan["owner_review_requested"] = profile.owner.review_label in _labels(pull_request)
     try:
-        verified = verify_build_artifact(
-            transport=transport,
-            repository=profile.repository,
-            repository_id=repository_id,
-            commit=head_sha,
-            purpose="preview",
-            context=preview_context,
-            image_repository=profile.image.repository,
-            pull_request_number=pull_request_number,
+        verified: VerifiedBuildArtifact | VerifiedGenericWebBuild = (
+            verify_generic_web_build(
+                transport=transport,
+                repository=profile.repository,
+                repository_id=repository_id,
+                commit=head_sha,
+                purpose="preview",
+                image_repository=profile.image.repository,
+                pull_request_number=pull_request_number,
+            )
+            if reconciles_as_generic_web(profile)
+            else verify_build_artifact(
+                transport=transport,
+                repository=profile.repository,
+                repository_id=repository_id,
+                commit=head_sha,
+                purpose="preview",
+                context=preview_context,
+                image_repository=profile.image.repository,
+                pull_request_number=pull_request_number,
+            )
         )
     except BuildProvenanceError as error:
         # A PR's build is untrusted input: an unprovable or malformed one is not built yet.
@@ -1104,7 +1161,8 @@ def _run_preview_operation(
     """Issue the preview plan the inputs route would, then run it as the apply route does."""
     plan = decision.plan
     operation: Literal["refresh", "destroy"] = "refresh" if plan["action"] == "apply" else "destroy"
-    manifest = decision.verified.manifest if decision.verified is not None else None
+    verified = decision.verified
+    manifest = verified.manifest if isinstance(verified, VerifiedBuildArtifact) else None
     if operation == "refresh":
         if manifest is None or manifest.source_build is None:
             raise ProductReconcileError("A preview apply needs its verified build.")
@@ -1236,6 +1294,201 @@ def _run_preview_operation(
     return ReconcileOutcome(plan)
 
 
+def _run_generic_web_preview_operation(
+    *,
+    record_store: ProductReconcileStore,
+    profile: LaunchplaneProductProfileRecord,
+    transport: BuildProvenanceTransport,
+    decision: _PreviewDecision,
+    pull_request_number: int,
+    control_plane_root: Path,
+    preview_hooks: PreviewProviderHooks,
+    previous_plan: dict[str, object],
+    lease_held: Callable[[], bool],
+) -> ReconcileOutcome:
+    """Refresh or destroy the PR's generic-web preview in-process, as its routes do.
+
+    The lease on this PR's reconcile request makes it the only writer of the
+    preview. A refresh that crashed is planned again and run again, as a re-run of
+    the product's preview workflow was. Provider and driver text can name targets
+    and hosts, so it goes to the worker log only.
+    """
+    plan = decision.plan
+    operation: Literal["refresh", "destroy"] = "refresh" if plan["action"] == "apply" else "destroy"
+    verified = decision.verified
+    if operation == "refresh" and not isinstance(verified, VerifiedGenericWebBuild):
+        raise ProductReconcileError("A preview refresh needs its verified build.")
+    try:
+        preview_slug = resolve_generic_web_preview_slug(
+            profile=profile,
+            preview_slug="",
+            anchor_pr_number=pull_request_number,
+            label="Preview reconcile",
+        )
+    except click.ClickException as error:
+        raise ProductReconcileError(f"The preview has no slug: {error.format_message()}") from error
+    if not launchplane_reconcile_preview_destination_allowed(
+        record_store=record_store,
+        product=profile.product,
+        context=profile.preview.context,
+        preview_slug=preview_slug,
+    ):
+        raise ProductReconcileError(
+            "Launchplane's reconcile may not change this preview destination."
+        )
+    plan["preview_slug"] = preview_slug
+    if isinstance(verified, VerifiedGenericWebBuild):
+        build_run = f"run-{verified.source_build.run_id}-{verified.source_build.run_attempt}"
+        plan["preview_build_run"] = build_run
+        if previous_plan.get("preview_build_run") == build_run and previous_plan.get(
+            "preview_result_status"
+        ) in {"fail", "blocked"}:
+            # Every sweep would otherwise run the same failing refresh again.
+            plan["preview_result_status"] = previous_plan["preview_result_status"]
+            return ReconcileOutcome(
+                plan,
+                error=(
+                    "The preview of this build failed; Launchplane tries again when the PR "
+                    "has a new build (a push, or a re-run of its Build workflow)."
+                ),
+            )
+    if decision.observed and _pull_request_moved(
+        transport=transport,
+        profile=profile,
+        pull_request_number=pull_request_number,
+        observed=decision.observed,
+    ):
+        plan["deferred"] = "pull_request_moved"
+        return ReconcileOutcome(plan, deferred=True)
+    if not lease_held():
+        raise ProductReconcileError(_LEASE_LOST)
+    try:
+        if isinstance(verified, VerifiedGenericWebBuild):
+            _records, result = preview_hooks.refresh_generic_web(
+                control_plane_root=control_plane_root,
+                record_store=record_store,
+                request=GenericWebPreviewRefreshEnvelope(
+                    product=profile.product,
+                    refresh=GenericWebPreviewRefreshRequest(
+                        product=profile.product,
+                        preview_slug=preview_slug,
+                        anchor_pr_number=pull_request_number,
+                        anchor_head_sha=verified.manifest.source_commit,
+                        image_reference=verified.image_reference,
+                        source=RECONCILE_SOURCE,
+                        timeout_seconds=GENERIC_WEB_PREVIEW_TIMEOUT_SECONDS,
+                    ),
+                ),
+                profile=profile,
+            )
+            status = str(result.get("refresh_status") or "")
+        else:
+            _records, result = preview_hooks.destroy_generic_web(
+                control_plane_root=control_plane_root,
+                record_store=record_store,
+                request=GenericWebPreviewDestroyEnvelope(
+                    product=profile.product,
+                    destroy=GenericWebPreviewDestroyRequest(
+                        product=profile.product,
+                        preview_slug=preview_slug,
+                        anchor_pr_number=pull_request_number,
+                        destroy_reason="pull_request_not_open",
+                        timeout_seconds=GENERIC_WEB_PREVIEW_TIMEOUT_SECONDS,
+                    ),
+                ),
+                profile=profile,
+            )
+            status = str(result.get("destroy_status") or "")
+    except (FileNotFoundError, ValueError, click.ClickException) as error:
+        _LOGGER.warning(
+            "Generic-web preview %s of %s refused: %s", operation, profile.product, error
+        )
+        plan["preview_result_status"] = "refused"
+        return ReconcileOutcome(
+            plan,
+            error=(
+                f"The preview {operation} was refused ({type(error).__name__}); "
+                "the worker log has the reason."
+            ),
+        )
+    plan["preview_result_status"] = status
+    if status != "pass":
+        _LOGGER.warning(
+            "Generic-web preview %s of %s ended %s: %s",
+            operation,
+            profile.product,
+            status,
+            result.get("error_message"),
+        )
+        return ReconcileOutcome(
+            plan,
+            error=(
+                f"The preview {operation} ended {status or 'unknown'}; "
+                "the worker log has the reason."
+            ),
+        )
+    if isinstance(verified, VerifiedGenericWebBuild):
+        preview_url = str(result.get("preview_url") or "")
+        plan["preview_url"] = preview_url
+        if not lease_held():
+            # Another worker owns this PR now; its refresh decides what serves.
+            raise ProductReconcileError(_LEASE_LOST)
+        _record_generic_web_preview_serving(
+            record_store=record_store,
+            profile=profile,
+            pull_request_number=pull_request_number,
+            preview_url=preview_url,
+            verified_at=str(result.get("refresh_finished_at") or "") or _utc_now(),
+            control_plane_root=control_plane_root,
+        )
+    return ReconcileOutcome(plan)
+
+
+def _record_generic_web_preview_serving(
+    *,
+    record_store: ProductReconcileStore,
+    profile: LaunchplaneProductProfileRecord,
+    pull_request_number: int,
+    preview_url: str,
+    verified_at: str,
+    control_plane_root: Path,
+) -> None:
+    """Make the refreshed generation the one the preview serves.
+
+    The refresh waited until the preview's health endpoint reported the expected
+    build, which is the check the product's preview workflow recorded before. A
+    driver that already recorded the generation as ready needs nothing more.
+    """
+    preview = find_preview_record(
+        record_store=cast(PreviewMutationRecordStore, record_store),
+        context_name=profile.preview.context.strip(),
+        anchor_repo=_preview_anchor_repo(profile),
+        anchor_pr_number=pull_request_number,
+    )
+    if preview is None:
+        raise ProductReconcileError("The preview refresh passed but recorded no preview.")
+    if preview.active_generation_id and (
+        preview.serving_generation_id == preview.active_generation_id
+    ):
+        return
+    apply_generic_web_preview_verification_result(
+        control_plane_root=control_plane_root,
+        record_store=record_store,
+        request=GenericWebPreviewVerificationEnvelope(
+            product=profile.product,
+            verification=GenericWebPreviewVerificationRequest(
+                context=preview.context,
+                anchor_repo=preview.anchor_repo,
+                anchor_pr_number=pull_request_number,
+                verification_status="pass",
+                verified_at=verified_at,
+                checked_urls=(preview_url,) if preview_url else (),
+                timeout_seconds=GENERIC_WEB_PREVIEW_TIMEOUT_SECONDS,
+            ),
+        ),
+    )
+
+
 def reconcile_product_request(
     *,
     record_store: ProductReconcileStore,
@@ -1244,6 +1497,7 @@ def reconcile_product_request(
     control_plane_root: Path | None = None,
     preview_hooks: PreviewProviderHooks = PreviewProviderHooks(),
     testing_hooks: TestingProviderHooks = TestingProviderHooks(),
+    lease_held: Callable[[], bool] = lambda: True,
 ) -> ReconcileOutcome:
     try:
         profile = record_store.read_product_profile_record(request.product)
@@ -1266,6 +1520,8 @@ def reconcile_product_request(
         )
     assert request.pull_request_number is not None
     return reconcile_preview_target(
+        previous_plan=dict(request.last_plan),
+        lease_held=lease_held,
         record_store=record_store,
         profile=profile,
         repository_id=identity.repository_id,
@@ -1293,14 +1549,21 @@ def run_product_reconcile_once(
     if request is None:
         return None
     try:
-        outcome = reconcile_product_request(
+        with _LeaseHeartbeat(
             record_store=record_store,
-            request=request,
-            transport_factory=transport_factory,
-            control_plane_root=control_plane_root,
-            preview_hooks=preview_hooks,
-            testing_hooks=testing_hooks,
-        )
+            target_key=request.target_key,
+            lease_owner=lease_owner,
+            lease_seconds=lease_seconds,
+        ) as lease:
+            outcome = reconcile_product_request(
+                record_store=record_store,
+                request=request,
+                transport_factory=transport_factory,
+                control_plane_root=control_plane_root,
+                preview_hooks=preview_hooks,
+                testing_hooks=testing_hooks,
+                lease_held=lease.held,
+            )
     except Exception as error:
         _LOGGER.warning("Product reconcile of %s failed: %s", request.target_key, error)
         outcome = ReconcileOutcome({"target": request.target_kind}, error=_error_text(error))
@@ -1337,6 +1600,65 @@ def run_product_reconcile_once(
     return record_store.complete_product_reconcile_request(
         request.target_key, lease_owner, "done", plan
     )
+
+
+class _LeaseHeartbeat:
+    """Renew a claimed request's lease while its reconcile runs.
+
+    A preview refresh can take longer than one lease; without renewal another
+    worker could claim the same PR and change its preview at the same time. A
+    worker that stops also stops renewing, so its request is reclaimed.
+    """
+
+    def __init__(
+        self,
+        *,
+        record_store: ProductReconcileStore,
+        target_key: str,
+        lease_owner: str,
+        lease_seconds: int,
+    ) -> None:
+        self._record_store = record_store
+        self._target_key = target_key
+        self._lease_owner = lease_owner
+        self._lease_seconds = lease_seconds
+        self._stop = Event()
+        self._thread = Thread(
+            target=self._run, name=f"product-reconcile-lease:{target_key}", daemon=True
+        )
+
+    def __enter__(self) -> "_LeaseHeartbeat":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        self._thread.join()
+
+    def held(self) -> bool:
+        """Renew now; False, failing closed, once the lease is lost or cannot be renewed."""
+        try:
+            return self._record_store.renew_product_reconcile_lease(
+                self._target_key, self._lease_owner, self._lease_seconds
+            )
+        except Exception as error:  # noqa: BLE001 - an unknown lease is not held
+            _LOGGER.warning(
+                "Product reconcile lease on %s could not be checked: %s", self._target_key, error
+            )
+            return False
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._lease_seconds / 3):
+            try:
+                if not self._record_store.renew_product_reconcile_lease(
+                    self._target_key, self._lease_owner, self._lease_seconds
+                ):
+                    _LOGGER.warning("Product reconcile lease on %s was lost.", self._target_key)
+                    return
+            except Exception as error:  # noqa: BLE001 - the next beat tries again
+                _LOGGER.warning(
+                    "Product reconcile lease on %s was not renewed: %s", self._target_key, error
+                )
 
 
 def reconcile_reservation_scope(product: str) -> str:
@@ -1588,12 +1910,23 @@ def _current_preview(
         current_state=preview.state,
         current_preview_url=preview.canonical_url.strip(),
     )
-    generation_id = preview.serving_generation_id or preview.active_generation_id
+    generic_web = reconciles_as_generic_web(profile)
+    # A generic-web refresh changes the preview's one application in place, so its
+    # latest generation is what runs, whatever an earlier one served.
+    generation_id = (
+        preview.active_generation_id or preview.serving_generation_id
+        if generic_web
+        else preview.serving_generation_id or preview.active_generation_id
+    )
     if not generation_id:
         return current, lifecycle_token
     try:
         generation = record_store.read_preview_generation_record(generation_id)
     except FileNotFoundError:
+        return current, lifecycle_token
+    if generic_web and generation.state != "ready":
+        # Its verification is not recorded (the refresh failed, or the worker stopped
+        # before recording it), so it serves nothing, though it names its image.
         return current, lifecycle_token
     digest = ""
     if generation.runtime_identity is not None:

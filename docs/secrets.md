@@ -407,6 +407,38 @@ decryption key state denies the reveal or resolution.
   key parts. The active policy record's `integration_key_markers` add
   product-specific ones. Policy apply adds markers and never removes one. `prod`
   lanes keep the lane-exact shortcut.
+- A production integration key may sit on a `testing` or `dev` lane only for a
+  reason on an allowlist, recorded with evidence. Declaring such a key
+  `shared_safe` on a non-production lane also needs a `sharing_reason` on the
+  product-config secret entry: `kind` (`read_only_source`, `dev_store`,
+  `pre_live` or `site_shared`, the lane integration allowance kinds plus
+  site-shared keys), `reason`, and `evidence` saying who verified the key, when,
+  and what they saw. `pre_live` is for `testing` and `dev` lanes only.
+  Launchplane stores it on the binding with who recorded it and when, and a
+  later write of the key needs it again. A product-config write that declares
+  `shared_safe` on an integration key without one is refused
+  (`sharing_reason_missing`). A key declared `testing` or `non_prod` is a
+  non-production key and needs none.
+- Nothing in Launchplane checks what a token can actually do. `read_only_source`
+  is a person's statement that they verified the token's permissions in the
+  provider and recorded it as evidence; Launchplane records it and shows it.
+- The reason is metadata, never part of the value. The lane's integration
+  allowances read (`GET /v1/product-config/integration-allowances`) lists the
+  integration keys stored for that lane with their declared class and reason,
+  and the product environment read shows both on each managed secret.
+- Keys declared `shared_safe` before reasons existed keep working for one
+  release: deploy-time checks, readiness and the read-back report them instead
+  of refusing them. Record their reasons with a product-config write; the
+  follow-up that ends the transition makes those paths refuse them too.
+- Generic-web deploys, promotions and rollbacks read the lane's integration keys
+  back after the deploy: the runtime key-safety rules run over every managed
+  secret delivered to the lane whose key names an integration, and the result
+  is stored on the deployment record as `integration_key_readback` (`pass`,
+  `reported`, `fail`, `unavailable` or `skipped`, with key names and finding
+  codes only). It records and does not refuse, because the deploy has already
+  happened and a refused promotion would roll a live site back. Odoo lanes
+  read their integration settings back from the database instead
+  (`control_plane/integration_readback.py`).
 - `prod_only` bindings are allowed only for `prod` runtime targets. `testing`
   targets may use `testing`, `non_prod`, or `shared_safe` bindings. `preview`
   targets may use `preview`, `non_prod`, or `shared_safe` bindings.

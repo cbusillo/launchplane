@@ -1174,6 +1174,33 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         self.assertEqual(sleeps, [5, 5, 2])
 
+    def test_wait_for_preview_health_stops_at_its_timeout_when_requests_hang(self) -> None:
+        clock = iter(range(0, 1000, 15))
+        requests: list[object] = []
+
+        def hanging_request(*_args: object, **_kwargs: object) -> object:
+            requests.append(_args)
+            raise TimeoutError
+
+        with (
+            patch("control_plane.workflows.generic_web_preview.urlopen", hanging_request),
+            patch("control_plane.workflows.generic_web_preview.time.sleep"),
+            patch(
+                "control_plane.workflows.generic_web_preview.time.monotonic",
+                side_effect=lambda: next(clock),
+            ),
+        ):
+            with self.assertRaisesRegex(click.ClickException, "Timed out"):
+                _wait_for_preview_health(
+                    preview_url="https://preview-42.example.test",
+                    health_path="/api/health",
+                    timeout_seconds=60,
+                )
+
+        # Each hung request costs 15 seconds of wall clock, so three fit in the
+        # 60-second timeout; the counted sleeps alone would have allowed twelve.
+        self.assertEqual(len(requests), 3)
+
     def test_wait_for_preview_health_keeps_polling_ok_false_with_identity(self) -> None:
         expected_identity = RuntimeIdentity(
             product="sellyouroutboard",

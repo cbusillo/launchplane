@@ -608,6 +608,7 @@ from control_plane.ordinary_agent_lifecycle import (
     supersede_authentication_credential_record,
 )
 from control_plane.production_backup_authority import (
+    ProductionBackupAuthorityScopeError,
     ProductionBackupAuthorityWritePlan,
     ProductionBackupAuthorityWriteEnvelope,
     ProductionBackupAuthorityWriteResult,
@@ -660,6 +661,7 @@ from control_plane.storage import landing_authority
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
     ProductProfileConflictError,
+    require_bundle_context_owner,
     ProductAuthorityBundle,
     ProviderTargetWrite,
     RuntimeEnvironmentConflictError,
@@ -6247,6 +6249,14 @@ class PostgresRecordStore(HumanSessionStore):
                     for record in (*bundle.product_profiles, *bundle.expected_product_profiles)
                 ),
             )
+            if bundle.required_context_owner is not None:
+                require_bundle_context_owner(
+                    bundle,
+                    (
+                        self._read_product_profile_payload(row.payload)
+                        for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
+                    ),
+                )
             for expected_profile in bundle.expected_product_profiles:
                 current_profile_row = session.scalar(
                     select(LaunchplaneProductProfileRow)
@@ -6937,6 +6947,7 @@ class PostgresRecordStore(HumanSessionStore):
         envelope: ProductionBackupAuthorityWriteEnvelope,
         mutation: DbOnlyMutationRequest,
         response_payload_builder: Callable[[ProductionBackupAuthorityWriteResult], dict[str, Any]],
+        revision_guard: Callable[[tuple[ProductionBackupPolicyRecord, ...]], str] | None = None,
     ) -> ProductionBackupAuthorityCompareWriteResult:
         if envelope.mode != "apply":
             raise ValueError("Production backup authority compare-write requires apply mode.")
@@ -6959,6 +6970,7 @@ class PostgresRecordStore(HumanSessionStore):
                 plan = self._plan_production_backup_authority_in_session(
                     session=session,
                     envelope=envelope,
+                    revision_guard=revision_guard,
                 )
             except Exception:
                 session.delete(reservation_row)
@@ -6994,6 +7006,7 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         session: Any,
         envelope: ProductionBackupAuthorityWriteEnvelope,
+        revision_guard: Callable[[tuple[ProductionBackupPolicyRecord, ...]], str] | None = None,
     ) -> ProductionBackupAuthorityWritePlan:
         target_statement = select(LaunchplaneProductionBackupTargetRow)
         policy_statement = select(LaunchplaneProductionBackupPolicyRow)
@@ -7014,6 +7027,10 @@ class PostgresRecordStore(HumanSessionStore):
             )
             for row in session.scalars(policy_statement).all()
         )
+        if revision_guard is not None:
+            refusal = revision_guard(policy_records)
+            if refusal:
+                raise ProductionBackupAuthorityScopeError(refusal)
         return plan_production_backup_authority_write_from_records(
             target_records=target_records,
             policy_records=policy_records,
@@ -19883,6 +19900,41 @@ class PostgresRecordStore(HumanSessionStore):
             self._merge_product_reconcile_request_row(session, completed)
             session.commit()
             return completed
+
+    def renew_product_reconcile_lease(
+        self, target_key: str, lease_owner: str, lease_seconds: int, *, now: str = ""
+    ) -> bool:
+        """Extend a claimed request's lease; False once another worker holds it."""
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_landing_authority(session, f"launchplane:product-reconcile:{target_key}")
+            statement = select(LaunchplaneProductReconcileRequestRow).where(
+                LaunchplaneProductReconcileRequestRow.target_key == target_key
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                session.rollback()
+                return False
+            record = self._read_payload(
+                model_type=ProductReconcileRequestRecord, payload=row.payload
+            )
+            if record.state != "running" or record.lease_owner != lease_owner.strip():
+                session.rollback()
+                return False
+            observed_at = now.strip() or self._database_mutation_timestamp(session)
+            renewed = record.model_copy(
+                update={
+                    "lease_expires_at": self._mutation_lease_expiry(
+                        observed_at=observed_at, lease_seconds=lease_seconds
+                    )
+                }
+            )
+            self._merge_product_reconcile_request_row(session, renewed)
+            session.commit()
+            return True
 
     def read_product_reconcile_request(self, target_key: str) -> ProductReconcileRequestRecord:
         return self._read_model(
@@ -34607,6 +34659,8 @@ class PostgresRecordStore(HumanSessionStore):
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> None:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            # Same order as bundle writes, which may check context ownership.
+            self._lock_product_authority_bundle_write(session)
             self._lock_landing_authority(session, landing_authority.product_profile(record.product))
             session.merge(self._product_profile_row(record))
             session.commit()
