@@ -389,6 +389,8 @@ def inspect_dokploy_target(
             "source_git_ref": target_record.source_git_ref,
             "source_type": target_record.source_type,
             "compose_path": target_record.compose_path,
+            "custom_git_url": _public_repository_url(target_record.custom_git_url),
+            "custom_git_branch": target_record.custom_git_branch,
             "domains": list(target_record.domains),
             "healthcheck_path": target_record.healthcheck_path,
             "deploy_timeout_seconds": target_record.deploy_timeout_seconds,
@@ -423,6 +425,8 @@ def summarize_dokploy_target_payload(
         "server_id": _string_field(payload, "serverId"),
         "source_type": _string_field(payload, "sourceType"),
         "compose_path": _string_field(payload, "composePath"),
+        "custom_git_url": _public_repository_url(_string_field(payload, "customGitUrl")),
+        "custom_git_branch": _string_field(payload, "customGitBranch"),
         "description_present": bool(_string_field(payload, "description")),
         "domains": _domain_summaries(payload),
         "environment": _environment_summary(payload),
@@ -529,3 +533,12 @@ def _bool_field(payload: Mapping[str, object], *keys: str) -> bool | None:
         if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
             return value.strip().lower() == "true"
     return None
+
+
+def _public_repository_url(value: str) -> str:
+    # Never expose credentials embedded in an adopted provider URL.
+    import re
+
+    return (
+        value if re.fullmatch(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value) else ""
+    )

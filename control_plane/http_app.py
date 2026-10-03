@@ -48,6 +48,7 @@ from control_plane.authz_candidate_preparation import (
     product_context_owners,
 )
 from control_plane.authz_scope import DOKPLOY_TARGET_LANE_SETUP_ACTION
+from control_plane.dokploy.target_source_setup import DokployComposeSourcePartialError
 from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
     execute_dokploy_target_setup,
@@ -23621,10 +23622,8 @@ def create_launchplane_fastapi_app(
             record_store=record_store,
             trace_id=trace_id,
         )
-        # A lane-scoped grant may only create a new compose, in a new provider
-        # project and environment, for its own lane: adopting, re-pointing,
-        # replacing or reusing existing placement could reach another lane's
-        # resources. It is checked on the one product that owns the context.
+        # Creation uses new placement; source completion keeps the testing
+        # lane's tracked binding. Both require exclusive context ownership.
         lane_owner = _lane_setup_context_owner(
             record_store=database_store, context=setup_request.context
         )
@@ -23635,7 +23634,13 @@ def create_launchplane_fastapi_app(
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         )
         lane_scoped_only = not service_scoped and (
-            setup_request.operation == "create-compose"
+            (
+                setup_request.operation == "create-compose"
+                or (
+                    setup_request.operation == "complete-compose-source"
+                    and setup_request.instance == "testing"
+                )
+            )
             and setup_request.expected_current_provider_target is None
             and not setup_request.project_id
             and not setup_request.environment_id
@@ -23737,6 +23742,13 @@ def create_launchplane_fastapi_app(
                     (lane_owner, setup_request.context) if lane_scoped_only else None
                 ),
             )
+        except DokployComposeSourcePartialError as error:
+            raise _launchplane_http_error(
+                status_code=502,
+                trace_id=trace_id,
+                code="dokploy_source_partial_outcome",
+                message=str(error),
+            ) from error
         except ProductContextOwnershipError as error:
             raise _launchplane_http_error(
                 status_code=403,

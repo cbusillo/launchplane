@@ -36421,6 +36421,109 @@ class PostgresRecordStore(HumanSessionStore):
     def write_dokploy_target_record(self, record: DokployTargetRecord) -> None:
         self._write_row(self._dokploy_target_row(record))
 
+    def complete_dokploy_compose_source(
+        self,
+        *,
+        expected_profile: LaunchplaneProductProfileRecord,
+        expected_record: DokployTargetRecord,
+        expected_target_id: DokployTargetIdRecord,
+        expected_provider_target: ProviderTargetRecord,
+        replacement_record: DokployTargetRecord,
+        apply_provider: Callable[[], None],
+    ) -> None:
+        """Fence ownership and binding across provider source completion/read-back."""
+        allowed_fields = {
+            "source_type",
+            "custom_git_url",
+            "custom_git_branch",
+            "compose_path",
+            "updated_at",
+            "source_label",
+        }
+        if expected_record.model_dump(exclude=allowed_fields) != replacement_record.model_dump(
+            exclude=allowed_fields
+        ):
+            raise ValueError("Source completion cannot change other target fields.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            self._lock_landing_authority(
+                session, landing_authority.product_profile(expected_profile.product)
+            )
+            profiles = tuple(
+                self._read_product_profile_payload(row.payload)
+                for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
+            )
+            require_bundle_context_owner(
+                ProductAuthorityBundle(
+                    required_context_owner=(expected_profile.product, expected_record.context)
+                ),
+                profiles,
+            )
+            if expected_profile not in profiles:
+                raise ValueError("Product profile changed before source completion.")
+            target_row = session.scalar(
+                select(LaunchplaneDokployTargetRow)
+                .where(
+                    LaunchplaneDokployTargetRow.context == expected_record.context,
+                    LaunchplaneDokployTargetRow.instance == expected_record.instance,
+                )
+                .with_for_update()
+            )
+            target_id_row = session.scalar(
+                select(LaunchplaneDokployTargetIdRow)
+                .where(
+                    LaunchplaneDokployTargetIdRow.context == expected_record.context,
+                    LaunchplaneDokployTargetIdRow.instance == expected_record.instance,
+                )
+                .with_for_update()
+            )
+            provider_row = session.scalar(
+                select(LaunchplaneProviderTargetRow)
+                .where(
+                    LaunchplaneProviderTargetRow.context == expected_record.context,
+                    LaunchplaneProviderTargetRow.instance == expected_record.instance,
+                )
+                .with_for_update()
+            )
+            if (
+                target_row is None
+                or target_id_row is None
+                or provider_row is None
+                or self._read_payload(model_type=DokployTargetRecord, payload=target_row.payload)
+                != expected_record
+                or self._read_payload(
+                    model_type=DokployTargetIdRecord, payload=target_id_row.payload
+                )
+                != expected_target_id
+                or self._read_payload(model_type=ProviderTargetRecord, payload=provider_row.payload)
+                != expected_provider_target
+            ):
+                raise ValueError("Tracked compose binding changed before source completion.")
+            for row in session.scalars(select(LaunchplaneProviderTargetRow)).all():
+                other = self._read_payload(model_type=ProviderTargetRecord, payload=row.payload)
+                if (
+                    other.provider_id == expected_provider_target.provider_id
+                    and other.target_id == expected_provider_target.target_id
+                    and (other.context, other.instance)
+                    != (expected_record.context, expected_record.instance)
+                ):
+                    raise ValueError("Compose source target is shared with another lane.")
+            apply_provider()
+            try:
+                target_row.updated_at = replacement_record.updated_at
+                target_row.payload = self._payload_dict(replacement_record)
+                session.commit()
+            except Exception as error:
+                from control_plane.dokploy.target_source_setup import (
+                    DokployComposeSourcePartialError,
+                )
+
+                raise DokployComposeSourcePartialError(
+                    "Provider source applied and verified; tracked record commit failed. "
+                    "Administrator reconciliation is required; do not retry with a new key."
+                ) from error
+
     def compare_and_write_dokploy_target_record(
         self,
         *,
