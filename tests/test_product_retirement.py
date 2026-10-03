@@ -12,7 +12,7 @@ import click
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
-from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.preview_record import PreviewRecord, PreviewState
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_retirement import (
     ProductRetirementIdentity,
@@ -213,6 +213,66 @@ def _plan(
 
 
 class ProductRetirementTests(unittest.TestCase):
+    def test_binding_scopes_preview_blockers_to_owned_context_and_repository(self) -> None:
+        for backend in ("filesystem", "sqlite"):
+            for anchor, context, state, blocked in (
+                ("example-site", "example-site-preview", "active", True),
+                ("every/example-site", "example-site-preview", "active", True),
+                ("example-site", "another-preview", "active", False),
+                ("other/example-site", "example-site-preview", "active", False),
+                ("another-site", "example-site-preview", "active", False),
+                ("example-site", "example-site-preview", "destroyed", False),
+            ):
+                with self.subTest(backend=backend, anchor=anchor, context=context, state=state):
+                    with TemporaryDirectory() as temporary_directory_name:
+                        root = Path(temporary_directory_name)
+                        store: FilesystemRecordStore | PostgresRecordStore
+                        if backend == "filesystem":
+                            store = FilesystemRecordStore(root)
+                        else:
+                            store = PostgresRecordStore(
+                                database_url=f"sqlite+pysqlite:///{root / 'records.sqlite3'}"
+                            )
+                            store.ensure_schema()
+                        try:
+                            fixture = _Store()
+                            store.write_product_profile_record(fixture.profile)
+                            assert fixture.provider_target is not None
+                            assert fixture.dokploy_target is not None
+                            assert fixture.target_id is not None
+                            store.write_provider_target_record(fixture.provider_target)
+                            store.write_dokploy_target_record(fixture.dokploy_target)
+                            store.write_dokploy_target_id_record(fixture.target_id)
+                            store.write_preview_record(
+                                PreviewRecord(
+                                    preview_id="preview-1",
+                                    context=context,
+                                    anchor_repo=anchor,
+                                    anchor_pr_number=1,
+                                    anchor_pr_url="https://github.com/every/example-site/pull/1",
+                                    preview_label="launchplane-preview",
+                                    canonical_url="https://pr-1.example.invalid",
+                                    state=cast(PreviewState, state),
+                                    created_at=NOW,
+                                    updated_at=NOW,
+                                    eligible_at=NOW,
+                                )
+                            )
+                            if blocked:
+                                with self.assertRaisesRegex(
+                                    ProductRetirementBlockedError, "active preview"
+                                ):
+                                    bind_product_retirement_authority(
+                                        record_store=store, request=_request()
+                                    )
+                            else:
+                                bind_product_retirement_authority(
+                                    record_store=store, request=_request()
+                                )
+                        finally:
+                            if isinstance(store, PostgresRecordStore):
+                                store.close()
+
     def test_plan_binds_exact_tracked_application_and_hashes_public_identity(self) -> None:
         store = _Store()
         plan = _plan(store, _observation())

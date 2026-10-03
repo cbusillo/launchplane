@@ -1134,15 +1134,22 @@ def active_preview_ids(
     preview_context = profile.preview.context.strip()
     if not preview_context:
         return ()
+    repository = profile.repository.strip()
+    # Current preview writers use the short name; retain full-form history.
+    preview_anchors = {repository, repository.partition("/")[2].strip()}
     return tuple(
         sorted(
-            preview_id
-            for preview in record_store.list_preview_records(
-                context_name=preview_context,
-                anchor_repo=profile.repository,
-            )
-            if getattr(preview, "state", "") in _ACTIVE_PREVIEW_STATES
-            and (preview_id := str(getattr(preview, "preview_id", "")).strip())
+            {
+                preview_id
+                for anchor_repo in preview_anchors
+                if anchor_repo
+                for preview in record_store.list_preview_records(
+                    context_name=preview_context,
+                    anchor_repo=anchor_repo,
+                )
+                if getattr(preview, "state", "") in _ACTIVE_PREVIEW_STATES
+                and (preview_id := str(getattr(preview, "preview_id", "")).strip())
+            }
         )
     )
 
