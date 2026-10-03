@@ -443,6 +443,14 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
   async function apply() {
     if (!reviewed || !matches) return;
     setError(""); setNotice("");
+    try {
+      const draft = JSON.stringify(reviewed);
+      sessionStorage.setItem(storageKey, draft);
+      if (sessionStorage.getItem(storageKey) !== draft) throw new Error("Draft read-back differs.");
+    } catch {
+      setError("The reviewed request could not be saved in this tab. Nothing was sent. Restore session storage and retry Apply, or open this product in a new tab and dry-run again.");
+      return;
+    }
     const response = await applyOperation.run(reviewed.request);
     if (!response) return;
     setReviewed(null);
@@ -467,7 +475,7 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
           ? "Change where this product publishes new images. Recorded rollback artifacts remain available."
           : "Prelaunch exempts this product from release review. Unknown and live require review."}</p>
       </div></header>
-      <p>Current: {current ?? "Reading profile…"}</p>
+      <p>Current: {current === null ? "Reading profile…" : current || "Not set"}</p>
       <fieldset disabled={locked || current === null} aria-label={`Change ${title.toLowerCase()}`}>
         <div className="product-config-field"><label htmlFor={`product-${field}-value`}>{title}</label>
           {field === "image" ? <input id={`product-${field}-value`} type="text" value={value} onChange={(event) => setValue(event.target.value)} spellCheck={false} autoCapitalize="none" />
@@ -484,7 +492,7 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
       {error ? <InlineFormError message={error} /> : null}
       {notice ? <p role="status">{notice}</p> : null}
       {reviewed && matches ? <div className="product-owner-plan">
-        <p>{reviewed.plan.before} → {reviewed.plan.after}{reviewed.plan.changed ? "" : " (no change)"}</p>
+        <p>{reviewed.plan.before || "Not set"} → {reviewed.plan.after || "Not set"}{reviewed.plan.changed ? "" : " (no change)"}</p>
         {reviewed.plan.lanes.length ? <ul>{reviewed.plan.lanes.map((lane) =>
           <li key={lane.instance}>{lane.instance}: {lane.artifact}</li>)}</ul> : null}
       </div> : null}

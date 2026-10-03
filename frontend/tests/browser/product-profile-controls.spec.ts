@@ -30,7 +30,7 @@ for (const field of ["Image repository", "Production use"]) {
 
 // Mock the HTTP boundary, so failures exercise the production API adapter.
 for (const field of ["image", "production"] as const) {
-  for (const outcome of ["uncertain", "uncertain-stale", "stale", "stale-updated", "mismatch"] as const) {
+  for (const outcome of ["uncertain", "uncertain-stale", "stale", "stale-updated", "mismatch", "storage-failure"] as const) {
     test(`${field} Apply handles ${outcome} evidence`, async ({ page }) => {
       await page.goto("/ui/products/atlas-commerce?fixture=products");
       const { products, fixtureIdentity } = await page.evaluate(async () => {
@@ -71,6 +71,14 @@ for (const field of ["image", "production"] as const) {
           changed: true, applied: body.mode === "apply", plan_sha256: "a".repeat(64), lanes: [],
         } } });
       });
+      if (outcome === "storage-failure") await page.addInitScript(() => {
+        window.__denyProfileDraft = true;
+        const original = Storage.prototype.setItem;
+        Storage.prototype.setItem = function(key, value) {
+          if (window.__denyProfileDraft && key.startsWith("launchplane:product-profile-draft:")) throw new DOMException("Quota exceeded", "QuotaExceededError");
+          return original.call(this, key, value);
+        };
+      });
       await page.goto("/ui/products/atlas-commerce");
       let panel = page.getByRole("region", { name: title, exact: true });
       if (field === "image") {
@@ -80,7 +88,14 @@ for (const field of ["image", "production"] as const) {
       await panel.getByLabel("Change reason").fill("Confirm the reviewed profile change.");
       await panel.getByRole("button", { name: "Dry run", exact: true }).click();
       await panel.getByRole("button", { name: "Apply", exact: true }).click();
-      if (outcome === "uncertain-stale") {
+      if (outcome === "storage-failure") {
+        await expect(panel.getByRole("alert")).toContainText("Nothing was sent");
+        expect(requests).toHaveLength(0);
+        await page.evaluate(() => { window.__denyProfileDraft = false; });
+        await panel.getByRole("button", { name: "Apply", exact: true }).click();
+        await expect(panel.getByRole("status")).toContainText("Applied and read back.");
+        expect(requests).toHaveLength(1);
+      } else if (outcome === "uncertain-stale") {
         await expect(panel.getByRole("button", { name: "Retry Apply" })).toBeEnabled();
         await page.reload();
         panel = page.getByRole("region", { name: title, exact: true });
