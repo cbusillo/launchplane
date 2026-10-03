@@ -12,7 +12,13 @@ from control_plane.service_auth import (
 )
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.contracts.verireel_prod_backup_gate import VeriReelProdBackupGateResult
+from control_plane.contracts.verireel_prod_backup_gate import (
+    VeriReelProdBackupGateRequest,
+    VeriReelProdBackupGateResult,
+)
+from control_plane.contracts.verireel_prod_backup_gate_operation import (
+    VeriReelProdBackupGateOperationRecord,
+)
 from tests.http_app_test_support import (
     _browser_mutation_headers,
     _github_human_identity,
@@ -168,6 +174,75 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
+    async def test_read_shows_an_older_driver_operation_without_its_provider_text(
+        self,
+    ) -> None:
+        request_payload = VeriReelProdBackupGateRequest(
+            backup_record_id="backup-gate-verireel-prod-run-1"
+        )
+        operation = VeriReelProdBackupGateOperationRecord(
+            operation_id="verireel-operation-1",
+            product="verireel",
+            context="verireel",
+            instance="prod",
+            backup_record_id=request_payload.backup_record_id,
+            request_fingerprint=request_payload.model_dump_json(),
+            request=request_payload,
+            status="fail",
+            phase="failed",
+            created_at="2026-07-23T03:30:00Z",
+            updated_at="2026-07-23T03:31:00Z",
+            finished_at="2026-07-23T03:31:00Z",
+            error_message="ssh to pve.internal (10.4.5.6) refused",
+            result=VeriReelProdBackupGateResult(
+                backup_record_id=request_payload.backup_record_id,
+                backup_status="fail",
+                error_message="ssh to pve.internal (10.4.5.6) refused",
+                evidence={
+                    "snapshot_name": "launchplane-verireel-prod-1",
+                    "error_message": "ssh to pve.internal (10.4.5.6) refused",
+                },
+            ),
+        )
+        policy = LaunchplaneAuthzPolicy(
+            local_operators=(
+                LocalOperatorPolicyRule(
+                    subjects=("local-owner-agent",),
+                    token_labels=("local-owner-read",),
+                    products=("verireel",),
+                    contexts=("verireel",),
+                    actions=("production_backup_authority.read",),
+                ),
+            )
+        )
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{Path(directory) / 'state.db'}"
+            )
+            store.ensure_schema()
+            store.write_verireel_prod_backup_gate_operation_record(operation)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                bearer_identity_config=_local_operator_bearer_config(),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+            )
+            query = urlencode({"product": "verireel", "context": "verireel", "instance": "prod"})
+            response = await get(
+                app,
+                f"/v1/production-backup-gates/operations/verireel-operation-1?{query}",
+                headers={"Authorization": "Bearer local-operator-token"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["operation_status"], "fail")
+        self.assertEqual(payload["error_code"], "backup_failed")
+        self.assertEqual(payload["error_description"], "The backup failed.")
+        self.assertEqual(payload["evidence"], {"snapshot_name": "launchplane-verireel-prod-1"})
+        self.assertNotIn("pve.internal", response.text)
+        self.assertNotIn("10.4.5.6", response.text)
+
 
 @unittest.skipUnless(
     os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "Real PostgreSQL test URL is required"
@@ -291,6 +366,10 @@ class ProductionBackupGatePostgresHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(read_failure.status_code, 200, read_failure.text)
             self.assertEqual(read_failure.json()["error_code"], "operation_authorization_revoked")
+            self.assertEqual(
+                read_failure.json()["error_description"],
+                "The backup's authorization was removed or narrowed before it ran.",
+            )
             self.assertEqual(read_failure.json()["evidence"], {"snapshot_name": "partial-snapshot"})
             cancel_failure = await request(
                 app,

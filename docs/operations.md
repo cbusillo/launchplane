@@ -3295,6 +3295,25 @@ refuses mismatches against the stored artifact manifest. Do not manually delete
 canonical stable targets as a replacement shortcut; add the missing Launchplane
 apply coverage first, then use the service-backed workflow.
 
+Before it writes the provider env, the deploy step checks the target and the
+site's settings. Each check that stops the deploy has its own code,
+`deploy_blocked.<check>`: `provider_target_unreadable`,
+`site_environment_unresolved`, `platform_credential_refused`,
+`lane_profile_unresolved`, `retirement_changed`,
+`retirement_conflict`, `runtime_secret_values_missing`,
+`runtime_key_safety_refused`, `runtime_key_safety_unavailable`,
+`runtime_settings_unavailable`, `compose_keys_missing`,
+`upstream_restore_blocked`, `provider_only_keys`, `unportable_values` and
+`override_secret_keys_missing`. Any other deploy-step failure is
+`deploy_failed`. The failed deployment record's `failure` holds the code,
+Launchplane's fixed description of it
+(`control_plane/contracts/odoo_target_replacement_failures.py`) and the env-key
+names it is about. The operation holds the same code, key names and
+description, and the reconciler's testing summary uses them. None of them carry
+the check's message, which can name provider targets, hosts or values.
+`deployment.read` reads the record, and `operations.read` reads the
+operation's structured status.
+
 Before the worker's first provider mutation it reauthorizes the stored caller,
 exact target, and managed rule against the current active policy. Revoked or
 narrowed authority and legacy operations without provenance fail terminally

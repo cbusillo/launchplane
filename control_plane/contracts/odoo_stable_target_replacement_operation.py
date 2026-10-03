@@ -89,6 +89,8 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
     error_message: str = ""
     # Env-key names the failure is about, such as undeclared runtime keys.
     error_detail_keys: tuple[str, ...] = ()
+    # Launchplane's fixed description of error_code, when it has one.
+    error_description: str = ""
     runner_trace_id: str = ""
 
     @model_validator(mode="after")
@@ -131,6 +133,7 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
         self.error_code = self.error_code.strip()
         self.error_message = self.error_message.strip()
         self.error_detail_keys = safe_error_detail_keys(self.error_detail_keys)
+        self.error_description = self.error_description.strip()
         self.runner_trace_id = self.runner_trace_id.strip()
         if self.product != self.request.product:
             raise ValueError("Odoo stable target replacement operation product must match request.")

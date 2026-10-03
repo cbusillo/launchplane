@@ -188,11 +188,13 @@ from control_plane.http_routes import (
     register_product_review_routes,
     register_privileged_operation_routes,
     register_operation_status_read_routes,
+    register_retirement_record_read_routes,
     register_preview_notification_attempt_read_routes,
     register_preview_readiness_read_routes,
     register_preview_record_read_routes,
     register_product_config_status_read_routes,
     register_product_environment_read_routes,
+    register_product_path_check_read_routes,
     register_product_promotion_status_read_routes,
     register_product_profile_read_routes,
     register_protected_artifact_read_routes,
@@ -24764,6 +24766,7 @@ def create_launchplane_fastapi_app(
         )
 
     register_operation_status_read_routes(app, dependencies=read_route_dependencies)
+    register_retirement_record_read_routes(app, dependencies=read_route_dependencies)
     register_protected_artifact_read_routes(
         app,
         dependencies=product_read_route_dependencies,
@@ -27263,6 +27266,10 @@ def create_launchplane_fastapi_app(
         dependencies=product_read_route_dependencies,
     )
     register_product_promotion_status_read_routes(
+        app,
+        dependencies=product_read_route_dependencies,
+    )
+    register_product_path_check_read_routes(
         app,
         dependencies=product_read_route_dependencies,
     )

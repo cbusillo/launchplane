@@ -323,7 +323,10 @@ lineage. The rollback runs inside the promotion's provider operation, so a
 cancelled caller or a lost response cannot skip it. The promotion record's
 `rollback` evidence names the failure, the `target_deployment_record_id`
 production returned to, and the rollback's own `deployment_record_id`;
-`rollback_health` holds its health check. The promotion response repeats them
+`rollback_health` holds its health check. A failed promotion's record also holds
+`failure`: a code (`source_health_failed`, `destination_deploy_failed` or
+`destination_health_failed`) and Launchplane's fixed description of it, so
+`promotion.read` shows why without the synchronous response. The promotion response repeats them
 as `rollback_status`, `rollback_target_deployment_record_id`, and
 `rollback_deployment_record_id`. When the rollback restores and verifies
 production, the promotion's provider operation completes with that failed

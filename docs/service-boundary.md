@@ -4037,6 +4037,28 @@ are removed only after provider absence is verified; runtime deletion events
 and preserved managed-secret references remain audit evidence. The profile is
 never deleted and becomes `retired` with previews disabled.
 
+`GET /v1/products/{product}/path-check?path=testing|promote` answers, in one
+read, whether the caller can take the product along that path and what is in
+the way. It needs `product_environment.read` on the product's lane contexts and
+writes nothing. Each step is `clear`, `blocked` or `unknown` with a code,
+Launchplane's fixed description, the kind of fix (`code`, `grant`,
+`owner_approval`, `client_acceptance`, `by_hand` or `wait`) and the record ids
+it read. `testing` checks the lane, the staff-testing hold and the last
+reconcile attempt, naming the `deploy_blocked.*` or other code that stopped it.
+`promote` checks the caller's own promotion grant, Client acceptance, the prod
+lane's backup authority and the last promotion's failure. A step whose evidence
+cannot be read is `unknown`, never `clear`, and the response never carries
+provider or exception text.
+
+`GET /v1/product-retirements/{record_id}` reads one retirement record's
+structured outcome with `operations.read` on the Launchplane product for the
+record's context and instance: ids, mode, outcome, times, lifecycle before and
+after, provider-effect flags and the error code. The reason, the error message,
+provider observations and authority snapshots are not returned.
+`GET /v1/detached-application-retirements/{record_id}` does the same for a
+detached application with `operations.read` on the Launchplane service context,
+without provider names.
+
 ## Detached application retirement
 
 `POST /v1/detached-application-retirement` is a separate bounded operation for

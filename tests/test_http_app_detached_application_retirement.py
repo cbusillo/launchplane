@@ -89,7 +89,31 @@ class DetachedApplicationRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     headers=self.headers,
                     payload=_request().model_dump(mode="json"),
                 )
+            (plan_record,) = store.list_detached_application_retirement_records()
+            read = await _asgi_request(
+                self._app(store, actions=("operations.read",)),
+                "GET",
+                f"/v1/detached-application-retirements/{plan_record.record_id}",
+                headers={"Authorization": "Bearer local-admin-token"},
+            )
+            read_denied = await _asgi_request(
+                self._app(store, actions=("detached_application_retirement.plan",)),
+                "GET",
+                f"/v1/detached-application-retirements/{plan_record.record_id}",
+                headers={"Authorization": "Bearer local-admin-token"},
+            )
             store.close()
+        self.assertEqual(read.status_code, 200, read.text)
+        self.assertEqual(
+            (read.json()["record"]["mode"], read.json()["record"]["outcome"]), ("plan", "planned")
+        )
+        self.assertNotIn(CANDIDATE_ID, read.text)
+        self.assertFalse(
+            {"application_name", "project_name", "environment_name", "reason"}
+            & read.json()["record"].keys()
+        )
+        self.assertNotIn(plan_record.reason, read.text)
+        self.assertEqual(read_denied.status_code, 403)
         self.assertEqual(denied.status_code, 403)
         self.assertEqual(planned.status_code, 202, planned.text)
         payload = planned.json()
