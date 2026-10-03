@@ -556,7 +556,7 @@ def build_generic_web_write_route_handlers(
                 status_code=409,
                 trace_id=trace_id,
                 code="release_review_unavailable",
-                message="Owner release approval could not be evaluated for live promotion.",
+                message="Client release approval could not be evaluated for live promotion.",
             ) from evaluation
         unchanged, decision = evaluation
         if not unchanged or (decision.required and not decision.approved):

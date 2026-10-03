@@ -428,6 +428,11 @@ service requires an exact lowercase 40-character source commit and lowercase
 64-character `sha256` image digest, injects its runtime identity into the preview
 environment, and requires `/launchplane/health` to echo the matching identity;
 callers cannot disable that verification on a refresh request.
+Refresh explicitly sets `PLATFORM_INSTANCE=preview` in the runtime environment,
+overriding any inherited instance name on both new and existing previews. The
+devkit treats this as a public, non-production runtime: startup password and
+`dbfilter` checks apply, outgoing mail is blocked, and restored production
+credentials are cleared.
 Refresh merges the artifact manifest's declared Odoo modules
 with Launchplane-required modules into both `ODOO_INSTALL_MODULES` and the
 explicit maintenance-only `ODOO_UPDATE_MODULES` input. It also merges the

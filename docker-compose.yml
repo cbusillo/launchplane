@@ -3,6 +3,7 @@ services:
     image: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}
     pull_policy: always
     restart: unless-stopped
+    # LAUNCHPLANE_DATABASE_URL reaches startup through .env, never command arguments.
     env_file:
       - .env
     command:

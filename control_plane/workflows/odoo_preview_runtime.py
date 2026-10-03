@@ -1476,6 +1476,7 @@ def _preview_refresh_environment_values(
     *, request: OdooPreviewDokployApplyRequest
 ) -> dict[str, str]:
     environment_values = dict(request.environment_values)
+    environment_values["PLATFORM_INSTANCE"] = "preview"
     addons_path = merge_required_odoo_addons_path(environment_values.get("ODOO_ADDONS_PATH", ""))
     if addons_path:
         environment_values["ODOO_ADDONS_PATH"] = addons_path

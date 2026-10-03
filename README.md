@@ -50,7 +50,7 @@ The first implemented ingress slice now exists in this repo as a local Launchpla
 service command with GitHub OIDC verification, DB-backed workflow policy records, and
 evidence ingress for deployments, promotions, and the full preview lifecycle.
 Shared-service core records can now be backed by Postgres with
-`LAUNCHPLANE_DATABASE_URL` or `uv run launchplane service serve --database-url ...`.
+`LAUNCHPLANE_DATABASE_URL` in the service environment.
 The same service boundary now exposes authenticated admin read endpoints for
 deployment, promotion, inventory, preview, preview history, and recent
 context-scoped operations. Launchplane-managed secrets now use the same Postgres

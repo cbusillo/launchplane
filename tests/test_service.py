@@ -2429,7 +2429,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(unmarked_status_code, 202, unmarked_payload)
         self.assertNotIn("@site-owner", unmarked_payload["result"]["comment_markdown"])
-        self.assertNotIn("Owner review", unmarked_payload["result"]["comment_markdown"])
+        self.assertNotIn("Client review", unmarked_payload["result"]["comment_markdown"])
 
     def test_preview_pr_feedback_ready_requires_active_preview_url(self) -> None:
         with (
@@ -2574,10 +2574,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "--policy-file",
                     str(policy_file),
                 ],
+                env={"LAUNCHPLANE_DATABASE_URL": ""},
             )
 
         self.assertEqual(result.exit_code, 1, msg=result.output)
-        self.assertIn("refuses startup without --database-url", result.output)
+        self.assertIn("refuses startup without LAUNCHPLANE_DATABASE_URL", result.output)
 
     def test_service_serve_rejects_missing_audience(self) -> None:
         runner = CliRunner()
@@ -2594,9 +2595,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     str(Path(temporary_directory_name) / "state"),
                     "--policy-file",
                     str(policy_file),
-                    "--database-url",
-                    f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'state.sqlite3'}",
                 ],
+                env={
+                    "LAUNCHPLANE_DATABASE_URL": (
+                        f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'state.sqlite3'}"
+                    ),
+                    "LAUNCHPLANE_SERVICE_AUDIENCE": "",
+                },
             )
 
         self.assertEqual(result.exit_code, 1, msg=result.output)
