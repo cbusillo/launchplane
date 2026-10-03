@@ -439,6 +439,7 @@ def read_path_check_inputs(
     caller_is_policy_administrator: Callable[[], bool],
     read_release_review: Callable[[], ReleaseReviewStatus],
     generated_at: str,
+    caller_can_use_generic_rollback: bool = False,
 ) -> PathCheckInputs:
     """Read the evidence ``path`` needs, each read independent of the others."""
     if path == "testing":
@@ -474,6 +475,7 @@ def read_path_check_inputs(
                 record_store=record_store,
                 action_allowed=action_allowed,
                 caller_is_policy_administrator=caller_is_policy_administrator,
+                caller_can_use_generic_rollback=caller_can_use_generic_rollback,
             ),
         )
     odoo = profile.driver_id == "odoo"
@@ -592,6 +594,7 @@ def _read_rollback_steps(
     record_store: object,
     action_allowed: ActionAllowed,
     caller_is_policy_administrator: Callable[[], bool],
+    caller_can_use_generic_rollback: bool,
 ) -> tuple[PathCheckStep, ...]:
     steps: list[PathCheckStep] = []
     odoo = profile.driver_id == "odoo"
@@ -648,7 +651,18 @@ def _read_rollback_steps(
             ),
         )
         # Execute revalidates and builds its own plan; a separate plan grant is not needed.
-        steps.append(_rollback_grant_step("rollback_grant", action, allowed))
+        if not caller_can_use_generic_rollback:
+            steps.append(
+                _step(
+                    "rollback_grant",
+                    "blocked",
+                    "rollback_identity_not_supported",
+                    "Use an authorized local operator/admin bearer credential or GitHub Actions OIDC for rollback.",
+                    "by_hand",
+                )
+            )
+        else:
+            steps.append(_rollback_grant_step("rollback_grant", action, allowed))
     # An authority refusal must not hide independent target blockers.
     target_steps = _read(
         "rollback_records_unread",
@@ -670,31 +684,31 @@ def _rollback_target_steps(
     record_store: object,
 ) -> tuple[PathCheckStep, ...]:
     reader = cast(_RollbackRecordReader, record_store)
-    try:
-        inventory = reader.read_environment_inventory(
-            context_name=prod_lane.context, instance_name="prod"
-        )
-    except FileNotFoundError:
-        return (
-            _step(
-                "rollback_target",
-                "blocked",
-                "prod_inventory_missing",
-                "The prod lane has no current inventory record.",
-                "by_hand",
-            ),
-        )
-    if inventory.context != prod_lane.context or inventory.instance != "prod":
-        return (
-            _step(
-                "rollback_target",
-                "blocked",
-                "inventory_scope_mismatch",
-                "The inventory does not match the prod lane.",
-                "code",
-            ),
-        )
     if profile.driver_id == "odoo":
+        try:
+            inventory = reader.read_environment_inventory(
+                context_name=prod_lane.context, instance_name="prod"
+            )
+        except FileNotFoundError:
+            return (
+                _step(
+                    "rollback_target",
+                    "blocked",
+                    "prod_inventory_missing",
+                    "The prod lane has no current inventory record.",
+                    "by_hand",
+                ),
+            )
+        if inventory.context != prod_lane.context or inventory.instance != "prod":
+            return (
+                _step(
+                    "rollback_target",
+                    "blocked",
+                    "inventory_scope_mismatch",
+                    "The inventory does not match the prod lane.",
+                    "code",
+                ),
+            )
         try:
             target = resolve_odoo_prod_rollback_target(
                 record_store=record_store,
@@ -747,10 +761,9 @@ def _rollback_target_steps(
                 "rollback_target_missing",
                 "No default rollback target is recorded; choose an explicit deployment through the rollback route.",
                 "by_hand",
-                (inventory.deployment_record_id,),
             ),
         )
-    record_ids = (inventory.deployment_record_id, previous.record_id)
+    record_ids = (previous.record_id,)
     # Build only: execute_generic_web_rollback_plan persists a plan and must not run here.
     plan = build_generic_web_rollback_plan(
         record_store=cast(GenericWebRollbackPlanReader, record_store),

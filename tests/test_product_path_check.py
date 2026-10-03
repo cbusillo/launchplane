@@ -1,6 +1,7 @@
 import unittest
 
 from fastapi import FastAPI
+from pydantic import BaseModel
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from contextlib import ExitStack
@@ -32,7 +33,16 @@ from control_plane.product_path_check import (
     build_product_path_check,
     read_path_check_inputs,
 )
-from control_plane.service_auth import LaunchplaneAuthzPolicy, LocalOperatorPolicyRule
+from control_plane.service_auth import (
+    LaunchplaneAuthzPolicy,
+    LocalOperatorPolicyRule,
+    GitHubHumanIdentity,
+    LocalOperatorIdentity,
+    TerminalAgentIdentity,
+)
+from control_plane.http_routes.path_check import register_product_path_check_read_routes
+from control_plane.http_routes.products import ProductReadRouteDependencies
+from control_plane.http_routes.support import ReadRouteDependencies
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _asgi_request, _local_operator_bearer_config
 from tests.support.auth import _StubVerifier, _identity
@@ -329,6 +339,7 @@ class ProductRollbackPathCheckTests(unittest.TestCase):
         self.review = Mock(side_effect=AssertionError("rollback must not compile release review"))
         inputs = read_path_check_inputs(
             path="rollback",
+            caller_can_use_generic_rollback=True,
             profile=self.profile,
             record_store=self.store,
             action_allowed=self.actions,
@@ -365,7 +376,7 @@ class ProductRollbackPathCheckTests(unittest.TestCase):
         self.review.assert_not_called()
         self.assertEqual(
             getattr(check, "steps")[-1].record_ids,
-            (self.current.record_id, self.previous.record_id),
+            (self.previous.record_id,),
         )
 
     def test_missing_grant_and_mutable_target_reported_together(self) -> None:
@@ -413,9 +424,9 @@ class ProductRollbackPathCheckTests(unittest.TestCase):
                 _steps(self.check())["rollback_target_deployment_scope_mismatch"][0], "blocked"
             )
 
-    def test_unread_authorization_does_not_hide_target_blockers_or_leak_text(self) -> None:
+    def test_unread_history_does_not_hide_grant_blocker_or_leak_text(self) -> None:
         with patch.object(
-            self.store, "read_environment_inventory", side_effect=RuntimeError("secret at 10.1.2.3")
+            self.store, "list_deployment_records", side_effect=RuntimeError("secret at 10.1.2.3")
         ):
             check = self.check(False)
         self.assertEqual(
@@ -426,13 +437,12 @@ class ProductRollbackPathCheckTests(unittest.TestCase):
         with patch.object(
             self.store, "list_deployment_records", side_effect=RuntimeError("secret")
         ):
-            self.assertEqual(
-                _steps(self.check())["rollback_target"][1], "rollback_records_unread"
-            )
+            self.assertEqual(_steps(self.check())["rollback_target"][1], "rollback_records_unread")
 
     def test_authorization_read_failure_is_unknown_with_clear_target(self) -> None:
         inputs = read_path_check_inputs(
             path="rollback",
+            caller_can_use_generic_rollback=True,
             profile=self.profile,
             record_store=self.store,
             action_allowed=Mock(side_effect=RuntimeError("private")),
@@ -448,6 +458,33 @@ class ProductRollbackPathCheckTests(unittest.TestCase):
             _steps(check)["rollback_grant"], ("unknown", "authorization_unread", "wait")
         )
         self.assertEqual(_steps(check)["rollback_target"][0], "clear")
+
+    def test_browser_style_identity_cannot_rollback_even_when_policy_allows(self) -> None:
+        inputs = read_path_check_inputs(
+            path="rollback",
+            profile=self.profile,
+            record_store=self.store,
+            action_allowed=lambda *_args: True,
+            caller_is_policy_administrator=lambda: True,
+            read_release_review=Mock(),
+            generated_at="2026-10-03T00:00:00Z",
+            caller_can_use_generic_rollback=False,
+        )
+        check = build_product_path_check(
+            product=self.profile.product, path="rollback", inputs=inputs
+        )
+        self.assertEqual(
+            _steps(check)["rollback_grant"],
+            ("blocked", "rollback_identity_not_supported", "by_hand"),
+        )
+        self.assertEqual(_steps(check)["rollback_target"][0], "clear")
+
+    def test_generic_target_does_not_require_inventory_read(self) -> None:
+        with patch.object(
+            self.store, "read_environment_inventory", side_effect=FileNotFoundError("missing")
+        ) as read:
+            self.assertEqual(_steps(self.check())["rollback_target"][0], "clear")
+        read.assert_not_called()
 
     def test_custom_rollback_driver_is_unknown_without_generic_grant_or_target_reads(self) -> None:
         self.profile = self.profile.model_copy(update={"driver_id": "verireel"})
@@ -518,6 +555,64 @@ class ProductRollbackPathCheckTests(unittest.TestCase):
 
 
 class ProductPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rollback_route_checks_identity_kind_even_when_every_action_is_allowed(
+        self,
+    ) -> None:
+        store = Mock()
+        store.read_product_profile_record.return_value = _profile()
+        store.list_deployment_records.return_value = ()
+        human = GitHubHumanIdentity(
+            login="example-admin",
+            github_id=123,
+            name="Admin",
+            email="",
+            organizations=frozenset(),
+            teams=frozenset(),
+            role="admin",
+        )
+        for identity, expected_code in (
+            (human, "rollback_identity_not_supported"),
+            (
+                TerminalAgentIdentity(subject="example-agent", token_label="read"),
+                "rollback_identity_not_supported",
+            ),
+            (
+                LocalOperatorIdentity(subject="example-operator", token_label="operator"),
+                "caller_may_rollback",
+            ),
+            (_identity(), "caller_may_rollback"),
+        ):
+            with self.subTest(identity=type(identity).__name__):
+                app = FastAPI()
+                register_product_path_check_read_routes(
+                    app,
+                    dependencies=ProductReadRouteDependencies(
+                        common=ReadRouteDependencies(
+                            read_identity=lambda: identity,
+                            get_record_store=lambda: store,
+                            next_trace_id=lambda: "test-trace",
+                            authorization_allows=Mock(return_value=True),
+                            http_error=Mock(),
+                            error_response_model=BaseModel,
+                        ),
+                        read_product_profile_list_identity=lambda: identity,
+                        work_graph_planning_facts_provider=None,
+                        workflow_credentials_ready=lambda _product: True,
+                        control_plane_root=Path("."),
+                        github_token=lambda: "",
+                    ),
+                )
+                response = await _asgi_request(
+                    app, "GET", "/v1/products/example-site/path-check?path=rollback"
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                grant = next(
+                    step
+                    for step in response.json()["check"]["steps"]
+                    if step["step_id"] == "rollback_grant"
+                )
+                self.assertEqual(grant["code"], expected_code)
+
     async def test_route_needs_product_read_and_answers_for_the_caller(self) -> None:
         with TemporaryDirectory() as directory:
             store = PostgresRecordStore(
@@ -583,7 +678,7 @@ class ProductPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rollback_check["state"], "blocked")
         rollback_steps = {step["step_id"]: step for step in rollback_check["steps"]}
         self.assertEqual(rollback_steps["rollback_grant"]["code"], "caller_lacks_rollback_grant")
-        self.assertEqual(rollback_steps["rollback_target"]["code"], "prod_inventory_missing")
+        self.assertEqual(rollback_steps["rollback_target"]["code"], "rollback_target_missing")
         self.assertEqual(denied.status_code, 404)
         self.assertEqual(missing.status_code, 404)
 
