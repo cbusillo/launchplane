@@ -3286,11 +3286,19 @@ def _is_ingress_route_option_literal(*, path: str, key: str, value: object) -> b
 
 
 def _is_runs_on_mechanic_selector(value_text: str) -> bool:
-    """Accept the JSON runner-selector form of the allowed runs-on mechanic values."""
+    """Accept JSON selectors and YAML flow lists of allowed runner mechanics."""
     try:
         selector = json.loads(value_text)
     except ValueError:
-        return False
+        if not (value_text.startswith("[") and value_text.endswith("]")):
+            return False
+        labels = value_text[1:-1].strip().removesuffix(",").split(",")
+        allowed_forms = {
+            form
+            for label in WORKFLOW_RUNS_ON_MECHANIC_VALUES
+            for form in (label, f"'{label}'", f'"{label}"')
+        }
+        return all(label.strip() in allowed_forms for label in labels)
     if isinstance(selector, str):
         return selector in WORKFLOW_RUNS_ON_MECHANIC_VALUES
     return (
