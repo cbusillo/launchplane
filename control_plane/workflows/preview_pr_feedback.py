@@ -865,8 +865,8 @@ def _render_preview_pr_feedback_markdown(
                     "",
                     f"@{owner_mention} this change is ready for you to look at.",
                     "",
-                    "1. Open the preview above and try the change. What to check is listed under "
-                    "**Client test notes** in the pull request description.",
+                    "1. Open the preview above and try the change. What to check is listed in "
+                    "the test notes in the pull request description.",
                     f"2. Record **Accept** or **Request changes** in Launchplane: {owner_review_url}",
                     "",
                     "Your decision does not merge or deploy anything. A GitHub approval or comment "

@@ -92,8 +92,10 @@ the Client each change's notes once; see
 batch body names as having no notes is still a release blocker, as it would be
 on its own.
 
-Product CI must require a nonempty **`Client test notes`** section on every pull
-request, including changes that need no manual test. The shared
+Product CI must require a nonempty test notes section on every pull request,
+including changes that need no manual test. Write **`Client test notes`** once the
+repository pins the action at or after the commit that introduced that heading;
+with an older pin, keep **`Owner test notes`**, which every version accepts. The shared
 `.github/actions/owner-test-notes` action checks presence only, using the pull
 request event as data without checking out or running its code. Run it inside an
 existing required CI job and include `edited` among that workflow's pull request
