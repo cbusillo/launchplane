@@ -1057,6 +1057,9 @@ def _wait_for_preview_health(
     parsed = urlparse(preview_url.rstrip("/"))
     health_url = parsed._replace(path=health_path, params="", query="", fragment="").geturl()
     deadline = timeout_seconds
+    # Requests that time out take longer than the sleeps counted against the
+    # deadline, so the wall clock bounds the wait too.
+    started_at = time.monotonic()
     request = Request(
         health_url,
         headers={
@@ -1065,7 +1068,7 @@ def _wait_for_preview_health(
         },
     )
     last_detail = "timeout"
-    while deadline > 0:
+    while deadline > 0 and time.monotonic() - started_at < timeout_seconds:
         try:
             with urlopen(request, timeout=min(15, deadline)) as response:
                 body = response.read().decode("utf-8")
