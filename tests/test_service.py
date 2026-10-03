@@ -132,6 +132,7 @@ from control_plane.workflows.verireel_environment import VeriReelStableEnvironme
 from control_plane.workflows.verireel_rollout import VeriReelRolloutVerificationResult
 from control_plane.workflows.odoo_artifact_publish import OdooArtifactPublishResult
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
+from tests.support.openapi import openapi_document, openapi_response
 from tests.support.http import get as http_get
 from tests.support.http import request as http_request
 from tests.support.auth import (
@@ -2300,13 +2301,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "database_required")
 
     def test_openapi_includes_merge_train_policy_import_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=LaunchplaneAuthzPolicy(),
-            record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("unused")),
-        )
-
-        payload = app.openapi()
+        payload = openapi_document()
 
         route = payload["paths"]["/v1/merge-train/policies/import"]["post"]
         self.assertEqual(route["operationId"], "import_merge_train_policy")
@@ -3419,13 +3414,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
     def test_openapi_includes_product_onboarding_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=LaunchplaneAuthzPolicy(),
-            record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("unused")),
-        )
-
-        payload = app.openapi()
+        payload = openapi_document()
 
         route = payload["paths"]["/v1/product-onboarding/apply"]["post"]
         self.assertEqual(route["operationId"], "apply_product_onboarding")
@@ -5283,13 +5272,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "database_required")
 
     def test_openapi_includes_provider_target_operation_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=LaunchplaneAuthzPolicy(),
-            record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("unused")),
-        )
-
-        payload = app.openapi()
+        payload = openapi_document()
 
         route = payload["paths"]["/v1/provider-targets/operations"]["post"]
         self.assertEqual(route["operationId"], "run_provider_target_operations")
@@ -7633,17 +7616,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "database_required")
 
     def test_openapi_includes_live_target_runtime_apply_contract(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            app = create_launchplane_fastapi_test_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=root,
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
-            )
-
-            status_code, payload = _invoke_app(app, method="GET", path="/openapi.json")
+        response = asyncio.run(openapi_response())
+        status_code, payload = response.status_code, response.json()
 
         self.assertEqual(status_code, 200)
         route = payload["paths"]["/v1/live-target-runtime/apply"]["post"]

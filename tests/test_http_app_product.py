@@ -101,6 +101,7 @@ from tests.http_app_test_support import (
     _terminal_agent_work_graph_rank_policy,
     _work_graph_read_policy,
 )
+from tests.support.openapi import openapi_response
 from tests.support.protected_artifacts import seed_protected_artifact_store
 from tests.support.auth import _identity, _StubVerifier
 from tests.support.product_reads import (
@@ -995,13 +996,7 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
         self.assertNotIn("detail", payload)
 
     async def test_openapi_includes_config_status_route(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=_product_environment_read_policy(context="example-site"),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         openapi = response.json()
@@ -1804,15 +1799,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sections["preview_readiness"]["status"], "available")
 
     async def test_openapi_includes_agent_context_read_contracts(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=_product_environment_read_policy(
-                context="launchplane", products=("launchplane",)
-            ),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         openapi = response.json()
@@ -2333,13 +2320,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("certificate-private-789", response.text)
 
     async def test_openapi_includes_product_environment_read_contracts(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=_product_environment_read_policy(context="launchplane"),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         openapi = response.json()
@@ -3790,13 +3771,7 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "database_required")
 
     async def test_openapi_includes_product_health_monitoring_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_product_health_monitoring_identity()),
-            authz_policy=_product_health_monitoring_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         route = response.json()["paths"]["/v1/product-profiles/health-monitoring/apply"]["post"]
@@ -4015,13 +3990,7 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "database_required")
 
     async def test_openapi_includes_product_prelaunch_rebuild_policy_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_product_prelaunch_rebuild_policy_identity()),
-            authz_policy=_product_prelaunch_rebuild_policy_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         route = response.json()["paths"]["/v1/product-profiles/prelaunch-rebuild/apply"]["post"]
@@ -4833,13 +4802,7 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "database_required")
 
     async def test_openapi_includes_product_preview_tls_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_product_preview_tls_identity()),
-            authz_policy=_product_preview_tls_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         route = response.json()["paths"]["/v1/product-profiles/preview-tls/apply"]["post"]
@@ -4856,13 +4819,7 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(status_code, route["responses"])
 
     async def test_openapi_includes_product_stable_lane_repair_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_product_stable_lane_repair_identity()),
-            authz_policy=_product_stable_lane_repair_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         route = response.json()["paths"]["/v1/product-profiles/stable-lane-repair/apply"]["post"]
@@ -5017,13 +4974,7 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("read_product_profile_record", show_response.json()["error"]["message"])
 
     async def test_openapi_includes_product_profile_contracts(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=_product_profile_read_policy(product="launchplane"),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         openapi = response.json()
@@ -5306,13 +5257,7 @@ class FastApiProtectedArtifactsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"]["code"], "database_storage_required")
 
     async def test_openapi_includes_protected_artifacts_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=_local_operator_artifact_protection_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         openapi = response.json()

@@ -113,6 +113,7 @@ from tests.http_app_test_support import (
     _post_odoo_target_replacement_plan,
     _post_odoo_website_bootstrap_override,
 )
+from tests.support.openapi import openapi_response
 from tests.support.auth import _identity, _StubVerifier
 from tests.support.artifact_manifests import artifact_manifest_v2
 from tests.support.profiles import _odoo_preview_profile_payload
@@ -650,13 +651,7 @@ class FastApiOdooArtifactPublishInputsTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_openapi_includes_odoo_artifact_publish_inputs_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(self._identity()),
-            authz_policy=self._policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         route = response.json()["paths"]["/v1/drivers/odoo/artifact-publish-inputs"]["post"]
@@ -1101,13 +1096,7 @@ class FastApiOdooArtifactPublishTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "invalid_request")
 
     async def test_openapi_includes_odoo_artifact_publish_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(self._identity()),
-            authz_policy=self._policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         route = response.json()["paths"]["/v1/drivers/odoo/artifact-publish"]["post"]
@@ -3597,13 +3586,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
     async def test_openapi_includes_odoo_preview_apply_contracts(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(self._identity()),
-            authz_policy=self._policy(actions=("odoo_preview_apply.execute",)),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         paths = response.json()["paths"]
@@ -4537,17 +4520,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "not_found")
 
     async def test_openapi_includes_odoo_prod_promotion_contracts(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(self._identity()),
-                authz_policy=self._policy(),
-                record_store_factory=lambda: self._store_with_tenant_profile(root / "state"),
-                control_plane_root_path=root,
-                state_dir=root / "state",
-            )
-
-            response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         paths = response.json()["paths"]
@@ -4999,16 +4972,7 @@ class FastApiOdooStableBootstrapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "driver_route_dependency_not_found")
 
     async def test_openapi_includes_odoo_stable_bootstrap_contract(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(self._identity()),
-                authz_policy=self._policy(),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
-                control_plane_root_path=root,
-            )
-
-            response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         operation = response.json()["paths"]["/v1/drivers/odoo/stable-bootstrap"]["post"]
@@ -5408,16 +5372,7 @@ class FastApiOdooTargetReplacementPlanTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "driver_route_dependency_not_found")
 
     async def test_openapi_includes_odoo_target_replacement_plan_contract(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(self._identity()),
-                authz_policy=self._policy(),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
-                control_plane_root_path=root,
-            )
-
-            response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         operation = response.json()["paths"]["/v1/drivers/odoo/target-replacement-plan"]["post"]
@@ -6226,16 +6181,7 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_openapi_includes_odoo_target_replacement_apply_contract(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(self._identity()),
-                authz_policy=self._policy(),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
-                control_plane_root_path=root,
-            )
-
-            response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         operation = response.json()["paths"]["/v1/drivers/odoo/target-replacement-apply"]["post"]
@@ -6638,16 +6584,7 @@ class FastApiOdooProdBackupGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "not_found")
 
     async def test_openapi_includes_odoo_prod_backup_gate_contract(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(self._identity()),
-                authz_policy=self._policy(),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
-                control_plane_root_path=root,
-            )
-
-            response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         operation = response.json()["paths"]["/v1/drivers/odoo/prod-backup-gate"]["post"]
@@ -6810,16 +6747,7 @@ class FastApiOdooProdBackupVerificationTests(unittest.IsolatedAsyncioTestCase):
         execute_mock.assert_not_called()
 
     async def test_openapi_includes_odoo_prod_backup_verification_contract(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(self._identity()),
-                authz_policy=self._policy(),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
-                control_plane_root_path=root,
-            )
-
-            response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         operation = response.json()["paths"]["/v1/drivers/odoo/prod-backup-verification"]["post"]
@@ -7240,16 +7168,7 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "not_found")
 
     async def test_openapi_includes_odoo_prod_rollback_contract(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(self._identity()),
-                authz_policy=self._policy(),
-                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
-                control_plane_root_path=root,
-            )
-
-            response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         operation = response.json()["paths"]["/v1/drivers/odoo/prod-rollback"]["post"]
@@ -8060,13 +7979,7 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_openapi_includes_odoo_post_deploy_override_contracts(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(self._identity()),
-            authz_policy=self._policy(),
-            record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("unused")),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         paths = response.json()["paths"]
