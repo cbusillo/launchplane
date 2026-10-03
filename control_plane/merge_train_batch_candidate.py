@@ -21,9 +21,13 @@ from control_plane.merge_train import (
     build_merge_train_dry_run_result,
     discover_merge_train_stack,
 )
+from control_plane.merge_train_branch_refresh import (
+    require_merge_train_client_review_read_store,
+)
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     GitHubMergeTrainSnapshotReader,
+    MergeTrainBranchRefreshReadStore,
     MergeTrainGitHubTransport,
     UrllibMergeTrainGitHubTransport,
 )
@@ -126,8 +130,12 @@ def execute_merge_train_batch_candidate_run_once(
     recorded_at: str,
     batch_store: MergeTrainBatchCandidateRecordStore,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
+    review_store: MergeTrainBranchRefreshReadStore,
     mutation_checkpoint: Callable[[str, int | None], None] | None = None,
 ) -> MergeTrainBatchCandidateRunOnceResult:
+    review_store = require_merge_train_client_review_read_store(
+        review_store, route="Merge train batch candidate"
+    )
     transport = UrllibMergeTrainGitHubTransport(
         token=token,
         api_base_url=request.github_api_base_url,
@@ -142,6 +150,7 @@ def execute_merge_train_batch_candidate_run_once(
             recorded_at=recorded_at,
             batch_store=batch_store,
             stack_collapse_store=stack_collapse_store,
+            review_store=review_store,
         )
 
     existing_record = read_merge_train_batch_candidate_record(
@@ -151,7 +160,7 @@ def execute_merge_train_batch_candidate_run_once(
         record_id=request.candidate_record_id,
     )
     candidate = existing_record.candidate
-    github_client = GitHubMergeTrainClient(transport=transport)
+    github_client = GitHubMergeTrainClient(transport=transport, branch_refresh_store=review_store)
     if request.mode == "build":
         candidate = github_client.build_batch_candidate(
             candidate=candidate,
@@ -227,12 +236,18 @@ def _execute_plan_mode(
     recorded_at: str,
     batch_store: MergeTrainBatchCandidateRecordStore,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
+    review_store: MergeTrainBranchRefreshReadStore,
 ) -> MergeTrainBatchCandidateRunOnceResult:
-    snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+    snapshot = GitHubMergeTrainSnapshotReader(
+        transport=transport, branch_refresh_store=review_store
+    ).read_merge_train_snapshot(
         repository=request.repository,
         base_branch=request.base_branch,
     )
-    dry_run_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
+    # Plans become batch candidates, so every labelled member needs Client review.
+    dry_run_result = build_merge_train_dry_run_result(
+        policy=policy, snapshot=snapshot, batch_landing=True
+    )
     selected_pr = dry_run_result.selected_pr
     if selected_pr is not None and merge_train_snapshot_has_stack_topology(
         snapshot=snapshot, dry_run_result=dry_run_result
@@ -275,6 +290,18 @@ def _execute_plan_mode(
                 "dry_run_result": dry_run_result.model_dump(mode="json"),
                 "stack_discovery": stack_discovery.model_dump(mode="json"),
                 "next_action": "stack_unsupported",
+            },
+            records={},
+        )
+
+    if dry_run_result.intended_next_action not in ("merge", "idle"):
+        # A waiting or blocked queue, including one awaiting Client review, gets
+        # no candidate; report the train's decision instead.
+        return MergeTrainBatchCandidateRunOnceResult(
+            accepted_result={
+                "mode": request.mode,
+                "dry_run_result": dry_run_result.model_dump(mode="json"),
+                "next_action": dry_run_result.intended_next_action,
             },
             records={},
         )
