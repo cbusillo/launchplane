@@ -7,7 +7,8 @@ import {
   consumeManagedSecretValues,
   productConfigDraftLocked,
   productConfigManagedSecretIdentity,
-  productConfigRuntimeDraftKey,
+  productConfigRuntimeChange,
+  productConfigRuntimeChangeKey,
   productConfigSelectionKey,
 } from "../src/product-config-operation.ts";
 
@@ -115,18 +116,49 @@ test("runtime and secret plan keys are stable across display order", () => {
     productConfigSelectionKey(["ANALYTICS_TOKEN", "SMTP_PASSWORD"]),
   );
   assert.equal(
-    productConfigRuntimeDraftKey(
-      ["PUBLIC_ORIGIN", "SENDER_EMAIL"],
-      { PUBLIC_ORIGIN: "https://example.invalid", SENDER_EMAIL: "ops@example.invalid" },
+    productConfigRuntimeChangeKey(
+      productConfigRuntimeChange(
+        ["PUBLIC_ORIGIN", "SENDER_EMAIL"],
+        { PUBLIC_ORIGIN: "https://example.invalid", SENDER_EMAIL: "ops@example.invalid" },
+        [],
+        "",
+      ),
     ),
-    productConfigRuntimeDraftKey(
-      ["SENDER_EMAIL", "PUBLIC_ORIGIN"],
-      { SENDER_EMAIL: "ops@example.invalid", PUBLIC_ORIGIN: "https://example.invalid" },
+    productConfigRuntimeChangeKey(
+      productConfigRuntimeChange(
+        ["SENDER_EMAIL", "PUBLIC_ORIGIN"],
+        { SENDER_EMAIL: "ops@example.invalid", PUBLIC_ORIGIN: "https://example.invalid" },
+        [],
+        "",
+      ),
     ),
   );
   assert.notEqual(
     productConfigManagedSecretIdentity("runtime_environment", "SMTP_PASSWORD"),
     productConfigManagedSecretIdentity("external_service", "SMTP_PASSWORD"),
+  );
+});
+
+test("a draft carries the site's own settings and provider keys to retire", () => {
+  const change = productConfigRuntimeChange(
+    ["PUBLIC_ORIGIN"],
+    { PUBLIC_ORIGIN: "https://example.invalid" },
+    [{ key: " SITE_MODE ", value: "full" }, { key: "", value: "ignored" }],
+    "LEGACY_TUNING\nOLD_KEY, LEGACY_TUNING",
+  );
+  assert.deepEqual(change, {
+    runtime_settings: { PUBLIC_ORIGIN: "https://example.invalid", SITE_MODE: "full" },
+    retired_provider_keys: ["LEGACY_TUNING", "OLD_KEY"],
+  });
+  assert.throws(
+    () =>
+      productConfigRuntimeChange(
+        ["PUBLIC_ORIGIN"],
+        { PUBLIC_ORIGIN: "a" },
+        [{ key: "PUBLIC_ORIGIN", value: "b" }],
+        "",
+      ),
+    /PUBLIC_ORIGIN appears more than once/,
   );
 });
 

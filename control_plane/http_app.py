@@ -730,6 +730,7 @@ from control_plane.product_config_http import (
     ProductConfigApplyResponse,
     ProductConfigApplyResult,
     ProductEnvironmentConfigApplyEnvelope,
+    ProductEnvironmentConfigRefused,
     product_config_live_target_next_actions,
     product_environment_config_apply_request,
     product_environment_config_confirmation,
@@ -15013,8 +15014,11 @@ def create_launchplane_fastapi_app(
                 message="Product environment was not found.",
             )
         idempotency_request_payload = None
-        if any(item.owner_submission_version_id for item in environment_request.managed_secrets):
-            # Pin replay to the submitted references, not their decryptable current values.
+        if environment_request.retired_provider_keys or any(
+            item.owner_submission_version_id for item in environment_request.managed_secrets
+        ):
+            # Pin replay to the submitted references, not their decryptable current values,
+            # and to the submitted retirements, not the lane's retirements they are added to.
             # Typed values still require the existing keyed secret fingerprint.
             idempotency_request_payload = {
                 **environment_request.model_dump(mode="json", exclude_none=True),
@@ -15050,6 +15054,19 @@ def create_launchplane_fastapi_app(
                     return ProductConfigApplyResponse.model_validate(
                         replay_response.model_dump(mode="json")
                     )
+        current_retired_provider_keys: tuple[str, ...] = ()
+        if environment_request.retired_provider_keys:
+            current_retired_provider_keys = next(
+                (
+                    record.retired_provider_keys
+                    for record in database_store.list_runtime_environment_records(
+                        scope="instance",
+                        context_name=lane.context,
+                        instance_name=lane.instance,
+                    )
+                ),
+                (),
+            )
         try:
             product_config_request = product_environment_config_apply_request(
                 profile=profile,
@@ -15064,7 +15081,19 @@ def create_launchplane_fastapi_app(
                         version_id=version_id,
                     )
                 ),
+                current_retired_provider_keys=current_retired_provider_keys,
+                # The same guard as declaring a key on a live product.
+                undeclared_settings_allowed=not (
+                    isinstance(identity, LocalOperatorIdentity) and profile.production_use == "live"
+                ),
             )
+        except ProductEnvironmentConfigRefused as error:
+            raise _launchplane_http_error(
+                status_code=error.status_code,
+                trace_id=trace_id,
+                code=error.code,
+                message=str(error),
+            ) from error
         except OwnerSecretSubmissionUnavailable as error:
             raise _launchplane_http_error(
                 status_code=409,

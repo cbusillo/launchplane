@@ -1153,7 +1153,8 @@ export async function applyProductEnvironmentConfigForFixture(
       { statusCode: 409, traceId: "fixture-product-config-blocked" },
     );
   }
-  const runtimeKeys = Object.keys(payload.runtime_settings ?? {}).sort();
+  const retiredKeys = [...(payload.retired_provider_keys ?? [])].sort();
+  const runtimeKeys = [...Object.keys(payload.runtime_settings ?? {}), ...retiredKeys].sort();
   const secretInputs = payload.managed_secrets ?? [];
   const nextActions = runtimeKeys.length
     ? [
@@ -1211,7 +1212,7 @@ export async function applyProductEnvironmentConfigForFixture(
         unchanged_keys: [],
         env_value_count_after: runtimeKeys.length,
         retired_provider_keys_before: [],
-        retired_provider_keys_after: [],
+        retired_provider_keys_after: retiredKeys,
       },
       runtime_key_safety: {
         required: secretInputs.length > 0,

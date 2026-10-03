@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from fnmatch import fnmatchcase
 from typing import Protocol
@@ -57,8 +58,15 @@ def is_secret_shaped_runtime_key(key_name: str) -> bool:
     )
 
 
+# A keyword connection string's password, as in libpq ``host=db password=...``
+# or ODBC ``Server=db;Pwd=...``.
+_KEYWORD_PASSWORD_PATTERN = re.compile(r"(?:^|[\s;])(?:password|pwd)\s*=\s*[^\s;]", re.IGNORECASE)
+
+
 def runtime_value_carries_credentials(value: str) -> bool:
     """Whether a value embeds a password, as in ``smtp://user:password@host``."""
+    if _KEYWORD_PASSWORD_PATTERN.search(value):
+        return True
     try:
         return bool(urlsplit(value.strip()).password)
     except ValueError:

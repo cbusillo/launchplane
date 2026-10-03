@@ -6130,6 +6130,14 @@
                     "title": "Reason",
                     "type": "string"
                   },
+                  "retired_provider_keys": {
+                    "description": "Provider keys to retire on this lane, added to those it already retires.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "title": "Retired Provider Keys",
+                    "type": "array"
+                  },
                   "runtime_settings": {
                     "additionalProperties": {
                       "anyOf": [
