@@ -722,9 +722,12 @@ def _runtime_artifact_id(
     if inventory.runtime_identity is None:
         return ""
     try:
+        # Inventory is Launchplane's record, so a lane deployed before the profile
+        # moved to another image repository still has evidence.
         artifact_id = normalize_generic_web_artifact_id(
             profile=profile,
             artifact_id=inventory.runtime_identity.artifact_id,
+            recorded=True,
         )
         if not _immutable_artifact_id(artifact_id):
             return ""
@@ -785,9 +788,25 @@ def _common_promotion_blockers(
             evidence=destination,
         )
     )
+    if source.artifact_id and not _in_profile_image_repository(profile, source.artifact_id):
+        # Testing's evidence stays readable after the profile moves to another image
+        # repository, but production is promoted only from the current one.
+        blockers.append(
+            "Testing runs an image outside the product's image repository; deploy testing "
+            "from that repository before promoting."
+        )
     if not _destination_target_ready(destination_summary, destination_lane):
         blockers.append("Production provider target authority is unavailable.")
     return blockers
+
+
+def _in_profile_image_repository(
+    profile: LaunchplaneProductProfileRecord, artifact_id: str
+) -> bool:
+    image_repository = profile.image.repository.strip().rstrip("/")
+    return bool(image_repository) and artifact_id.startswith(
+        (f"{image_repository}@", f"{image_repository}:")
+    )
 
 
 def _environment_evidence_blockers(
@@ -1029,10 +1048,12 @@ def _runtime_identity_matches_expected(
         runtime_artifact = normalize_generic_web_artifact_id(
             profile=profile,
             artifact_id=identity.artifact_id,
+            recorded=True,
         )
         inventory_artifact = normalize_generic_web_artifact_id(
             profile=profile,
             artifact_id=inventory.artifact_identity.artifact_id,
+            recorded=True,
         )
     except (ValueError, click.ClickException):
         return False

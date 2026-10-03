@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.deploy_target import DeployTargetCategory
 from control_plane.contracts.deploy_reference import (
+    is_digest_pinned_image_reference,
     provider_image_reference,
     validate_provider_deploy_reference,
 )
@@ -243,8 +244,15 @@ def _fallback_target_name(
 
 
 def normalize_generic_web_artifact_id(
-    *, profile: LaunchplaneProductProfileRecord, artifact_id: str
+    *, profile: LaunchplaneProductProfileRecord, artifact_id: str, recorded: bool = False
 ) -> str:
+    """The artifact a generic-web lane deploys, in the product's image repository.
+
+    ``recorded`` is for an artifact Launchplane read from its own deployment,
+    inventory or reservation records, never one a caller supplied: an immutable
+    image there stays valid after the profile moves to another repository, so a
+    rollback, a deploy recovery or promotion evidence still finds it.
+    """
     normalized_artifact_id = artifact_id.strip()
     image_repository = profile.image.repository.strip().rstrip("/")
     if not normalized_artifact_id:
@@ -257,6 +265,12 @@ def normalize_generic_web_artifact_id(
     if normalized_artifact_id.startswith(
         f"{image_repository}@"
     ) or normalized_artifact_id.startswith(f"{image_repository}:"):
+        return normalized_artifact_id
+    if (
+        recorded
+        and "@" in normalized_artifact_id
+        and is_digest_pinned_image_reference(normalized_artifact_id)
+    ):
         return normalized_artifact_id
     if normalized_artifact_id.startswith("sha256:"):
         return f"{image_repository}@{normalized_artifact_id}"
@@ -357,6 +371,7 @@ def _fallback_ship_request(
     deploy_provider: GenericWebDeployProvider,
     artifact_id: str = "",
     include_deploy_reference: bool = True,
+    recorded_artifact: bool = False,
 ) -> ShipRequest:
     provider_id = deploy_provider.provider_id.strip().lower()
     if not provider_id:
@@ -365,6 +380,7 @@ def _fallback_ship_request(
     resolved_artifact_id = artifact_id.strip() or normalize_generic_web_artifact_id(
         profile=profile,
         artifact_id=request.artifact_id,
+        recorded=recorded_artifact,
     )
     deploy_reference = ""
     if include_deploy_reference and request.deploy_reference:
@@ -402,6 +418,7 @@ def _resolve_deploy_target(
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
     deploy_provider: GenericWebDeployProvider,
+    recorded_artifact: bool = False,
 ) -> GenericWebResolvedDeployTarget:
     return deploy_provider.resolve_deploy_target(
         control_plane_root=control_plane_root,
@@ -415,6 +432,7 @@ def _resolve_deploy_target(
         normalized_artifact_id=normalize_generic_web_artifact_id(
             profile=profile,
             artifact_id=request.artifact_id,
+            recorded=recorded_artifact,
         ),
         request_deploy_reference=request.deploy_reference,
         fallback_target_name=_fallback_target_name(profile=profile, lane=lane),
@@ -434,7 +452,9 @@ def execute_generic_web_deploy(
     provider_operation_title: str = "",
     deployment_record_id: str = "",
     provider_effect_checkpoint: Callable[[str], None] | None = None,
+    recorded_artifact: bool = False,
 ) -> GenericWebDeployResult:
+    """Deploy ``request``; ``recorded_artifact`` marks its artifact as Launchplane's own record."""
     normalized_provider_operation_title = provider_operation_title.strip()
     if provider_effect_checkpoint is not None and not normalized_provider_operation_title:
         raise ValueError("Durable generic web deploys require a provider operation title.")
@@ -461,6 +481,7 @@ def execute_generic_web_deploy(
             profile=resolved_profile,
             lane=resolved_lane,
             deploy_provider=resolved_deploy_provider,
+            recorded_artifact=recorded_artifact,
         )
         prepared_deploy_target = resolved_deploy_target or _resolve_deploy_target(
             control_plane_root=control_plane_root,
@@ -469,6 +490,7 @@ def execute_generic_web_deploy(
             profile=resolved_profile,
             lane=resolved_lane,
             deploy_provider=resolved_deploy_provider,
+            recorded_artifact=recorded_artifact,
         )
         ship_request = prepared_deploy_target.ship_request
         resolved_target = prepared_deploy_target.resolved_target

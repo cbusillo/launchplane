@@ -16,7 +16,10 @@ from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
 )
 from control_plane.drivers.registry import read_driver_descriptor
-from control_plane.contracts.deploy_reference import is_non_floating_tag_reference
+from control_plane.contracts.deploy_reference import (
+    is_digest_pinned_image_reference,
+    is_non_floating_tag_reference,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 
 GenericWebRollbackPlanStatus = Literal["ready", "blocked"]
@@ -441,6 +444,10 @@ def _immutable_artifact_id(
     if artifact_id.startswith("sha256:"):
         return f"{image_repository}@{artifact_id}"
     if artifact_id.startswith(f"{image_repository}@sha256:"):
+        return artifact_id
+    # A deployment Launchplane recorded stays a rollback target after the profile
+    # moves to another image repository.
+    if "@" in artifact_id and is_digest_pinned_image_reference(artifact_id):
         return artifact_id
     return ""
 
