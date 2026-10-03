@@ -78,6 +78,13 @@ class RunnerLaneServiceRetireTests(unittest.TestCase):
             script, count = re.subn(pattern, replacement, script, flags=re.MULTILINE)
             if count != 1:
                 raise AssertionError("Cannot safely relocate retirement helper fixture")
+        # Keep explicit binary paths inside the same fake host boundary if the
+        # helper starts spelling its host commands with absolute paths.
+        script = re.sub(
+            r"/(?:[a-zA-Z0-9._-]+/)*(systemctl|stat|realpath|grep)\b",
+            lambda match: str(self.bin / match.group(1)),
+            script,
+        )
         self.script = self.root / "retire.sh"
         self.script.write_text(script)
         self.env = {
@@ -87,7 +94,8 @@ class RunnerLaneServiceRetireTests(unittest.TestCase):
             "UNIT_USER": "runner",
             "UNIT_EXEC_START": (
                 f"{{ path={self.registration}/lane-1/bin/runsvc.sh ; "
-                f"argv[]={self.registration}/lane-1/bin/runsvc.sh ; ignore_errors=no ; }}"
+                f"argv[]={self.registration}/lane-1/bin/runsvc.sh ; ignore_errors=no ; "
+                "start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }"
             ),
             "COMMAND_LOG": str(self.log),
             "REGISTRATION_ROOT": str(self.registration),
@@ -183,7 +191,7 @@ class RunnerLaneServiceRetireTests(unittest.TestCase):
             },
             {
                 "UNIT_EXEC_START": (
-                    f"{{ path={self.registration}/lane-1/bin/runsvc.sh ; argv[]=runner ; }} "
+                    f"{{ path={self.registration}/lane-1/bin/runsvc.sh ; argv[]=runner ; }}\n"
                     "{ path=/elsewhere/runsvc.sh ; argv[]=runner ; }"
                 )
             },
