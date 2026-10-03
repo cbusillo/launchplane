@@ -55,18 +55,23 @@ def complete_compose_source(
         for lane in profile.lanes
     ):
         raise ValueError("Source completion requires an existing product testing lane.")
-    target = record_store.read_dokploy_target_record(
-        context_name=request.context,
-        instance_name=request.instance,
-    )
-    target_id = record_store.read_dokploy_target_id_record(
-        context_name=request.context,
-        instance_name=request.instance,
-    )
-    provider = record_store.read_provider_target_record(
-        context_name=request.context,
-        instance_name=request.instance,
-    )
+    try:
+        target = record_store.read_dokploy_target_record(
+            context_name=request.context,
+            instance_name=request.instance,
+        )
+        target_id = record_store.read_dokploy_target_id_record(
+            context_name=request.context,
+            instance_name=request.instance,
+        )
+        provider = record_store.read_provider_target_record(
+            context_name=request.context,
+            instance_name=request.instance,
+        )
+    except FileNotFoundError as error:
+        raise ValueError(
+            "Source completion requires tracked target, target-id and provider records."
+        ) from error
     if (
         target.target_type != "compose"
         or target.custom_git_url
@@ -76,9 +81,10 @@ def complete_compose_source(
         raise ValueError("Source completion requires an empty tracked compose target.")
     if target.source_type not in ("", "git", "github", "raw"):
         raise ValueError("Tracked compose has a different source type.")
-    if provider != ProviderTargetRecord.from_dokploy_records(
+    projection = ProviderTargetRecord.from_dokploy_records(
         target_record=target, target_id_record=target_id
-    ):
+    )
+    if provider.to_deployed_target_reference() != projection.to_deployed_target_reference():
         raise ValueError("Source completion requires matching tracked provider binding.")
     if any(
         other.provider_id == provider.provider_id

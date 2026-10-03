@@ -6,6 +6,8 @@ import unittest
 from unittest.mock import patch
 
 from pydantic import ValidationError
+from sqlalchemy import select
+from control_plane.storage.postgres import LaunchplaneDokployTargetRow
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -365,6 +367,82 @@ class ComposeSourceSetupTests(unittest.TestCase):
         )
         self.assertEqual(persisted.custom_git_url, self.live["customGitUrl"])
         self.assertEqual(persisted.compose_path, self.live["composePath"])
+
+    def test_source_inputs_reject_shell_syntax_and_repository_path_escape(self) -> None:
+        for overrides in (
+            {"custom_git_branch": "main$(id)"},
+            {"custom_git_branch": "main;id"},
+            {"compose_path": "./compose.yml;id"},
+            {"compose_path": "../other/compose.yml"},
+            {"compose_path": "/tmp/compose.yml"},
+        ):
+            with self.subTest(overrides=overrides), self.assertRaises(ValidationError):
+                self.request(**overrides)
+
+    def test_routine_target_provenance_change_does_not_change_binding(self) -> None:
+        self.store.write_dokploy_target_record(
+            self.target.model_copy(
+                update={
+                    "updated_at": "2026-10-03T02:00:00Z",
+                    "source_label": "service:testing-hold",
+                }
+            )
+        )
+        status, response = self.invoke_http(mode="apply")
+        self.assertEqual(status, 202, response)
+        self.assertEqual(
+            self.store.read_provider_target_record(context_name="sample", instance_name="testing"),
+            self.provider,
+        )
+
+    def test_older_payload_with_missing_defaults_can_complete(self) -> None:
+        with self.store._session_factory() as session:
+            row = session.scalar(select(LaunchplaneDokployTargetRow))
+            assert row is not None
+            old_payload = deepcopy(row.payload)
+            old_payload.pop("healthcheck_timeout_seconds", None)
+            old_payload["policies"].pop("integration_allowances", None)
+            row.payload = old_payload
+            session.commit()
+        status, response = self.invoke_http(mode="apply")
+        self.assertEqual(status, 202, response)
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name="sample", instance_name="testing"
+            ).env,
+            self.target.env,
+        )
+
+    def test_missing_tracked_binding_returns_a_validation_error(self) -> None:
+        self.store.delete_provider_target_record(expected_record=self.provider)
+        status, response = self.invoke_http()
+        self.assertEqual(status, 400, response)
+        self.assertEqual(self.calls, [])
+
+    def test_partial_provider_update_is_reported_without_persisting(self) -> None:
+        self.readback_wrong = True
+        status, response = self.invoke_http(mode="apply")
+        self.assertEqual(status, 502, response)
+        self.assertEqual(response["error"]["code"], "dokploy_source_partial_outcome")
+        self.assertIn("Provider source applied", response["error"]["message"])
+        self.assertEqual(
+            self.store.read_dokploy_target_record(context_name="sample", instance_name="testing"),
+            self.target,
+        )
+
+    def test_historical_context_and_partial_branches_are_refused(self) -> None:
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"historical_contexts": ("sample",)})
+        )
+        with self.assertRaisesRegex(ValueError, "historical"):
+            execute_dokploy_target_setup(
+                control_plane_root_path=self.root, record_store=self.store, request=self.request()
+            )
+        self.store.write_product_profile_record(self.profile)
+        self.live["gitlabBranch"] = "unfinished-source"
+        status, response = self.invoke_http()
+        self.assertEqual(status, 400, response)
+        self.assertEqual(self.calls, [])
 
     def test_inspect_never_exposes_url_credentials(self) -> None:
         self.live["customGitUrl"] = "https://secret:token@github.com/example/sample.git"

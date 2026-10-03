@@ -8,7 +8,10 @@ from control_plane.contracts.deploy_target import DeployedTargetReference, Provi
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord, DokployTargetType
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.dokploy.target_source_setup import configure_empty_compose_source
+from control_plane.dokploy.target_source_setup import (
+    configure_empty_compose_source,
+    DokployComposeSourcePartialError,
+)
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProductAuthorityBundleStore,
@@ -722,6 +725,8 @@ def create_dokploy_compose_target(
                 "path": "/api/compose.update",
                 "payload": {
                     "composeId": "<created-compose-id>",
+                    "name": normalized_target_name,
+                    "environmentId": normalized_environment_id or "<created-environment-id>",
                     "sourceType": "git",
                     "customGitUrl": custom_git_url,
                     "customGitBranch": custom_git_branch,
@@ -851,28 +856,36 @@ def create_dokploy_compose_target(
 
         adoption_fetch = fetch_verified_source
 
-    adoption = adopt_dokploy_target(
-        record_store=record_store,
-        host=host,
-        token=token,
-        context=normalized_context,
-        instance=normalized_instance,
-        target_type="compose",
-        target_id=compose_id,
-        project_name=normalized_project_name,
-        target_name=normalized_target_name,
-        source_git_ref=source_git_ref,
-        healthcheck_path=normalized_healthcheck_path,
-        domains=domains,
-        deploy_timeout_seconds=deploy_timeout_seconds,
-        expected_current_provider_target=expected_current_provider_target,
-        source_label=source_label,
-        updated_at=updated_at,
-        apply=True,
-        fetch_target_payload=adoption_fetch,
-        required_context_owner=required_context_owner,
-        expected_product_profile=expected_product_profile,
-    )
+    try:
+        adoption = adopt_dokploy_target(
+            record_store=record_store,
+            host=host,
+            token=token,
+            context=normalized_context,
+            instance=normalized_instance,
+            target_type="compose",
+            target_id=compose_id,
+            project_name=normalized_project_name,
+            target_name=normalized_target_name,
+            source_git_ref=source_git_ref,
+            healthcheck_path=normalized_healthcheck_path,
+            domains=domains,
+            deploy_timeout_seconds=deploy_timeout_seconds,
+            expected_current_provider_target=expected_current_provider_target,
+            source_label=source_label,
+            updated_at=updated_at,
+            apply=True,
+            fetch_target_payload=adoption_fetch,
+            required_context_owner=required_context_owner,
+            expected_product_profile=expected_product_profile,
+        )
+    except Exception as error:
+        if custom_git_url:
+            raise DokployComposeSourcePartialError(
+                "Provider source applied; adoption did not complete. Administrator reconciliation "
+                "is required; do not create a replacement target."
+            ) from error
+        raise
     target_record = adoption.target_record.model_copy(
         update={
             "source_type": adoption.target_record.source_type or source_type.strip() or "raw",

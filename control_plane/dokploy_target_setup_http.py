@@ -315,6 +315,10 @@ def execute_dokploy_target_setup(
     required_context_owner: tuple[str, str] | None = None,
 ) -> dict[str, object]:
     apply_changes = request.mode == "apply"
+    ensure_dokploy_target_setup_context_is_not_historical(
+        record_store=record_store,
+        context=request.context,
+    )
     if request.operation == "complete-compose-source":
         from control_plane.dokploy_compose_source_setup import complete_compose_source
 
@@ -331,10 +335,6 @@ def execute_dokploy_target_setup(
 
         source_profile = resolve_compose_source_profile(record_store, request.context)
         source_url = repository_source_url(source_profile.repository)
-    ensure_dokploy_target_setup_context_is_not_historical(
-        record_store=record_store,
-        context=request.context,
-    )
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root_path)
     result: (
         DokployTargetAdoptionResult

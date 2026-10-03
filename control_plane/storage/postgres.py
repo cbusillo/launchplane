@@ -36437,9 +36437,14 @@ class PostgresRecordStore(HumanSessionStore):
                 target_row is None
                 or target_id_row is None
                 or provider_row is None
-                or target_row.payload != self._payload_dict(expected_record)
-                or target_id_row.payload != self._payload_dict(expected_target_id)
-                or provider_row.payload != self._payload_dict(expected_provider_target)
+                or self._read_payload(model_type=DokployTargetRecord, payload=target_row.payload)
+                != expected_record
+                or self._read_payload(
+                    model_type=DokployTargetIdRecord, payload=target_id_row.payload
+                )
+                != expected_target_id
+                or self._read_payload(model_type=ProviderTargetRecord, payload=provider_row.payload)
+                != expected_provider_target
             ):
                 raise ValueError("Tracked compose binding changed before source completion.")
             for row in session.scalars(select(LaunchplaneProviderTargetRow)).all():
@@ -36452,9 +36457,19 @@ class PostgresRecordStore(HumanSessionStore):
                 ):
                     raise ValueError("Compose source target is shared with another lane.")
             apply_provider()
-            target_row.updated_at = replacement_record.updated_at
-            target_row.payload = self._payload_dict(replacement_record)
-            session.commit()
+            try:
+                target_row.updated_at = replacement_record.updated_at
+                target_row.payload = self._payload_dict(replacement_record)
+                session.commit()
+            except Exception as error:
+                from control_plane.dokploy.target_source_setup import (
+                    DokployComposeSourcePartialError,
+                )
+
+                raise DokployComposeSourcePartialError(
+                    "Provider source applied and verified; tracked record commit failed. "
+                    "Administrator reconciliation is required; do not retry with a new key."
+                ) from error
 
     def compare_and_write_dokploy_target_record(
         self,

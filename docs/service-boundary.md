@@ -2462,7 +2462,9 @@ writes take, so a context reassigned during the provider calls is refused
 unrecorded.
 
 For a generic-web compose's repository source, `create-compose` accepts
-`custom_git_branch` and an explicit `compose_path`. The service resolves the
+`custom_git_branch` and an explicit `compose_path`. Branches and relative paths
+use letters, digits, dot, underscore, hyphen and slash; shell syntax and parent
+path traversal are refused. The service resolves the
 repository from the exclusively owning product profile, sets the provider's git
 source before adoption, and verifies read-back. The caller cannot supply a
 repository URL or credentials. Dry-run reports the resolved source and planned
@@ -2484,8 +2486,8 @@ unchanged. `autoDeploy` is disabled, so source setup starts no deployment.
 Dry-run performs the same source/identity checks without writes; apply retains
 the confirmation, reason and idempotency requirements above. Apply replay with
 the same key returns its saved result. If the provider accepts an update but
-read-back or the record commit fails, report the exact partial outcome for
-admin reconciliation; do not replace the target or overwrite its configured
+read-back or the record commit fails, the route reports
+`dokploy_source_partial_outcome` (502) for admin reconciliation; do not replace the target or overwrite its configured
 source by retrying with a new key. No new grant, credential, deploy or production
 operation is part of source completion. After delivery, RepairShopr Sync's
 setup session can complete its tracked testing source through this operation.
