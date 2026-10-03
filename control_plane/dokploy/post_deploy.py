@@ -2395,9 +2395,9 @@ record_integration_readback_passed() {{
     checked_payload=$(docker exec "${{workflow_environment[@]}}" "${{script_runner_container_id}}" \
         printenv ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64 || true)
     checked_sha256=$(printf '%s\\n%s' "${{database_name}}" "${{checked_payload}}" \
-        | sha256sum | cut -d " " -f 1)
+        | sha256sum | cut -d " " -f 1) || return 1
     docker exec -u root "${{script_runner_container_id}}" \
-        sh -c 'printf %s "$1" > "$2"' _ "${{checked_sha256}}" "${{integration_readback_passed_path}}"
+        sh -c 'printf %s "$1" > "$2"' _ "${{checked_sha256}}" "${{integration_readback_passed_path}}" || return 1
     echo "integration_readback_passed_recorded=true"
 }}
 
@@ -2405,12 +2405,18 @@ start_web_container() {{
     if [ "${{start_web_after_workflow}}" != "1" ]; then
         return
     fi
-    record_integration_readback_passed
+    record_integration_readback_passed || return 1
     local current_status
-    current_status=$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}" 2>/dev/null || true)
+    # Still attempt recovery if this first read fails; the final read must pass.
+    current_status=$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}" 2>/dev/null) || current_status=""
     if [ "${{current_status}}" != "running" ]; then
         echo "Starting web container ${{web_container_id}}"
-        docker start "${{web_container_id}}" >/dev/null || true
+        docker start "${{web_container_id}}" >/dev/null || return 1
+    fi
+    current_status=$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}") || return 1
+    if [ "${{current_status}}" != "running" ]; then
+        echo "Web container did not return to running after the data workflow." >&2
+        return 1
     fi
 }}
 
@@ -2453,7 +2459,11 @@ exit_trap() {{
         echo "Leaving web container ${{web_container_id}} stopped: the integration read-back did not pass." >&2
         exit "${{exit_status}}"
     fi
-    start_web_container
+    if ! start_web_container; then
+        if [ "${{exit_status}}" -eq 0 ]; then
+            exit_status=1
+        fi
+    fi
     exit "${{exit_status}}"
 }}
 
@@ -2636,11 +2646,11 @@ if ! enforce_integration_readback; then
     exit 1
 fi
 
+start_web_container
 if [ "${{restore_mode}}" = "1" ]; then
     restore_completed=1
     echo "odoo_restore_completed=true"
 fi
-start_web_container
 trap - EXIT
 """
 
