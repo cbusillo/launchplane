@@ -93,7 +93,7 @@ def register_product_path_check_read_routes(
                 target=AuthorizationTarget(scope="instance", instances=instances),
             )
 
-        def caller_is_policy_administrator() -> bool:
+        def caller_is_admin() -> bool:
             # A failed policy read raises, and read_path_check_inputs makes it unknown.
             policy = read_active_authz_policy_record(cast(PostgresRecordStore, record_store)).policy
             return isinstance(identity, GitHubHumanIdentity) and policy.names_administrator(
@@ -105,7 +105,7 @@ def register_product_path_check_read_routes(
             profile=profile,
             record_store=record_store,
             action_allowed=action_allowed,
-            caller_is_policy_administrator=caller_is_policy_administrator,
+            caller_is_admin=caller_is_admin,
             caller_can_use_generic_rollback=isinstance(
                 identity, (GitHubActionsIdentity, LocalAdminIdentity, LocalOperatorIdentity)
             ),

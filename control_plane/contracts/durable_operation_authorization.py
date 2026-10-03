@@ -155,11 +155,9 @@ class DurableOperationAuthorization(BaseModel):
         required_text_fields: tuple[str, ...] = _POLICY_RULE_TEXT_FIELDS
         if self.grant == "policy_administrator":
             if self.caller.identity_type != "github_human" or self.caller.role != "admin":
-                raise ValueError(
-                    "A policy administrator grant requires a GitHub human caller with role admin."
-                )
+                raise ValueError("An admin grant requires a GitHub human caller with role admin.")
             if any(getattr(self, field_name) for field_name in _MANAGED_RULE_TEXT_FIELDS):
-                raise ValueError("A policy administrator grant carries no managed rule.")
+                raise ValueError("An admin grant carries no managed rule.")
             required_text_fields = _POLICY_PROVENANCE_TEXT_FIELDS
         for field_name in required_text_fields:
             if not getattr(self, field_name):

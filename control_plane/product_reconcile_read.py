@@ -1,9 +1,9 @@
-"""Operator view of what the event reconciler last decided for a product's targets.
+"""Admin view of what the event reconciler last decided for a product's targets.
 
 The saved plan and error carry GitHub, provider and build text Launchplane did not
 write itself, so every string passes through the shared redactor before it leaves
 the service. Exact commit SHAs and image digests stay readable: they are what an
-operator compares against the build they expect. So do the ids Launchplane records
+admin compares against the build they expect. So do the ids Launchplane records
 itself, the GitHub delivery id and the plan's top-level `*_id` fields, when they
 have an id's shape; the shared redactor would otherwise take their hex for a token.
 The same ids stay readable where the saved error names them. A failed testing deploy's

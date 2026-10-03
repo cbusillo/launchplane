@@ -218,7 +218,7 @@ def create_launchplane_service_application(
 
 
 def register_thread_dump_signal() -> None:
-    """Let an operator dump every thread's stack with SIGUSR1, without stopping the service."""
+    """Let an admin dump every thread's stack with SIGUSR1, without stopping the service."""
     thread_dump_signal = getattr(signal, "SIGUSR1", None)
     if thread_dump_signal is not None:
         faulthandler.register(thread_dump_signal, all_threads=True, chain=False)

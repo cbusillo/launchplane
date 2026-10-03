@@ -438,8 +438,8 @@ def product_environment_config_apply_request(
     site_setting_keys = sorted(set(request.runtime_settings) - runtime_requirements)
     if site_setting_keys and not undeclared_settings_allowed:
         raise ProductEnvironmentConfigRefused(
-            "A live product's undeclared settings are recorded by the operator, "
-            "not with the local operator credential the operator's agent uses.",
+            "A live product's undeclared settings are recorded by an admin, "
+            "not with the local_operator credential the Director's agent uses.",
             code="live_product_requires_operator",
             status_code=403,
         )

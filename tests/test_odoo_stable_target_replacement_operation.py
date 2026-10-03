@@ -839,7 +839,7 @@ class OdooStableTargetReplacementOperationRecordTests(unittest.TestCase):
             self.assertEqual(loaded.status, "reconciliation_required")
             self.assertEqual(loaded.phase, "apply")
             self.assertEqual(loaded.error_code, "operation_reconciliation_required")
-            self.assertIn("operator reconciliation", loaded.error_message)
+            self.assertIn("admin reconciliation", loaded.error_message)
             self.assertEqual(loaded.lease_owner, "")
             self.assertEqual(loaded.finished_at, "")
 

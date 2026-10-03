@@ -3737,7 +3737,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
 
 
 def _write_local_operator_product_profile(store: PostgresRecordStore) -> None:
-    """The operator's agent writes only to a context its product owns."""
+    """The Director's agent writes only to a context its product owns."""
     store.ensure_schema()
     store.write_product_profile_record(
         LaunchplaneProductProfileRecord.model_validate(
