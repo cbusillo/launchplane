@@ -70,14 +70,32 @@ def main(argv):
         template, container_id = argv[2], argv[3]
         if ".State.Status" in template:
             path = state_path(container_id)
-            print(path.read_text().strip() if path.exists() else "running")
+            status = path.read_text().strip() if path.exists() else "running"
+            if container_id == "web-id":
+                after_stop = (state_dir / "web-stopped").exists()
+                after_start = (state_dir / "web-started").exists()
+                log(f"inspect web {status}")
+                if after_stop and not after_start and os.environ.get("FAKE_INITIAL_INSPECT_FAILURE") == "1":
+                    return 42
+                if after_stop and os.environ.get("FAKE_RECOVERY_INSPECT_FAILURE") == "1":
+                    return 42
+                if after_start and os.environ.get("FAKE_FINAL_INSPECT_FAILURE") == "1":
+                    return 42
+            print(status)
         else:
             print("sha256:same-image")
         return 0
     if command in ("start", "stop"):
         container_id = argv[1]
-        state_path(container_id).write_text("running" if command == "start" else "exited")
         log(f"{command} {container_id}")
+        status = "running" if command == "start" else "exited"
+        if container_id == "web-id":
+            (state_dir / f"web-{'started' if command == 'start' else 'stopped'}").touch()
+            if command == "start":
+                if os.environ.get("FAKE_WEB_START_FAILURE") == "1":
+                    return 41
+                status = os.environ.get("FAKE_WEB_START_STATUS", "running")
+        state_path(container_id).write_text(status)
         return 0
     if command != "exec":
         print(f"fake docker: unsupported command {argv!r}", file=sys.stderr)
@@ -122,6 +140,9 @@ def main(argv):
         print(value)
         return 0
     if program[:2] == ["sh", "-c"] and program[-1].endswith("integration_readback_passed"):
+        if os.environ.get("FAKE_PASS_WRITE_FAILURE") == "1":
+            log("write readback-passed failed")
+            return 43
         passed_path.write_text(program[-2])
         log("write readback-passed")
         return 0
@@ -466,6 +487,8 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         log_path.unlink(missing_ok=True)
         for state_file in self.root.glob("*.state"):
             state_file.unlink()
+        for marker in ("web-stopped", "web-started"):
+            (self.root / marker).unlink(missing_ok=True)
         (self.root / f"{WEB_CONTAINER_ID}.state").write_text(web_status)
         script_path = self.root / "script.sh"
         script_path.write_text(script, encoding="utf-8")
@@ -809,6 +832,51 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn("odoo_restore_completed=true", run.stdout.splitlines())
         self.assertNotIn("odoo_restore_completed=false", run.stdout)
+
+    def test_restore_fails_when_web_recovery_fails(self) -> None:
+        script = _render_restore_script()
+        for failure in (
+            {"FAKE_WEB_START_FAILURE": "1"},
+            {"FAKE_WEB_START_STATUS": "exited"},
+            {"FAKE_FINAL_INSPECT_FAILURE": "1"},
+            {"FAKE_RECOVERY_INSPECT_FAILURE": "1"},
+            {"FAKE_PASS_WRITE_FAILURE": "1"},
+        ):
+            with self.subTest(failure=failure):
+                run = self._run(script, **failure)
+
+                self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn("exec workflow", run.docker_log)
+                self.assertIn("odoo_restore_completed=false", run.stdout.splitlines())
+                self.assertNotIn("odoo_restore_completed=true", run.stdout.splitlines())
+                if "FAKE_PASS_WRITE_FAILURE" in failure:
+                    self.assertFalse(run.web_restarted, run.docker_log)
+                else:
+                    self.assertTrue(run.web_restarted, run.docker_log)
+
+    def test_restore_failure_keeps_its_exit_status_when_recovery_also_fails(self) -> None:
+        script = _render_restore_script()
+        for failure in (
+            {},
+            {"FAKE_WEB_START_FAILURE": "1"},
+            {"FAKE_WEB_START_STATUS": "exited"},
+            {"FAKE_FINAL_INSPECT_FAILURE": "1"},
+        ):
+            with self.subTest(failure=failure):
+                run = self._run(script, FAKE_WORKFLOW_EXIT="40", **failure)
+
+                self.assertEqual(run.returncode, 40, run.stdout + run.stderr)
+                self.assertTrue(run.web_restarted, run.docker_log)
+                self.assertIn("odoo_restore_completed=false", run.stdout.splitlines())
+                self.assertNotIn("odoo_restore_completed=true", run.stdout.splitlines())
+
+    def test_recovery_retries_start_after_an_initial_status_read_failure(self) -> None:
+        # Fail only the read before start; a fresh read after start must succeed.
+        run = self._run(_render_restore_script(), FAKE_INITIAL_INSPECT_FAILURE="1")
+
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertTrue(run.web_restarted, run.docker_log)
+        self.assertIn("inspect web running", run.docker_log)
 
     def test_restore_that_exits_non_zero_is_not_marked_complete(self) -> None:
         run = self._run(
