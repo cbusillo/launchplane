@@ -13,6 +13,7 @@ from pydantic import (
     PositiveInt,
     SerializerFunctionWrapHandler,
     ValidationInfo,
+    ValidatorFunctionWrapHandler,
     field_validator,
     model_serializer,
     model_validator,
@@ -436,9 +437,12 @@ class MergeTrainPolicyRecord(BaseModel):
     policy_sha256: str = ""
     policy: MergeTrainPolicy
 
-    @field_validator("policy", mode="plain", json_schema_input_type=MergeTrainPolicy)
+    @field_validator("policy", mode="wrap")
     @classmethod
-    def _read_historical_policy(cls, value: object) -> MergeTrainPolicy:
+    def _read_historical_policy(
+        cls, value: object, _handler: ValidatorFunctionWrapHandler
+    ) -> MergeTrainPolicy:
+        # Validate with historical context while preserving the model serializer.
         if isinstance(value, MergeTrainPolicy):
             value = value.model_dump(mode="json")
         return MergeTrainPolicy.model_validate(value, context={"historical_policy_record": True})

@@ -16840,8 +16840,7 @@
         "additionalProperties": false,
         "properties": {
           "policy": {
-            "$ref": "#/components/schemas/MergeTrainPolicy-Input",
-            "title": "Policy"
+            "$ref": "#/components/schemas/MergeTrainPolicy-Input"
           },
           "policy_sha256": {
             "default": "",
@@ -16889,8 +16888,7 @@
         "additionalProperties": false,
         "properties": {
           "policy": {
-            "$ref": "#/components/schemas/MergeTrainPolicy-Output",
-            "title": "Policy"
+            "$ref": "#/components/schemas/MergeTrainPolicy-Output"
           },
           "policy_sha256": {
             "default": "",
@@ -69493,8 +69491,7 @@
                     "additionalProperties": false,
                     "properties": {
                       "policy": {
-                        "$ref": "#/$defs/MergeTrainPolicy",
-                        "title": "Policy"
+                        "$ref": "#/$defs/MergeTrainPolicy"
                       },
                       "policy_sha256": {
                         "default": "",

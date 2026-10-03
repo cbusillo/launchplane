@@ -15164,8 +15164,7 @@
         "additionalProperties": false,
         "properties": {
           "policy": {
-            "$ref": "#/components/schemas/MergeTrainPolicy-Output",
-            "title": "Policy"
+            "$ref": "#/components/schemas/MergeTrainPolicy-Output"
           },
           "policy_sha256": {
             "default": "",
