@@ -1,6 +1,7 @@
 # Artifact Provenance
 
-Status: built in `control_plane/build_provenance.py` (#2604). Event handling is #2605.
+Status: built in `control_plane/build_provenance.py` (#2604). Event handling is
+built too (#2605); see [event-driven deploys](event-driven-deploys.md).
 
 A product repository builds its own artifact and never calls Launchplane.
 Launchplane decides for itself which artifact came from which commit by reading
@@ -107,9 +108,10 @@ product repository gets any new access, and no new grant is needed.
 
 The artifact publish route and publish-inputs route, the reusable publish
 workflow, and the workflow-identity grants that let product repos call them.
-Those are deleted in #2606.
+They are still in the code until #2606 (open) deletes them; nothing new may
+use them.
 
 ## Not covered here
 
 Event handling (which GitHub events start a verification, and the catch-up
-sweep) is #2605.
+sweep) is in [event-driven deploys](event-driven-deploys.md).

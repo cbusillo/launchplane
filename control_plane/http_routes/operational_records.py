@@ -658,15 +658,24 @@ def register_managed_secret_read_routes(
             visible_bindings = []
             for binding in bindings:
                 instance = str(binding["instance"])
+                target = AuthorizationTarget(
+                    scope="instance" if instance else "context",
+                    instances=(instance,) if instance else (),
+                )
+                # Binding metadata is a record the standing product environment read
+                # covers too; values are never part of it.
                 if dependencies.authorization_allows(
                     identity=identity,
                     action="secret.list",
                     product=LAUNCHPLANE_SERVICE_CONTEXT,
                     context=str(binding["context"]),
-                    target=AuthorizationTarget(
-                        scope="instance" if instance else "context",
-                        instances=(instance,) if instance else (),
-                    ),
+                    target=target,
+                ) or dependencies.authorization_allows(
+                    identity=identity,
+                    action="product_environment.read",
+                    product=product,
+                    context=str(binding["context"]),
+                    target=target,
                 ):
                     visible_bindings.append(binding)
         except product_secret_copy.ProductSecretCopyError as error:

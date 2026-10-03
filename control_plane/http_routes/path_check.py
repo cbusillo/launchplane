@@ -21,6 +21,9 @@ from control_plane.durable_operation_authorization import read_active_authz_poli
 from control_plane.service_auth import (
     AuthorizationTarget,
     GitHubHumanIdentity,
+    GitHubActionsIdentity,
+    LocalAdminIdentity,
+    LocalOperatorIdentity,
     LaunchplaneIdentity,
 )
 from control_plane.storage.postgres import PostgresRecordStore
@@ -103,6 +106,9 @@ def register_product_path_check_read_routes(
             record_store=record_store,
             action_allowed=action_allowed,
             caller_is_policy_administrator=caller_is_policy_administrator,
+            caller_can_use_generic_rollback=isinstance(
+                identity, (GitHubActionsIdentity, LocalAdminIdentity, LocalOperatorIdentity)
+            ),
             read_release_review=lambda: current_release_review(
                 control_plane_root=dependencies.control_plane_root,
                 record_store=record_store,

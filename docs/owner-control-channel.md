@@ -91,7 +91,7 @@ The service derives every approval-request field, nonce, whole-second timestamps
 and deterministic review payload from those locked records; callers cannot
 author request, evidence, policy, admin, review, or provenance fields.
 
-Issuance requires exactly one active schema-v2 policy, a live enrolled session,
+Issuance requires exactly one active schema-v2 or schema-v3 policy, a live enrolled session,
 an unexpired `planned` operation, and one immutable GitHub-ID managed rule that
 allows the enrolled admin under the descriptor's existing approval action.
 Blocked managed-policy plans and unsupported evidence fail closed. Challenge

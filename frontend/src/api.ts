@@ -7,6 +7,10 @@ import type {
 import type {
   ApplyProductEnvironmentConfigData,
   ApplyProductEnvironmentConfigResponse,
+  ApplyProductImageRepositoryData,
+  ApplyProductImageRepositoryResponse,
+  ApplyProductProductionUseData,
+  ApplyProductProductionUseResponse,
   ApplyProductOwnerData,
   ApplyProductOwnerResponse,
   ApproveHumanPrivilegedOperationData,
@@ -622,6 +626,28 @@ export function applyProductOwner(
     options.signal,
     generatedIdempotencyKey(request.headers),
     options.onDispatch,
+  );
+}
+
+export function applyProductImageRepository(
+  product: string,
+  payload: ApplyProductImageRepositoryData["body"],
+  options: BrowserOperationOptions,
+): Promise<ApplyProductImageRepositoryResponse> {
+  return requestJson<ApplyProductImageRepositoryResponse>(
+    BROWSER_WRITE_ROUTES.productImageRepositoryApply.replace("{product}", encodeURIComponent(product)),
+    "POST", payload, options.signal, options.idempotencyKey, options.onDispatch,
+  );
+}
+
+export function applyProductProductionUse(
+  product: string,
+  payload: ApplyProductProductionUseData["body"],
+  options: BrowserOperationOptions,
+): Promise<ApplyProductProductionUseResponse> {
+  return requestJson<ApplyProductProductionUseResponse>(
+    BROWSER_WRITE_ROUTES.productProductionUseApply.replace("{product}", encodeURIComponent(product)),
+    "POST", payload, options.signal, options.idempotencyKey, options.onDispatch,
   );
 }
 

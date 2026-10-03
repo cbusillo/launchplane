@@ -2,6 +2,16 @@
 title: Reusable Preview Workflow Contract
 ---
 
+Status: transitional. This page describes the old call-in path, in which a
+product repository's workflows call Launchplane through pinned reusable
+workflows and workflow-identity grants. [DIRECTION.md](../DIRECTION.md) retires
+that: a product repository never calls Launchplane. Previews now come from
+[event-driven deploys](event-driven-deploys.md), and the reconciler writes the PR
+comment and the `launchplane/owner-review` status itself. Products still on the
+call-in path keep it until they move (#2740) and #2606 deletes it; do not add a
+new caller. [Client Review Request](#client-review-request) and
+[Manager Preview Approval](#manager-preview-approval) apply to both paths.
+
 ## Purpose
 
 Product preview workflows should be thin event adapters. Product repos build and
@@ -413,7 +423,7 @@ workflows should treat the Odoo refresh response's `result.status="pass"` (the
 reusable workflow aliases it to `refresh_status`) as the ready-to-comment signal
 instead of independently deciding readiness from raw health checks. A passing
 result persists the active preview, ready serving generation, immutable artifact
-identity, and verified runtime identity before manager approval projection. The
+identity, and verified runtime identity. The
 service requires an exact lowercase 40-character source commit and lowercase
 64-character `sha256` image digest, injects its runtime identity into the preview
 environment, and requires `/launchplane/health` to echo the matching identity;

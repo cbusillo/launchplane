@@ -36,11 +36,18 @@ Agent-facing context and scoped write-intent rules are summarized in
 [agent-context-boundary.md](agent-context-boundary.md). Keep that page aligned
 with this endpoint inventory whenever agent-visible behavior changes.
 
-Product repos should build, test, and publish product artifacts, then call this
-boundary with minimal trigger facts. They should not carry Launchplane lifecycle
-truth, provider mutation logic, rendered evidence payloads, or copied driver
-behavior. See [product-repo-contract.md](product-repo-contract.md) for the
-approval gate.
+Product repos should build, test, and publish product artifacts. They should
+not carry Launchplane lifecycle truth, provider mutation logic, rendered
+evidence payloads, or copied driver behavior. See
+[product-repo-contract.md](product-repo-contract.md) for the approval gate.
+
+Status: product repositories calling Launchplane is retired (see
+`DIRECTION.md`): workflow-identity grants for product repositories, pinned
+reusable Launchplane workflows, and Launchplane-held build settings. Launchplane
+is moving to react to source-control events instead (see
+`POST /v1/github/app-webhook` below). Routes, grants, and workflows below
+that describe product-repository callers document code that remains only until
+it is deleted; do not extend them.
 
 ### Repository Inventory
 
@@ -90,7 +97,10 @@ cleanup scope so the store is always closed.
 - CLI: `uv run launchplane service serve`
 - server runtime: FastAPI served directly by Uvicorn
 
-The ordinary finite worker is a separate, dormant process boundary. Its source
+The ordinary finite worker is a separate, dormant process boundary. Ordinary-agent
+delegated delivery is retired (see `DIRECTION.md`); this worker, the ordinary
+admission described below, and the ordinary-agent enrollment routes remain only
+until their code is deleted and are not to be extended. Its source
 CLI is `uv run launchplane service ordinary-agent-workers run-once` or `run`.
 The worker uses PostgreSQL-backed finite-job claims, an injected purpose
 dispatcher, and independent process-local scan/error telemetry. Startup probes
@@ -334,6 +344,9 @@ governed expectation, custody and currentness contract.
     package named after the product's repository, apply bound to the dry run's
     starting repository, profile compare-and-write, and apply-only atomic
     idempotency enforcement)
+  - `POST /v1/product-profiles/{product}/production-use` (native FastAPI for
+    bearer-token and human-cookie callers with `product_profile.write`; dry run,
+    reviewed-plan-digest-bound atomic apply and idempotent audit evidence)
   - `POST /v1/product-profiles/preview-tls/apply` (native FastAPI for
     Launchplane admin workflow callers, DB-backed dry-run/apply planning,
     reviewed-plan continuity, and apply-only idempotency enforcement)
@@ -395,7 +408,9 @@ governed expectation, custody and currentness contract.
     values. Read grants do not authorize policy reconciliation, Client decisions,
     or provider changes.
 
-- Every Code local automation work-request routes:
+- Every Code local automation work-request routes (Every Code is retired; see
+  `DIRECTION.md`. These routes and the Every Code sections below remain only
+  until their readers move):
   - `GET /v1/every-code/summary` (native FastAPI for bearer-token,
     human-session, and Every Code worker-token callers)
   - `GET /v1/previews/readiness` (native FastAPI for bearer-token,
@@ -595,7 +610,7 @@ Frontend contract generation uses the same boundary. Run
 to write the canonical OpenAPI document from `create_launchplane_fastapi_app`
 without live credentials, managed-secret values, or runtime-authority examples.
 The frontend then derives the checked `frontend/generated/openapi-ui.json` slice
-and checked `frontend/src/generated/openapi.ts/` types from that canonical
+and checked `frontend/src/generated/openapi.ts` types from that canonical
 export. `pnpm --dir frontend check:openapi-drift` regenerates those artifacts in
 temporary paths and fails when the checked schema or generated types drift from
 the backend contract. The canonical `x-launchplane-ui-read-operations` and
@@ -1292,9 +1307,9 @@ landing outcome behavior as controller mode. If those dependencies are
 unavailable, the route fails closed before GitHub mutation.
 
 Launchplane's merge-train worker (`service merge-train-workers run`) is the
-scheduler for this route: it runs each scheduler-enabled policy target on its
-own five-minute timer, calling the same admission and worker functions
-in-process. See [merge-train policy](merge-train-policy.md).
+scheduler for this route: every five minutes by default it runs one pass over
+the scheduler-enabled policy targets, one target at a time, calling the same
+admission and worker functions in-process. See [merge-train policy](merge-train-policy.md).
 
 `.github/workflows/merge-train-runner.yml` is the external caller for
 this route. It mints a GitHub Actions OIDC token for the Launchplane service,
@@ -1303,8 +1318,8 @@ one worker entrypoint only when the decision is `admitted`. Scheduled
 repository, base-branch, runner-mode, and mutation selection come from the
 active merge-train policy record through `policy-targets`; manual dispatch uses
 explicit workflow inputs. Scheduled runs with no enabled policy scheduler target
-complete as no-ops before admission, and scheduled runs with multiple enabled
-targets fail closed. The default manual runner mode calls the Level 1 `run-once`
+complete as no-ops before admission, and each enabled target gets its own
+independent run job. The default manual runner mode calls the Level 1 `run-once`
 route; setting manual `runner_mode: controller` switches an admitted pass to one
 full-controller `run-once` call instead.
 Controller-mode dry-runs do not deliver PR feedback comments; feedback delivery
@@ -1326,6 +1341,9 @@ preview context; awareness entries do not imply Launchplane runtime ownership.
 current Launchplane-assembled work graph snapshot for the same authorization
 boundary. It composes product overviews and Every Code work-request records into
 the typed snapshot contract.
+General planning and work graphs inside Launchplane are retired (see
+`DIRECTION.md`); the planning provider, ranking, and issue-inbox reconcile
+described here remain only until their code is deleted.
 When a caller-owned planning ingestion provider is configured, the route can
 overlay compact GitHub/Code Plans facts. The first provider is opt-in via
 `LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER` and
@@ -1558,6 +1576,9 @@ rule
   - allowed actions
 ```
 
+The product-repository examples below show the current code's rule shape only;
+product-repository workflow grants are retired (see `DIRECTION.md`).
+
 Example policy intent:
 
 ```text
@@ -1644,10 +1665,9 @@ allowed actions:
   - odoo_prod_rollback.execute
 ```
 
-The initial policy engine can be config-backed and static. It does not need a
-full RBAC system yet.
+The policy engine does not need a full RBAC system yet.
 
-Human policy rules use the same reviewed policy file under `github_humans`.
+Human policy rules live in the same DB-backed authz policy under `github_humans`.
 The first supported roles are `read_only` and `admin`. Browser sessions can
 authorize read endpoints. A POST route accepts a browser session only through
 the CSRF-checked browser-mutation dependency (same-origin fetch metadata plus a
@@ -1683,10 +1703,10 @@ subject model before diagnostics or downstream intent contracts consume them:
   cannot use POST routes, product mutations, authz policy changes, destructive
   cleanup, or secret-backed actions even if a policy rule is too broad.
 - `local_operator`: trusted Director terminal agents authenticated by the dedicated
-  write bearer token. These subjects can use only product-config plan/apply from
-  a trusted shell with a required reason and matching dry-run before apply. They
-  cannot call other mutation, destructive, production, secret-backed
-  non-product-config, or authz policy routes.
+  write bearer token. Their authority comes only from exact `local_operators`
+  policy rules (subject, token label, product, context, action) on routes that
+  accept this identity. Product-config writes require a non-empty reason, and
+  product-config apply also requires a matching recorded dry-run.
 - `github_human`: browser-session humans with `read_only` or `admin` role from
   GitHub human policy rules or bootstrap admin email matching. Read-only humans
   are `limited_remote_user` consumers: even if a rule is accidentally broad,
@@ -1937,6 +1957,7 @@ refresh/destroy flow.
 - `POST /v1/product-profiles/preview-tls/apply`
 - `POST /v1/product-profiles/{product}/owner`
 - `POST /v1/product-profiles/{product}/image-repository`
+- `POST /v1/product-profiles/{product}/production-use`
 
 Product profiles are Launchplane-owned product/driver bindings. They are written
 through native FastAPI authenticated service ingress and stored in Launchplane
@@ -2614,8 +2635,10 @@ remain provider execution configuration for Dokploy-backed lanes and must agree
 with the provider-target identity before deploy proceeds. The route keeps
 optional `Idempotency-Key` replay/conflict handling and stores deploy-pass plus
 post-deploy-fail evidence to prevent repeating the completed provider mutation.
-This image-backed route is the canonical product-repo integration surface for
-simple generic-web services. `cbusillo/repairshopr_api` proved the path in live
+This image-backed route was the product-repo integration surface for simple
+generic-web services; product repositories calling it is retired (see
+`DIRECTION.md`), and the route stays only until source-control-event deploys
+replace those callers. `cbusillo/repairshopr_api` proved the path in live
 Launchplane after #1503 deployed: Launchplane Deploy run `28415366430` attempt 4
 called `/v1/drivers/generic-web/deploy` with immutable GHCR image identity and
 received `deploy_status: pass` for deployment record
@@ -3076,8 +3099,9 @@ route-missing response. It then uses the shared request action and GitHub OIDC t
 resolve `/v1/drivers/odoo/artifact-publish-inputs` for the caller's product,
 context, instance, and source ref. That response includes the image publish
 coordinates plus the Odoo devkit, shared-addons, and product repository
-identities resolved from Launchplane runtime records; product repos should not
-keep those dependency repo defaults in workflow files. Missing runtime records
+identities resolved from Launchplane runtime records. Launchplane-held build
+settings are retired (see `DIRECTION.md`); these inputs remain only until the
+product builds its own artifacts. Missing runtime records
 for those artifact-publish inputs are classified as
 `driver_route_dependency_not_found`, not as route-missing or generic invalid
 requests. The artifact-publish and artifact-publish inputs routes are owned by
@@ -3136,9 +3160,9 @@ Mutation-capable routes are proven by pre-mutation classification: preview apply
 uses a blocked destroy plan and rejects any non-blocked acceptance, while preview
 feedback uses the route's `dry_run` request mode so Launchplane evaluates the same
 `preview_pr_feedback.write` authorization without writing records or comments.
-Product repos should use that reusable smoke or Launchplane-owned reusable
-workflows instead of adding repo-local route setup or copied driver request
-contracts.
+Pinned reusable Launchplane workflows for product repositories are retired
+(see `DIRECTION.md`); do not add new product-repository callers of this smoke
+or of other reusable Launchplane workflows.
 
 The product-neutral preview lifecycle route should become the common boundary
 for preview desired/current-state comparison. Product-specific driver routes can
@@ -3352,9 +3376,9 @@ retries do not collide. The regular cleanup workflow uses
   the `plan_provenance.plan_id` returned by preview apply-inputs; callers must
   not synthesize a separate apply key.
 
-Generic-web product workflow clients live in product repositories as thin
-Launchplane callers until Launchplane provides a shared distributable helper.
-Those clients must keep Launchplane lifecycle truth out of the product repo and
+Generic-web product workflow clients that still live in product repositories
+as thin Launchplane callers are retired (see `DIRECTION.md`) and remain only
+until source-control-event deploys replace them. Until then those clients must keep Launchplane lifecycle truth out of the product repo and
 follow the shared request semantics: request a GitHub OIDC token with an explicit
 timeout, apply bounded timeouts to Launchplane route calls, preserve HTTP status
 and raw response bodies before attempting JSON parsing on failed responses, do
@@ -3612,6 +3636,11 @@ decision digest as `external_id`. Replays avoid duplicate writes and same-head
 binding changes update only the App-owned run. The check completes `neutral`,
 remain shadow/non-authoritative, and are excluded from merge-train and tenant-
 admission technical inputs.
+
+Status: the two paragraphs below describe the CM product repository's preview
+workflow and its grants. Product-repository workflow grants are retired (see
+`DIRECTION.md`); these grants remain only until that workflow is deleted and
+must not be extended.
 
 The CM tenant preview workflow uses tenant-product scope for both artifact
 publish input/evidence and preview lifecycle requests. Artifact publish still
@@ -3906,8 +3935,8 @@ lane.
 
 Current commands such as:
 
-- `control-plane launchplane-previews write-from-generation`
-- `control-plane launchplane-previews write-destroyed`
+- `launchplane launchplane-previews write-from-generation`
+- `launchplane launchplane-previews write-destroyed`
 
 are local rehearsal and repair clients for these Launchplane payloads. They are
 not the shared integration boundary for external product workflows.
@@ -4020,20 +4049,11 @@ interprets a missing landing outcome as landed. See
 
 ## Change Impact API
 
-`POST /v1/change-impact/evaluation` accepts only a repository/pull-request
-target reference plus optional non-authoritative metadata. Launchplane uses its
-managed GitHub credential to resolve immutable repository identity, current
-head/tree, and changed files; GitHub Actions callers must also match the OIDC
-repository IDs/name and workflow `sha`. The active DB-backed component policy
-may declare affected products directly. Additional dependency and reviewer
-evidence is read only from Launchplane storage, and reviewer product claims
-require trusted same-component dependency evidence. Missing extension records,
-stale heads, incomplete provider evidence, and provider failures cannot fall
-back to caller input and therefore fail closed.
-
-The response is the authoritative Client-impact classification with exact policy
-revision/digest and repository/PR/head/tree binding. See
-`docs/change-impact-policy.md` for the policy, evidence, and persistence contracts.
+Retired. Change-impact routing is retired (see `DIRECTION.md`), and the former
+`POST /v1/change-impact/evaluation` route is deleted; there is no service route
+for evaluating or applying change-impact policy. See
+`docs/change-impact-policy.md` for the retained historical record
+compatibility.
 
 ## Out Of Scope For This First Slice
 
@@ -4044,6 +4064,9 @@ revision/digest and repository/PR/head/tree binding. See
 - moving every current CLI command behind HTTP at once
 
 ## Recommended Next Implementation Steps
+
+Historical: these first-slice steps predate the current service; the Odoo and
+VeriReel drivers and service ingress described above exist.
 
 1. Convert the existing CLI preview evidence commands into local clients of the
    same service-layer handler or payload contract.
@@ -4085,7 +4108,7 @@ are removed only after provider absence is verified; runtime deletion events
 and preserved managed-secret references remain audit evidence. The profile is
 never deleted and becomes `retired` with previews disabled.
 
-`GET /v1/products/{product}/path-check?path=testing|promote` answers, in one
+`GET /v1/products/{product}/path-check?path=testing|promote|rollback` answers, in one
 read, whether the caller can take the product along that path and what is in
 the way. It needs `product_environment.read` on the product's lane contexts and
 writes nothing. Each step is `clear`, `blocked` or `unknown` with a code,
@@ -4096,7 +4119,21 @@ reconcile attempt, naming the `deploy_blocked.*` or other code that stopped it.
 `promote` checks the caller's own promotion grant, Client acceptance, the prod
 lane's backup authority and the last promotion's failure. A step whose evidence
 cannot be read is `unknown`, never `clear`, and the response never carries
-provider or exception text.
+provider or exception text. `rollback` checks the prod lane, the caller's
+execute grant and accepted bearer/OIDC identity for generic-web (or the signed-in admin recognized by the active policy
+for queued Odoo rollback), and the recorded previous release. Generic-web uses
+prod deployment history's previous passing different artifact, then
+runs the effect-free rollback plan builder; all target blockers are returned,
+including mutable image references. Odoo uses the queued rollback's effect-free
+previous-passing-deployment resolver, requiring its manifest and current
+promotion. Neither check persists a plan or contacts a provider. These are
+record and authority checks; deploy fences, live provider readiness and later
+repair paths remain outside this slice, including Odoo's active-operation gates.
+A custom rollback route is `unknown` until its checks are implemented; a driver
+with no rollback route is `blocked`. A separate generic-web plan grant is not
+required because execute builds and revalidates its own plan. Browser sessions
+cannot call the generic-web rollback route. Each target blocker uses
+`rollback_target_<code>` as its step id so simultaneous blockers remain distinct.
 
 `GET /v1/product-retirements/{record_id}` reads one retirement record's
 structured outcome with `operations.read` on the Launchplane product for the
@@ -4156,10 +4193,9 @@ Only a local admin or GitHub Actions running the exact SHA-pinned reusable
 worker may reach the route. Authorization actions are
 `detached_application_retirement.plan` and
 `detached_application_retirement.apply` against Launchplane's global
-control-plane context, never a product instance. Phase one adds the reusable
-`workflow_call` worker and managed authz secret routing only; it intentionally
-adds no mutable dispatch wrapper, live managed rule/secret value, deployment,
-or provider mutation.
+control-plane context, never a product instance. The reusable `workflow_call`
+worker is invoked by the manual `Detached Application Retirement` dispatch
+workflow, which pins it to a full commit SHA.
 
 ## Privileged-Operation API
 
