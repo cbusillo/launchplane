@@ -22,10 +22,7 @@ the checklist. Admins get a separate **Admin Approval Override** section
 and approval-justification field explaining that their decision supplies
 approval under their own identity and replaces an earlier
 request for changes. A saved decision whose release record has not been
-published shows that pending state beside the decision. The release record is
-an issue in the product repository whose first line is the marker
-`<!-- launchplane:release-decision:<record id> -->`; a retry finds an earlier
-issue by that marker, so a lost response never creates a second record. Every decision is
+published shows that pending state beside the decision. Every decision is
 recorded without deploying; deployment remains a later operation with its own
 release and backup checks.
 
@@ -79,7 +76,9 @@ was lost. GitHub issue contents and membership never decide release contents or
 approval; the saved Launchplane decision remains authoritative.
 The complete record uses one issue body. If GitHub rejects publication, the
 decision remains saved and promotion stays blocked; records are not split into
-comments. Retry recovery checks the complete issue body. Multiple `Owner test notes`
+comments. Retry recovery finds the earlier issue by the marker on its first
+line, `<!-- launchplane:release-decision:<record id> -->`, so a record written
+before a wording change is still found. Multiple `Owner test notes`
 sections are collected together; CI checks presence, not their number or content.
 
 GitHub attributes commits landed through a merge-train batch pull request to
