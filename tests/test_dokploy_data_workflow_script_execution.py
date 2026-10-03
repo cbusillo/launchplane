@@ -157,6 +157,8 @@ def main(argv):
     if program[:2] == ["python3", "-u"]:
         log("exec workflow")
         log("workflow arguments " + " ".join(program[3:]))
+        kept_key = "ODOO_RESTORE_KEPT_INTEGRATIONS"
+        log("workflow kept integrations " + exec_environment.get(kept_key, "<unset>"))
         print(os.environ.get("FAKE_WORKFLOW_OUTPUT", "workflow ran"))
         return int(os.environ.get("FAKE_WORKFLOW_EXIT", "0"))
     if program[:2] == ["python3", "-"]:
@@ -380,6 +382,8 @@ def _render_post_deploy_script(
     *,
     run_destructive_restore: bool = False,
     bootstrap_missing_database: bool = False,
+    instance: str = "testing",
+    workflow_environment_overrides: dict[str, str] | None = None,
 ) -> str:
     schedule_payloads: list[dict[str, object]] = []
 
@@ -389,7 +393,7 @@ def _render_post_deploy_script(
 
     target_definition = control_plane_dokploy.DokployTargetDefinition(
         context="example",
-        instance="testing",
+        instance=instance,
         target_id="compose-123",
         target_name="example-testing",
         policies=policies or _policies(),
@@ -452,6 +456,7 @@ def _render_post_deploy_script(
             env_file=None,
             run_destructive_restore=run_destructive_restore,
             bootstrap_missing_database=bootstrap_missing_database,
+            workflow_environment_overrides=workflow_environment_overrides,
         )
     if len(schedule_payloads) != 1:
         raise AssertionError(f"expected one schedule upsert, got {len(schedule_payloads)}")
@@ -501,6 +506,67 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         )
         docker_log = tuple(log_path.read_text().splitlines()) if log_path.exists() else ()
         return ScriptRun(completed.returncode, completed.stdout, completed.stderr, docker_log)
+
+    def test_restore_runner_keeps_only_real_account_allowances(self) -> None:
+        policies = DokployTargetPolicies(
+            integration_allowances=(
+                DokployTargetIntegrationAllowance(
+                    integration="repairshopr", kind="pre_live", reason="Working instance."
+                ),
+                DokployTargetIntegrationAllowance(
+                    integration="fishbowl",
+                    kind="read_only_source",
+                    reason="Import source.",
+                    evidence="Read-only grant verified.",
+                ),
+                DokployTargetIntegrationAllowance(
+                    integration="cm_data", kind="pre_live", reason="Working instance."
+                ),
+                DokployTargetIntegrationAllowance(
+                    integration="shopify", kind="dev_store", reason="Development store."
+                ),
+            )
+        )
+        for instance, expected in (
+            ("testing", "cm_data,fishbowl,repairshopr"),
+            ("dev", "cm_data,fishbowl,repairshopr"),
+            ("prod", ""),
+            ("production", ""),
+            ("preview", ""),
+            ("pr-42", ""),
+        ):
+            with self.subTest(instance=instance):
+                run = self._run(
+                    _render_post_deploy_script(
+                        policies,
+                        run_destructive_restore=True,
+                        instance=instance,
+                        workflow_environment_overrides={
+                            "ODOO_RESTORE_KEPT_INTEGRATIONS": "payment"
+                        },
+                    )
+                )
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn("workflow kept integrations " + expected, run.docker_log)
+
+    def test_restore_without_real_account_allowances_keeps_nothing(self) -> None:
+        for policies in (_policies(), _policies(allowed=("shopify",))):
+            with self.subTest(policies=policies):
+                run = self._run(_render_restore_script(policies))
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn("workflow kept integrations ", run.docker_log)
+
+    def test_maintenance_does_not_send_restore_allowances(self) -> None:
+        policies = DokployTargetPolicies(
+            integration_allowances=(
+                DokployTargetIntegrationAllowance(
+                    integration="fishbowl", kind="pre_live", reason="Working instance."
+                ),
+            )
+        )
+        run = self._run(_render_post_deploy_script(policies))
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("workflow kept integrations <unset>", run.docker_log)
 
     def assert_refused_and_web_stopped(self, run: ScriptRun, *entries: str) -> None:
         self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
