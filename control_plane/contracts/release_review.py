@@ -1,4 +1,4 @@
-"""Owner decisions about the complete change being promoted to production."""
+"""Client decisions about the complete change being promoted to production."""
 
 from typing import Literal
 
@@ -63,7 +63,7 @@ class ReleaseReviewDecisionRecord(BaseModel):
         if self.decision != "accepted" and not self.reason.strip():
             raise ValueError("Requesting changes or overriding requires a reason.")
         if self.decision != "overridden" and self.actor_github_id != self.checklist.owner_github_id:
-            raise ValueError("Only the product Owner can accept or request changes.")
+            raise ValueError("Only the product's Client can accept or request changes.")
         return self
 
 

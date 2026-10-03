@@ -285,7 +285,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self._publish(github, owner_set=False)
 
         self.assertEqual(github.statuses[0]["state"], "pending")
-        self.assertEqual(github.statuses[0]["description"], "No Owner set for this product")
+        self.assertEqual(github.statuses[0]["description"], "No Client set for this product")
 
     def test_unmarked_pull_request_gets_no_status(self) -> None:
         github = _GitHub(labels=("launchplane-preview",))
@@ -331,7 +331,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self.assertEqual(github.statuses[0]["context"], "manager-preview-approval")
         self.assertEqual(github.statuses[0]["state"], "success")
         self.assertEqual(
-            github.statuses[0]["description"], "Retired. Owner review is recorded in Launchplane."
+            github.statuses[0]["description"], "Retired. Client review is recorded in Launchplane."
         )
         self.assertEqual(github.check_runs[0]["conclusion"], "neutral")
         output = github.check_runs[0]["output"]
