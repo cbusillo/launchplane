@@ -1574,7 +1574,6 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             idempotency_key=f"{RECONCILE_SOURCE}:site:cm:testing:old-authority",
             request_fingerprint="old-request",
             lease_owner="other-worker",
-            lease_seconds=300,
             reconciliation_key="old-app-reconciliation",
             provider_target_key="old-app-target",
         )
@@ -1583,6 +1582,51 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.assertEqual(deferred.state, "pending")
         self.assertEqual(deferred.last_plan["deferred"], "lane_busy")
         self.assertEqual(self.deploys.runtime_identities, [])
+
+    def test_expired_old_authority_reports_recovery_instead_of_deferring_forever(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        with patch.object(
+            self.store, "_database_mutation_timestamp", return_value="2000-01-01T00:00:00Z"
+        ):
+            self.store.reserve_mutation(
+                scope=reconcile_reservation_scope("site"),
+                route_path=GENERIC_WEB_DEPLOY_ROUTE,
+                idempotency_key=f"{RECONCILE_SOURCE}:site:cm:testing:old-authority",
+                request_fingerprint="old-request",
+                lease_owner="crashed-worker",
+                reconciliation_key="old-app-reconciliation",
+                provider_target_key="old-app-target",
+            )
+        self.request()
+        blocked = self.run_once()
+        self.assertEqual(blocked.state, "failed")
+        self.assertIn("generic-web deploy recovery", blocked.last_error)
+        self.assertEqual(self.deploys.runtime_identities, [])
+
+    def test_changed_settings_still_observe_and_settle_the_same_unknown_deploy(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        succeeded = self.deploys.observation
+        self.deploys.deploy_error = click.ClickException("provider timed out")
+        self.deploys.observation = GenericWebProviderDeploymentObservation(outcome="unknown")
+        self.request()
+        first = self.run_once()
+        self.assertEqual(first.state, "failed")
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="global",
+                env={"SYNC_INTERVAL_SECONDS": 3600},
+                updated_at="2026-10-02T01:00:00Z",
+            )
+        )
+        self.deploys.observation = succeeded
+        self.request()
+        settled = self.run_once()
+        self.assertEqual(settled.state, "done")
+        self.assertEqual(settled.last_plan["deploy_operation_status"], "adopted")
+        self.assertEqual(
+            settled.last_plan["deploy_idempotency_key"], first.last_plan["deploy_idempotency_key"]
+        )
+        self.assertEqual(len(self.deploys.runtime_identities), 1)
 
     def test_the_reconcile_may_deploy_only_the_generic_web_testing_lane(self) -> None:
         def allowed(*, product: str = "site", instance: str = "testing") -> bool:

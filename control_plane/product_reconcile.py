@@ -49,7 +49,11 @@ from control_plane.contracts.odoo_target_replacement_failures import deploy_fail
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
-from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.idempotency_record import (
+    LaunchplaneIdempotencyRecord,
+    parse_launchplane_mutation_timestamp,
+)
+from control_plane.storage.postgres import ExistingMutationReservationLookupResult
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
@@ -290,7 +294,10 @@ class TestingProviderHooks:
 
 
 class _TestingLaneAuthorityStore(
-    secrets.SecretBindingSelectionStore, RuntimeEnvironmentRecordStore, Protocol
+    ProductReconcileStore,
+    secrets.SecretBindingSelectionStore,
+    RuntimeEnvironmentRecordStore,
+    Protocol,
 ):
     def read_provider_target_record(
         self, *, context_name: str, instance_name: str
@@ -303,6 +310,10 @@ class _TestingLaneAuthorityStore(
     def list_held_provider_target_reservations(
         self,
     ) -> tuple[LaunchplaneIdempotencyRecord, ...]: ...
+
+    def lookup_existing_mutation_reservation(
+        self, *, route_path: str, idempotency_key: str, request_fingerprint: str
+    ) -> ExistingMutationReservationLookupResult: ...
 
 
 @dataclass(frozen=True)
@@ -648,10 +659,22 @@ def _deploy_generic_web_testing(
             f"{desired.manifest.image.digest}:authority-{authority}:from-{starting_point}"
         )
         plan["deploy_idempotency_key"] = idempotency_key
+        request_fingerprint = _fingerprint(envelope.model_dump(mode="json"))
+        adapter = GenericWebDeployProviderMutationAdapter(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            deploy_request=envelope,
+            profile=profile,
+            lane=lane,
+            trace_id=trace_id,
+            deploy_provider=testing_hooks.generic_web_deploy_provider(),
+        )
         # The reconcile request's lane lease serializes these decisions. A new
         # authority key must not bypass an unresolved old attempt, even after a
         # binding repair points at a different provider application. The same
         # key still goes through the runner's normal observation/recovery path.
+        # Recover an old key automatically only when its complete provider and
+        # request identity match; recovery must never act on a repointed app.
         lane_prefix = f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:{TESTING_INSTANCE}:"
         for reservation in cast(
             _TestingLaneAuthorityStore, record_store
@@ -662,6 +685,37 @@ def _deploy_generic_web_testing(
                 and reservation.idempotency_key.startswith(lane_prefix)
                 and reservation.idempotency_key != idempotency_key
             ):
+                if (
+                    reservation.provider_target_key == adapter.target_key()
+                    and reservation.reconciliation_key == adapter.reconciliation_key()
+                    and reservation.request_fingerprint == request_fingerprint
+                ):
+                    idempotency_key = reservation.idempotency_key
+                    plan["deploy_idempotency_key"] = idempotency_key
+                    continue
+                if reservation.state == "running":
+                    lookup = cast(
+                        _TestingLaneAuthorityStore, record_store
+                    ).lookup_existing_mutation_reservation(
+                        route_path=reservation.route_path,
+                        idempotency_key=reservation.idempotency_key,
+                        request_fingerprint=reservation.request_fingerprint,
+                    )
+                    if lookup.status == "found" and lookup.record is not None:
+                        reservation = lookup.record
+                        if reservation.state == "completed":
+                            continue
+                        if reservation.state == "running" and parse_launchplane_mutation_timestamp(
+                            reservation.lease_expires_at, field_name="lease_expires_at"
+                        ) <= parse_launchplane_mutation_timestamp(
+                            lookup.observed_at, field_name="observed_at"
+                        ):
+                            # Read-only classification; recovery owns the stored transition.
+                            reservation = reservation.model_copy(
+                                update={"state": "reconcile_required"}
+                            )
+                    else:
+                        reservation = reservation.model_copy(update={"state": "reconcile_required"})
                 return _generic_web_testing_outcome(
                     plan=plan,
                     result=DurableProviderOperationResult("target_busy", reservation, 409, {}),
@@ -671,18 +725,10 @@ def _deploy_generic_web_testing(
             scope=reconcile_reservation_scope(profile.product),
             route_path=GENERIC_WEB_DEPLOY_ROUTE,
             idempotency_key=idempotency_key,
-            request_fingerprint=_fingerprint(envelope.model_dump(mode="json")),
+            request_fingerprint=request_fingerprint,
             lease_owner=trace_id,
             response_trace_id=trace_id,
-            adapter=GenericWebDeployProviderMutationAdapter(
-                control_plane_root=control_plane_root,
-                record_store=record_store,
-                deploy_request=envelope,
-                profile=profile,
-                lane=lane,
-                trace_id=trace_id,
-                deploy_provider=testing_hooks.generic_web_deploy_provider(),
-            ),
+            adapter=adapter,
         )
     except (FileNotFoundError, ValueError, click.ClickException) as error:
         # Refused before any provider change; the next event or sweep tries again. The

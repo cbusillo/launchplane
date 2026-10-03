@@ -106,7 +106,9 @@ reservation. The webhook request never waits on a deploy.
     this keyed identity and permits a fresh attempt of a known failure. The existing
     provider-target reservation still fences an unknown or concurrent operation.
     Before using a new authority key, the reconciler also checks held attempts
-    for its testing lane: a running attempt defers it, and an unknown attempt
+    for its testing lane. Matching provider target, reconciliation identity and
+    deploy request reuse the held attempt's key for normal observation/recovery.
+    Otherwise a running attempt defers it, and an unknown or expired attempt
     requires generic-web deploy recovery first, even after a provider-binding
     repair moves the lane to another application.
     Provider-only edits outside Launchplane's
