@@ -116,6 +116,9 @@ function DefaultPrivilegedOperationsRoute({
   );
 
   const descriptorId = selectedDescriptorId ?? resource.state.data?.descriptorId ?? null;
+  function selectDescriptorId(next: PrivilegedOperationDescriptorId) {
+    if (next !== descriptorId) setDescriptorId(next);
+  }
 
   return (
     <EngineeringRouteFrame
@@ -130,14 +133,14 @@ function DefaultPrivilegedOperationsRoute({
           >
             <button
               aria-pressed={descriptorId === "managed-secret-reencryption"}
-              onClick={() => setDescriptorId("managed-secret-reencryption")}
+              onClick={() => selectDescriptorId("managed-secret-reencryption")}
               type="button"
             >
               Secret rotation
             </button>
             <button
               aria-pressed={descriptorId === "managed-authz-policy-set"}
-              onClick={() => setDescriptorId("managed-authz-policy-set")}
+              onClick={() => selectDescriptorId("managed-authz-policy-set")}
               type="button"
             >
               Access policy
@@ -147,7 +150,7 @@ function DefaultPrivilegedOperationsRoute({
                 descriptorId === "managed-merge-train-policy-import"
               }
               onClick={() =>
-                setDescriptorId("managed-merge-train-policy-import")
+                selectDescriptorId("managed-merge-train-policy-import")
               }
               type="button"
             >
@@ -158,7 +161,7 @@ function DefaultPrivilegedOperationsRoute({
                 descriptorId === "ordinary-agent-delivery-activation"
               }
               onClick={() =>
-                setDescriptorId("ordinary-agent-delivery-activation")
+                selectDescriptorId("ordinary-agent-delivery-activation")
               }
               type="button"
             >

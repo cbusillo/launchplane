@@ -294,7 +294,7 @@ closed. The Client's release decision uses the release review route in
 
 The privileged-operation list opens on the first readable supported plan type
 (secret rotation, access policy, then merge-train policy), using authorized
-read-only list requests. Only descriptor read denials advance to another tab;
+read-only list requests. Only authorization-denied read responses advance to another tab;
 authentication, service failures, and cancellation stay visible. An explicit
 tab or descriptor link keeps its selection and names that plan type in a denial.
 If no supported type is readable, the page says so and leaves the tabs available.

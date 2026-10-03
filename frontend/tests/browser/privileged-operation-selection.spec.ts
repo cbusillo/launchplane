@@ -39,6 +39,10 @@ test("readable initial tab, refresh, explicit denial, and recovery", async ({ pa
   await expect(mergeTab).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByText("No changes are waiting for review")).toBeVisible();
   expect([...new Set(calls)]).toEqual(["managed-secret-reencryption", "managed-authz-policy-set", "managed-merge-train-policy-import"]);
+  const beforeActiveClick = calls.length;
+  await mergeTab.click();
+  await expect(mergeTab).toHaveAttribute("aria-pressed", "true");
+  expect(calls.length).toBe(beforeActiveClick);
   const beforeRefresh = calls.length;
   await page.getByRole("button", { name: "Refresh plans", exact: true }).click();
   await expect.poll(() => calls.length).toBeGreaterThan(beforeRefresh);
