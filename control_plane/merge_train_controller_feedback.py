@@ -245,6 +245,12 @@ def _feedback_message(
             return f"Launchplane needs attention before the train can continue: {detail}"
         return "Launchplane needs attention before the train can continue."
     if event == "waiting":
+        selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))
+        if selected.get("owner_review_required") is True and "candidate" not in result:
+            return (
+                "Launchplane is waiting for current-head Client review and required checks "
+                "on this pull request."
+            )
         return "Launchplane is waiting for required checks or fresh GitHub state."
     if controller_record_id:
         return f"Launchplane is advancing `{controller_action}` with `{controller_record_id}`."
@@ -316,14 +322,16 @@ def _held_out_messages(
 
 
 def _pull_request_numbers(result: dict[str, Any]) -> list[int]:
-    if (
-        _string(result.get("controller_action")) in {"wait_for_checks", "block"}
-        and "merge_train_batch_candidate_record_id" in result
-        and "candidate" not in result
+    if _string(result.get("controller_action")) in {"wait_for_checks", "block"} and (
+        "candidate" not in result
     ):
         selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))
         number = selected.get("number")
-        if isinstance(number, int) and number > 0:
+        # Client review waits are reported before a candidate exists, too.
+        if (
+            "merge_train_batch_candidate_record_id" in result
+            or selected.get("owner_review_required") is True
+        ) and (isinstance(number, int) and number > 0):
             return [number]
     containers = (
         _as_dict(result.get("landing_plan")).get("entries"),
