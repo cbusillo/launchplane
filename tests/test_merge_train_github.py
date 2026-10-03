@@ -35,7 +35,6 @@ from control_plane.merge_train import MergeTrainLabelActor
 from control_plane.merge_train import MergeTrainQueueEntry
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train import MergeTrainReviewConversations
-from control_plane.merge_train import MergeTrainReviewThread
 from control_plane.merge_train import review_conversations_reason
 from control_plane.merge_train_github import GitHubMergeTrainClient
 from control_plane.merge_train_github import MergeTrainGitHubCandidateEntryConflictError
@@ -3295,9 +3294,11 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
         snapshot, bodies = self._read_with_conversations(
             rule=_conversation_rule(True),
             threads={
-                (20, None): _review_threads((True, "a.py", "reviewer"), end_cursor="page-2"),
-                (20, "page-2"): _review_threads((False, "b.py", "github-advanced-security")),
-                (21, None): _review_threads((True, "c.py", "reviewer")),
+                (20, None): _review_threads((True, "reviewer"), end_cursor="page-2"),
+                (20, "page-2"): _review_threads(
+                    (False, "github-advanced-security"), (False, "reviewer")
+                ),
+                (21, None): _review_threads((True, "reviewer")),
             },
         )
 
@@ -3305,10 +3306,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
         self.assertEqual(
             first.review_conversations,
             MergeTrainReviewConversations(
-                rule="required",
-                unresolved=(
-                    MergeTrainReviewThread(path="b.py", author_login="github-advanced-security"),
-                ),
+                rule="required", unresolved_count=2, code_scanning_count=1
             ),
         )
         self.assertIsNone(second.review_conversations)
@@ -3330,7 +3328,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
         snapshot, _ = self._read_with_conversations(
             rule={"errors": [{"message": "Resource not accessible by integration"}]},
             threads={
-                (20, None): _review_threads((False, "a.py", "reviewer")),
+                (20, None): _review_threads((False, "reviewer")),
                 (21, None): _review_threads(),
             },
         )
@@ -3358,10 +3356,8 @@ def _conversation_rule(required: bool | None = False) -> dict[str, object]:
     return {"data": {"repository": {"ref": {"refUpdateRule": rule}}}}
 
 
-def _review_threads(
-    *threads: tuple[bool, str, str], end_cursor: str | None = None
-) -> dict[str, object]:
-    """GraphQL page of review threads, each as (resolved, path, first author)."""
+def _review_threads(*threads: tuple[bool, str], end_cursor: str | None = None) -> dict[str, object]:
+    """GraphQL page of review threads, each as (resolved, first comment's author)."""
     return {
         "data": {
             "repository": {
@@ -3370,10 +3366,9 @@ def _review_threads(
                         "nodes": [
                             {
                                 "isResolved": resolved,
-                                "path": path,
                                 "comments": {"nodes": [{"author": {"login": author}}]},
                             }
-                            for resolved, path, author in threads
+                            for resolved, author in threads
                         ],
                         "pageInfo": {
                             "hasNextPage": end_cursor is not None,

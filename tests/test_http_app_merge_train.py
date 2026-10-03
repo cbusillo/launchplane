@@ -35,7 +35,6 @@ from control_plane.merge_train import (
     MergeTrainDryRunSnapshot,
     MergeTrainPullRequestSnapshot,
     MergeTrainReviewConversations,
-    MergeTrainReviewThread,
 )
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from control_plane.merge_train_controller_run_once import MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION
@@ -3249,13 +3248,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                     repository=repository, base_branch=base_branch
                 )
                 conversations = MergeTrainReviewConversations(
-                    rule="required",
-                    unresolved=(
-                        MergeTrainReviewThread(
-                            path="tests/test_release.py",
-                            author_login="github-advanced-security",
-                        ),
-                    ),
+                    rule="required", unresolved_count=1, code_scanning_count=1
                 )
                 return snapshot.model_copy(
                     update={
@@ -3321,7 +3314,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(dropped["eligible"])
         (reason,) = dropped["ineligible_reasons"]
-        self.assertIn("unresolved review conversation on tests/test_release.py", reason)
+        self.assertIn("1 unresolved review conversation", reason)
         self.assertIn("fix the code-scanning finding", reason)
 
     async def test_dry_run_planning_reports_the_conflict_probe_without_running_it(self) -> None:

@@ -67,15 +67,6 @@ class MergeTrainLabelActor(BaseModel):
 CODE_SCANNING_REVIEW_AUTHOR = "github-advanced-security"
 
 
-class MergeTrainReviewThread(BaseModel):
-    """One unresolved review thread: where it is and who opened it."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    path: str = ""
-    author_login: str = ""
-
-
 class MergeTrainReviewConversations(BaseModel):
     """Unresolved review threads that can stop GitHub from merging a pull request.
 
@@ -86,23 +77,21 @@ class MergeTrainReviewConversations(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     rule: Literal["required", "unreadable"]
-    unresolved: tuple[MergeTrainReviewThread, ...] = Field(min_length=1)
+    unresolved_count: PositiveInt
+    code_scanning_count: int = Field(default=0, ge=0)
 
 
 def review_conversations_reason(conversations: MergeTrainReviewConversations) -> str:
-    count = len(conversations.unresolved)
+    # Thread paths stay out: reasons are public summaries with a length limit.
+    count = conversations.unresolved_count
     noun = "conversation" if count == 1 else "conversations"
-    paths = sorted({thread.path for thread in conversations.unresolved if thread.path})
-    where = f" on {', '.join(paths)}" if paths else ""
     rule = (
         "the base branch requires conversation resolution"
         if conversations.rule == "required"
         else "the base branch's conversation-resolution rule could not be read"
     )
-    reason = f"{count} unresolved review {noun}{where}; {rule}"
-    if any(
-        thread.author_login == CODE_SCANNING_REVIEW_AUTHOR for thread in conversations.unresolved
-    ):
+    reason = f"{count} unresolved review {noun}; {rule}"
+    if conversations.code_scanning_count:
         reason += "; fix the code-scanning finding in the code instead of resolving its thread"
     return reason
 

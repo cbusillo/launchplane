@@ -41,7 +41,6 @@ from control_plane.merge_train import (
     MergeTrainDryRunSnapshot,
     MergeTrainPullRequestSnapshot,
     MergeTrainReviewConversations,
-    MergeTrainReviewThread,
 )
 from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.service_auth import LaunchplaneAuthzPolicy
@@ -460,8 +459,7 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                     provider=_EvidenceProvider(evidence),
                     evidence=evidence,
                     target_conversations=MergeTrainReviewConversations(
-                        rule="required",
-                        unresolved=(MergeTrainReviewThread(path="app.py", author_login="ann"),),
+                        rule="required", unresolved_count=1
                     ),
                 )
         self.assertEqual(blocked.exception.reason_code, "pull_request_conversations_unresolved")

@@ -608,8 +608,9 @@ while any review thread is unresolved. The snapshot reader reads that rule from
 the base branch's `refUpdateRule`, which GitHub shows without the Administration
 permission the train token does not hold. When the rule is on, each open,
 non-draft pull request's review threads are read, and one with an unresolved
-thread is ineligible with a reason that names the files. A thread opened by
-code scanning tells the author to fix the code rather than resolve the thread.
+thread is ineligible with a reason that counts them; file paths stay out of
+public reasons. A thread opened by code scanning tells the author to fix the
+code rather than resolve the thread.
 The other entries plan and land without it, and resolving the thread brings it
 back. An unreadable rule is not taken as absent: unresolved threads still make
 the entry ineligible, and the reason says the rule could not be read. A planned

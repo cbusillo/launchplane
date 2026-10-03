@@ -56,7 +56,7 @@ class _BatchProvider:
         self.requests: list[tuple[str, str, dict[str, object] | None]] = []
         self.before_merge: Callable[[], None] = lambda: None
         self.requires_conversation_resolution = False
-        self.batch_threads: tuple[tuple[bool, str, str], ...] = ()
+        self.batch_threads: tuple[tuple[bool, str], ...] = ()
 
     @property
     def merge_calls(self) -> list[tuple[str, str, dict[str, object] | None]]:
@@ -423,9 +423,7 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
 
     def test_unresolved_batch_conversation_blocks_before_any_admission(self) -> None:
         self.provider.requires_conversation_resolution = True
-        self.provider.batch_threads = (
-            (False, "tests/test_release.py", "github-advanced-security"),
-        )
+        self.provider.batch_threads = ((False, "github-advanced-security"),)
         with self.assertRaises(MergeAdmissionDeniedError) as blocked:
             self.land()
         self.assertEqual(
@@ -435,12 +433,12 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
         self.assertEqual(self.guard.admissions, {})
         self.assertEqual(self.provider.merge_calls, [])
 
-        self.provider.batch_threads = ((True, "tests/test_release.py", "github-advanced-security"),)
+        self.provider.batch_threads = ((True, "github-advanced-security"),)
         landed = self.land()
         self.assertTrue(all(entry.status == "merged" for entry in landed.entries))
 
     def test_batch_threads_do_not_block_when_the_base_does_not_require_resolution(self) -> None:
-        self.provider.batch_threads = ((False, "tests/test_release.py", "reviewer"),)
+        self.provider.batch_threads = ((False, "reviewer"),)
         landed = self.land()
         self.assertTrue(all(entry.status == "merged" for entry in landed.entries))
 

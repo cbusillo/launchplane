@@ -60,7 +60,7 @@ from control_plane.merge_train import MergeTrainPullRequestSnapshot
 from control_plane.merge_train import MergeTrainPullRequestState
 from control_plane.merge_train import MergeTrainQueueEntry
 from control_plane.merge_train import MergeTrainReviewConversations
-from control_plane.merge_train import MergeTrainReviewThread
+from control_plane.merge_train import CODE_SCANNING_REVIEW_AUTHOR
 from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionDeniedError
 
 logger = logging.getLogger(__name__)
@@ -3216,7 +3216,7 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $after) {
-        nodes { isResolved path comments(first: 1) { nodes { author { login } } } }
+        nodes { isResolved comments(first: 1) { nodes { author { login } } } }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -3286,7 +3286,8 @@ def _review_conversations(
     pull_request_number: int,
     rule: Literal["required", "unreadable"],
 ) -> MergeTrainReviewConversations | None:
-    unresolved: list[MergeTrainReviewThread] = []
+    unresolved_count = 0
+    code_scanning_count = 0
     after: str | None = None
     while True:
         repository = _graphql_repository(
@@ -3304,21 +3305,22 @@ def _review_conversations(
             thread = _json_object(node, "GitHub GraphQL review thread")
             if thread.get("isResolved") is True:
                 continue
-            unresolved.append(
-                MergeTrainReviewThread(
-                    path=str(thread.get("path") or "").strip(),
-                    author_login=_first_comment_author(thread),
-                )
-            )
+            unresolved_count += 1
+            if _first_comment_author(thread) == CODE_SCANNING_REVIEW_AUTHOR:
+                code_scanning_count += 1
         page = _json_object(threads.get("pageInfo"), "GitHub GraphQL review thread page")
         if page.get("hasNextPage") is not True:
             break
         after = _required_text(
             page.get("endCursor"), "GitHub GraphQL review thread page requires endCursor."
         )
-    if not unresolved:
+    if not unresolved_count:
         return None
-    return MergeTrainReviewConversations(rule=rule, unresolved=tuple(unresolved))
+    return MergeTrainReviewConversations(
+        rule=rule,
+        unresolved_count=unresolved_count,
+        code_scanning_count=code_scanning_count,
+    )
 
 
 def _first_comment_author(thread: dict[str, object]) -> str:
