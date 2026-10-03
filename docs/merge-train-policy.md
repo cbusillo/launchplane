@@ -296,10 +296,13 @@ match the recorded previous head and merged base, the previous head must occur
 in the same PR commit list, and that merged base must still be an ancestor of
 the PR's observed base. The change against that merged base must have identical
 file names, statuses, and text patches before and after the refresh. Unrelated
-base edits can change a file's resulting blob while keeping that patch; patchless
-pure renames still require an identical blob. Unreadable,
-binary, or truncated comparisons require review. This proof is used in controller snapshots and landing
-admission. Missing records or failed reads withhold automatic admission;
+base edits can change a file's resulting blob while keeping that patch when
+hunk positions and context are unchanged. Shifted hunk positions or context
+require agent review; patchless pure renames still require an identical blob.
+Unreadable, binary, or truncated comparisons require review. This proof is used
+in controller snapshots and landing admission. Older standalone phase and CLI snapshot readers do not consult these
+records and remain conservative; use the controller dry-run to assess a refreshed
+dependency update. Missing records or failed reads withhold automatic admission;
 unrecorded merges and other authors still need agent review. Checks are read
 again on the refreshed head before landing.
 
