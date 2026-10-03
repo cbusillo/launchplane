@@ -76,7 +76,9 @@ was lost. GitHub issue contents and membership never decide release contents or
 approval; the saved Launchplane decision remains authoritative.
 The complete record uses one issue body. If GitHub rejects publication, the
 decision remains saved and promotion stays blocked; records are not split into
-comments. Retry recovery checks the complete issue body. Multiple `Owner test notes`
+comments. Retry recovery finds the earlier issue by the marker on its first
+line, `<!-- launchplane:release-decision:<record id> -->`, so a record written
+before a wording change is still found. Multiple `Owner test notes`
 sections are collected together; CI checks presence, not their number or content.
 
 GitHub attributes commits landed through a merge-train batch pull request to
