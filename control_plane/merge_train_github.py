@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from control_plane.contracts.advisory_check_projection import is_launchplane_projected_check
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
 from control_plane.contracts.merge_train_batch import MergeTrainBatchEntry
+from control_plane.contracts.merge_train_batch import MergeTrainBatchHeldOutEntry
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingEntry
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
@@ -54,6 +55,7 @@ from control_plane.merge_train import MergeTrainLabelActor
 from control_plane.merge_train import MergeTrainMergeableState
 from control_plane.merge_train import MergeTrainPullRequestSnapshot
 from control_plane.merge_train import MergeTrainPullRequestState
+from control_plane.merge_train import MergeTrainQueueEntry
 from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionDeniedError
 
 logger = logging.getLogger(__name__)
@@ -607,6 +609,71 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 error.status_code,
             )
         return _validated_model_update(candidate, status="ready_for_checks")
+
+    def probe_batch_entry_conflicts(
+        self,
+        *,
+        repository: str,
+        base_branch: str,
+        base_sha: str,
+        queue: tuple[MergeTrainQueueEntry, ...],
+    ) -> tuple[MergeTrainBatchHeldOutEntry, ...]:
+        """Find queued heads that do not merge cleanly onto the heads ahead of them.
+
+        GitHub cannot test-merge two pull requests without writing a ref, and a
+        pull request's mergeability is computed only against its base. The probe
+        resets a dedicated construction ref to the base and merges each head in
+        queue order. A conflicting merge writes no commit, so the probe records
+        that head and continues. The probe ref is deleted afterwards; the
+        canonical train ref and pull request branches are never written.
+        """
+        lineage = MergeTrainEffectLineage(
+            repository=repository, base_branch=base_branch, batch_id="conflict-probe"
+        )
+        probe_ref = merge_train_conflict_probe_ref(repository=repository, base_branch=base_branch)
+        effect_executor = self.semantic_effect_executor
+        effect_executor.prepare_candidate_ref(
+            CandidateRefPrepareEffect(lineage=lineage, candidate_ref=probe_ref, base_sha=base_sha)
+        )
+        merged_pull_request_numbers: list[int] = []
+        held_out: list[MergeTrainBatchHeldOutEntry] = []
+        probe_sha = base_sha
+        try:
+            for queue_entry in queue:
+                try:
+                    merge_outcome = effect_executor.merge_candidate_head(
+                        CandidateHeadMergeEffect(
+                            lineage=lineage,
+                            candidate_ref=probe_ref,
+                            rolling_parent_sha=probe_sha,
+                            pull_request_number=queue_entry.number,
+                            head_sha=queue_entry.head_sha,
+                        )
+                    )
+                except MergeTrainGitHubCandidateEntryConflictError:
+                    held_out.append(
+                        MergeTrainBatchHeldOutEntry(
+                            pull_request_number=queue_entry.number,
+                            head_sha=queue_entry.head_sha,
+                            conflicts_with=tuple(merged_pull_request_numbers),
+                        )
+                    )
+                    continue
+                merged_pull_request_numbers.append(queue_entry.number)
+                probe_sha = merge_outcome.result_sha or probe_sha
+        finally:
+            try:
+                effect_executor.delete_candidate_ref(
+                    CandidateRefDeleteEffect(lineage=lineage, candidate_ref=probe_ref)
+                )
+            except MergeTrainGitHubError as error:
+                # The next probe resets the same ref, so a leftover one is harmless.
+                logger.warning(
+                    "Conflict probe ref cleanup failed for %s (GitHub status %s).",
+                    probe_ref,
+                    error.status_code,
+                )
+        return tuple(held_out)
 
     def observe_batch_candidate_checks(
         self, *, candidate: MergeTrainBatchCandidate
@@ -2625,6 +2692,16 @@ def _base_branch_sha(
 def merge_train_construction_ref(candidate_ref: str) -> str:
     """Locate native construction evidence from the canonical candidate identity."""
     return "refs/heads/launchplane/construct/" + sha256(candidate_ref.encode("utf-8")).hexdigest()
+
+
+def merge_train_conflict_probe_ref(*, repository: str, base_branch: str) -> str:
+    """Locate the train's conflict probe in the construction namespace.
+
+    One probe ref per train: the controller lease serializes probes, and a
+    leftover ref is reset by the next probe.
+    """
+    probe_identity = f"conflict-probe:{repository.lower()}:{base_branch}"
+    return "refs/heads/launchplane/construct/" + sha256(probe_identity.encode()).hexdigest()
 
 
 def _verify_candidate_publication(

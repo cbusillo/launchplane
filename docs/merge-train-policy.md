@@ -544,13 +544,34 @@ releases the controller lease without replaying the rejected merge. The same
 queue-change rule then governs replacement planning; an unchanged queue remains
 stopped for Director attention.
 
-A merge conflict is the exception. When an entry does not merge cleanly into
-the candidate built before it, the controller reports
-`merge_train_candidate_entry_conflict` and records that pull request and head as
-`held_out` on the failed candidate. The replacement candidate leaves it out and
-carries the hold-out forward, so the rest of the queue lands. A new head on the
-held-out pull request brings it back into the queue; until then, its author
-resolves the conflict, typically after the others land.
+A merge conflict between queued pull requests is caught before the build.
+GitHub computes a pull request's mergeability only against its base, so two
+queued pull requests can each be clean and still conflict with each other.
+Before a mutating pass plans a candidate with more than one entry, the
+controller runs a conflict probe: it resets a dedicated ref in the
+`launchplane/construct/` namespace, one per train, to the base SHA and merges
+each queued head in queue order. A head that does not merge cleanly onto the
+heads accepted before it writes no commit; the probe records it and continues.
+The probe ref is then deleted; a leftover one is reset by the next probe. It
+never writes the canonical train ref or a pull request branch. A probe costs
+one ref write, one merge per queued pull request, and one delete.
+
+The candidate is planned from the heads that merged cleanly. Each conflicting
+pull request and head is recorded as `held_out` with reason `entry_conflict` and
+`conflicts_with`, the pull requests accepted ahead of it (empty when it does not
+merge onto the base). The controller result reports the probe as
+`conflict_probe`, and PR feedback tells each held-out pull request which pull
+requests it conflicts with. Later candidates carry the hold-out forward while
+its head is unchanged, so the rest of the queue lands. A new head brings it
+back into the queue; until then, its author resolves the conflict, typically
+after the others land. A dry run writes no ref and reports
+`conflict_probe.status: will_run` with the pull requests a mutating pass would
+probe.
+
+The build keeps the same rule as a backstop. When an entry does not merge
+cleanly into the candidate built before it, the controller reports
+`merge_train_candidate_entry_conflict`, records that pull request and head as
+`held_out` on the failed candidate, and the replacement candidate leaves it out.
 
 An exhausted final-publication readback also fails closed, with no individual
 failed pull request: its checkpoint identifies the publication phase and the

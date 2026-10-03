@@ -32,6 +32,14 @@ from control_plane.merge_admission import (
 from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from control_plane.merge_train_controller_run_once import MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION
+from control_plane.contracts.merge_train_effect import (
+    CandidateHeadMergeEffect,
+    CandidateHeadMergeOutcome,
+    CandidateRefDeleteEffect,
+    CandidateRefPrepareEffect,
+    MergeTrainSemanticEffectExecutor,
+)
+from control_plane.merge_train_github import GitHubMergeTrainClient
 from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.merge_train_github import MergeTrainGitHubMergeRejectedError
 from control_plane.merge_train_github import MergeTrainGitHubCandidateEntryConflictError
@@ -98,6 +106,51 @@ from tests.support.merge_train import (
 )
 from tests.test_merge_readiness import _candidate, _evaluate
 from tests.test_merge_train_admission import _fenced_landing_record
+
+
+class _ThreeQueuedSnapshotReader(_FakeExpandedMergeTrainSnapshotReader):
+    def read_merge_train_snapshot(
+        self, *, repository: str, base_branch: str
+    ) -> MergeTrainDryRunSnapshot:
+        snapshot = super().read_merge_train_snapshot(repository=repository, base_branch=base_branch)
+        third = snapshot.pull_requests[0].model_copy(
+            update={
+                "number": 3,
+                "url": f"https://github.com/{repository}/pull/3",
+                "created_at": "2026-05-08T11:00:00Z",
+                "head_sha": "head-3",
+                "head_ref": "feature/third",
+            }
+        )
+        return snapshot.model_copy(update={"pull_requests": (*snapshot.pull_requests, third)})
+
+
+class _PairConflictProbeExecutor:
+    """Answer probe merges as GitHub's merges API would for one conflicting pair."""
+
+    def __init__(self, *, conflicting_pair: tuple[int, int]) -> None:
+        self.conflicting_pair = conflicting_pair
+        self.merged: list[int] = []
+        self.ref_events: list[tuple[str, str]] = []
+        self.probe_ref = ""
+
+    def prepare_candidate_ref(self, effect: CandidateRefPrepareEffect) -> None:
+        self.probe_ref = effect.candidate_ref
+        self.merged.clear()
+        self.ref_events.append(("prepare", effect.candidate_ref))
+
+    def merge_candidate_head(self, effect: CandidateHeadMergeEffect) -> CandidateHeadMergeOutcome:
+        earlier, later = self.conflicting_pair
+        if effect.pull_request_number == later and earlier in self.merged:
+            raise MergeTrainGitHubCandidateEntryConflictError(
+                pull_request_number=effect.pull_request_number, head_sha=effect.head_sha
+            )
+        self.merged.append(effect.pull_request_number)
+        return CandidateHeadMergeOutcome(result_sha=f"probe-{effect.pull_request_number}")
+
+    def delete_candidate_ref(self, effect: CandidateRefDeleteEffect) -> bool:
+        self.ref_events.append(("delete", effect.candidate_ref))
+        return True
 
 
 class _LowercaseRepositorySnapshotReader(_FakeMergeTrainSnapshotReader):
@@ -2926,7 +2979,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             [1, 2],
         )
 
-    async def test_conflicting_entry_is_held_out_and_the_rest_lands(self) -> None:
+    async def test_build_conflict_the_probe_missed_is_held_out_and_the_rest_lands(self) -> None:
         class ConflictingSecondEntryClient(_FakeMergeTrainGitHubClient):
             def build_batch_candidate(self, **kwargs: Any) -> Any:
                 candidate = kwargs["candidate"]
@@ -2987,7 +3040,14 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([entry["pull_request_number"] for entry in replacement["entries"]], [1])
         self.assertEqual(
             replacement["held_out"],
-            [{"pull_request_number": 2, "head_sha": "head-2", "reason": "entry_conflict"}],
+            [
+                {
+                    "pull_request_number": 2,
+                    "head_sha": "head-2",
+                    "reason": "entry_conflict",
+                    "conflicts_with": [1],
+                }
+            ],
         )
         self.assertEqual(
             [entry["pull_request_number"] for entry in results[-1]["landing_plan"]["entries"]],
@@ -3072,6 +3132,129 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         replanned = results[-1]["candidate"]
         self.assertEqual([entry["pull_request_number"] for entry in replanned["entries"]], [1, 3])
         self.assertEqual([entry["pull_request_number"] for entry in replanned["held_out"]], [2])
+
+    async def test_planning_holds_out_a_conflicting_entry_and_the_rest_lands(self) -> None:
+        probe_executor = _PairConflictProbeExecutor(conflicting_pair=(1, 2))
+
+        class ProbingClient(_FakeMergeTrainGitHubClient):
+            def probe_batch_entry_conflicts(self, **kwargs: Any) -> Any:
+                return GitHubMergeTrainClient(
+                    transport=cast(Any, self.transport),
+                    effect_executor=cast(MergeTrainSemanticEffectExecutor, probe_executor),
+                ).probe_batch_entry_conflicts(**kwargs)
+
+            def build_batch_candidate(self, **kwargs: Any) -> Any:
+                for entry in kwargs["candidate"].entries:
+                    if entry.pull_request_number == 2:
+                        raise MergeTrainGitHubCandidateEntryConflictError(
+                            pull_request_number=2, head_sha=entry.head_sha
+                        )
+                return super().build_batch_candidate(**kwargs)
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            results = []
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _ThreeQueuedSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    ProbingClient,
+                ),
+            ):
+                for _ in range(5):
+                    response = await _post_merge_train_controller_run_once(app, request_payload)
+                    results.append(response.json()["result"])
+
+        self.assertEqual(
+            [result["controller_action"] for result in results],
+            [
+                "plan_candidate",
+                "build_candidate",
+                "observe_candidate",
+                "plan_landing",
+                "land_batch",
+            ],
+        )
+        planned = results[0]["candidate"]
+        self.assertEqual([entry["pull_request_number"] for entry in planned["entries"]], [1, 3])
+        self.assertEqual(
+            [
+                (entry["pull_request_number"], entry["conflicts_with"])
+                for entry in planned["held_out"]
+            ],
+            [(2, [1])],
+        )
+        self.assertEqual(results[0]["conflict_probe"]["held_out"], planned["held_out"])
+        self.assertEqual(probe_executor.ref_events[0][0], "prepare")
+        self.assertEqual(probe_executor.ref_events[-1], ("delete", probe_executor.probe_ref))
+        self.assertEqual(
+            [entry["pull_request_number"] for entry in results[-1]["landing_plan"]["entries"]],
+            [1, 3],
+        )
+
+    async def test_dry_run_planning_reports_the_conflict_probe_without_running_it(self) -> None:
+        class NoProbeClient(_FakeMergeTrainGitHubClient):
+            def probe_batch_entry_conflicts(self, **kwargs: Any) -> Any:
+                raise AssertionError("a dry run must not write a probe ref")
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _ThreeQueuedSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    NoProbeClient,
+                ),
+            ):
+                response = await _post_merge_train_controller_run_once(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": False,
+                    },
+                )
+
+        result = response.json()["result"]
+        self.assertEqual(
+            (result["mode"], result["controller_action"]), ("dry-run", "plan_candidate")
+        )
+        self.assertEqual(
+            result["conflict_probe"], {"status": "will_run", "pull_request_numbers": [1, 2, 3]}
+        )
 
     async def test_failed_candidate_does_not_block_a_behind_base_queue_head(self) -> None:
         branch_updates: list[tuple[int, str]] = []
