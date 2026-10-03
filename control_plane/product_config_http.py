@@ -211,7 +211,9 @@ class ProductConfigSecretResult(BaseModel):
     instance: str
     secret_id: str = ""
     copy_from: ProductSecretCopyFrom | None = Field(
-        default=None, json_schema_extra={"x-launchplane-optional-response": True}
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
     )
     sharing_reason: dict[str, str] | None = Field(
         default=None, json_schema_extra={"x-launchplane-optional-response": True}

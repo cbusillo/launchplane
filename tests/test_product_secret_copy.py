@@ -166,6 +166,13 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
+    async def test_plain_value_request_does_not_add_copy_fields_to_legacy_response(self) -> None:
+        response = await self.post(
+            {**self.source_payload, "mode": "dry-run", "reason": "Ordinary rotation"}
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertNotIn("copy_from", response.json()["result"]["secrets"][0])
+
     async def test_copy_refuses_foreign_lane_stale_source_and_unreasoned_class(self) -> None:
         for change in (
             {
