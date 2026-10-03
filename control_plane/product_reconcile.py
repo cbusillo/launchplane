@@ -138,8 +138,11 @@ from control_plane.odoo_target_replacement_apply_http import (
 from control_plane.product_reconcile_feedback import (
     PR_FEEDBACK_PLAN_KEY,
     FeedbackTokenFactory,
+    OwnerReviewStatusWriter,
     post_reconcile_feedback,
 )
+from control_plane.product_review import require_product_review_store
+from control_plane.product_review_status import OwnerReviewStatus, OwnerReviewStatusPublisher
 from control_plane.product_repository_identity import (
     ProductRepositoryIdentity,
     ProductRepositoryIdentityRefusal,
@@ -1543,6 +1546,7 @@ def run_product_reconcile_once(
     testing_hooks: TestingProviderHooks = TestingProviderHooks(),
     feedback_token: FeedbackTokenFactory = resolve_pull_request_feedback_token,
     public_origin: Callable[[], str] = launchplane_public_origin_from_env,
+    owner_review_status: OwnerReviewStatusWriter | None = None,
 ) -> ProductReconcileRequestRecord | None:
     """Claim one request, reconcile it, and record the plan; one bad target never stops the worker."""
     request = record_store.claim_next_product_reconcile_request(lease_owner, lease_seconds)
@@ -1580,6 +1584,12 @@ def run_product_reconcile_once(
         public_origin=public_origin,
         source=RECONCILE_SOURCE,
         recorded_at=_utc_now(),
+        owner_review_status=owner_review_status
+        or _owner_review_status_writer(
+            record_store=record_store,
+            control_plane_root=control_plane_root,
+            public_origin=public_origin,
+        ),
     )
     if feedback is not None:
         plan[PR_FEEDBACK_PLAN_KEY] = feedback
@@ -1600,6 +1610,31 @@ def run_product_reconcile_once(
     return record_store.complete_product_reconcile_request(
         request.target_key, lease_owner, "done", plan
     )
+
+
+def _owner_review_status_writer(
+    *,
+    record_store: object,
+    control_plane_root: Path | None,
+    public_origin: Callable[[], str],
+) -> OwnerReviewStatusWriter | None:
+    """Write the Owner-review status as the preview feedback route does, with the
+    preview context's feedback credential; the merge-train App cannot write statuses."""
+    if control_plane_root is None:
+        return None
+    try:
+        review_store = require_product_review_store(record_store)
+    except TypeError:
+        return None
+
+    def write(
+        profile: LaunchplaneProductProfileRecord, pull_request_number: int
+    ) -> OwnerReviewStatus | None:
+        return OwnerReviewStatusPublisher(
+            control_plane_root=control_plane_root, public_origin=public_origin() or None
+        ).publish(store=review_store, profile=profile, pull_request_number=pull_request_number)
+
+    return write
 
 
 class _LeaseHeartbeat:

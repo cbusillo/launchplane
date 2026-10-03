@@ -267,8 +267,9 @@ Client section; release approval is the safety net (see
 
 The Client's answer is shown on the pull request as one commit status,
 `launchplane/owner-review`, on the current head. Launchplane writes it with the
-same repository credential that writes the preview comment, when the ready
-preview comment is written and again as soon as the Client records a decision:
+preview context's feedback credential, when the ready preview comment is written
+(by the feedback route or the event reconciler) and again as soon as the Client
+records a decision:
 
 - marked, Client set, no decision for the current head: `pending`, "Waiting for
   @client to review the preview", linking the focused `/ui/owner-review` page;
@@ -276,6 +277,11 @@ preview comment is written and again as soon as the Client records a decision:
   @client") or `failure` ("Changes requested by @client");
 - a decision recorded for an older head does not count, because the Client
   reviews what is actually previewed, so the status returns to `pending`;
+  the one exception is an acceptance carried across a base-only refresh made by
+  the merge train, which is saved as its own decision for the new head and shown
+  as `success` ("Accepted by @client (carried from `<short head>` after a
+  base-only refresh)"); see
+  [carried acceptance](owner-acceptance.md#carried-acceptance);
 - marked with no Client: `pending`, `No Owner set for this product`;
 - unmarked: no status is written.
 
