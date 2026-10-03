@@ -1786,37 +1786,11 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             finally:
                 store.close()
 
-    def test_repository_human_admission_schema_has_postgres_types_and_partial_index(
-        self,
-    ) -> None:
-        with _store_for_fresh_head_database() as store:
-            engine = create_engine(store.database_url)
-            try:
-                inspector = inspect(engine)
-                role_columns = {
-                    column["name"]: str(column["type"]).lower()
-                    for column in inspector.get_columns(
-                        "launchplane_repository_human_role_policies"
-                    )
-                }
-                waiver_columns = {
-                    column["name"]: str(column["type"]).lower()
-                    for column in inspector.get_columns(
-                        "launchplane_tenant_technical_human_waiver_events"
-                    )
-                }
-                role_indexes = {
-                    index["name"]: index
-                    for index in inspector.get_indexes("launchplane_repository_human_role_policies")
-                }
-            finally:
-                engine.dispose()
+    def test_retired_governance_migration_drops_rows_and_preserves_other_records(self) -> None:
+        from tests.test_retired_governance_migration import assert_retired_governance_drop
 
-        self.assertEqual(role_columns["payload"], "jsonb")
-        self.assertIn("bigint", role_columns["role_policy_revision"])
-        self.assertEqual(waiver_columns["payload"], "jsonb")
-        self.assertIn("bigint", waiver_columns["author_github_id"])
-        self.assertTrue(role_indexes["launchplane_repo_human_role_active_uidx"]["unique"])
+        with _isolated_postgres_database() as database_url:
+            assert_retired_governance_drop(self, database_url)
 
     def test_full_release_upgrades_compatibility_floor_before_store_startup(self) -> None:
         with _isolated_postgres_database() as database_url:

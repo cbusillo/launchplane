@@ -12,7 +12,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "49a61248b8c5"
+EXPECTED_ALEMBIC_HEAD_REVISION = "b7e9f1a3c5d8"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE = "launchplane_ordinary_agent_delivery_activations"
 ORDINARY_AGENT_DELIVERY_ACTIVATION_EVENT_TABLE = (
@@ -453,16 +453,6 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         ("jsonb",),
     ),
     CriticalColumnType(
-        "launchplane_manager_preview_approval_events",
-        "manager_github_id",
-        ("bigint", "int8"),
-    ),
-    CriticalColumnType(
-        "launchplane_manager_preview_approval_events",
-        "payload",
-        ("jsonb",),
-    ),
-    CriticalColumnType(
         "launchplane_owner_acceptance_events",
         "owner_github_id",
         ("bigint", "int8"),
@@ -549,46 +539,6 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     ),
     CriticalColumnType(
         "launchplane_tenant_repository_classifications",
-        "payload",
-        ("jsonb",),
-    ),
-    CriticalColumnType(
-        "launchplane_repository_human_role_policies",
-        "role_policy_revision",
-        ("bigint", "int8"),
-    ),
-    CriticalColumnType(
-        "launchplane_repository_human_role_policies",
-        "payload",
-        ("jsonb",),
-    ),
-    CriticalColumnType(
-        "launchplane_tenant_technical_human_waiver_events",
-        "pull_request_number",
-        ("bigint", "int8"),
-    ),
-    CriticalColumnType(
-        "launchplane_tenant_technical_human_waiver_events",
-        "classification_revision",
-        ("bigint", "int8"),
-    ),
-    CriticalColumnType(
-        "launchplane_tenant_technical_human_waiver_events",
-        "role_policy_revision",
-        ("bigint", "int8"),
-    ),
-    CriticalColumnType(
-        "launchplane_tenant_technical_human_waiver_events",
-        "authz_policy_revision",
-        ("bigint", "int8"),
-    ),
-    CriticalColumnType(
-        "launchplane_tenant_technical_human_waiver_events",
-        "author_github_id",
-        ("bigint", "int8"),
-    ),
-    CriticalColumnType(
-        "launchplane_tenant_technical_human_waiver_events",
         "payload",
         ("jsonb",),
     ),
@@ -1470,21 +1420,6 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         ("status", "lease_expires_at", "updated_at"),
     ),
     CriticalIndex(
-        "launchplane_manager_preview_approval_events",
-        "launchplane_manager_preview_approval_events_subject_idx",
-        ("product", "context", "repository", "pr_number", "occurred_at"),
-    ),
-    CriticalIndex(
-        "launchplane_manager_preview_approval_events",
-        "launchplane_manager_preview_approval_events_preview_idx",
-        ("preview_id", "serving_generation_id", "occurred_at"),
-    ),
-    CriticalIndex(
-        "launchplane_manager_preview_approval_events",
-        "launchplane_manager_preview_approval_events_approval_idx",
-        ("approval_id", "occurred_at"),
-    ),
-    CriticalIndex(
         "launchplane_owner_acceptance_events",
         "launchplane_owner_acceptance_events_subject_idx",
         (
@@ -1585,44 +1520,6 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
             "status",
             "policy_revision",
         ),
-    ),
-    CriticalIndex(
-        "launchplane_repository_human_role_policies",
-        "launchplane_repo_human_role_revision_uidx",
-        ("repository_id", "product", "context", "role_policy_revision"),
-        unique=True,
-    ),
-    CriticalIndex(
-        "launchplane_repository_human_role_policies",
-        "launchplane_repo_human_role_active_uidx",
-        ("repository_id", "product", "context"),
-        unique=True,
-        predicate_expression="status='active'",
-    ),
-    CriticalIndex(
-        "launchplane_repository_human_role_policies",
-        "launchplane_repo_human_role_current_idx",
-        ("repository_id", "product", "context", "status", "role_policy_revision"),
-    ),
-    CriticalIndex(
-        "launchplane_tenant_technical_human_waiver_events",
-        "launchplane_tenant_human_waiver_exact_head_idx",
-        ("repository_id", "pull_request_number", "head_sha", "occurred_at", "event_id"),
-    ),
-    CriticalIndex(
-        "launchplane_tenant_technical_human_waiver_events",
-        "launchplane_tenant_human_waiver_binding_idx",
-        ("binding_sha256", "occurred_at", "event_id"),
-    ),
-    CriticalIndex(
-        "launchplane_tenant_technical_human_waiver_events",
-        "launchplane_tenant_human_waiver_waiver_idx",
-        ("waiver_id", "occurred_at", "event_id"),
-    ),
-    CriticalIndex(
-        "launchplane_tenant_technical_human_waiver_events",
-        "launchplane_tenant_human_waiver_policy_idx",
-        ("role_policy_record_id", "authz_policy_record_id", "occurred_at"),
     ),
     CriticalIndex(
         "launchplane_trusted_maintenance_policies",
@@ -1858,10 +1755,6 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
         ("product", "context", "instance"),
     ),
     CriticalPrimaryKey(
-        "launchplane_manager_preview_approval_events",
-        ("event_id",),
-    ),
-    CriticalPrimaryKey(
         "launchplane_owner_acceptance_events",
         ("event_id",),
     ),
@@ -1915,14 +1808,6 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     CriticalPrimaryKey(
         "launchplane_production_backup_policies",
         ("record_id",),
-    ),
-    CriticalPrimaryKey(
-        "launchplane_repository_human_role_policies",
-        ("record_id",),
-    ),
-    CriticalPrimaryKey(
-        "launchplane_tenant_technical_human_waiver_events",
-        ("event_id",),
     ),
     CriticalPrimaryKey(
         "launchplane_trusted_maintenance_policies",

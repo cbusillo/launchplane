@@ -771,9 +771,10 @@ evidence, and commits the transaction as one unit. No-op applies complete replay
 evidence without creating policy history.
 
 Manager approval of rendered previews is retired. Its contracts, evaluator, and
-store methods are deleted; existing `launchplane_manager_preview_approval_events`
-rows stay in the database unread. Current approval uses product review and the
-release checklist.
+store methods are deleted. Migration `b7e9f1a3c5d8` drops
+`launchplane_manager_preview_approval_events` and all its rows, without export
+or counts, under the Director's #2006 decision. Downgrade restores only an empty
+table. Current approval uses product review and the release checklist.
 
 Schema-v1 migration and unmanaged-rule adoption are never implicit. The caller
 must request `schema_migration = migrate_v1_to_v2` and/or

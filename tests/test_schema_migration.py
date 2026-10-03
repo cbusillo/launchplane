@@ -1436,7 +1436,7 @@ class SchemaMigrationTests(unittest.TestCase):
             database_url = f"sqlite+pysqlite:///{database_path}"
             config = alembic_config(database_url)
 
-            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            command.upgrade(config, "49a61248b8c5")
             engine = create_engine(database_url)
             try:
                 inspector = inspect(engine)
@@ -2293,10 +2293,6 @@ class SchemaMigrationTests(unittest.TestCase):
             ("record_id",),
         )
         self.assertEqual(
-            column_types[("launchplane_repository_human_role_policies", "payload")],
-            ("jsonb",),
-        )
-        self.assertEqual(
             column_types[("launchplane_change_impact_policies", "payload")],
             ("jsonb",),
         )
@@ -2312,23 +2308,6 @@ class SchemaMigrationTests(unittest.TestCase):
         self.assertEqual(
             primary_keys["launchplane_change_impact_policies"],
             ("record_id",),
-        )
-        self.assertEqual(
-            column_types[("launchplane_repository_human_role_policies", "role_policy_revision")],
-            ("bigint", "int8"),
-        )
-        self.assertEqual(
-            column_types[("launchplane_tenant_technical_human_waiver_events", "payload")],
-            ("jsonb",),
-        )
-        self.assertEqual(
-            column_types[
-                (
-                    "launchplane_tenant_technical_human_waiver_events",
-                    "author_github_id",
-                )
-            ],
-            ("bigint", "int8"),
         )
         self.assertEqual(
             column_types[("launchplane_owner_acceptance_events", "payload")],
@@ -2385,41 +2364,6 @@ class SchemaMigrationTests(unittest.TestCase):
                 "owner_action",
                 "environment",
             ),
-        )
-        self.assertEqual(
-            primary_keys["launchplane_repository_human_role_policies"],
-            ("record_id",),
-        )
-        self.assertEqual(
-            primary_keys["launchplane_tenant_technical_human_waiver_events"],
-            ("event_id",),
-        )
-        self.assertEqual(
-            indexes[
-                (
-                    "launchplane_repository_human_role_policies",
-                    "launchplane_repo_human_role_revision_uidx",
-                )
-            ].column_names,
-            ("repository_id", "product", "context", "role_policy_revision"),
-        )
-        self.assertEqual(
-            indexes[
-                (
-                    "launchplane_repository_human_role_policies",
-                    "launchplane_repo_human_role_active_uidx",
-                )
-            ].predicate_expression,
-            "status='active'",
-        )
-        self.assertEqual(
-            indexes[
-                (
-                    "launchplane_tenant_technical_human_waiver_events",
-                    "launchplane_tenant_human_waiver_exact_head_idx",
-                )
-            ].column_names,
-            ("repository_id", "pull_request_number", "head_sha", "occurred_at", "event_id"),
         )
 
     def test_owner_control_shadow_verifier_migration_upgrades_and_downgrades(self) -> None:
