@@ -334,6 +334,9 @@ governed expectation, custody and currentness contract.
     package named after the product's repository, apply bound to the dry run's
     starting repository, profile compare-and-write, and apply-only atomic
     idempotency enforcement)
+  - `POST /v1/product-profiles/{product}/production-use` (native FastAPI for
+    bearer-token and human-cookie callers with `product_profile.write`; dry run,
+    reviewed-plan-digest-bound atomic apply and idempotent audit evidence)
   - `POST /v1/product-profiles/preview-tls/apply` (native FastAPI for
     Launchplane admin workflow callers, DB-backed dry-run/apply planning,
     reviewed-plan continuity, and apply-only idempotency enforcement)
@@ -1937,6 +1940,7 @@ refresh/destroy flow.
 - `POST /v1/product-profiles/preview-tls/apply`
 - `POST /v1/product-profiles/{product}/owner`
 - `POST /v1/product-profiles/{product}/image-repository`
+- `POST /v1/product-profiles/{product}/production-use`
 
 Product profiles are Launchplane-owned product/driver bindings. They are written
 through native FastAPI authenticated service ingress and stored in Launchplane

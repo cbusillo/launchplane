@@ -15,14 +15,14 @@ from tests.support.profiles import product_profile_payload
 from tests.support.stores import sqlite_database_url
 
 _PRODUCT = "sellyouroutboard"
-_ROUTE = f"/v1/product-profiles/{_PRODUCT}/image-repository"
-_OLD = "ghcr.io/cbusillo/sellyouroutboard-app"
-_NEW = "ghcr.io/cbusillo/sellyouroutboard"
+_ROUTE = f"/v1/product-profiles/{_PRODUCT}/production-use"
+_OLD = "unknown"
+_NEW = "live"
 
 
 def _profile() -> LaunchplaneProductProfileRecord:
     payload = product_profile_payload(_PRODUCT)
-    payload["image"] = {"repository": _OLD}
+    payload["production_use"] = _OLD
     return LaunchplaneProductProfileRecord.model_validate(payload)
 
 
@@ -48,22 +48,22 @@ async def _post(app: FastAPI, payload: dict[str, object], idempotency_key: str =
     return await _asgi_request(app, "POST", _ROUTE, headers=headers, payload=payload)
 
 
-def _apply(expected: str = _OLD) -> dict[str, object]:
+def _apply(expected: str) -> dict[str, object]:
     return {
         "mode": "apply",
-        "image_repository": _NEW,
-        "expected_image_repository": expected,
-        "reason": "Publish to the package named after the repository.",
+        "production_use": _NEW,
+        "reviewed_plan_sha256": expected,
+        "reason": "Classify current production use.",
     }
 
 
-class ProductImageRepositoryHttpTests(unittest.IsolatedAsyncioTestCase):
+class ProductProductionUseHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_dry_run_shows_the_change_and_writes_nothing(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = _store(Path(temporary_directory_name))
             response = await _post(
                 _app(store),
-                {"image_repository": _NEW, "reason": "Publish to the repository's package."},
+                {"production_use": _NEW, "reason": "Classify current production use."},
             )
             stored = store.read_product_profile_record(_PRODUCT)
             store.close()
@@ -71,100 +71,115 @@ class ProductImageRepositoryHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 202)
         result = response.json()["result"]
         self.assertEqual(
-            (result["image_repository_before"], result["image_repository_after"]), (_OLD, _NEW)
+            (result["production_use_before"], result["production_use_after"]), (_OLD, _NEW)
         )
         self.assertTrue(result["changed"])
         self.assertFalse(result["applied"])
-        self.assertEqual([lane["instance"] for lane in result["lanes"]], ["testing"])
+        self.assertTrue(result["plan_sha256"])
         self.assertEqual(stored, _profile())
 
-    async def test_apply_changes_only_the_image_repository_and_replays(self) -> None:
+    async def test_apply_changes_only_production_use_and_replays(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = _store(Path(temporary_directory_name))
             app = _app(store)
-            response = await _post(app, _apply(), idempotency_key="image-apply")
-            replay = await _post(app, _apply(), idempotency_key="image-apply")
+            dry = await _post(
+                app, {"production_use": _NEW, "reason": "Classify current production use."}
+            )
+            digest = dry.json()["result"]["plan_sha256"]
+            response = await _post(app, _apply(digest), idempotency_key="production-use-apply")
+            replay = await _post(app, _apply(digest), idempotency_key="production-use-apply")
             stored = store.read_product_profile_record(_PRODUCT)
             store.close()
 
         self.assertEqual(response.status_code, 202)
         self.assertTrue(response.json()["result"]["applied"])
         self.assertTrue(replay.json()["replayed"])
-        self.assertEqual(stored.image.repository, _NEW)
-        unchanged = {"image", "updated_at", "source"}
+        self.assertEqual(stored.production_use, _NEW)
+        unchanged = {"production_use", "updated_at", "source"}
         self.assertEqual(
             stored.model_dump(exclude=unchanged), _profile().model_dump(exclude=unchanged)
         )
 
-    async def test_only_the_package_named_after_the_repository_is_accepted(self) -> None:
+    async def test_unknown_classification_is_refused(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = _store(Path(temporary_directory_name))
             response = await _post(
                 _app(store),
-                {"image_repository": "ghcr.io/cbusillo/other", "reason": "Wrong package."},
+                {"production_use": "not-a-classification", "reason": "Wrong package."},
             )
             store.close()
 
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.json()["error"]["code"], "image_repository_not_repository_named")
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
 
     async def test_apply_refuses_when_the_profile_changed_since_the_dry_run(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = _store(Path(temporary_directory_name))
-            response = await _post(
-                _app(store), _apply(expected="ghcr.io/cbusillo/elsewhere"), "image-apply"
-            )
+            response = await _post(_app(store), _apply(expected="0" * 64), "production-use-apply")
             stored = store.read_product_profile_record(_PRODUCT)
             store.close()
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["error"]["code"], "stale")
-        self.assertEqual(stored.image.repository, _OLD)
+        self.assertEqual(stored.production_use, _OLD)
 
     async def test_a_caller_without_profile_write_is_refused(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = _store(Path(temporary_directory_name))
             response = await _post(
                 _app(store, policy=_product_profile_write_policy(product="other-product")),
-                _apply(),
-                "image-apply",
+                _apply("0" * 64),
+                "production-use-apply",
             )
             stored = store.read_product_profile_record(_PRODUCT)
             store.close()
 
         self.assertEqual(response.status_code, 403)
-        self.assertEqual(stored.image.repository, _OLD)
+        self.assertEqual(stored.production_use, _OLD)
 
-    async def test_explicit_empty_starting_repository_can_be_applied(self) -> None:
+    async def test_reviewed_plan_binds_profile_value_and_reason(self) -> None:
+        for change in ("profile", "value", "reason"):
+            with self.subTest(change=change), TemporaryDirectory() as directory:
+                store = _store(Path(directory))
+                app = _app(store)
+                dry = await _post(
+                    app, {"production_use": _NEW, "reason": "Classify current production use."}
+                )
+                payload = _apply(dry.json()["result"]["plan_sha256"])
+                if change == "profile":
+                    original = store.read_product_profile_record(_PRODUCT)
+                    store.write_product_profile_record(
+                        original.model_copy(update={"updated_at": "2026-10-03T13:00:00Z"})
+                    )
+                elif change == "value":
+                    payload["production_use"] = "prelaunch"
+                else:
+                    payload["reason"] = "A different reason"
+                response = await _post(app, payload, "bound-plan")
+                stored = store.read_product_profile_record(_PRODUCT)
+                store.close()
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.json()["error"]["code"], "stale")
+                self.assertEqual(stored.production_use, _OLD)
+
+    async def test_prelaunch_and_unknown_can_be_applied_with_a_fresh_plan(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))
-            profile = _profile().model_copy(
-                update={
-                    "image": _profile().image.model_copy(update={"repository": ""}),
-                    "preview": _profile().preview.model_copy(update={"enabled": False}),
-                }
-            )
-            store.write_product_profile_record(profile)
             app = _app(store)
-            dry = await _post(
-                app,
-                {
-                    "image_repository": _NEW,
-                    "reason": "Publish to the package named after the repository.",
-                },
-            )
-            self.assertEqual(dry.json()["result"]["image_repository_before"], "")
-            response = await _post(app, _apply(expected=""), "empty-repository")
-            self.assertEqual(response.status_code, 202)
-            self.assertEqual(store.read_product_profile_record(_PRODUCT).image.repository, _NEW)
-            store.close()
-
-    async def test_apply_requires_an_explicit_starting_repository(self) -> None:
-        with TemporaryDirectory() as directory:
-            store = _store(Path(directory))
-            payload = _apply()
-            del payload["expected_image_repository"]
-            response = await _post(_app(store), payload, "missing-binding")
-            self.assertEqual(response.status_code, 400)
-            self.assertEqual(store.read_product_profile_record(_PRODUCT).image.repository, _OLD)
+            for value in ("prelaunch", "live", "unknown"):
+                dry = await _post(
+                    app, {"production_use": value, "reason": "Reviewed classification."}
+                )
+                apply = await _post(
+                    app,
+                    {
+                        "mode": "apply",
+                        "production_use": value,
+                        "reason": "Reviewed classification.",
+                        "reviewed_plan_sha256": dry.json()["result"]["plan_sha256"],
+                    },
+                    value,
+                )
+                self.assertEqual(apply.status_code, 202)
+                self.assertEqual(store.read_product_profile_record(_PRODUCT).production_use, value)
             store.close()
