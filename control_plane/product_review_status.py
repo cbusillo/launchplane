@@ -1,4 +1,4 @@
-"""The one Owner-review signal Launchplane shows on a pull request.
+"""The one Client-review signal Launchplane shows on a pull request.
 
 A marked pull request gets the commit status ``launchplane/owner-review`` on its
 current head. Delivery is best-effort: a recorded decision and a delivered preview
@@ -33,11 +33,11 @@ from control_plane.workflows.launchplane import (
 )
 
 OWNER_REVIEW_STATUS_CONTEXT: Final = "launchplane/owner-review"
-NO_OWNER_DESCRIPTION: Final = "No Owner set for this product"
-RETIRED_MANAGER_STATUS_DESCRIPTION: Final = "Retired. Owner review is recorded in Launchplane."
+NO_OWNER_DESCRIPTION: Final = "No Client set for this product"
+RETIRED_MANAGER_STATUS_DESCRIPTION: Final = "Retired. Client review is recorded in Launchplane."
 RETIRED_OWNER_ACCEPTANCE_TITLE: Final = "Retired"
 RETIRED_OWNER_ACCEPTANCE_SUMMARY: Final = (
-    f"Owner review for this pull request is shown by the `{OWNER_REVIEW_STATUS_CONTEXT}` status."
+    f"Client review for this pull request is shown by the `{OWNER_REVIEW_STATUS_CONTEXT}` status."
 )
 
 OwnerReviewStatusState = Literal["pending", "success", "failure"]
@@ -93,7 +93,7 @@ def owner_review_status(
             description=f"Waiting for @{owner.github_login} to review the preview",
         )
     if decision.feedback_requested and not decision.feedback_url:
-        return OwnerReviewStatus(state="pending", description="Owner feedback delivery is pending")
+        return OwnerReviewStatus(state="pending", description="Client feedback delivery is pending")
     if decision.decision == "accepted":
         description = f"Accepted by @{decision.owner_github_login}"
         if decision.carried_from is not None:
@@ -108,7 +108,7 @@ def owner_review_status(
 
 @dataclass(frozen=True, slots=True)
 class OwnerReviewStatusPublisher:
-    """Writes the Owner-review status with the repository's preview feedback credential."""
+    """Writes the Client-review status with the repository's preview feedback credential."""
 
     control_plane_root: Path
     public_origin: str | None = None
@@ -135,7 +135,7 @@ class OwnerReviewStatusPublisher:
             ).strip()
             if not token or "/" not in repository:
                 _LOGGER.info(
-                    "Owner review status skipped: no source-control credential.",
+                    "Client review status skipped: no source-control credential.",
                     extra={"repository": repository, "pull_request_number": pull_request_number},
                 )
                 return None
@@ -144,7 +144,7 @@ class OwnerReviewStatusPublisher:
             )
         except Exception:
             _LOGGER.warning(
-                "Owner review status could not read the pull request.",
+                "Client review status could not read the pull request.",
                 exc_info=True,
                 extra={"repository": repository, "pull_request_number": pull_request_number},
             )
@@ -163,7 +163,7 @@ class OwnerReviewStatusPublisher:
                     )
                 except Exception:
                     _LOGGER.warning(
-                        "Owner decision is saved but feedback delivery is pending.",
+                        "Client decision is saved but feedback delivery is pending.",
                         exc_info=True,
                         extra={
                             "repository": repository,
@@ -180,7 +180,7 @@ class OwnerReviewStatusPublisher:
                     )
         except Exception:
             _LOGGER.warning(
-                "Owner review status could not be written.",
+                "Client review status could not be written.",
                 exc_info=True,
                 extra={"repository": repository, "pull_request_number": pull_request_number},
             )
@@ -219,7 +219,7 @@ class OwnerReviewStatusPublisher:
         if not pending:
             return
         if not self.public_origin:
-            raise ValueError("Owner feedback needs the public review origin.")
+            raise ValueError("Client feedback needs the public review origin.")
         actor = json_object(
             self.api_request(path="/user", token=token),
             "GitHub feedback actor",
@@ -248,7 +248,7 @@ class OwnerReviewStatusPublisher:
             except Exception:
                 # Keep this receipt pending, but do not strand later feedback.
                 _LOGGER.warning(
-                    "Saved Owner decision feedback delivery is pending.",
+                    "Saved Client decision feedback delivery is pending.",
                     exc_info=True,
                     extra={"repository": profile.repository, "record_id": decision.record_id},
                 )
@@ -316,7 +316,7 @@ class OwnerReviewStatusPublisher:
         except Exception:
             # Not carried: the head waits for the Client, as it would without a carry.
             _LOGGER.warning(
-                "Owner acceptance could not be checked for a carry.",
+                "Client acceptance could not be checked for a carry.",
                 exc_info=True,
                 extra={
                     "repository": profile.repository,
@@ -468,7 +468,7 @@ def owner_review_reference_url(
     try:
         parsed_origin = urlsplit(origin)
     except ValueError as error:
-        raise ValueError("Owner review requires a valid browser public origin.") from error
+        raise ValueError("Client review requires a valid browser public origin.") from error
     if (
         parsed_origin.scheme not in {"http", "https"}
         or not parsed_origin.netloc
@@ -478,20 +478,20 @@ def owner_review_reference_url(
         or parsed_origin.username is not None
         or parsed_origin.password is not None
     ):
-        raise ValueError("Owner review requires a valid browser public origin.")
+        raise ValueError("Client review requires a valid browser public origin.")
     try:
         if parsed_origin.port is not None and not 1 <= parsed_origin.port <= 65535:
             raise ValueError
     except ValueError as error:
-        raise ValueError("Owner review requires a valid browser public origin.") from error
+        raise ValueError("Client review requires a valid browser public origin.") from error
     if any(character.isspace() or ord(character) < 32 for character in origin):
-        raise ValueError("Owner review requires a valid browser public origin.")
+        raise ValueError("Client review requires a valid browser public origin.")
     if repository.count("/") != 1 or any(
         not part or part != part.strip() for part in repository.split("/", 1)
     ):
-        raise ValueError("Owner review requires a valid repository target.")
+        raise ValueError("Client review requires a valid repository target.")
     if pull_request_number < 1:
-        raise ValueError("Owner review requires a positive pull request number.")
+        raise ValueError("Client review requires a positive pull request number.")
     url = (
         f"{origin.rstrip('/')}/ui/owner-review"
         f"?repository={quote(repository, safe='')}&pull_request={pull_request_number}"

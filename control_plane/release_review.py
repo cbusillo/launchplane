@@ -222,6 +222,8 @@ def build_release_review(
         untracked_commits=untracked,
         additional_changes=(
             (
+                # role-words: legacy. This text is part of checklist_digest, so rewording it
+                # would orphan every recorded decision on a release with this change.
                 "Shared website components changed outside this repository's checklist. Operator review is required.",
             )
             if production.shared_addons_digest != candidate.shared_addons_digest
@@ -246,9 +248,9 @@ def build_release_review(
         blockers += (RELEASE_RECORD_PENDING,)
     if not approved and not blockers:
         blockers = (
-            "The Owner requested changes."
+            "The Client requested changes."
             if latest_decision
-            else "Owner approval of this release is required.",
+            else "Client approval of this release is required.",
         )
     return ReleaseReviewStatus(
         required=profile.production_use != "prelaunch",
@@ -263,21 +265,21 @@ def build_release_review(
 def checklist_blockers(checklist: ReleaseChecklist) -> tuple[str, ...]:
     blockers = []
     if not checklist.owner_github_id:
-        blockers.append("No Owner set for this product.")
+        blockers.append("No Client set for this product.")
     if not checklist.testing_url:
         blockers.append("The testing site URL is unavailable.")
     for item in checklist.items:
         if not item.owner_test_notes:
-            blockers.append(f"Pull request #{item.pull_request_number} has no Owner test notes.")
+            blockers.append(f"Pull request #{item.pull_request_number} has no Client test notes.")
         # A merge-train batch PR names each of its pull requests that came without notes.
         for number in pull_requests_missing_owner_test_notes(item.owner_test_notes):
             blockers.append(
                 f"Pull request #{number}, landed in #{item.pull_request_number},"
-                " has no Owner test notes."
+                " has no Client test notes."
             )
     if checklist.untracked_commits:
         blockers.append(
-            "The release contains commits without a merged pull request and Owner test notes."
+            "The release contains commits without a merged pull request and Client test notes."
         )
     blockers.extend(checklist.additional_changes)
     return tuple(blockers)
@@ -362,7 +364,7 @@ def require_release_approval(
         return
     if not review.approved or review.checklist is None:
         raise click.ClickException(
-            " ".join(review.blockers) or "Owner release approval is required."
+            " ".join(review.blockers) or "Client release approval is required."
         )
     candidate = review.checklist.candidate
     if (artifact_id and artifact_id != candidate.artifact_id) or (

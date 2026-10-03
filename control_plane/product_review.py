@@ -1,4 +1,4 @@
-"""The small Owner product-review path.
+"""The small Client product-review path.
 
 Decision authorization is one question: is the signed-in GitHub user the Owner named on the
 product record? A decision is a recorded opinion and never merges or deploys.

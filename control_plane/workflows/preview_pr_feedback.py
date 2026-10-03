@@ -772,7 +772,7 @@ def _render_preview_pr_feedback_markdown(
             [
                 (
                     f"Launchplane preview is ready for PR #{anchor_pr_number} — "
-                    "Owner review requested."
+                    "Client review requested."
                     if owner_review_requested and not owner_review_accepted
                     else f"Launchplane preview is ready for PR #{anchor_pr_number}."
                 ),
@@ -850,7 +850,7 @@ def _render_preview_pr_feedback_markdown(
             lines.extend(
                 [
                     "",
-                    "## Owner review",
+                    "## Client review",
                     "",
                     f"{owner_review_accepted}.",
                     "",
@@ -861,12 +861,12 @@ def _render_preview_pr_feedback_markdown(
             lines.extend(
                 [
                     "",
-                    "## Owner review",
+                    "## Client review",
                     "",
                     f"@{owner_mention} this change is ready for you to look at.",
                     "",
                     "1. Open the preview above and try the change. What to check is listed under "
-                    "**Owner test notes** in the pull request description.",
+                    "**Client test notes** in the pull request description.",
                     f"2. Record **Accept** or **Request changes** in Launchplane: {owner_review_url}",
                     "",
                     "Your decision does not merge or deploy anything. A GitHub approval or comment "
@@ -877,10 +877,10 @@ def _render_preview_pr_feedback_markdown(
             lines.extend(
                 [
                     "",
-                    "## Owner review",
+                    "## Client review",
                     "",
-                    "This pull request is marked for Owner review, but no Owner is set for this "
-                    "product in Launchplane. The operator needs to set one.",
+                    "This pull request is marked for Client review, but no Client is set for this "
+                    "product in Launchplane. An admin needs to set one.",
                 ]
             )
         lines.extend(

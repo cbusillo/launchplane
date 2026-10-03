@@ -58,10 +58,11 @@ Moving lifecycle truth from code into repo metadata, workflow defaults, TOML,
 JSON, or YAML is still a boundary violation unless the file is docs, tests, or
 Launchplane self-bootstrap.
 
-## `Owner test notes`
+## `Client test notes`
 
-Every product pull request includes an **`Owner test notes`** heading with test
-instructions or `Nothing for the owner to test`. CI checks presence without
+Every product pull request includes a **`Client test notes`** heading with test
+instructions or `Nothing for the Client to test`. The older `Owner test notes`
+heading and `Nothing for the owner to test` marker are still accepted. CI checks presence without
 deciding whether a change needs human review. Add the shared action as a step in
 an existing required CI job, before checking out product code:
 
@@ -76,7 +77,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Require Owner test notes
+      - name: Require Client test notes
         if: github.event_name == 'pull_request'
         uses: cbusillo/launchplane/.github/actions/owner-test-notes@<launchplane-sha>
 ```

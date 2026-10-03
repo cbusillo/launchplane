@@ -31,7 +31,7 @@ class ProductReviewCarry(BaseModel):
 
 
 class ProductReviewDecisionRecord(BaseModel):
-    """One Owner decision about one pull request preview.
+    """One Client decision about one pull request preview.
 
     The decision is a recorded opinion: it never merges or deploys anything.
     """
