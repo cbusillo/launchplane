@@ -826,6 +826,15 @@ using `pause_train` stop after that label action; repositories using
 `continue_after_blocking_pr` may continue to the next eligible pull request once
 the blocked pull request has been labeled.
 
+For service-controller batches using merge commits, two or more eligible
+entries land through a batch PR built and checked on the current base. Planning
+and failed-candidate reflow therefore preserve their source heads even when
+GitHub reports them behind the base. Required checks and conflict guards still
+apply. The conflict probe re-evaluates this decision after holding out entries:
+a remaining batch preserves its heads; a lone remaining PR still refreshes.
+Direct PR landings, including single-entry candidates and squash/rebase methods,
+retain the branch-refresh requirement.
+
 When the selected pull request needs a branch refresh, Launchplane updates that
 pull request using the observed head SHA as the compare point. The worker must
 then re-read mergeability and required checks before any later merge decision;
@@ -942,7 +951,8 @@ Controller actions have these retry/stop semantics:
 - `wait_for_root_checks`: The collapsed root PR's required checks are still
   running. Stop and poll later; do not call phase endpoints. Any other state
   of the collapsed root is answered from the whole queue, the same as for any
-  queued pull request: a root behind its base gets its branch refreshed, a root
+  queued pull request: a root behind its base refreshes for a direct landing
+  or keeps its head when joining a multi-PR merge batch, a root
   with failed checks or conflicts reports `block`, and a root that left the
   queue lets the other ready pull requests proceed. A refreshed root still
   disposes of its stack's children when it lands.
@@ -987,7 +997,8 @@ Controller actions have these retry/stop semantics:
   for that batch.
 - `block`: The selected PR is blocked by conflicts or failed checks. Stop and
   surface `dry_run_result.next_action_detail`.
-- `update_branch`: The selected PR is behind its base. A mutate call updates
+- `update_branch`: The selected PR is behind its base and will land directly.
+  A mutate call updates
   the PR branch through GitHub with the expected head SHA and reports
   `branch_update_result`; call again once the new head's checks pass. A dry-run
   call changes nothing.

@@ -255,7 +255,10 @@ class MergeTrainMergeResult(BaseModel):
 
 
 def build_merge_train_dry_run_result(
-    *, policy: MergeTrainPolicy, snapshot: MergeTrainDryRunSnapshot
+    *,
+    policy: MergeTrainPolicy,
+    snapshot: MergeTrainDryRunSnapshot,
+    batch_landing: bool = False,
 ) -> MergeTrainDryRunResult:
     repository_policy = policy.find_repository_policy(
         repository=snapshot.repository, base_branch=snapshot.base_branch
@@ -273,7 +276,13 @@ def build_merge_train_dry_run_result(
     )
     selected_pr = next((entry for entry in queue if entry.eligible), None)
     intended_next_action, next_action_detail = _next_action_for_selected_pr(
-        repository_policy, selected_pr
+        repository_policy,
+        selected_pr,
+        skip_branch_update=(
+            batch_landing
+            and repository_policy.merge_method == "merge"
+            and sum(entry.eligible for entry in queue) > 1
+        ),
     )
     return MergeTrainDryRunResult(
         repository=snapshot.repository,
@@ -726,6 +735,8 @@ def _stack_entry(pull_request: MergeTrainPullRequestSnapshot) -> MergeTrainStack
 def _next_action_for_selected_pr(
     repository_policy: MergeTrainRepositoryPolicy,
     selected_pr: MergeTrainQueueEntry | None,
+    *,
+    skip_branch_update: bool = False,
 ) -> tuple[MergeTrainDryRunAction, str]:
     if selected_pr is None:
         return "idle", "No eligible pull requests are queued."
@@ -739,7 +750,7 @@ def _next_action_for_selected_pr(
             "block",
             f"Add {repository_policy.blocked_label}; required checks failed.",
         )
-    if selected_pr.branch_update_required:
+    if selected_pr.branch_update_required and not skip_branch_update:
         return "update_branch", "Refresh the pull request against the current base branch."
     if selected_pr.mergeable == "unknown" or selected_pr.required_checks_status in {
         "pending",
