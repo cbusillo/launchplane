@@ -4,6 +4,10 @@ title: Work Graph Read Model
 
 ## Status
 
+> **Retired.** [DIRECTION.md](../DIRECTION.md) retires general planning and
+> work graphs inside Launchplane, and Every Code. This page describes code that
+> is scheduled for deletion. Do not build on it.
+
 This is a transitional compatibility surface, not part of Launchplane's
 permanent forge-neutral product boundary. Do not add ranking, planning,
 issue-reconciliation, queue, or live-forge ingestion capability. Preserve the

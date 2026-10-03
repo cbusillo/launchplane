@@ -9,6 +9,13 @@ discovery, admin read models, and future GUI action rendering. They describe
 what a product driver can do without making the UI understand the runtime
 provider that currently executes the work.
 
+Where this page says a product, tenant, or product workflow calls a route,
+that is the old call-in path, which [DIRECTION.md](../DIRECTION.md) retires: a
+product repository never calls Launchplane. Those routes stay for admin use and
+for products that have not moved yet, until #2606 deletes the call-in path;
+previews and testing deploys now come from
+[event-driven deploys](event-driven-deploys.md).
+
 This is a read-first contract and does not add a frontend plugin system.
 Descriptor presence alone does not execute actions; service dispatch requires a
 matching backend handler registration, and tests must fail closed when the
@@ -181,9 +188,8 @@ deploy succeeds.
 The retired `source_ref_deploy` action and
 `POST /v1/drivers/generic-web/source-ref-deploy` endpoint are no longer
 advertised by the generic-web descriptor. The #1498 replacement path is the
-image-backed `stable_deploy` action above; product repositories publish an
-immutable artifact and call Launchplane's generic-web deploy route instead of
-asking Launchplane to temporarily rewrite provider source refs.
+image-backed `stable_deploy` action above: Launchplane deploys an immutable
+artifact instead of temporarily rewriting provider source refs.
 
 The `prod_promotion` action routes to the native FastAPI
 `POST /v1/drivers/generic-web/prod-promotion` endpoint. It promotes a
@@ -218,7 +224,7 @@ also requires digest-pinned artifacts, immutable source commits, fresh testing
 and production evidence, and the explicit production provider-target record.
 
 `ProductPromotionWorkflowProfile` also names the workflow inputs for
-`dry_run`, `bump`, `artifact_id`, `source_git_ref`, and
+`dry_run`, `bump`, `artifact_id`, `deploy_reference`, `source_git_ref`, and
 `promotion_intent_id`. Product workflows must forward the reviewed artifact,
 revision, and intent to the reusable generic-web promotion workflow, with the
 intent also used as the raw live request's `Idempotency-Key`. The raw driver
@@ -338,8 +344,11 @@ surface is the isolated compose planner/apply pair, not Odoo-shaped
 desired-state, inventory, readiness, and verification aliases are retired;
 callers should use the inherited generic-web routes for common
 read/planning/evidence actions.
-New tenant workflows should call `POST /v1/drivers/odoo/preview-apply-inputs`
-and then `POST /v1/drivers/odoo/preview-apply` for refresh and destroy. The
+The event-driven reconciler plans and runs Odoo preview refresh and destroy
+in process through `run_odoo_preview_apply_operation`, issuing the same plan as
+`POST /v1/drivers/odoo/preview-apply-inputs`; tenant workflows that still call
+`preview-apply-inputs` and then `POST /v1/drivers/odoo/preview-apply` are on
+the old call-in path. The
 lower-level `POST /v1/drivers/odoo/preview-apply` route applies a ready isolated-preview
 Dokploy plan to provider state after service authorization and idempotency
 checks. The route resolves runtime env values from Launchplane-owned
@@ -353,9 +362,7 @@ runtime binding evidence, template compose id, Dokploy environment id, Odoo
 runtime plan, and redacted provider dry-run plan from product profiles,
 runtime-environment records, managed secrets, and tracked Dokploy target records.
 The route is read-only, returns no plaintext runtime or secret values, and
-supports both refresh and destroy planning. Tenant workflows should call this
-route before `preview-apply` instead of assembling Odoo runtime or Dokploy plan
-payloads in the tenant repo.
+supports both refresh and destroy planning.
 Odoo stable promotion also exposes
 `POST /v1/drivers/odoo/prod-promotion-inputs` as a read-only action before the
 backup gate and promotion mutation routes. The route resolves the promotable

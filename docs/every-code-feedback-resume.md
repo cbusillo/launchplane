@@ -1,10 +1,13 @@
 # Feedback continuation contract
 
-Issue [#2328](https://github.com/cbusillo/launchplane/issues/2328) owns the approved
-feedback continuation plan. The Director selected implementation with a supported
-admin recovery path required before production enablement. Enabling it in
-production needs new grants, which are a Director decision, and its separate
-rollout approvals.
+> **Not continued.** Issue [#2328](https://github.com/cbusillo/launchplane/issues/2328),
+> which owned this plan, was closed on 2026-09-23 when [DIRECTION.md](../DIRECTION.md)
+> was adopted, as tied to the retired delegated-delivery design. The foundation
+> below remains in code, unwired. Do not extend it without a direction change.
+
+The plan required a supported admin recovery path before production enablement.
+Enabling it in production would need new grants, which are a Director decision,
+and its separate rollout approvals.
 
 ## Implemented foundation
 

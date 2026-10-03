@@ -2,15 +2,15 @@
 
 ## Terminology
 
-Launchplane currently ships a GitHub-backed Level 1 ordered merge queue baseline.
-It reads a fresh GitHub snapshot, orders eligible pull requests, selects the first
-eligible entry, and applies at most one worker transition per service call. That
-baseline is useful for fail-closed ordering, but it is not the provider-neutral
-delivery target.
+Launchplane has two GitHub-backed runner modes. The Level 1 ordered merge queue
+reads a fresh GitHub snapshot, orders eligible pull requests, selects the first
+eligible entry, and applies at most one worker transition per service call. The
+controller runs the batch-validating train and is the preferred entrypoint; see
+`POST /v1/work-graph/merge-train/controller/run-once` below.
 
-The full Launchplane merge train target is a provider-neutral, batch-validating
-train. Source-control-specific reads and effects belong behind an adapter; the
-steps below describe the current GitHub adapter:
+The merge train is provider-neutral and batch-validating. Source-control-specific
+reads and effects belong behind an adapter; the steps below describe the current
+GitHub adapter:
 
 1. Collect eligible queued pull requests for one repository/base branch.
 2. Build one combined batch candidate from the base branch plus queued pull
@@ -22,9 +22,6 @@ steps below describe the current GitHub adapter:
 5. If the candidate fails or cannot be built, split or reduce the batch to
    isolate blockers, then mark or requeue entries according to policy.
 
-Until the batch candidate and landing records exist, docs and admins should
-describe the live implementation as the ordered merge queue baseline.
-
 Launchplane merge trains use an explicit repository policy before any worker is
 allowed to enqueue, update, or merge pull requests. Live service routes resolve
 the active `launchplane_merge_train_policies` record from Launchplane storage.
@@ -34,6 +31,10 @@ new DB-backed policy record, not by relying on checked-in config files,
 service-host env, or generic service-code conditionals.
 
 ## Preparing An Ordinary-Agent Target
+
+> Ordinary-agent delegated delivery is retired under
+> [DIRECTION.md](../DIRECTION.md). This surface remains only until its code is
+> deleted; do not build on it.
 
 The Engineering Ops Merge-train policy workbench can prepare one new target
 without reconstructing the active policy. The supported service surface is:
@@ -857,9 +858,9 @@ selects `merge`.
 A Level 1 ordered-queue worker pass applies at most one transition from one
 fresh snapshot. It may add the block label, request a branch refresh, record a
 wait boundary, perform one guarded merge, or report an idle queue; it must not
-chain follow-up reads or mutations in the same pass. The full batch train will
-use separate batch candidate and landing-plan records instead of treating a
-single selected PR as the whole train state.
+chain follow-up reads or mutations in the same pass. The controller's batch
+train uses separate batch candidate and landing-plan records instead of treating
+a single selected PR as the whole train state.
 
 The service endpoint `POST /v1/work-graph/merge-train/run-once` uses the same
 policy. Request payloads name `repository`, `base_branch`, and optional
@@ -1079,9 +1080,9 @@ phase before planning new train work.
 
 Controller landing and direct batch landing use the same per-entry guarded
 boundary documented in [merge-admission.md](merge-admission.md). Immediately
-before each provider merge, Launchplane re-resolves current Client,
-change-impact, engineering-review, technical-check, policy, candidate, queue,
-rolling-base, head/tree, lease, and expected-effect evidence. It persists one
+before each provider merge, Launchplane re-resolves current engineering-review,
+technical-check, policy, candidate, queue, rolling-base, head/tree, lease, and
+expected-effect evidence. Retired Client and change-impact gates are not read. It persists one
 immutable admission before mutation and a separate truthful landing outcome
 afterward.
 

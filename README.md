@@ -39,8 +39,10 @@ These are the current implementation surfaces, not the final Launchplane product
 shape. The intended direction is:
 
 - Launchplane service ingress over authenticated HTTP.
-- GitHub Actions OIDC for workflow-to-Launchplane trust.
-- Launchplane-owned product drivers plus thin repo extensions.
+- GitHub Actions OIDC for Launchplane's own admin and self-deploy workflows.
+- Launchplane-owned product drivers. Product repositories never call
+  Launchplane: Launchplane reacts to source-control events and verifies each
+  build's provenance (see [docs/event-driven-deploys.md](docs/event-driven-deploys.md)).
 - CLI tools that act as local/admin clients of Launchplane contracts rather than
   defining the contract themselves.
 
@@ -64,8 +66,10 @@ cd frontend && npx pnpm@10.10.0 validate
 uv run --extra dev python -m unittest
 ```
 
-Frontend validation currently covers TypeScript and the production Vite build.
-Lint, formatting, and component tests are not introduced yet.
+Frontend validation runs the frontend unit tests, the OpenAPI drift check,
+TypeScript, and the production Vite build. `pnpm --dir frontend test:browser`
+runs the Playwright browser smoke. Frontend lint and formatting are not
+introduced yet.
 
 When checking the served Launchplane UI, use a browser or `GET /ui` request. Some
 server paths may not answer `HEAD /ui` the same way as the app shell, so a
@@ -181,6 +185,7 @@ The repo now includes `.github/workflows/deploy-launchplane.yml` for that path.
 Configure these GitHub settings before enabling it:
 
 - repository variables:
+  - `LAUNCHPLANE_RUNNER_LABEL` (the self-hosted runner label both deploy jobs use)
   - `LAUNCHPLANE_DOKPLOY_TARGET_TYPE`
   - `LAUNCHPLANE_DOKPLOY_TARGET_ID`
   - `LAUNCHPLANE_DEPLOY_HEALTH_URLS`
@@ -194,21 +199,24 @@ Configure these GitHub settings before enabling it:
 - repository secrets:
   - optional `LAUNCHPLANE_GITHUB_CLIENT_SECRET`
   - optional `LAUNCHPLANE_SESSION_SECRET`
-  - emergency rollback fallback `LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST`
-  - emergency rollback fallback `LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN`
+  - break-glass rollback `LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST`
+  - break-glass rollback `LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN`
 
 The deploy workflow now uses GitHub OIDC plus Launchplane's own service API to
 request a self-deploy. It updates the immutable image reference and known OAuth
 env keys while preserving the target's minimal bootstrap policy env. Live
 product/workflow authz changes should move through DB-backed policy records, not
 repo-local TOML. Normal Dokploy credentials should live in Launchplane-managed
-secrets inside the shared store, not in GitHub repository secrets. The emergency
-rollback fallback secrets are intentionally narrower: the deploy workflow uses
-them only after a failed rollout makes the Launchplane service route unavailable
-for self-rollback.
+secrets inside the shared store, not in GitHub repository secrets. The
+break-glass rollback secrets are intentionally narrower: only the manual
+`emergency-dokploy-rollback` job reads them, in the `launchplane-break-glass`
+environment, when a `workflow_dispatch` types the `break_glass_confirm` phrase
+with an exact prior image digest and a reason. A failed automatic rollout
+restores the previous digest through the Launchplane service route instead.
 
-`LAUNCHPLANE_DEPLOY_HEALTH_URLS` must point at Launchplane URLs that GitHub-hosted
-runners can reach, typically the public `https://.../v1/health` endpoint.
+`LAUNCHPLANE_DEPLOY_HEALTH_URLS` must point at Launchplane URLs that the
+self-hosted deploy runner can reach, typically the public `https://.../v1/health`
+endpoint.
 
 Before a real Dokploy deploy, Launchplane now exposes a sanitized preflight check:
 

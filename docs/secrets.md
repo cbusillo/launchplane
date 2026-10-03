@@ -142,6 +142,9 @@ not part of this input flow.
   product/system scope and exactly the product Client policy and requirement
   read/write actions. Product identities, repository identities, and Client
   memberships remain DB-backed runtime records and do not belong in this secret.
+  Those actions belong to the retired Client policy records, whose routes are
+  deleted (see [`product-owner-policy.md`](product-owner-policy.md)), so this
+  set authorizes no current route.
 
 ## DB-Backed Secret Resolution
 
@@ -550,7 +553,7 @@ decryption key state denies the reveal or resolution.
   supervised worker rather than an arbitrary checkout or legacy service route.
 - `uv run launchplane product-config apply --input-file bundle.json --dry-run`
   previews an approved product runtime/secret bundle without printing plaintext
-  values or writing records. `--apply` writes non-secret runtime keys and
+  values or writing records. `--apply --allow-direct-db-mutation` writes non-secret runtime keys and
   managed secret values through the same DB-backed authority bundle. Runtime
   records, encrypted secret versions, current secret pointers, bindings, audit
   events, and applicable idempotency evidence commit together or roll back

@@ -158,6 +158,11 @@ finding exists or `1` otherwise.
 
 ## Composite Action
 
+> **Status.** [DIRECTION.md](../DIRECTION.md) retires product repositories
+> calling Launchplane, including pinned Launchplane workflows. Do not add new
+> product adoption of this action; where this contract should live is an open
+> question.
+
 Product workflows may call
 `.github/actions/dependency-health-trivy/action.yml` at an immutable Launchplane
 commit after producing baseline and candidate Trivy JSON reports. The action

@@ -2,6 +2,10 @@
 title: Post-v2 Product And Engineering Audit
 ---
 
+> **Historical.** Issue `#1672` closed on July 16, 2026. This page records the
+> July 2026 baseline and plan; it is not current guidance. Every Code, named
+> below, is retired; see [DIRECTION.md](../DIRECTION.md).
+
 ## Purpose
 
 This document records the baseline, findings, decisions, and execution order for
