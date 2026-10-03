@@ -3604,6 +3604,35 @@ runtime/target authority, preserves secret and deletion evidence, disables
 preview configuration, and marks the profile `retired`. Do not delete the
 profile.
 
+The service also accepts an explicit `no_target: true` retirement intent, with
+an empty `expected_target_sha256`. This narrow case requires an active generic-web
+profile with one lane, an application-name configuration, no tracked target IDs
+in its current or historical contexts, no shared context, and no preview
+generation evidence. A complete Dokploy application enumeration and fresh
+application/domain reads must show no stable name, preview prefix, repository,
+image repository, or known domain belonging to the product. Missing, malformed,
+unauthorized or incomplete provider evidence blocks planning and apply.
+
+The plan binds the profile, configuration and stale preview records. Apply
+repeats the provider proof, rechecks those records under database locks, refuses
+a running product reconciler, and atomically marks the previews destroyed and
+the profile retired. The apply confirmation is `retire product PRODUCT instance
+INSTANCE with no target`. This path makes no provider writes; runtime settings,
+target configuration, secret records and artifact/package history are preserved.
+Retired profiles are already excluded from the product reconciliation sweep.
+Running either mode against shared Launchplane remains an admin action; source
+delivery does not approve a live retirement or package deletion.
+Before apply, finish or cancel other provisioning actions for the product; do
+not start onboarding or stable-lane repair concurrently with retirement. The
+database checks fence recorded authority and the reconciler, not an independent
+provider operation that has not recorded its result yet.
+
+The updated reusable worker supports this intent. The protected dispatch wrapper
+still pins the earlier tracked-target-only worker: expose `no_target` and pin the
+wrapper to the reviewed worker's merged full SHA in a separate change before
+using that workflow for no-target retirement. Existing service API authorization
+is unchanged; do not add a grant to bypass an unavailable action.
+
 Authorization rollout uses the `product-retirement` selector in **Manage
 Launchplane Authorization**, backed by managed set
 `operator.product-retirement` and secret

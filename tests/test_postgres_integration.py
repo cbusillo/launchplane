@@ -30,6 +30,8 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from tests import test_http_app_product_retirement as retirement_tests
+from tests.http_app_test_support import _asgi_request
 from control_plane import authz_grant_service, authz_policy_activation
 from control_plane.authz_candidate_preparation import (
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS,
@@ -918,6 +920,150 @@ def _owner_acceptance_system_event(
         source_event_id=source_event_id,
         reason="PostgreSQL subject sequence integration evidence.",
     )
+
+
+class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_no_target_retirement_commits_and_replays_on_postgres(self) -> None:
+        with _head_postgres_database() as url:
+            fixture = retirement_tests.ProductRetirementHttpTests()
+            store = fixture._no_target_store(Path("."), database_url=url)
+            try:
+                app = fixture._app(
+                    store, actions=("product_retirement.plan", "product_retirement.apply")
+                )
+                payload = {
+                    **retirement_tests._plan_payload(),
+                    "no_target": True,
+                    "expected_target_sha256": "",
+                }
+                with (
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "test"),
+                    ),
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_api.search_dokploy_applications",
+                        return_value=(),
+                    ),
+                ):
+                    plan = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=fixture.headers,
+                        payload=payload,
+                    )
+                    self.assertEqual(plan.status_code, 202, plan.text)
+                    payload = {
+                        **payload,
+                        "mode": "apply",
+                        "reviewed_plan_record_id": plan.json()["records"][
+                            "product_retirement_plan_id"
+                        ],
+                        "reviewed_plan_sha256": plan.json()["result"]["plan_sha256"],
+                        "confirmation": "retire product example-site instance prod with no target",
+                    }
+                    applied = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=fixture.headers,
+                        payload=payload,
+                    )
+                    self.assertEqual(applied.status_code, 202, applied.text)
+                    replay = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=fixture.headers,
+                        payload=payload,
+                    )
+                self.assertEqual(replay.json()["records"], applied.json()["records"])
+                self.assertEqual(store.read_preview_record("stale-preview").state, "destroyed")
+                self.assertEqual(
+                    store.read_product_profile_record("example-site").lifecycle_state, "retired"
+                )
+            finally:
+                store.close()
+
+    async def test_no_target_commit_refuses_a_target_written_after_provider_read(self) -> None:
+        from control_plane.product_retirement_no_target import observe_no_target_absence
+
+        with _head_postgres_database() as url:
+            fixture = retirement_tests.ProductRetirementHttpTests()
+            store = fixture._no_target_store(Path("."), database_url=url)
+            other = PostgresRecordStore(database_url=url)
+            calls = 0
+
+            def observe(**kwargs: Any) -> Any:
+                nonlocal calls
+                calls += 1
+                observed = observe_no_target_absence(**kwargs)
+                if calls == 2:
+                    other.write_dokploy_target_id_record(
+                        DokployTargetIdRecord(
+                            context="example-site",
+                            instance="prod",
+                            target_id="late-target",
+                            updated_at=retirement_tests.NOW,
+                        )
+                    )
+                return observed
+
+            try:
+                app = fixture._app(
+                    store, actions=("product_retirement.plan", "product_retirement.apply")
+                )
+                payload = {
+                    **retirement_tests._plan_payload(),
+                    "no_target": True,
+                    "expected_target_sha256": "",
+                }
+                with (
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "test"),
+                    ),
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_api.search_dokploy_applications",
+                        return_value=(),
+                    ),
+                    patch(
+                        "control_plane.product_retirement_no_target.observe_no_target_absence",
+                        side_effect=observe,
+                    ),
+                ):
+                    plan = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=fixture.headers,
+                        payload=payload,
+                    )
+                    self.assertEqual(plan.status_code, 202, plan.text)
+                    applied = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=fixture.headers,
+                        payload={
+                            **payload,
+                            "mode": "apply",
+                            "reviewed_plan_record_id": plan.json()["records"][
+                                "product_retirement_plan_id"
+                            ],
+                            "reviewed_plan_sha256": plan.json()["result"]["plan_sha256"],
+                            "confirmation": "retire product example-site instance prod with no target",
+                        },
+                    )
+                self.assertEqual(applied.status_code, 409, applied.text)
+                self.assertEqual(store.read_preview_record("stale-preview").state, "failed")
+                self.assertEqual(
+                    store.read_product_profile_record("example-site").lifecycle_state, "active"
+                )
+            finally:
+                other.close()
+                store.close()
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):

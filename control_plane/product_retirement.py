@@ -10,6 +10,7 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_retirement import (
     MAX_PRODUCT_RETIREMENT_ERROR_MESSAGE_LENGTH,
     ProductRetirementAuthoritySnapshot,
@@ -159,11 +160,12 @@ class BoundProductRetirement:
         *,
         profile: LaunchplaneProductProfileRecord,
         context: str,
-        provider_target: ProviderTargetRecord,
+        provider_target: ProviderTargetRecord | None,
         dokploy_target: DokployTargetRecord,
-        dokploy_target_id: DokployTargetIdRecord,
+        dokploy_target_id: DokployTargetIdRecord | None,
         runtime_records: tuple[RuntimeEnvironmentRecord, ...],
         secret_records: tuple[SecretRecord, ...],
+        previews: tuple[PreviewRecord, ...] = (),
     ) -> None:
         self.profile = profile
         self.context = context
@@ -172,11 +174,16 @@ class BoundProductRetirement:
         self.dokploy_target_id = dokploy_target_id
         self.runtime_records = runtime_records
         self.secret_records = secret_records
+        self.previews = previews
 
 
 def bind_product_retirement_authority(
     *, record_store: ProductRetirementStore, request: ProductRetirementRequest
 ) -> BoundProductRetirement:
+    if request.no_target:
+        from control_plane.product_retirement_no_target import bind_no_target_retirement
+
+        return bind_no_target_retirement(record_store=record_store, request=request)
     profile = record_store.read_product_profile_record(request.product)
     if profile.driver_id.strip() != "generic-web":
         raise ProductRetirementBlockedError(
@@ -394,15 +401,23 @@ def authority_snapshot(bound: BoundProductRetirement) -> ProductRetirementAuthor
         context=bound.context,
         profile_sha256=canonical_sha256(bound.profile.model_dump(mode="json")),
         profile_updated_at=bound.profile.updated_at,
-        provider_target_sha256=canonical_sha256(bound.provider_target.model_dump(mode="json")),
+        provider_target_sha256=canonical_sha256(
+            bound.provider_target.model_dump(mode="json") if bound.provider_target else None
+        ),
         dokploy_target_sha256=canonical_sha256(bound.dokploy_target.model_dump(mode="json")),
-        dokploy_target_id_sha256=canonical_sha256(bound.dokploy_target_id.model_dump(mode="json")),
+        dokploy_target_id_sha256=canonical_sha256(
+            bound.dokploy_target_id.model_dump(mode="json") if bound.dokploy_target_id else None
+        ),
         runtime_record_refs=runtime_refs,
         runtime_record_sha256=tuple(
             canonical_sha256(record.model_dump(mode="json")) for record in bound.runtime_records
         ),
         secret_record_refs=secret_refs,
         secret_record_sha256=secret_sha256,
+        preview_record_refs=tuple(preview.preview_id for preview in bound.previews),
+        preview_record_sha256=tuple(
+            canonical_sha256(preview.model_dump(mode="json")) for preview in bound.previews
+        ),
     )
 
 
@@ -422,7 +437,16 @@ def build_product_retirement_plan_record(
         raise ProductRetirementBlockedError(
             "Product retirement planning requires an active product profile."
         )
-    if observation.state != "present" or not observation.retirable:
+    if request.no_target:
+        from control_plane.product_retirement_no_target import absence_scope_sha256
+
+        if (
+            not observation.no_target
+            or observation.state != "absent"
+            or observation.absence_scope_sha256 != absence_scope_sha256(bound)
+        ):
+            raise ProductRetirementBlockedError("No-target retirement requires provider absence.")
+    elif observation.state != "present" or not observation.retirable or observation.no_target:
         raise ProductRetirementBlockedError(
             "Product retirement requires a present, idle, retirable application."
         )
@@ -1074,6 +1098,9 @@ def redacted_product_retirement_response(record: ProductRetirementRecord) -> dic
             "instance": record.instance,
             "plan_sha256": record.plan_sha256,
             "target_id_sha256": record.provider_observation.target_id_sha256,
+            "no_target": record.provider_observation.no_target,
+            "closed_preview_ids": list(evidence.closed_preview_ids),
+            "planned_preview_ids": list(record.authority_snapshot.preview_record_refs),
             "provider_observation_sha256": canonical_sha256(
                 record.provider_observation.model_dump(
                     mode="json",
@@ -1086,7 +1113,12 @@ def redacted_product_retirement_response(record: ProductRetirementRecord) -> dic
                 else ""
             ),
             "provider_effect_phases": list(evidence.provider_effect_phases),
-            "provider_absence_verified": evidence.provider_absence_verified,
+            "provider_absence_verified": evidence.provider_absence_verified
+            or (
+                record.mode == "plan"
+                and record.provider_observation.no_target
+                and record.provider_observation.state == "absent"
+            ),
             "runtime_delete_event_count": len(evidence.runtime_delete_event_ids),
             "deleted_authority_refs": list(evidence.deleted_authority_refs),
             "disabled_secret_record_count": len(evidence.disabled_secret_record_sha256),

@@ -130,6 +130,7 @@ from control_plane.contracts.provider_delivery_readiness import (
 )
 
 if TYPE_CHECKING:
+    from control_plane.product_retirement import BoundProductRetirement
     from control_plane.contracts.merge_train_historical_completion import (
         MergeTrainHistoricalCompletionProviderEvidence,
     )
@@ -35122,6 +35123,155 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             rows = session.scalars(statement).all()
             return tuple(self._read_product_profile_payload(row.payload) for row in rows)
+
+    def commit_no_target_retirement(
+        self,
+        *,
+        bound: BoundProductRetirement,
+        terminal: ProductRetirementRecord,
+    ) -> None:
+        """Close unprovisioned previews and retire their profile in one transaction."""
+        from control_plane.product_retirement import ProductRetirementBlockedError
+
+        profile = bound.profile
+        contexts = (
+            {lane.context for lane in profile.lanes}
+            | {
+                profile.preview.context,
+                *profile.historical_contexts,
+            }
+        ) - {""}
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            self._lock_landing_authority(
+                session,
+                landing_authority.product_profile(profile.product),
+                *(
+                    landing_authority.preview_anchor(preview.anchor_repo, preview.anchor_pr_number)
+                    for preview in bound.previews
+                ),
+            )
+            if not self.database_url.startswith("sqlite"):
+                # Include insertions and generation writes, not only existing preview rows.
+                tables = ", ".join(
+                    model.__tablename__
+                    for model in (
+                        LaunchplaneProductProfileRow,
+                        LaunchplaneProviderTargetRow,
+                        LaunchplaneDokployTargetIdRow,
+                        LaunchplaneDokployTargetRow,
+                        LaunchplanePreviewRow,
+                        LaunchplanePreviewGenerationRow,
+                        LaunchplaneProductReconcileRequestRow,
+                    )
+                )
+                session.execute(text(f"LOCK TABLE {tables} IN SHARE ROW EXCLUSIVE MODE"))
+            profiles = session.scalars(select(LaunchplaneProductProfileRow)).all()
+            if session.scalar(
+                select(LaunchplaneProductReconcileRequestRow)
+                .where(
+                    LaunchplaneProductReconcileRequestRow.product == profile.product,
+                    LaunchplaneProductReconcileRequestRow.state == "running",
+                )
+                .limit(1)
+            ):
+                raise ProductRetirementBlockedError("Product reconciliation is still running.")
+            current = next((row for row in profiles if row.product == profile.product), None)
+            if current is None or self._read_product_profile_payload(current.payload) != profile:
+                raise ProductRetirementBlockedError(
+                    "No-target product profile changed before commit."
+                )
+            for row in profiles:
+                other = self._read_product_profile_payload(row.payload)
+                if other.product != profile.product and contexts.intersection(
+                    {lane.context for lane in other.lanes}
+                    | {other.preview.context, *other.historical_contexts}
+                ):
+                    raise ProductRetirementBlockedError("No-target context ownership changed.")
+            for model in (LaunchplaneProviderTargetRow, LaunchplaneDokployTargetIdRow):
+                if session.scalar(select(model).where(model.context.in_(contexts)).limit(1)):
+                    raise ProductRetirementBlockedError(
+                        "No-target authority appeared before commit."
+                    )
+            targets = session.scalars(
+                select(LaunchplaneDokployTargetRow).where(
+                    LaunchplaneDokployTargetRow.context.in_(contexts)
+                )
+            ).all()
+            if (
+                len(targets) != 1
+                or self._read_payload(model_type=DokployTargetRecord, payload=targets[0].payload)
+                != bound.dokploy_target
+            ):
+                raise ProductRetirementBlockedError(
+                    "No-target configuration changed before commit."
+                )
+            previews = session.scalars(
+                select(LaunchplanePreviewRow).where(
+                    LaunchplanePreviewRow.context == profile.preview.context
+                )
+            ).all()
+            if (
+                tuple(
+                    sorted(
+                        (PreviewRecord.model_validate(row.payload) for row in previews),
+                        key=lambda preview: preview.preview_id,
+                    )
+                )
+                != bound.previews
+            ):
+                raise ProductRetirementBlockedError("No-target previews changed before commit.")
+            if session.scalar(
+                select(LaunchplanePreviewGenerationRow)
+                .where(
+                    LaunchplanePreviewGenerationRow.preview_id.in_(
+                        tuple(preview.preview_id for preview in bound.previews)
+                    )
+                )
+                .limit(1)
+            ):
+                raise ProductRetirementBlockedError("No-target preview generation appeared.")
+            for preview_row in previews:
+                preview = PreviewRecord.model_validate(preview_row.payload)
+                if preview.state == "destroyed":
+                    continue
+                closed = preview.model_copy(
+                    update={
+                        "state": "destroyed",
+                        "destroyed_at": terminal.completed_at,
+                        "updated_at": terminal.completed_at,
+                        "destroy_reason": f"product-retirement-plan:{terminal.plan_record_id}",
+                    }
+                )
+                preview_row.state = closed.state
+                preview_row.updated_at = closed.updated_at
+                preview_row.payload = self._payload_dict(closed)
+            retired = profile.model_copy(
+                update={
+                    "lifecycle_state": "retired",
+                    "preview": profile.preview.model_copy(update={"enabled": False}),
+                    "updated_at": terminal.completed_at,
+                    "source": "service:product-retirement",
+                }
+            )
+            session.merge(self._product_profile_row(retired))
+            session.add(
+                LaunchplaneProductRetirementRow(
+                    record_id=terminal.record_id,
+                    plan_record_id=terminal.plan_record_id,
+                    product=terminal.product,
+                    context=terminal.context,
+                    instance=terminal.instance,
+                    actor=terminal.identity.actor,
+                    idempotency_key=terminal.idempotency_key,
+                    mode=terminal.mode,
+                    outcome=terminal.outcome,
+                    recorded_at=terminal.recorded_at,
+                    payload=self._payload_dict(terminal),
+                )
+            )
+            session.commit()
 
     def write_product_retirement_record(self, record: ProductRetirementRecord) -> None:
         with self._session_factory() as session:

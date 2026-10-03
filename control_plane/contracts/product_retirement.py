@@ -44,7 +44,8 @@ class ProductRetirementRequest(BaseModel):
     mode: ProductRetirementMode = "plan"
     product: str
     instance: str
-    expected_target_sha256: str
+    expected_target_sha256: str = ""
+    no_target: bool = False
     reason: str
     related_issue: str
     reviewed_plan_record_id: str = ""
@@ -56,7 +57,6 @@ class ProductRetirementRequest(BaseModel):
         for field_name in (
             "product",
             "instance",
-            "expected_target_sha256",
             "reason",
             "related_issue",
         ):
@@ -64,11 +64,15 @@ class ProductRetirementRequest(BaseModel):
             setattr(self, field_name, value)
             if not value:
                 raise ValueError(f"Product retirement requires {field_name}.")
-        self.expected_target_sha256 = self.expected_target_sha256.lower()
+        self.expected_target_sha256 = self.expected_target_sha256.strip().lower()
         self.reviewed_plan_record_id = self.reviewed_plan_record_id.strip()
         self.reviewed_plan_sha256 = self.reviewed_plan_sha256.strip().lower()
         self.confirmation = self.confirmation.strip()
-        _require_sha256(self.expected_target_sha256, "expected_target_sha256")
+        if self.no_target:
+            if self.expected_target_sha256:
+                raise ValueError("No-target retirement rejects a tracked target digest.")
+        else:
+            _require_sha256(self.expected_target_sha256, "expected_target_sha256")
         if self.mode == "plan":
             if self.reviewed_plan_record_id or self.reviewed_plan_sha256 or self.confirmation:
                 raise ValueError("Product retirement plan rejects apply-only fields.")
@@ -82,13 +86,15 @@ class ProductRetirementRequest(BaseModel):
 
     @property
     def expected_confirmation(self) -> str:
+        if self.no_target:
+            return f"retire product {self.product} instance {self.instance} with no target"
         return (
             f"retire product {self.product} instance {self.instance} "
             f"target {self.expected_target_sha256}"
         )
 
     def continuity_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema_version": self.schema_version,
             "product": self.product,
             "instance": self.instance,
@@ -96,6 +102,9 @@ class ProductRetirementRequest(BaseModel):
             "reason": self.reason,
             "related_issue": self.related_issue,
         }
+        if self.no_target:
+            payload["no_target"] = True
+        return payload
 
     @property
     def continuity_sha256(self) -> str:
@@ -142,12 +151,28 @@ class ProductRetirementProviderObservation(BaseModel):
     domain_host_sha256: tuple[str, ...] = ()
     deployment_status: str = ""
     retirable: bool
+    no_target: bool = False
+    absence_scope_sha256: str = ""
+    inventory_sha256: str = ""
 
     @model_validator(mode="after")
     def _validate_observation(self) -> "ProductRetirementProviderObservation":
         self.observed_at = self.observed_at.strip()
         self.target_id = self.target_id.strip()
         self.deployment_status = self.deployment_status.strip().lower()
+        if self.no_target:
+            if (
+                not self.observed_at
+                or self.target_id
+                or self.target_id_sha256
+                or self.state != "absent"
+                or self.retirable
+                or self.domain_ids
+            ):
+                raise ValueError("No-target observations require inventory-proven absence.")
+            _require_sha256(self.absence_scope_sha256, "absence_scope_sha256")
+            _require_sha256(self.inventory_sha256, "inventory_sha256")
+            return self
         if not self.observed_at or not self.target_id:
             raise ValueError("Product retirement provider observation is incomplete.")
         _require_sha256(self.target_id_sha256, "target_id_sha256")
@@ -194,6 +219,8 @@ class ProductRetirementAuthoritySnapshot(BaseModel):
     runtime_record_sha256: tuple[str, ...] = ()
     secret_record_refs: tuple[str, ...] = ()
     secret_record_sha256: tuple[str, ...] = ()
+    preview_record_refs: tuple[str, ...] = ()
+    preview_record_sha256: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _validate_snapshot(self) -> "ProductRetirementAuthoritySnapshot":
@@ -208,12 +235,15 @@ class ProductRetirementAuthoritySnapshot(BaseModel):
             self.dokploy_target_id_sha256,
             *self.runtime_record_sha256,
             *self.secret_record_sha256,
+            *self.preview_record_sha256,
         ):
             _require_sha256(digest, "authority snapshot digest")
         if len(self.runtime_record_refs) != len(self.runtime_record_sha256):
             raise ValueError("Runtime retirement references require matching digests.")
         if len(self.secret_record_refs) != len(self.secret_record_sha256):
             raise ValueError("Secret retirement references require matching digests.")
+        if len(self.preview_record_refs) != len(self.preview_record_sha256):
+            raise ValueError("Preview retirement references require matching digests.")
         return self
 
 
@@ -233,6 +263,7 @@ class ProductRetirementMutationEvidence(BaseModel):
     secret_disable_event_sha256: tuple[str, ...] = ()
     lifecycle_before: Literal["", "active", "retiring", "retired"] = ""
     lifecycle_after: Literal["", "active", "retiring", "retired"] = ""
+    closed_preview_ids: tuple[str, ...] = ()
     error_code: str = ""
     error_message: str = Field(default="", max_length=MAX_PRODUCT_RETIREMENT_ERROR_MESSAGE_LENGTH)
 
