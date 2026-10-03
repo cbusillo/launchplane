@@ -803,6 +803,7 @@ from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.factory import storage_backend_name
 from control_plane.storage.product_authority_bundle import (
     SecretCopySourceConflictError,
+    SecretRecordConflictError,
     ProductAuthorityBundle,
     ProductContextOwnershipError,
     ProductProfileConflictError,
@@ -15354,7 +15355,7 @@ def create_launchplane_fastapi_app(
             if secret.copy_from is not None
         ]
         if (
-            copy_references
+            (copy_references or product_config_request.adopts_provider_secrets())
             and product_config_request.mode == "apply"
             and not product_config_dry_run_exists(
                 record_store=database_store,
@@ -15367,7 +15368,7 @@ def create_launchplane_fastapi_app(
                 status_code=409,
                 trace_id=trace_id,
                 code="matching_dry_run_required",
-                message="Secret copy requires a prior matching dry-run.",
+                message="Secret copy and provider adoption require a prior matching dry-run.",
             )
 
         def secret_copy_source_readable(*, context: str, instance: str) -> bool:
@@ -15405,7 +15406,7 @@ def create_launchplane_fastapi_app(
                 )
         lane_provider_env_reader: control_plane_product_config.LaneProviderEnvReader | None = None
         try:
-            if product_config_request.adopts_provider_keys() and product_config_request.instance:
+            if product_config_request.reads_lane_provider_env() and product_config_request.instance:
                 # The service reads the provider values itself; they never reach the caller.
                 lane_provider_env = await asyncio.to_thread(
                     control_plane_product_config_service.read_lane_provider_env,
@@ -15530,7 +15531,9 @@ def create_launchplane_fastapi_app(
             records={},
             result=ProductConfigApplyResult.model_validate(driver_result),
         )
-        if (operator_identity or copy_references) and product_config_request.mode == "dry-run":
+        if (
+            operator_identity or copy_references or product_config_request.adopts_provider_secrets()
+        ) and product_config_request.mode == "dry-run":
             store_product_config_dry_run_record(
                 record_store=database_store,
                 identity=identity,
@@ -15648,6 +15651,16 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="secret_copy_source_changed",
                 message="The secret copy source changed. Read metadata and review a fresh dry-run.",
+            ) from error
+        except SecretRecordConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="provider_secret_already_recorded",
+                message=(
+                    "A secret named for provider adoption was recorded before commit. "
+                    "Review a fresh dry-run."
+                ),
             ) from error
         except ProductProfileConflictError as error:
             raise _launchplane_http_error(

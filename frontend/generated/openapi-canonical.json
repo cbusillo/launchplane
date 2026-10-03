@@ -74581,6 +74581,19 @@
                   "ProductConfigSecretInput": {
                     "additionalProperties": true,
                     "properties": {
+                      "adopt_from_provider": {
+                        "anyOf": [
+                          {
+                            "const": true,
+                            "type": "boolean"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "description": "Store the lane's current provider env value for binding_key; the service reads it, and no value is sent or returned.",
+                        "title": "Adopt From Provider"
+                      },
                       "binding_key": {
                         "anyOf": [
                           {

@@ -2316,6 +2316,9 @@ return a typed blocked result rather than guessing a domain.
   keys and review a fresh dry run. A key cannot be adopted and also set or
   retired in the same request. Apply reads the provider again, so a value
   changed on the provider after the dry run is the one recorded.
+- To move a lane's provider-only credential into a managed secret, use a
+  product-config secret entry with `adopt_from_provider: true` instead of a
+  value; see "Adopting a provider-only credential" in `secrets.md`.
 - Platform credentials never reach an app runtime. Every path that renders or
   writes an app runtime environment (live-target runtime sync, ship and
   promotion, Odoo stable bootstrap and target replacement, backup restore, and
