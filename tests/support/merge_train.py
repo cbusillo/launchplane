@@ -71,9 +71,11 @@ class _FakeMergeTrainGitHubClient:
         transport: object,
         effect_executor: MergeTrainSemanticEffectExecutor | None = None,
         branch_refresh_recorder: object | None = None,
+        branch_refresh_store: object | None = None,
     ) -> None:
         self.transport = transport
         self.branch_refresh_recorder = branch_refresh_recorder
+        self._branch_refresh_store = branch_refresh_store
         self.semantic_effect_executor = (
             effect_executor
             if effect_executor is not None
@@ -555,7 +557,7 @@ class _NoopMergeTrainGitHubClient:
 
 
 class _FakeMergeTrainSnapshotReader:
-    def __init__(self, *, transport: object) -> None:
+    def __init__(self, *, transport: object, branch_refresh_store: object | None = None) -> None:
         self.transport = transport
 
     def read_merge_train_snapshot(
@@ -621,7 +623,7 @@ class _FakeExpandedMergeTrainSnapshotReader(_FakeMergeTrainSnapshotReader):
 
 
 class _FakeEmptyMergeTrainSnapshotReader:
-    def __init__(self, *, transport: object) -> None:
+    def __init__(self, *, transport: object, branch_refresh_store: object | None = None) -> None:
         self.transport = transport
 
     def read_merge_train_snapshot(
@@ -636,7 +638,7 @@ class _FakeEmptyMergeTrainSnapshotReader:
 
 
 class _FakeStackedMergeTrainSnapshotReader:
-    def __init__(self, *, transport: object) -> None:
+    def __init__(self, *, transport: object, branch_refresh_store: object | None = None) -> None:
         self.transport = transport
 
     def read_merge_train_snapshot(

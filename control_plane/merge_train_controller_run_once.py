@@ -69,6 +69,7 @@ from control_plane.merge_train_batch_landing import (
 from control_plane.merge_train_branch_refresh import (
     MergeTrainBranchRefreshWriteStore,
     merge_train_branch_refresh_recorder,
+    optional_merge_train_branch_refresh_read_store,
 )
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
@@ -352,6 +353,7 @@ def execute_merge_train_controller_run_once(
     github_client = GitHubMergeTrainClient(
         transport=transport,
         effect_executor=effect_executor,
+        branch_refresh_store=optional_merge_train_branch_refresh_read_store(branch_refresh_store),
         branch_refresh_recorder=(
             merge_train_branch_refresh_recorder(
                 store=branch_refresh_store,

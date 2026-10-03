@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from control_plane.contracts.advisory_check_projection import is_launchplane_projected_check
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
+from control_plane.contracts.merge_train_branch_refresh_record import MergeTrainBranchRefreshRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchEntry
 from control_plane.contracts.merge_train_batch import MergeTrainBatchHeldOutEntry
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingEntry
@@ -60,6 +61,12 @@ from control_plane.merge_train import MergeTrainQueueEntry
 from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionDeniedError
 
 logger = logging.getLogger(__name__)
+
+
+class MergeTrainBranchRefreshReadStore(Protocol):
+    def list_merge_train_branch_refresh_records(
+        self, *, repository: str, pull_request_number: int
+    ) -> tuple[MergeTrainBranchRefreshRecord, ...]: ...
 
 
 class MergeTrainBranchRefreshRecorder(Protocol):
@@ -231,27 +238,29 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         transport: MergeTrainGitHubTransport,
         effect_executor: MergeTrainSemanticEffectExecutor | None = None,
         branch_refresh_recorder: MergeTrainBranchRefreshRecorder | None = None,
+        branch_refresh_store: MergeTrainBranchRefreshReadStore | None = None,
         wait: Callable[[float], None] = sleep,
     ) -> None:
         self.transport = transport
         self._effect_executor = effect_executor
         self._branch_refresh_recorder = branch_refresh_recorder
+        self._branch_refresh_store = branch_refresh_store
         self._wait = wait
 
     def read_merge_train_snapshot(
         self, *, repository: str, base_branch: str
     ) -> MergeTrainDryRunSnapshot:
         """Read planning evidence through the client-owned provider boundary."""
-        return GitHubMergeTrainSnapshotReader(transport=self.transport).read_merge_train_snapshot(
-            repository=repository, base_branch=base_branch
-        )
+        return GitHubMergeTrainSnapshotReader(
+            transport=self.transport, branch_refresh_store=self._branch_refresh_store
+        ).read_merge_train_snapshot(repository=repository, base_branch=base_branch)
 
     def read_pull_request_snapshot(
         self, *, repository: str, pull_request_number: int
     ) -> MergeTrainPullRequestSnapshot:
-        return GitHubMergeTrainSnapshotReader(transport=self.transport).read_pull_request_snapshot(
-            repository=repository, pull_request_number=pull_request_number
-        )
+        return GitHubMergeTrainSnapshotReader(
+            transport=self.transport, branch_refresh_store=self._branch_refresh_store
+        ).read_pull_request_snapshot(repository=repository, pull_request_number=pull_request_number)
 
     def observe_historical_batch_completion(
         self,
@@ -2052,8 +2061,14 @@ class LegacyMergeTrainEffectExecutor:
 
 
 class GitHubMergeTrainSnapshotReader:
-    def __init__(self, *, transport: MergeTrainGitHubTransport) -> None:
+    def __init__(
+        self,
+        *,
+        transport: MergeTrainGitHubTransport,
+        branch_refresh_store: MergeTrainBranchRefreshReadStore | None = None,
+    ) -> None:
         self.transport = transport
+        self._branch_refresh_store = branch_refresh_store
         self._actor_roles: dict[tuple[str, str], str] = {}
 
     def read_merge_train_snapshot(
@@ -2172,6 +2187,8 @@ class GitHubMergeTrainSnapshotReader:
                 pull_request_number=pull_request_number,
                 author_id=actor_id,
                 head_sha=head_sha,
+                base_branch=str(base.get("ref") or ""),
+                base_sha=str(base.get("sha") or ""),
             )
             if str(user.get("type") or "") == "Bot"
             else None
@@ -2204,7 +2221,14 @@ class GitHubMergeTrainSnapshotReader:
         )
 
     def _safe_dependency_update_class(
-        self, *, repository_path: str, pull_request_number: int, author_id: int, head_sha: str
+        self,
+        *,
+        repository_path: str,
+        pull_request_number: int,
+        author_id: int,
+        head_sha: str,
+        base_branch: str,
+        base_sha: str,
     ) -> DependencyUpdateClass:
         # A read failure only withholds label-free admission; it must not stop the train.
         try:
@@ -2213,12 +2237,21 @@ class GitHubMergeTrainSnapshotReader:
                 pull_request_number=pull_request_number,
                 author_id=author_id,
                 head_sha=head_sha,
+                base_branch=base_branch,
+                base_sha=base_sha,
             )
         except MergeTrainGitHubError:
             return "needs_review"
 
     def _dependency_update_class(
-        self, *, repository_path: str, pull_request_number: int, author_id: int, head_sha: str
+        self,
+        *,
+        repository_path: str,
+        pull_request_number: int,
+        author_id: int,
+        head_sha: str,
+        base_branch: str,
+        base_sha: str,
     ) -> DependencyUpdateClass:
         payload = self.transport.request(
             method="GET",
@@ -2231,6 +2264,7 @@ class GitHubMergeTrainSnapshotReader:
         if commits[-1].get("sha") != head_sha:
             return "needs_review"
         messages: list[str] = []
+        commit_shas = {commit.get("sha") for commit in commits}
         for commit in commits:
             # A commit author is only an email, so a collaborator can amend and
             # keep it. Require the bot as author and a GitHub-signed commit.
@@ -2239,13 +2273,22 @@ class GitHubMergeTrainSnapshotReader:
             detail = _json_object(commit.get("commit"), "GitHub pull request commit detail")
             verification = detail.get("verification")
             if (
-                not isinstance(author, dict)
-                or author.get("id") != author_id
-                or not isinstance(committer, dict)
+                not isinstance(committer, dict)
                 or committer.get("id") != _GITHUB_WEB_FLOW_USER_ID
                 or not isinstance(verification, dict)
                 or verification.get("verified") is not True
             ):
+                return "needs_review"
+            if self._recorded_base_refresh(
+                repository_path=repository_path,
+                pull_request_number=pull_request_number,
+                commit=commit,
+                commit_shas=commit_shas,
+                base_branch=base_branch,
+                base_sha=base_sha,
+            ):
+                continue
+            if not isinstance(author, dict) or author.get("id") != author_id:
                 return "needs_review"
             messages.append(str(detail.get("message") or ""))
         if self._force_pushed_by_other(
@@ -2255,6 +2298,54 @@ class GitHubMergeTrainSnapshotReader:
         ):
             return "needs_review"
         return classify_dependency_update(messages)
+
+    def _recorded_base_refresh(
+        self,
+        *,
+        repository_path: str,
+        pull_request_number: int,
+        commit: dict[str, object],
+        commit_shas: set[object],
+        base_branch: str,
+        base_sha: str,
+    ) -> bool:
+        parents = commit.get("parents")
+        if not isinstance(parents, list) or len(parents) != 2 or self._branch_refresh_store is None:
+            return False
+        parent_shas = [
+            parent.get("sha") if isinstance(parent, dict) else None for parent in parents
+        ]
+        if parent_shas[0] not in commit_shas:
+            return False
+        try:
+            records = self._branch_refresh_store.list_merge_train_branch_refresh_records(
+                repository=repository_path, pull_request_number=pull_request_number
+            )
+        except Exception:
+            logger.warning("Cannot read train branch refresh evidence.", exc_info=True)
+            return False
+        for record in records:
+            if (
+                record.repository.casefold() != repository_path.casefold()
+                or record.pull_request_number != pull_request_number
+                or record.base_branch != base_branch
+                or record.result_head_sha != commit.get("sha")
+                or record.expected_head_sha != parent_shas[0]
+                or record.merged_base_sha != parent_shas[1]
+            ):
+                continue
+            comparison = _json_object(
+                self.transport.request(
+                    method="GET",
+                    path=(
+                        f"/repos/{repository_path}/compare/{record.merged_base_sha}..."
+                        f"{quote(base_sha, safe='')}"
+                    ),
+                ),
+                "GitHub base ancestry comparison",
+            )
+            return comparison.get("status") in {"ahead", "identical"}
+        return False
 
     def _force_pushed_by_other(
         self, *, repository_path: str, pull_request_number: int, author_id: int
