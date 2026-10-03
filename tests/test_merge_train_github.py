@@ -33,6 +33,10 @@ from control_plane.contracts.merge_train_structural_provenance import (
 )
 from control_plane.merge_train import MergeTrainLabelActor
 from control_plane.merge_train import MergeTrainQueueEntry
+from control_plane.merge_train import MergeTrainDryRunSnapshot
+from control_plane.merge_train import MergeTrainReviewConversations
+from control_plane.merge_train import MergeTrainReviewThread
+from control_plane.merge_train import review_conversations_reason
 from control_plane.merge_train_github import GitHubMergeTrainClient
 from control_plane.merge_train_github import MergeTrainGitHubCandidateEntryConflictError
 from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader
@@ -241,7 +245,8 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             ({"head": {"sha": "new-head"}}, "unconfirmed"),
             ({"state": "closed"}, "unconfirmed"),
             ({"number": 43}, "unconfirmed"),
-            ({"mergeable_state": "blocked"}, "unconfirmed"),
+            ({"mergeable_state": "blocked"}, "merge_blocked"),
+            ({"mergeable_state": "blocked", "head": {"sha": "new-head"}}, "unconfirmed"),
         ):
             with self.subTest(changes=changes):
                 transport = RecordingMergeTrainGitHubTransport(
@@ -2850,6 +2855,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _label_events(),
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
+                _conversation_rule(),
             )
         )
         reader = GitHubMergeTrainSnapshotReader(transport=transport)
@@ -2893,6 +2899,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 "/repos/cbusillo/sellyouroutboard/issues/43/events?per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/commits/head-43/status?per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/commits/head-43/check-runs?per_page=100&page=1",
+                "/graphql",
             ],
         )
         self.assertNotIn("/pulls/44", "\n".join(request.path for request in transport.requests))
@@ -2909,6 +2916,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _label_events(),
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
+                _conversation_rule(),
             )
         )
 
@@ -2984,7 +2992,11 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 if expected == "patch_or_minor" or label == "force-pushed by someone else":
                     responses.append(timeline)
                 responses.extend(
-                    [_combined_status(), {"check_runs": [_check_run("completed", "success")]}]
+                    [
+                        _combined_status(),
+                        {"check_runs": [_check_run("completed", "success")]},
+                        _conversation_rule(),
+                    ]
                 )
                 transport = RecordingMergeTrainGitHubTransport(responses=tuple(responses))
 
@@ -3016,6 +3028,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     "total_count": 101,
                     "check_runs": [{"name": "check-100", **_check_run("completed", "failure")}],
                 },
+                _conversation_rule(),
             )
         )
 
@@ -3059,6 +3072,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     ],
                 },
                 {"check_runs": [_check_run("completed", "success")]},
+                _conversation_rule(),
             )
         )
 
@@ -3089,6 +3103,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     {"check_runs": [_check_run("completed", "success")]},
                 ]
             )
+        responses.append(_conversation_rule())
         transport = RecordingMergeTrainGitHubTransport(responses=tuple(responses))
 
         snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
@@ -3108,6 +3123,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _label_events(),
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
+                _conversation_rule(),
             )
         )
 
@@ -3128,6 +3144,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _label_events(),
                 _combined_status(),
                 {"check_runs": [_check_run("queued", None)]},
+                _conversation_rule(),
             )
         )
 
@@ -3139,7 +3156,13 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
         self.assertEqual(pull_request.mergeable, "unknown")
         self.assertEqual(pull_request.required_checks_status, "pending")
         self.assertTrue(pull_request.branch_update_required)
-        self.assertTrue(all(request.method == "GET" for request in transport.requests))
+        # GraphQL reads use POST; nothing else may write.
+        self.assertTrue(
+            all(
+                request.method == "GET" or request.path == "/graphql"
+                for request in transport.requests
+            )
+        )
 
     def test_snapshot_reader_uses_check_runs_when_legacy_statuses_are_absent(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
@@ -3151,6 +3174,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _label_events(),
                 _combined_status(statuses=()),
                 {"check_runs": [_check_run("completed", "success")]},
+                _conversation_rule(),
             )
         )
 
@@ -3175,6 +3199,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 {"permission": "write"},
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
+                _conversation_rule(),
             )
         )
 
@@ -3215,6 +3240,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                         [event],
                         _combined_status(),
                         {"check_runs": [_check_run("completed", "success")]},
+                        _conversation_rule(),
                     )
                 )
 
@@ -3228,6 +3254,93 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     snapshot.pull_requests[0].label_actors[0].on_behalf_via_app, expected_app
                 )
 
+    def _read_with_conversations(
+        self, *, rule: object, threads: dict[tuple[int, object], dict[str, object]]
+    ) -> tuple[MergeTrainDryRunSnapshot, list[dict[str, object]]]:
+        graphql_bodies: list[dict[str, object]] = []
+
+        class Transport(RecordingMergeTrainGitHubTransport):
+            def request(
+                self, *, method: str, path: str, body: dict[str, object] | None = None
+            ) -> object:
+                if path == "/graphql":
+                    assert body is not None
+                    graphql_bodies.append(body)
+                    variables = cast(dict[str, object], body["variables"])
+                    if "number" not in variables:
+                        return rule
+                    return threads[(cast(int, variables["number"]), variables["after"])]
+                if path.endswith("/branches/main"):
+                    return _github_branch()
+                if "/pulls?" in path:
+                    return [_github_pull_request(20), _github_pull_request(21)]
+                if "/pulls/" in path:
+                    return _github_pull_request(int(path.rsplit("/", 1)[1]))
+                if "/collaborators/" in path:
+                    return {"permission": "admin"}
+                if "/events?" in path:
+                    return _label_events()
+                if "/status?" in path:
+                    return _combined_status()
+                return {"check_runs": [_check_run("completed", "success")]}
+
+        snapshot = GitHubMergeTrainSnapshotReader(transport=Transport()).read_merge_train_snapshot(
+            repository="cbusillo/sellyouroutboard", base_branch="main"
+        )
+        return snapshot, graphql_bodies
+
+    def test_snapshot_reader_records_unresolved_threads_when_the_base_requires_resolution(
+        self,
+    ) -> None:
+        snapshot, bodies = self._read_with_conversations(
+            rule=_conversation_rule(True),
+            threads={
+                (20, None): _review_threads((True, "a.py", "reviewer"), end_cursor="page-2"),
+                (20, "page-2"): _review_threads((False, "b.py", "github-advanced-security")),
+                (21, None): _review_threads((True, "c.py", "reviewer")),
+            },
+        )
+
+        first, second = snapshot.pull_requests
+        self.assertEqual(
+            first.review_conversations,
+            MergeTrainReviewConversations(
+                rule="required",
+                unresolved=(
+                    MergeTrainReviewThread(path="b.py", author_login="github-advanced-security"),
+                ),
+            ),
+        )
+        self.assertIsNone(second.review_conversations)
+        self.assertEqual(cast(dict[str, object], bodies[0]["variables"])["ref"], "refs/heads/main")
+
+    def test_snapshot_reader_skips_threads_when_the_base_does_not_require_resolution(
+        self,
+    ) -> None:
+        for rule in (_conversation_rule(False), _conversation_rule(None)):
+            with self.subTest(rule=rule):
+                snapshot, bodies = self._read_with_conversations(rule=rule, threads={})
+
+                self.assertEqual(len(bodies), 1)
+                self.assertTrue(
+                    all(item.review_conversations is None for item in snapshot.pull_requests)
+                )
+
+    def test_snapshot_reader_treats_an_unreadable_rule_as_possibly_blocking(self) -> None:
+        snapshot, _ = self._read_with_conversations(
+            rule={"errors": [{"message": "Resource not accessible by integration"}]},
+            threads={
+                (20, None): _review_threads((False, "a.py", "reviewer")),
+                (21, None): _review_threads(),
+            },
+        )
+
+        conversations = snapshot.pull_requests[0].review_conversations
+        assert conversations is not None
+        self.assertEqual(conversations.rule, "unreadable")
+        self.assertIn("could not be read", review_conversations_reason(conversations))
+        self.assertIsNone(snapshot.pull_requests[1].review_conversations)
+
     def test_snapshot_reader_fails_closed_on_missing_required_shape(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=(_github_branch(), [{"number": 1}])
@@ -3237,6 +3350,40 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
                 repository="cbusillo/sellyouroutboard", base_branch="main"
             )
+
+
+def _conversation_rule(required: bool | None = False) -> dict[str, object]:
+    """GraphQL answer for the base branch's conversation-resolution rule."""
+    rule = None if required is None else {"requiresConversationResolution": required}
+    return {"data": {"repository": {"ref": {"refUpdateRule": rule}}}}
+
+
+def _review_threads(
+    *threads: tuple[bool, str, str], end_cursor: str | None = None
+) -> dict[str, object]:
+    """GraphQL page of review threads, each as (resolved, path, first author)."""
+    return {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "reviewThreads": {
+                        "nodes": [
+                            {
+                                "isResolved": resolved,
+                                "path": path,
+                                "comments": {"nodes": [{"author": {"login": author}}]},
+                            }
+                            for resolved, path, author in threads
+                        ],
+                        "pageInfo": {
+                            "hasNextPage": end_cursor is not None,
+                            "endCursor": end_cursor,
+                        },
+                    }
+                }
+            }
+        }
+    }
 
 
 def _label_events(

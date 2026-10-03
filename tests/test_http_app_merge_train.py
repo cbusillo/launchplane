@@ -31,7 +31,12 @@ from control_plane.merge_admission import (
     MergeAdmissionDeniedError,
     MergeAdmissionEvaluation,
 )
-from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
+from control_plane.merge_train import (
+    MergeTrainDryRunSnapshot,
+    MergeTrainPullRequestSnapshot,
+    MergeTrainReviewConversations,
+    MergeTrainReviewThread,
+)
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from control_plane.merge_train_controller_run_once import MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION
 from control_plane.contracts.merge_train_effect import (
@@ -2699,7 +2704,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 kwargs["admission_guard"].update_landing_plan_record(record)
                 kwargs["provider_checkpoint"](progress, second)
                 raise MergeTrainGitHubMergeRejectedError(
-                    pull_request_number=second.pull_request_number, head_behind_base=True
+                    pull_request_number=second.pull_request_number, observed_merge_state="behind"
                 )
 
         with (
@@ -2758,6 +2763,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 "github_status_code": 405,
                 "pull_request_number": 2,
                 "refusal_diagnosis": "head_behind_base",
+                "github_mergeable_state": "behind",
             },
         )
         self.assertIn("inspect the refusal diagnosis", payload["error"]["message"])
@@ -3231,6 +3237,92 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             [entry["pull_request_number"] for entry in results[-1]["landing_plan"]["entries"]],
             [1, 3],
         )
+
+    async def test_unresolved_conversation_drops_its_entry_before_any_merge(self) -> None:
+        """#2650: GitHub refused a whole batch over one entry's open code-scanning thread."""
+
+        class ThreadedSecondReader(_ThreeQueuedSnapshotReader):
+            def read_merge_train_snapshot(
+                self, *, repository: str, base_branch: str
+            ) -> MergeTrainDryRunSnapshot:
+                snapshot = super().read_merge_train_snapshot(
+                    repository=repository, base_branch=base_branch
+                )
+                conversations = MergeTrainReviewConversations(
+                    rule="required",
+                    unresolved=(
+                        MergeTrainReviewThread(
+                            path="tests/test_release.py",
+                            author_login="github-advanced-security",
+                        ),
+                    ),
+                )
+                return snapshot.model_copy(
+                    update={
+                        "pull_requests": tuple(
+                            pull_request.model_copy(update={"review_conversations": conversations})
+                            if pull_request.number == 2
+                            else pull_request
+                            for pull_request in snapshot.pull_requests
+                        )
+                    }
+                )
+
+        landed: list[tuple[int, ...]] = []
+
+        class RecordingClient(_FakeMergeTrainGitHubClient):
+            def land_batch_candidate(self, **kwargs: Any) -> Any:
+                landed.append(
+                    tuple(entry.pull_request_number for entry in kwargs["landing_plan"].entries)
+                )
+                return super().land_batch_candidate(**kwargs)
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            results = []
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    ThreadedSecondReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    RecordingClient,
+                ),
+            ):
+                for _ in range(5):
+                    response = await _post_merge_train_controller_run_once(app, request_payload)
+                    results.append(response.json()["result"])
+
+        self.assertEqual(results[-1]["controller_action"], "land_batch")
+        self.assertEqual(
+            [entry["pull_request_number"] for entry in results[0]["candidate"]["entries"]],
+            [1, 3],
+        )
+        self.assertEqual(landed, [(1, 3)])
+        dropped = next(
+            entry for entry in results[0]["dry_run_result"]["queue"] if entry["number"] == 2
+        )
+        self.assertFalse(dropped["eligible"])
+        (reason,) = dropped["ineligible_reasons"]
+        self.assertIn("unresolved review conversation on tests/test_release.py", reason)
+        self.assertIn("fix the code-scanning finding", reason)
 
     async def test_dry_run_planning_reports_the_conflict_probe_without_running_it(self) -> None:
         class NoProbeClient(_FakeMergeTrainGitHubClient):

@@ -5862,6 +5862,7 @@ def create_launchplane_fastapi_app(
                         "github_status_code": error.status_code,
                         "pull_request_number": error.pull_request_number,
                         "refusal_diagnosis": error.refusal_diagnosis,
+                        "github_mergeable_state": error.observed_merge_state or None,
                     },
                 },
             )

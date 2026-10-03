@@ -18,6 +18,7 @@ from tests.test_merge_train_dependency_updates import INDIRECT_PATCH, MAJOR
 from tests.test_merge_train_github import (
     _check_run,
     _combined_status,
+    _conversation_rule,
     _github_branch,
     _github_commit,
     _github_pull_request,
@@ -106,6 +107,8 @@ class DependencyRefreshTests(unittest.TestCase):
                     return _combined_status()
                 if "/check-runs" in path:
                     return {"check_runs": [_check_run("completed", "success")]}
+                if path == "/graphql":
+                    return _conversation_rule()
                 return super().request(method=method, path=path, body=body)
 
         comparisons = iter(ancestry)

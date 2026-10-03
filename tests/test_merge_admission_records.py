@@ -1012,7 +1012,7 @@ class GuardedMergeAdmissionScenarioTests(unittest.TestCase):
         guard = self._guard()
         admission = self._admit(guard)
         error = MergeTrainGitHubMergeRejectedError(
-            pull_request_number=admission.pull_request_number, head_behind_base=True
+            pull_request_number=admission.pull_request_number, observed_merge_state="behind"
         )
 
         outcome = guard.record_provider_failure(
