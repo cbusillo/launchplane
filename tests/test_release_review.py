@@ -26,7 +26,11 @@ from control_plane.release_review import (
     require_release_approval,
     require_unchanged_production_artifact,
 )
-from control_plane.release_review_github import owner_test_notes, read_release_changes
+from control_plane.release_review_github import (
+    nest_owner_test_notes,
+    owner_test_notes,
+    read_release_changes,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.stores import sqlite_database_url
@@ -397,6 +401,16 @@ class ReleaseGitHubTests(unittest.TestCase):
                 "## Owner test notes\nCheck checkout.\n## Tests\nPassed.\n## Owner test notes\nCheck booking."
             ),
             "Check checkout.\nCheck booking.",
+        )
+
+    def test_nested_notes_cannot_end_or_swallow_the_enclosing_section(self) -> None:
+        nested = nest_owner_test_notes(
+            "Check cart.\n## Phone\nSmall screen\n```\n# Example\nopen fence",
+            min_heading_level=4,
+        )
+        self.assertEqual(
+            owner_test_notes(f"## Owner test notes\n### #1\n{nested}\n## Other\nLeak"),
+            "### #1\nCheck cart.\n#### Phone\nSmall screen\n```\n# Example\nopen fence\n```",
         )
 
     def test_incomplete_comparison_fails_closed(self) -> None:

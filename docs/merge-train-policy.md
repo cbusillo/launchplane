@@ -408,7 +408,12 @@ provider adapter.
 
 After a multi-entry candidate passes, repositories configured for `merge` use a
 Launchplane-created batch pull request whose head is that exact candidate. Its
-body identifies every constituent PR and reviewed head. The original PRs and
+body identifies every constituent PR and reviewed head, and its
+`Owner test notes` section carries each constituent's own notes under a
+`### #<number> <title>` subheading, read when the batch PR is created. Headings
+inside those notes are demoted so they stay within the section, and a
+constituent without notes is named as having none. Later edits to a
+constituent's notes are not copied into an existing batch PR. The original PRs and
 source branches remain intact. GitHub enforces normal protected-PR checks,
 reviews, CodeQL, and base freshness on the batch PR; Launchplane never pushes
 the protected base ref. The batch PR has no enqueue label and is not another

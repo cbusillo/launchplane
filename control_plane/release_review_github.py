@@ -1,7 +1,7 @@
 """GitHub adapter for the actual commits in a release, independent of milestones."""
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from urllib.parse import quote
 
 from control_plane.contracts.release_review import ReleaseReviewItem
@@ -10,11 +10,8 @@ from control_plane.contracts.release_review import ReleaseReviewItem
 GitHubRead = Callable[[str], object]
 
 
-def owner_test_notes(body: str) -> str:
-    """Collect Owner notes sections, ignoring headings inside fenced examples."""
-    lines: list[str] = []
-    collecting = False
-    level = 0
+def _markdown_lines(body: str) -> Iterator[tuple[str, re.Match[str] | None, str]]:
+    """Yield each line, its heading match outside fenced code, and the open fence."""
     fence = ""
     for line in body.splitlines():
         stripped = line.lstrip()
@@ -22,6 +19,15 @@ def owner_test_notes(body: str) -> str:
             marker = stripped[:3]
             fence = "" if fence == marker else marker if not fence else fence
         heading = re.match(r"^(#{1,6})\s+(.+?)\s*#*\s*$", line) if not fence else None
+        yield line, heading, fence
+
+
+def owner_test_notes(body: str) -> str:
+    """Collect Owner notes sections, ignoring headings inside fenced examples."""
+    lines: list[str] = []
+    collecting = False
+    level = 0
+    for line, heading, _fence in _markdown_lines(body):
         if heading:
             if heading[2].strip().casefold() == "owner test notes":
                 collecting = True
@@ -32,6 +38,25 @@ def owner_test_notes(body: str) -> str:
         if collecting:
             lines.append(line)
     return "\n".join(lines).strip()
+
+
+def nest_owner_test_notes(notes: str, *, min_heading_level: int) -> str:
+    """Demote headings so collected notes stay inside an enclosing notes section.
+
+    Headings keep their relative order down to level 6, and a fence left open
+    is closed so it cannot swallow the enclosing document.
+    """
+    levels = [len(heading[1]) for _line, heading, _fence in _markdown_lines(notes) if heading]
+    shift = max(0, min_heading_level - min(levels, default=min_heading_level))
+    lines: list[str] = []
+    fence = ""
+    for line, heading, fence in _markdown_lines(notes):
+        if heading:
+            line = "#" * min(6, len(heading[1]) + shift) + line[len(heading[1]) :]
+        lines.append(line)
+    if fence:
+        lines.append(fence)
+    return "\n".join(lines)
 
 
 def read_release_changes(

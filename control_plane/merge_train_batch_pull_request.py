@@ -35,6 +35,7 @@ from control_plane.merge_train_github import (
     _validated_model_update,
     _wait_for_branch_sha,
 )
+from control_plane.release_review_github import nest_owner_test_notes, owner_test_notes
 
 
 def _candidate_branch(
@@ -122,6 +123,36 @@ def _owned_batch_pull_request(
             "PR is not owned by the recorded Launchplane candidate ref."
         )
     return pull_request
+
+
+def _batch_owner_test_notes(
+    *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
+) -> str:
+    """Carry each constituent's own Owner test notes into the batch PR body.
+
+    GitHub attributes a batch-landed commit to the batch PR alone, so release
+    review reads these notes from the batch PR, never from the constituents.
+    """
+    sections = []
+    for entry in candidate.entries:
+        detail = client._pull_request_detail(
+            repository=candidate.repository, pull_request_number=entry.pull_request_number
+        )
+        title = detail.get("title")
+        heading = f"### #{entry.pull_request_number}" + (
+            f" {title.strip()}" if isinstance(title, str) and title.strip() else ""
+        )
+        body = detail.get("body")
+        notes = owner_test_notes(body if isinstance(body, str) else "")
+        sections.append(
+            f"{heading}\n\n"
+            + (
+                nest_owner_test_notes(notes, min_heading_level=4)
+                if notes
+                else f"#{entry.pull_request_number} has no Owner test notes."
+            )
+        )
+    return "## Owner test notes\n\n" + "\n\n".join(sections)
 
 
 def _find_batch_pull_request(
@@ -250,7 +281,8 @@ def ensure_batch_pull_request(
                     "Keep source PRs and branches intact. Let the Launchplane controller merge this PR; "
                     "do not merge it by hand or update its generated branch. An out-of-controller merge "
                     "without a preceding admission remains fenced for explicit reconciliation. "
-                    "The controller confirms constituent completion after landing."
+                    "The controller confirms constituent completion after landing.\n\n"
+                    + _batch_owner_test_notes(client=client, candidate=candidate)
                 ),
             },
         )
