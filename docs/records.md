@@ -6,8 +6,7 @@ title: Records
 
 - Persist local-dev records as JSON files in a local state directory.
 - Use Postgres-backed Launchplane core-record tables for shared-service ingress
-  when Launchplane is running with `LAUNCHPLANE_DATABASE_URL` or
-  `launchplane service serve --database-url ...`.
+  when Launchplane is running with `LAUNCHPLANE_DATABASE_URL` in its environment.
 - Use Postgres-backed Launchplane secret tables for managed secret records when
   Launchplane is running with `LAUNCHPLANE_DATABASE_URL` and
   `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`.
