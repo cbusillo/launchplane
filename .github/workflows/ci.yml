@@ -514,20 +514,20 @@ jobs:
       - name: Freeze unittest timing snapshot
         run: |
           set -euo pipefail
-          snapshot_directory="${RUNNER_TEMP}/unittest-timing-snapshot"
-          mkdir -p "${snapshot_directory}"
+          snapshot_directory="$(mktemp -d "${RUNNER_TEMP}/unittest-timing-snapshot.XXXXXX")"
+          printf 'UNITTEST_TIMING_SNAPSHOT_DIR=%s\n' "${snapshot_directory}" >> "${GITHUB_ENV}"
           if [ -f "${UNITTEST_TIMINGS_CACHE}" ]; then
             cp "${UNITTEST_TIMINGS_CACHE}" "${snapshot_directory}/history.json"
           fi
           printf '%s:%s\n' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" \
             > "${snapshot_directory}/snapshot-id"
 
-      # Plan once here. Shards on different runners can discover different
-      # targets, so each shard runs its slice of this one plan (#2618).
+      # Plan once and use fresh artifact directories. Residual timing history
+      # in a reused runner directory changed target splitting (#2618).
       - name: Plan unittest shards
         run: |
           set -euo pipefail
-          snapshot_directory="${RUNNER_TEMP}/unittest-timing-snapshot"
+          snapshot_directory="${UNITTEST_TIMING_SNAPSHOT_DIR}"
           uv run --extra dev launchplane ci unittest-shard plan \
             --shard-count "${UNITTEST_SHARD_COUNT}" \
             --timings-file "${snapshot_directory}/history.json" \
@@ -540,7 +540,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: unittest-timing-snapshot
-          path: ${{ runner.temp }}/unittest-timing-snapshot
+          path: ${{ env.UNITTEST_TIMING_SNAPSHOT_DIR }}
           if-no-files-found: error
           overwrite: true
           retention-days: 30
@@ -578,27 +578,35 @@ jobs:
       - name: Install Python
         run: uv python install 3.13
 
+      - name: Prepare unittest artifact directories
+        run: |
+          set -euo pipefail
+          snapshot_directory="$(mktemp -d "${RUNNER_TEMP}/unittest-timing-snapshot.XXXXXX")"
+          results_directory="$(mktemp -d "${RUNNER_TEMP}/unittest-timings.XXXXXX")"
+          printf 'UNITTEST_TIMING_SNAPSHOT_DIR=%s\n' "${snapshot_directory}" >> "${GITHUB_ENV}"
+          printf 'UNITTEST_TIMINGS_RESULTS_DIR=%s\n' "${results_directory}" >> "${GITHUB_ENV}"
+
       - name: Download unittest timing snapshot
         # v7 downloads one named artifact; the following v8 step needs merge-multiple.
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: unittest-timing-snapshot
-          path: ${{ runner.temp }}/unittest-timing-snapshot
+          path: ${{ env.UNITTEST_TIMING_SNAPSHOT_DIR }}
 
       - name: Run unit test shard
         run: >-
           uv run --extra dev launchplane ci unittest-shard run
           --shard-count "${UNITTEST_SHARD_COUNT}"
           --shard-index ${{ matrix.shard_index }}
-          --plan-file "${RUNNER_TEMP}/unittest-timing-snapshot/plan.json"
-          --timings-output "${RUNNER_TEMP}/unittest-timings/shard-${{ matrix.shard_index }}.json"
+          --plan-file "${UNITTEST_TIMING_SNAPSHOT_DIR}/plan.json"
+          --timings-output "${UNITTEST_TIMINGS_RESULTS_DIR}/shard-${{ matrix.shard_index }}.json"
 
       - name: Upload unittest timings
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: unittest-timings-${{ matrix.shard_index }}
-          path: ${{ runner.temp }}/unittest-timings/shard-${{ matrix.shard_index }}.json
+          path: ${{ env.UNITTEST_TIMINGS_RESULTS_DIR }}/shard-${{ matrix.shard_index }}.json
           if-no-files-found: error
           overwrite: true
           retention-days: 30
@@ -643,25 +651,33 @@ jobs:
             exit 1
           fi
 
+      - name: Prepare unittest artifact directories
+        run: |
+          set -euo pipefail
+          snapshot_directory="$(mktemp -d "${RUNNER_TEMP}/unittest-timing-snapshot.XXXXXX")"
+          results_directory="$(mktemp -d "${RUNNER_TEMP}/unittest-timings.XXXXXX")"
+          printf 'UNITTEST_TIMING_SNAPSHOT_DIR=%s\n' "${snapshot_directory}" >> "${GITHUB_ENV}"
+          printf 'UNITTEST_TIMINGS_RESULTS_DIR=%s\n' "${results_directory}" >> "${GITHUB_ENV}"
+
       - name: Download unittest timing snapshot
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: unittest-timing-snapshot
-          path: ${{ runner.temp }}/unittest-timing-snapshot
+          path: ${{ env.UNITTEST_TIMING_SNAPSHOT_DIR }}
 
       - name: Download unittest timings
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: unittest-timings-*
-          path: ${{ runner.temp }}/unittest-timings
+          path: ${{ env.UNITTEST_TIMINGS_RESULTS_DIR }}
           merge-multiple: true
 
       - name: Aggregate unittest timings
         run: >-
           uv run --extra dev launchplane ci unittest-shard aggregate
           --shard-count "${UNITTEST_SHARD_COUNT}"
-          --results-dir "${RUNNER_TEMP}/unittest-timings"
-          --plan-file "${RUNNER_TEMP}/unittest-timing-snapshot/plan.json"
+          --results-dir "${UNITTEST_TIMINGS_RESULTS_DIR}"
+          --plan-file "${UNITTEST_TIMING_SNAPSHOT_DIR}/plan.json"
           --timings-output "${UNITTEST_TIMINGS_CACHE}"
 
       - name: Save unittest timings
