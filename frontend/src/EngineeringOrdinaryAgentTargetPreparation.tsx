@@ -345,7 +345,6 @@ function TargetPreparationForm({
           >
             <option value="">Choose review evidence</option>
             <option value="advisory">Advisory</option>
-            <option value="required">Required</option>
           </select>
         </label>
         <label>

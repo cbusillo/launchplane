@@ -1907,7 +1907,7 @@ export type OrdinaryAgentMergeTrainTargetInputsResponse = {
 export type OrdinaryAgentMergeTrainTargetIntentInput = {
     base_branch: string;
     blocked_label: string;
-    engineering_review_mode?: 'advisory' | 'required';
+    engineering_review_mode?: 'advisory';
     enqueue: MergeTrainEnqueuePolicyInput;
     enqueue_label: string;
     failure_policy: 'pause_train' | 'continue_after_blocking_pr';
@@ -1921,7 +1921,7 @@ export type OrdinaryAgentMergeTrainTargetIntentInput = {
 export type OrdinaryAgentMergeTrainTargetIntentOutput = {
     base_branch: string;
     blocked_label: string;
-    engineering_review_mode: 'advisory' | 'required';
+    engineering_review_mode: 'advisory';
     enqueue: MergeTrainEnqueuePolicyOutput;
     enqueue_label: string;
     failure_policy: 'pause_train' | 'continue_after_blocking_pr';

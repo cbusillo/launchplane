@@ -15164,7 +15164,8 @@
         "additionalProperties": false,
         "properties": {
           "policy": {
-            "$ref": "#/components/schemas/MergeTrainPolicy-Output"
+            "$ref": "#/components/schemas/MergeTrainPolicy-Output",
+            "title": "Policy"
           },
           "policy_sha256": {
             "default": "",
@@ -18269,11 +18270,8 @@
             "type": "string"
           },
           "engineering_review_mode": {
+            "const": "advisory",
             "default": "advisory",
-            "enum": [
-              "advisory",
-              "required"
-            ],
             "title": "Engineering Review Mode",
             "type": "string"
           },
@@ -18358,11 +18356,8 @@
             "type": "string"
           },
           "engineering_review_mode": {
+            "const": "advisory",
             "default": "advisory",
-            "enum": [
-              "advisory",
-              "required"
-            ],
             "title": "Engineering Review Mode",
             "type": "string"
           },

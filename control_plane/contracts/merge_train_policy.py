@@ -12,6 +12,7 @@ from pydantic import (
     GetJsonSchemaHandler,
     PositiveInt,
     SerializerFunctionWrapHandler,
+    ValidationInfo,
     field_validator,
     model_serializer,
     model_validator,
@@ -23,7 +24,7 @@ MergeTrainActorRole = Literal["repo_owner", "repo_admin"]
 MergeTrainFailurePolicy = Literal["pause_train", "continue_after_blocking_pr"]
 MergeTrainIdentityKind = Literal["github_actions_oidc", "github_app", "github_token_secret"]
 MergeTrainMergeMethod = Literal["merge", "squash", "rebase"]
-MergeTrainEngineeringReviewMode = Literal["advisory", "required"]
+MergeTrainEngineeringReviewMode = Literal["advisory"]
 MergeTrainPolicyRecordStatus = Literal["active", "superseded"]
 MergeTrainSchedulerRunnerMode = Literal["level1", "controller"]
 MERGE_TRAIN_POLICY_TARGETS_READ_ACTION = "merge_train.policy_targets"
@@ -323,7 +324,8 @@ class MergeTrainRepositoryPolicy(BaseModel):
     blocked_label: str
     stack_child_disposition_label: str = ""
     merge_method: MergeTrainMergeMethod
-    engineering_review_mode: MergeTrainEngineeringReviewMode = "advisory"
+    # Required survives only as immutable policy history, never merge authority.
+    engineering_review_mode: Literal["advisory", "required"] = "advisory"
     failure_policy: MergeTrainFailurePolicy
     enqueue: MergeTrainEnqueuePolicy
     merge_identity: MergeTrainIdentity
@@ -380,7 +382,9 @@ class MergeTrainPolicy(BaseModel):
     policies: tuple[MergeTrainRepositoryPolicy, ...]
 
     @model_validator(mode="after")
-    def _validate_policy(self) -> "MergeTrainPolicy":
+    def _validate_policy(self, info: ValidationInfo) -> "MergeTrainPolicy":
+        if not (info.context and info.context.get("historical_policy_record")):
+            self.require_advisory_review()
         if not self.policies:
             raise ValueError("merge train policy requires at least one repository policy")
         seen_keys: set[str] = set()
@@ -391,6 +395,10 @@ class MergeTrainPolicy(BaseModel):
                 raise ValueError("merge train policies must be unique by repository/base_branch")
             seen_keys.add(key)
         return self
+
+    def require_advisory_review(self) -> None:
+        if any(policy.engineering_review_mode != "advisory" for policy in self.policies):
+            raise ValueError("Required engineering-review merge mode is retired; use advisory")
 
     @property
     def policy_sha256(self) -> str:
@@ -428,6 +436,13 @@ class MergeTrainPolicyRecord(BaseModel):
     updated_at: str
     policy_sha256: str = ""
     policy: MergeTrainPolicy
+
+    @field_validator("policy", mode="plain", json_schema_input_type=MergeTrainPolicy)
+    @classmethod
+    def _read_historical_policy(cls, value: object) -> MergeTrainPolicy:
+        if isinstance(value, MergeTrainPolicy):
+            value = value.model_dump(mode="json")
+        return MergeTrainPolicy.model_validate(value, context={"historical_policy_record": True})
 
     @model_validator(mode="after")
     def _validate_record(self) -> "MergeTrainPolicyRecord":

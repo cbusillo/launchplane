@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "record_id": "historical-required-policy",
+  "status": "active",
+  "source": "legacy-test-fixture",
+  "updated_at": "2026-09-02T00:00:00Z",
+  "policy_sha256": "2e366ded29acc581a0bc2fb27c42f5d5e69df20572f64164c25d32dda0f47243",
+  "policy": {
+    "schema_version": 1,
+    "policies": [
+      {
+        "repository": "example/app",
+        "base_branch": "main",
+        "enqueue_label": "ready-to-merge",
+        "blocked_label": "merge-blocked",
+        "stack_child_disposition_label": "stack-landed",
+        "merge_method": "merge",
+        "engineering_review_mode": "required",
+        "failure_policy": "pause_train",
+        "enqueue": {
+          "label_required": true,
+          "allowed_actor_roles": [
+            "repo_owner",
+            "repo_admin"
+          ]
+        },
+        "merge_identity": {
+          "kind": "github_actions_oidc",
+          "name": "launchplane-merge-train"
+        },
+        "service_authz": {
+          "action": "merge_train.run_once",
+          "product": "launchplane",
+          "context": "launchplane"
+        },
+        "github_token": {
+          "env_var": "GH_TOKEN"
+        },
+        "scheduler": {
+          "enabled": false,
+          "runner_mode": "controller",
+          "mutate": false
+        }
+      }
+    ]
+  }
+}

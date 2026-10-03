@@ -7,8 +7,7 @@ It authorizes no effect. The live adapter uses the same evaluation for guarded
 landing and the engineering governance view.
 
 Current readiness checks the required technical checks at the exact candidate
-SHA, engineering-review evidence under the repository's required/advisory mode,
-current policy fingerprints, candidate and rolling-base provenance, and the
+SHA, advisory engineering-review observations, current policy fingerprints, candidate and rolling-base provenance, and the
 controller lease plus expected effect SHA. Missing evidence stays unknown;
 contradictory evidence blocks the attempt. Each landing re-reads these inputs.
 
@@ -21,12 +20,13 @@ release checklist, separately from machine merge readiness.
 
 The six current policy dimensions are `technical_checks`, `engineering_review`,
 `ruleset`, `merge_train`, `authorization`, and `admission_algorithm`. Advisory
-engineering review remains visible without blocking; required engineering review
-still needs the exact qualifying runs and current authority. Reserved Launchplane
+engineering-review evidence and its policy fingerprint remain visible without
+blocking. Stored required-review snapshots keep their historical aggregation
+and digests; current evaluations always use advisory review. Reserved Launchplane
 advisory check projections never count as required technical-check authority.
 
 States aggregate deterministically: unknown, candidate identity, policy,
-engineering review, technical checks, then ready. Every active facet keeps its
+technical checks, then ready. Every active facet keeps its
 reason codes. Legacy Client-blocked states remain readable only in old snapshots.
 Policy, evidence, and state collections are canonicalized; observation timestamps
 and advisory GitHub observations do not change the readiness digest.

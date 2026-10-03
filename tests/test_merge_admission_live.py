@@ -64,7 +64,6 @@ from tests.test_merge_readiness import (
     HEAD_SHA,
     REPOSITORY,
     TREE_SHA,
-    _evaluate,
     _policy_fingerprints,
 )
 from tests.support.merge_train import labeled_by
@@ -464,7 +463,7 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
 
 
 class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
-    def test_repository_policy_controls_engineering_review_authority(self) -> None:
+    def test_historical_required_policy_cannot_restore_engineering_merge_gate(self) -> None:
         candidate_record, landing_record, controller_state, structural_result = _guard_records()
         snapshot_reader = _StaticSnapshotReader(
             MergeTrainDryRunSnapshot(
@@ -490,19 +489,23 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
 
         for mode in ("advisory", "required"):
             with self.subTest(mode=mode):
-                captured: dict[str, object] = {}
-
-                def evaluate_readiness(**kwargs: object):  # type: ignore[no-untyped-def]
-                    captured.update(kwargs)
-                    return _evaluate(engineering_review_authority=mode)
-
+                legacy_record = MergeTrainPolicyRecord.model_validate_json(
+                    Path("tests/fixtures/merge-train-policy-required.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                legacy_payload = legacy_record.model_dump(mode="json")
+                legacy_payload["policy"]["policies"][0]["repository"] = REPOSITORY
+                legacy_payload["policy_sha256"] = ""
+                legacy_record = MergeTrainPolicyRecord.model_validate(legacy_payload)
                 evaluator = LiveMergeAdmissionEvaluator(
                     store=object(),
                     repository_evidence_provider=_UnusedRepositoryEvidenceProvider(),
-                    technical_check_client=_TechnicalCheckClient(),
-                    policy_record_provider=lambda: build_test_merge_train_policy_record(
-                        repository=REPOSITORY,
-                        engineering_review_mode=mode,
+                    technical_check_client=_PassingTechnicalCheckClient(),
+                    policy_record_provider=lambda: (
+                        build_test_merge_train_policy_record(repository=REPOSITORY)
+                        if mode == "advisory"
+                        else legacy_record
                     ),
                     snapshot_reader=snapshot_reader,
                 )
@@ -525,12 +528,8 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
                         "control_plane.merge_admission_live.require_engineering_review_decision_store",
                         return_value=engineering_store,
                     ),
-                    patch(
-                        "control_plane.merge_admission_live.evaluate_merge_readiness_from_live_evidence",
-                        side_effect=evaluate_readiness,
-                    ),
                 ):
-                    evaluator.evaluate(
+                    result = evaluator.evaluate(
                         candidate_record=candidate_record,
                         landing_plan_record=landing_record,
                         entry=landing_record.landing_plan.entries[0],
@@ -544,7 +543,9 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
                         evaluated_at="2026-08-11T03:01:00Z",
                     )
 
-                self.assertEqual(captured["engineering_review_authority"], mode)
+                self.assertEqual(result.readiness.state, "ready")
+                self.assertEqual(result.readiness.engineering_review_authority, "advisory")
+                self.assertEqual(result.readiness.engineering_review.state, "unknown")
 
     def test_live_queue_is_rediscovered_and_inserted_pr_refuses_admission(self) -> None:
         candidate_record, landing_record, controller_state, _ = _guard_records()

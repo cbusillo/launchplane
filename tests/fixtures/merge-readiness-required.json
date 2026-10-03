@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "mode": "ephemeral",
+  "authoritative": false,
+  "authorizes": [],
+  "engineering_review_authority": "required",
+  "target": {
+    "schema_version": 1,
+    "repository": "example/launchplane",
+    "pull_request_number": 2083,
+    "base_branch": "main",
+    "base_sha": "1111111111111111111111111111111111111111",
+    "pull_request_head_sha": "2222222222222222222222222222222222222222",
+    "pull_request_tree_sha": "3333333333333333333333333333333333333333",
+    "expected_effect_sha": "4444444444444444444444444444444444444444",
+    "queue_position": 2
+  },
+  "state": "ready",
+  "reason_codes": [
+    "candidate_exact",
+    "checks_passed",
+    "controller_lease_held",
+    "engineering_review_approved",
+    "expected_sha_match",
+    "policy_fingerprints_match"
+  ],
+  "owner_facets": [],
+  "technical_checks": {
+    "head_sha": "4444444444444444444444444444444444444444",
+    "status": "pass",
+    "required_checks": [
+      "ci-gate",
+      "security-gate"
+    ],
+    "advisory_observations": [],
+    "state": "ready",
+    "reason_codes": [
+      "checks_passed"
+    ]
+  },
+  "engineering_review": {
+    "status": "approved",
+    "decision_id": "engineering-review-decision-5da7ffe0cdc854b7aeabae6f",
+    "decision_binding_sha256": "5da7ffe0cdc854b7aeabae6ff59de5104d6ddb21d852609316e5cebf566ff691",
+    "head_sha": "2222222222222222222222222222222222222222",
+    "tree_sha": "3333333333333333333333333333333333333333",
+    "evidence": [
+      {
+        "run_id": "review-run-1",
+        "head_sha": "2222222222222222222222222222222222222222",
+        "tree_sha": "3333333333333333333333333333333333333333",
+        "evidence_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    ],
+    "state": "ready",
+    "reason_codes": [
+      "engineering_review_approved"
+    ]
+  },
+  "policy": {
+    "fingerprints": {
+      "impact": null,
+      "technical_checks": {
+        "dimension": "technical_checks",
+        "expected_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "current_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "engineering_review": {
+        "dimension": "engineering_review",
+        "expected_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "current_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "ruleset": {
+        "dimension": "ruleset",
+        "expected_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "current_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "merge_train": {
+        "dimension": "merge_train",
+        "expected_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "current_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "authorization": {
+        "dimension": "authorization",
+        "expected_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "current_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "admission_algorithm": {
+        "dimension": "admission_algorithm",
+        "expected_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "current_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    "state": "ready",
+    "reason_codes": [
+      "policy_fingerprints_match"
+    ]
+  },
+  "candidate": {
+    "evidence": {
+      "structural_status": "exact",
+      "record_id": "candidate-record-1",
+      "repository": "example/launchplane",
+      "base_sha": "1111111111111111111111111111111111111111",
+      "candidate_sha": "4444444444444444444444444444444444444444",
+      "pull_request_number": 2083,
+      "queue_position": 2,
+      "pull_request_head_sha": "2222222222222222222222222222222222222222"
+    },
+    "state": "ready",
+    "reason_codes": [
+      "candidate_exact"
+    ]
+  },
+  "fence": {
+    "evidence": {
+      "controller_key": "merge-train-controller:example:launchplane:main",
+      "controller_repository": "example/launchplane",
+      "controller_base_branch": "main",
+      "controller_status": "running",
+      "expected_lease_owner": "controller-run-1",
+      "observed_lease_owner": "controller-run-1",
+      "lease_expires_at": "2026-08-11T03:10:00.000000Z",
+      "observed_effect_sha": "4444444444444444444444444444444444444444"
+    },
+    "state": "ready",
+    "reason_codes": [
+      "controller_lease_held",
+      "expected_sha_match"
+    ]
+  },
+  "evaluated_at": "2026-08-11T03:00:00.000000Z",
+  "readiness_digest": "f7e5dc8466e006acea4b93abc1e256dbf714aec5cef59ddaac5045125ccc9111"
+}

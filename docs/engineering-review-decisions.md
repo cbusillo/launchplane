@@ -22,8 +22,10 @@ classification fields. No historical record is rewritten or deleted.
 
 The GitHub engineering-review check is a projection, never authority. Projection
 retry reloads the persisted decision and verifies the current Git target.
-Repository merge-train policy retains its existing `advisory`/`required` choice;
-this change does not enable enforcement or change runtime policy.
+Engineering review is always advisory for current merge readiness. The overall
+DIRECTION.md retires reviewer approval as a merge gate; new policies reject
+`required`. Historical policy and admission records preserve their original
+values and digests. Other merge gates remain independent of review evidence.
 
 Routes remain:
 

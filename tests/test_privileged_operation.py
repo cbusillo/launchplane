@@ -926,7 +926,7 @@ class PrivilegedOperationContractTests(unittest.TestCase):
                 blocked_label=target.blocked_label,
                 stack_child_disposition_label=target.stack_child_disposition_label,
                 merge_method=target.merge_method,
-                engineering_review_mode=target.engineering_review_mode,
+                engineering_review_mode="advisory",
                 failure_policy=target.failure_policy,
                 enqueue=target.enqueue,
                 merge_identity=target.merge_identity,

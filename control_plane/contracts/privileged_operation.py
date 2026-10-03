@@ -434,6 +434,7 @@ class ManagedMergeTrainPolicyImportProposalInput(BaseModel):
             raise ValueError("Unsupported merge-train policy import schema version.")
         if self.record.status != "active":
             raise ValueError("Merge-train policy import candidate record must be active.")
+        self.record.policy.require_advisory_review()
         normalize_merge_train_policy_timestamp(self.record.updated_at)
         object.__setattr__(self, "reason", _required_token(self.reason, "reason"))
         object.__setattr__(self, "related_issue", self.related_issue.strip())
