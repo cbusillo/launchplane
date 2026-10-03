@@ -757,6 +757,7 @@ def _render_preview_pr_feedback_markdown(
     owner_login: str = "",
     owner_review_url: str = "",
     waiting_for: str = "",
+    owner_review_accepted: str = "",
 ) -> str:
     lines = [marker]
     if status == "pending":
@@ -772,7 +773,7 @@ def _render_preview_pr_feedback_markdown(
                 (
                     f"Launchplane preview is ready for PR #{anchor_pr_number} — "
                     "Owner review requested."
-                    if owner_review_requested
+                    if owner_review_requested and not owner_review_accepted
                     else f"Launchplane preview is ready for PR #{anchor_pr_number}."
                 ),
                 "",
@@ -844,7 +845,19 @@ def _render_preview_pr_feedback_markdown(
             ]
         )
         owner_mention = owner_login.strip().removeprefix("@")
-        if owner_review_requested and owner_mention and owner_review_url:
+        if owner_review_requested and owner_review_accepted and owner_review_url:
+            # Already accepted for this revision: say so instead of asking again.
+            lines.extend(
+                [
+                    "",
+                    "## Owner review",
+                    "",
+                    f"{owner_review_accepted}.",
+                    "",
+                    f"The Client can record a new decision in Launchplane: {owner_review_url}",
+                ]
+            )
+        elif owner_review_requested and owner_mention and owner_review_url:
             lines.extend(
                 [
                     "",
@@ -940,6 +953,7 @@ def render_preview_pr_feedback_markdown(
     owner_login: str = "",
     owner_review_url: str = "",
     waiting_for: str = "",
+    owner_review_accepted: str = "",
 ) -> str:
     return _render_preview_pr_feedback_markdown(
         marker=marker,
@@ -956,6 +970,7 @@ def render_preview_pr_feedback_markdown(
         owner_login=owner_login,
         owner_review_url=owner_review_url,
         waiting_for=waiting_for,
+        owner_review_accepted=owner_review_accepted,
     )
 
 

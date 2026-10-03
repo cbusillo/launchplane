@@ -306,6 +306,9 @@ from control_plane.contracts.merge_train_controller_state import (
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
 )
+from control_plane.contracts.merge_train_branch_refresh_record import (
+    MergeTrainBranchRefreshRecord,
+)
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyCompareWriteResult,
@@ -4976,6 +4979,24 @@ class LaunchplaneMergeTrainRunRow(Base):
     selected_pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     policy_key: Mapped[str] = mapped_column(String, nullable=False)
     policy_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneMergeTrainBranchRefreshRow(Base):
+    __tablename__ = "launchplane_merge_train_branch_refreshes"
+    __table_args__ = (
+        Index(
+            "launchplane_merge_train_branch_refreshes_pr_idx",
+            "repository",
+            "pull_request_number",
+            desc("requested_at"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    pull_request_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    requested_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -17500,6 +17521,35 @@ class PostgresRecordStore(HumanSessionStore):
                 policy_sha256=record.policy_sha256,
                 payload=self._payload_dict(record),
             )
+        )
+
+    def write_merge_train_branch_refresh_record(
+        self, record: MergeTrainBranchRefreshRecord
+    ) -> None:
+        self._write_row(
+            LaunchplaneMergeTrainBranchRefreshRow(
+                record_id=record.record_id,
+                repository=record.repository,
+                pull_request_number=record.pull_request_number,
+                requested_at=record.requested_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_merge_train_branch_refresh_records(
+        self, *, repository: str, pull_request_number: int
+    ) -> tuple[MergeTrainBranchRefreshRecord, ...]:
+        return self._list_models(
+            model_type=MergeTrainBranchRefreshRecord,
+            orm_model=LaunchplaneMergeTrainBranchRefreshRow,
+            filters=[
+                LaunchplaneMergeTrainBranchRefreshRow.repository == repository,
+                LaunchplaneMergeTrainBranchRefreshRow.pull_request_number == pull_request_number,
+            ],
+            order_by=(
+                LaunchplaneMergeTrainBranchRefreshRow.requested_at.desc(),
+                LaunchplaneMergeTrainBranchRefreshRow.record_id.desc(),
+            ),
         )
 
     def write_merge_train_policy_record(self, record: MergeTrainPolicyRecord) -> None:

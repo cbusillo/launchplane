@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import asyncio
 import threading
 import unittest
@@ -2103,6 +2104,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_controller_refreshes_a_lone_behind_base_pull_request(self) -> None:
         branch_updates: list[tuple[int, str]] = []
+        head_sha = "1" * 40
 
         class BehindBaseReader(_FakeMergeTrainSnapshotReader):
             def read_merge_train_snapshot(self, **kwargs: Any) -> Any:
@@ -2111,7 +2113,9 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 return snapshot.model_copy(
                     update={
                         "pull_requests": (
-                            pull_request.model_copy(update={"branch_update_required": True}),
+                            pull_request.model_copy(
+                                update={"branch_update_required": True, "head_sha": head_sha}
+                            ),
                         )
                     }
                 )
@@ -2121,6 +2125,16 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 self, *, repository: str, pull_request_number: int, expected_head_sha: str
             ) -> None:
                 branch_updates.append((pull_request_number, expected_head_sha))
+                # As the real client does once the provider accepted the refresh.
+                assert callable(self.branch_refresh_recorder)
+                self.branch_refresh_recorder(
+                    repository=repository,
+                    pull_request_number=pull_request_number,
+                    expected_head_sha=expected_head_sha,
+                    result_head_sha="2" * 40,
+                    merged_base_sha="3" * 40,
+                    requested_at=datetime.now(timezone.utc),
+                )
 
         with (
             TemporaryDirectory() as temporary_directory_name,
@@ -2155,6 +2169,9 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 mutated = await _post_merge_train_controller_run_once(
                     app, {**payload, "mutate": True}
                 )
+            refreshes = store.list_merge_train_branch_refresh_records(
+                repository="cbusillo/sellyouroutboard", pull_request_number=1
+            )
 
         self.assertEqual(dry_run.status_code, 202, dry_run.text)
         self.assertEqual(dry_run.json()["result"]["mode"], "dry-run")
@@ -2162,7 +2179,10 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         result = mutated.json()["result"]
         self.assertEqual(result["controller_action"], "update_branch")
         self.assertEqual(result["branch_update_result"]["status"], "updated")
-        self.assertEqual(branch_updates, [(1, "head-1")])
+        self.assertEqual(branch_updates, [(1, head_sha)])
+        # The refresh is kept, so a Client's acceptance can be carried across it.
+        (refresh,) = refreshes
+        self.assertEqual((refresh.expected_head_sha, refresh.base_branch), (head_sha, "main"))
 
     async def test_a_slow_controller_run_does_not_block_other_requests(self) -> None:
         controller_started = threading.Event()

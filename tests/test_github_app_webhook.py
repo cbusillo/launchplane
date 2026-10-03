@@ -179,9 +179,20 @@ class GitHubAppWebhookTests(unittest.TestCase):
             event="pull_request",
             delivery_id="draft",
         )
+        # A retarget re-checks a carried acceptance; a title edit changes nothing.
+        self.deliver(
+            {**_pull_request("edited", number=12), "changes": {"base": {"ref": {"from": "a"}}}},
+            event="pull_request",
+            delivery_id="retarget",
+        )
+        self.deliver(
+            {**_pull_request("edited", number=13), "changes": {"title": {"from": "x"}}},
+            event="pull_request",
+            delivery_id="title",
+        )
 
         requests = {r.target_key: r for r in self.store.list_product_reconcile_requests()}
-        self.assertEqual(set(requests), {f"site:preview:{number}" for number in (7, 8, 9)})
+        self.assertEqual(set(requests), {f"site:preview:{number}" for number in (7, 8, 9, 12)})
         self.assertEqual(requests["site:preview:7"].request_count, 2)
         self.assertEqual(requests["site:preview:7"].pull_request_number, 7)
 
