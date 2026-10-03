@@ -342,13 +342,8 @@ class ProductRollbackPathCheckTests(unittest.TestCase):
             ]
             check = self.check()
         self.assertEqual(getattr(check, "state"), "clear")
-        self.assertEqual(
-            self.actions.call_args_list[0].args,
-            ("generic_web_prod_rollback.plan", "example-site", ("prod",)),
-        )
-        self.assertEqual(
-            self.actions.call_args_list[1].args,
-            ("generic_web_prod_rollback.execute", "example-site", ("prod",)),
+        self.actions.assert_called_once_with(
+            "generic_web_prod_rollback.execute", "example-site", ("prod",)
         )
         for write in writes:
             write.assert_not_called()
@@ -374,7 +369,6 @@ class ProductRollbackPathCheckTests(unittest.TestCase):
         )
         steps = _steps(self.check(False))
         for step_id in (
-            "rollback_plan_grant",
             "rollback_grant",
             "rollback_target_mutable_artifact_reference",
             "rollback_target_target_deploy_not_passed",
@@ -434,6 +428,26 @@ class ProductRollbackPathCheckTests(unittest.TestCase):
             _steps(check)["rollback_grant"], ("unknown", "authorization_unread", "wait")
         )
         self.assertEqual(_steps(check)["rollback_target"][0], "clear")
+
+    def test_custom_rollback_driver_is_unknown_without_generic_grant_or_target_reads(self) -> None:
+        self.profile = self.profile.model_copy(update={"driver_id": "verireel"})
+        with patch.object(
+            self.store, "read_environment_inventory", side_effect=AssertionError("wrong driver")
+        ) as read:
+            check = self.check()
+        self.assertEqual(getattr(check, "state"), "unknown")
+        self.assertEqual(
+            _steps(check)["rollback_route"], ("unknown", "rollback_driver_unchecked", "code")
+        )
+        self.actions.assert_not_called()
+        read.assert_not_called()
+
+    def test_driver_without_rollback_route_is_blocked(self) -> None:
+        self.profile = self.profile.model_copy(update={"driver_id": "ingress"})
+        self.assertEqual(
+            _steps(self.check())["rollback_route"], ("blocked", "rollback_not_supported", "code")
+        )
+        self.actions.assert_not_called()
 
     def test_odoo_uses_previous_passing_target_manifest_and_administrator(self) -> None:
         self.profile = self.profile.model_copy(update={"driver_id": "odoo"})

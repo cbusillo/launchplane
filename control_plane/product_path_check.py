@@ -54,6 +54,8 @@ from control_plane.production_backup_authority import (
     require_production_backup_authority_store,
     resolve_production_backup_authority,
 )
+from control_plane.drivers.registry import effective_driver_actions, read_driver_descriptor
+from control_plane.contracts.driver_descriptor import DriverDescriptor
 from control_plane.testing_lane_hold import TestingHoldReader, read_staff_testing_hold
 from control_plane.workflows.production_promotion_backup import (
     GENERIC_WEB_PROMOTION_BACKUP_ACTION,
@@ -601,18 +603,45 @@ def _read_rollback_steps(
                 )
             )
     else:
-        for step_id, action in (
-            ("rollback_plan_grant", "generic_web_prod_rollback.plan"),
-            ("rollback_grant", "generic_web_prod_rollback.execute"),
-        ):
-            allowed = cast(
-                bool | Unread,
-                _read(
-                    "authorization_unread",
-                    lambda: action_allowed(action, prod_lane.context, ("prod",)),
+        descriptor = _read(
+            "rollback_driver_unread", lambda: read_driver_descriptor(profile.driver_id)
+        )
+        if isinstance(descriptor, Unread):
+            return (_unread("rollback_route", descriptor),)
+        actions = effective_driver_actions(cast(DriverDescriptor, descriptor))
+        rollback_action = next(
+            (action for action in actions if action.action_id == "prod_rollback"), None
+        )
+        if rollback_action is None:
+            return (
+                _step(
+                    "rollback_route",
+                    "blocked",
+                    "rollback_not_supported",
+                    "The product's driver has no rollback route.",
+                    "code",
                 ),
             )
-            steps.append(_rollback_grant_step(step_id, action, allowed))
+        if rollback_action.route_path != "/v1/drivers/generic-web/prod-rollback":
+            return (
+                _step(
+                    "rollback_route",
+                    "unknown",
+                    "rollback_driver_unchecked",
+                    "This path check does not cover the driver's custom rollback route yet.",
+                    "code",
+                ),
+            )
+        action = rollback_action.authz_action
+        allowed = cast(
+            bool | Unread,
+            _read(
+                "authorization_unread",
+                lambda: action_allowed(action, prod_lane.context, ("prod",)),
+            ),
+        )
+        # Execute revalidates and builds its own plan; a separate plan grant is not needed.
+        steps.append(_rollback_grant_step("rollback_grant", action, allowed))
     # An authority refusal must not hide independent target blockers.
     target_steps = _read(
         "rollback_records_unread",
