@@ -268,12 +268,15 @@ Logins are diagnostic labels, not policy identity, because logins can be renamed
 
 PRs labelled for Client review require the newest `launchplane/owner-review`
 commit status on their current head. Missing status is pending, even if check
-runs already passed; pending or failed review cannot admit the PR. Only active product profiles' configured review labels mark this
-boundary; an unrelated label on a repository without such a profile creates no
-review requirement. Every batch member is checked during planning and again
-before the provider landing effect. The standalone landing route also requires
-that profile reader and refuses if it is unavailable. Successful review still
-requires all other current-head checks.
+runs already passed; pending or failed review cannot admit the PR. Only active
+product profiles' configured review labels mark this boundary; an unrelated
+label on a repository without such a profile creates no review requirement.
+Every batch member is checked during planning and again before the provider
+landing effect. The controller, standalone candidate planning and landing, and
+run-once (including scheduled Level 1 runs) all read the product profiles and
+refuse with `client_review_profiles_unavailable` when they cannot. Standalone
+planning reports a waiting or blocked queue without building a candidate.
+Successful review still requires all other current-head checks.
 
 Only an actor allowed to enqueue may put a pull request in the train: a trusted
 automation identity, or an actor whose role is in `allowed_actor_roles` (by
