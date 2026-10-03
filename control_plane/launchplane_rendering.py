@@ -6,11 +6,6 @@ from pathlib import Path
 
 from control_plane.contracts.preview_request_metadata import (
     LAUNCHPLANE_ALLOWED_COMPANION_REPOS,
-    LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_INFO_STRING,
-)
-from control_plane.workflows.launchplane import (
-    DEFAULT_LAUNCHPLANE_BASELINE_CHANNEL,
-    LAUNCHPLANE_PREVIEW_ENABLE_LABEL,
 )
 
 
@@ -298,12 +293,6 @@ def launchplane_inventory_bucket(row: dict[str, object]) -> str:
     return "live"
 
 
-def launchplane_preview_enablement_record_id(
-    *, context_name: str, anchor_repo: str, anchor_pr_number: int
-) -> str:
-    return f"{context_name}-{anchor_repo}-pr-{anchor_pr_number}"
-
-
 def build_launchplane_promotion_resolve_recipe_script(
     *,
     context_name: str,
@@ -466,9 +455,9 @@ def render_launchplane_preview_policy_page_html(
         </dl>
       </article>
       <article class=\"policy-card\">
-        <div class=\"section-label\">Enablement</div>
-        <h3>Preview request gate</h3>
-        <p>Launchplane can enable a PR preview from the anchor PR label <code>{escape(LAUNCHPLANE_PREVIEW_ENABLE_LABEL)}</code> or from an explicit Launchplane-side request. Once requested, manifest-changing PR events can refresh the same preview identity.</p>
+        <div class=\"section-label\">Lifecycle</div>
+        <h3>Preview follows the pull request</h3>
+        <p>Every open pull request in an eligible anchor repository has a preview of its verified head. Closing or merging the pull request removes it.</p>
       </article>
     </section>
 
@@ -485,11 +474,6 @@ def render_launchplane_preview_policy_page_html(
     </section>
 
     <section class=\"policy-grid\">
-      <article class=\"policy-card\">
-        <div class=\"section-label\">Preview metadata</div>
-        <h3>PR body contract</h3>
-        <p>Launchplane reads one fenced metadata block from the anchor PR body using info string <code>{escape(LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_INFO_STRING)}</code>. The default baseline channel is <code>{escape(DEFAULT_LAUNCHPLANE_BASELINE_CHANNEL)}</code>.</p>
-      </article>
       <article class=\"policy-card\">
         <div class=\"section-label\">Companions</div>
         <h3>Allowlisted companion repos</h3>
@@ -1102,7 +1086,6 @@ def render_launchplane_preview_index_page_html(
         tone = escape(str(item.get("tone", "neutral")).strip() or "neutral")
         request_source = str(item.get("request_source", "none")).strip()
         source_label = {
-            "github_label": "GitHub label",
             "launchplane": "Launchplane request",
             "history": "Earlier request",
             "none": "Not requested",

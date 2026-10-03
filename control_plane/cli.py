@@ -29,7 +29,6 @@ from control_plane.contracts.odoo_instance_override_record import OdooOverrideAp
 from control_plane.contracts.odoo_stable_target_replacement import apply_artifact_odoo_version
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import PreviewPullRequestSummary
-from control_plane.contracts.preview_manifest import LaunchplaneResolvedPreviewManifest
 from control_plane.contracts.preview_request_metadata import (
     LaunchplaneCompanionPullRequestReference,
     LaunchplanePreviewRequestMetadata,
@@ -92,13 +91,11 @@ from control_plane.launchplane_rendering import (
     build_launchplane_promotion_execute_recipe_script as _build_launchplane_promotion_execute_recipe_script,
     build_launchplane_promotion_resolve_recipe_script as _build_launchplane_promotion_resolve_recipe_script,
     int_from_json_value as _int_from_json_value,
-    json_object as _json_object,
     json_object_items as _json_object_items,
     launchplane_action_slug as _launchplane_action_slug,
     launchplane_environment_bundle_relative_path as _launchplane_environment_bundle_relative_path,
     launchplane_inventory_bucket as _launchplane_inventory_bucket,
     launchplane_preview_bundle_relative_path as _launchplane_preview_bundle_relative_path,
-    launchplane_preview_enablement_record_id as _launchplane_preview_enablement_record_id,
     launchplane_promotion_bundle_relative_path as _launchplane_promotion_bundle_relative_path,
     relative_href as _relative_href,
     render_launchplane_environment_status_page_html,
@@ -124,8 +121,6 @@ from control_plane.workflows.launchplane import (
     build_preview_inventory_payload,
     build_preview_status_payload,
     launchplane_anchor_repo_context,
-    launchplane_preview_label_enabled,
-    LAUNCHPLANE_PREVIEW_ENABLE_LABEL,
     ProductProfileListStore,
     resolve_pull_request_event_manifest,
 )
@@ -500,7 +495,6 @@ def _launchplane_preview_enablement_actionable_payload(
     anchor_pr_url: str,
     anchor_head_sha: str,
     state: str,
-    label_enabled: bool,
     summary: str,
     baseline_release_tuple_id: str,
     resolved_manifest_fingerprint: str,
@@ -568,8 +562,6 @@ def _launchplane_preview_enablement_actionable_payload(
     )
     if state == "requested":
         headline = "Materialize requested Launchplane preview"
-    elif label_enabled:
-        headline = "Request Launchplane preview from saved label state"
     else:
         headline = "Request Launchplane preview"
     return {
@@ -631,7 +623,6 @@ def _build_launchplane_preview_enablement_action_payload(
     anchor_pr_url: str,
     anchor_head_sha: str,
     state: str,
-    label_enabled: bool,
     request_metadata_status: str,
     request_metadata_baseline_channel: str,
     request_metadata_companions: tuple[LaunchplaneCompanionPullRequestReference, ...],
@@ -683,7 +674,6 @@ def _build_launchplane_preview_enablement_action_payload(
             anchor_pr_url=anchor_pr_url,
             anchor_head_sha=anchor_head_sha,
             state=state,
-            label_enabled=label_enabled,
             summary=(
                 "Launchplane cannot resolve the default baseline contract from this workspace snapshot, so this request recipe keeps explicit placeholders for the baseline tuple id and manifest fingerprint before execution."
             ),
@@ -721,12 +711,9 @@ def _build_launchplane_preview_enablement_action_payload(
         pr_number=anchor_pr_number,
         pr_url=anchor_pr_url,
         occurred_at="<utc-timestamp>",
-        pr_body="",
         state="open",
         merged=False,
         head_sha=anchor_head_sha,
-        label_names=(LAUNCHPLANE_PREVIEW_ENABLE_LABEL,) if label_enabled else (),
-        action_label=LAUNCHPLANE_PREVIEW_ENABLE_LABEL if label_enabled else "",
     )
     try:
         resolved_manifest = resolve_pull_request_event_manifest(
@@ -752,7 +739,6 @@ def _build_launchplane_preview_enablement_action_payload(
             anchor_pr_url=anchor_pr_url,
             anchor_head_sha=anchor_head_sha,
             state=state,
-            label_enabled=label_enabled,
             summary=(
                 "Launchplane could not resolve the default preview manifest automatically for this PR yet. "
                 f"Use the typed request recipe below after replacing the baseline placeholders: {exc}"
@@ -784,7 +770,6 @@ def _build_launchplane_preview_enablement_action_payload(
             anchor_pr_url=anchor_pr_url,
             anchor_head_sha=anchor_head_sha,
             state=state,
-            label_enabled=label_enabled,
             summary=(
                 "Launchplane could not resolve the default preview manifest automatically for this PR yet. "
                 "Use the typed request recipe below after replacing the baseline tuple id and manifest fingerprint placeholders."
@@ -812,12 +797,9 @@ def _build_launchplane_preview_enablement_action_payload(
         anchor_pr_url=anchor_pr_url,
         anchor_head_sha=anchor_head_sha,
         state=state,
-        label_enabled=label_enabled,
         summary=(
             "This tenant PR is preview-eligible but still inactive. Run Launchplane's typed request-generation flow to create the initial preview route from the default testing baseline."
-            if state != "requested" and not label_enabled
-            else "GitHub already marked this PR for preview. Run Launchplane's typed request-generation flow to turn that saved label state into a live preview route."
-            if label_enabled and state != "requested"
+            if state != "requested"
             else "A preview request exists, but Launchplane has not produced a serving route yet. Run the typed request-generation flow to materialize the preview from the saved PR snapshot."
         ),
         baseline_release_tuple_id=resolved_manifest.baseline_release_tuple_id,
@@ -1159,76 +1141,6 @@ def _build_launchplane_promotion_detail_payload(
     }
 
 
-def _build_launchplane_preview_enablement_record(
-    *,
-    context_name: str,
-    event: GitHubPullRequestEvent,
-    request_metadata: LaunchplanePreviewRequestParseResult,
-    resolved_manifest: LaunchplaneResolvedPreviewManifest | None = None,
-) -> PreviewEnablementRecord | None:
-    resolved_context = context_name.strip()
-    if not resolved_context:
-        return None
-    updated_at = event.occurred_at.strip() or utc_now_timestamp()
-    return PreviewEnablementRecord(
-        record_id=_launchplane_preview_enablement_record_id(
-            context_name=resolved_context,
-            anchor_repo=event.repo,
-            anchor_pr_number=event.pr_number,
-        ),
-        context=resolved_context,
-        anchor_repo=event.repo,
-        anchor_pr_number=event.pr_number,
-        anchor_pr_url=event.pr_url,
-        anchor_head_sha=event.head_sha,
-        action=event.action,
-        pr_state=event.state,
-        updated_at=updated_at,
-        label_enabled=launchplane_preview_label_enabled(label_names=event.label_names),
-        action_label=event.action_label,
-        request_metadata_status=request_metadata.status,
-        request_metadata_error=request_metadata.error,
-        request_metadata_baseline_channel=(
-            request_metadata.metadata.baseline_channel
-            if request_metadata.metadata is not None
-            else ""
-        ),
-        request_metadata_companions=(
-            request_metadata.metadata.companions if request_metadata.metadata is not None else ()
-        ),
-        request_metadata_companion_summaries=_enablement_companion_summaries_snapshot(
-            request_metadata=request_metadata,
-            resolved_manifest=resolved_manifest,
-        ),
-    )
-
-
-def _enablement_companion_summaries_snapshot(
-    *,
-    request_metadata: LaunchplanePreviewRequestParseResult,
-    resolved_manifest: LaunchplaneResolvedPreviewManifest | None,
-) -> tuple[PreviewPullRequestSummary, ...]:
-    if request_metadata.metadata is None or resolved_manifest is None:
-        return ()
-    requested_keys = tuple(
-        (companion.repo.strip(), companion.pr_number)
-        for companion in request_metadata.metadata.companions
-    )
-    if not requested_keys:
-        return ()
-    summary_by_key = {
-        (summary.repo.strip(), summary.pr_number): summary
-        for summary in resolved_manifest.companion_summaries
-    }
-    summaries: list[PreviewPullRequestSummary] = []
-    for requested_key in requested_keys:
-        summary = summary_by_key.get(requested_key)
-        if summary is None:
-            return ()
-        summaries.append(summary)
-    return tuple(summaries)
-
-
 def _launchplane_preview_enablement_item_tone(state: str) -> str:
     if state == "running":
         return "good"
@@ -1239,21 +1151,18 @@ def _launchplane_preview_enablement_item_tone(state: str) -> str:
 
 def _launchplane_preview_enablement_item_source(
     *,
-    label_enabled: bool,
     preview_row: dict[str, object] | None,
     latest_requested_reason: str,
 ) -> str:
-    if label_enabled:
-        return "github_label"
     if latest_requested_reason.startswith("operator_requested"):
         return "launchplane"
-    if preview_row is not None and not label_enabled:
+    if preview_row is not None:
         return "history"
     return "none"
 
 
 def _launchplane_preview_enablement_item_state(
-    *, preview_row: dict[str, object] | None, label_enabled: bool, pr_state: str
+    *, preview_row: dict[str, object] | None, pr_state: str
 ) -> str:
     preview_state = (
         str(preview_row.get("state", "")).strip().lower() if preview_row is not None else ""
@@ -1267,41 +1176,25 @@ def _launchplane_preview_enablement_item_state(
         return "paused"
     if preview_row is not None and serving_generation_id:
         return "running"
-    if preview_row is not None or label_enabled:
+    if preview_row is not None:
         return "requested"
     if pr_state == "open":
         return "candidate"
     return ""
 
 
-def _launchplane_preview_enablement_item_request_summary(
-    *,
-    state: str,
-    source: str,
-    request_metadata_status: str,
-    request_metadata_error: str,
-    preview_row: dict[str, object] | None,
-) -> str:
+def _launchplane_preview_enablement_item_request_summary(*, state: str, source: str) -> str:
     if state == "candidate":
         return "Eligible tenant PR. No preview request is active yet."
     if state == "retained":
         return "Launchplane is keeping this PR's preview history as retained evidence."
-    if source == "github_label":
-        if request_metadata_status == "invalid":
-            return (
-                "GitHub label launchplane-preview requested a preview, but Launchplane preview metadata is invalid: "
-                f"{request_metadata_error}"
-            )
-        if preview_row is None:
-            return "GitHub label launchplane-preview requested a preview, but Launchplane has not created the preview record yet."
-        return "GitHub label launchplane-preview is the current preview request source."
     if source == "launchplane":
-        return "Launchplane explicitly requested this preview without relying on the GitHub label."
+        return "Launchplane explicitly requested this preview."
     if state == "paused":
         return (
             "Launchplane is intentionally holding this preview in place until an admin resumes it."
         )
-    return "Launchplane still has preview evidence from an earlier request even though no current GitHub label is present."
+    return "Launchplane still has preview evidence from an earlier request."
 
 
 def _launchplane_preview_enablement_item_status_summary(
@@ -1353,9 +1246,6 @@ def _build_launchplane_preview_enablement_items(
         pr_state = enablement_record.pr_state if enablement_record is not None else "open"
         state = _launchplane_preview_enablement_item_state(
             preview_row=preview_row,
-            label_enabled=enablement_record.label_enabled
-            if enablement_record is not None
-            else False,
             pr_state=pr_state,
         )
         if not state:
@@ -1372,9 +1262,7 @@ def _build_launchplane_preview_enablement_items(
             if latest_generations:
                 latest_requested_reason = latest_generations[0].requested_reason
 
-        label_enabled = enablement_record.label_enabled if enablement_record is not None else False
         source = _launchplane_preview_enablement_item_source(
-            label_enabled=label_enabled,
             preview_row=preview_row,
             latest_requested_reason=latest_requested_reason,
         )
@@ -1382,9 +1270,6 @@ def _build_launchplane_preview_enablement_items(
             enablement_record.request_metadata_status
             if enablement_record is not None
             else "missing"
-        )
-        request_metadata_error = (
-            enablement_record.request_metadata_error if enablement_record is not None else ""
         )
         anchor_head_sha = enablement_record.anchor_head_sha if enablement_record is not None else ""
         request_metadata_baseline_channel = (
@@ -1426,7 +1311,6 @@ def _build_launchplane_preview_enablement_items(
             anchor_pr_url=anchor_pr_url,
             anchor_head_sha=anchor_head_sha,
             state=state,
-            label_enabled=label_enabled,
             request_metadata_status=request_metadata_status,
             request_metadata_baseline_channel=request_metadata_baseline_channel,
             request_metadata_companions=request_metadata_companions,
@@ -1448,17 +1332,12 @@ def _build_launchplane_preview_enablement_items(
                 "tone": _launchplane_preview_enablement_item_tone(state),
                 "request_source": source,
                 "request_summary": _launchplane_preview_enablement_item_request_summary(
-                    state=state,
-                    source=source,
-                    request_metadata_status=request_metadata_status,
-                    request_metadata_error=request_metadata_error,
-                    preview_row=preview_row,
+                    state=state, source=source
                 ),
                 "status_summary": _launchplane_preview_enablement_item_status_summary(
                     state=state, preview_row=preview_row
                 ),
                 "updated_at": updated_at,
-                "label_enabled": label_enabled,
                 "request_metadata_status": request_metadata_status,
                 "request_metadata_baseline_channel": request_metadata_baseline_channel,
                 "request_metadata_companion_summaries": [
@@ -1938,20 +1817,6 @@ def _read_launchplane_browser_csrf_token(*, service_url: str, session_cookie: st
             "Launchplane auth session response did not include a CSRF token."
         )
     return csrf_token
-
-
-def _load_github_webhook_json_bytes(
-    raw_payload_bytes: bytes,
-    *,
-    description: str = "GitHub webhook payload",
-) -> dict[str, object]:
-    try:
-        webhook_payload = json.loads(raw_payload_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, JSONDecodeError) as exc:
-        raise click.ClickException(f"{description} must be valid UTF-8 JSON: {exc}") from exc
-    if not isinstance(webhook_payload, dict):
-        raise click.ClickException(f"{description} must decode to a JSON object.")
-    return webhook_payload
 
 
 def _wait_for_ship_healthcheck(*, url: str, timeout_seconds: int) -> None:
@@ -3774,8 +3639,5 @@ register_launchplane_preview_commands(
         write_site_bundle=_write_launchplane_site_bundle,
         render_status_page_html=_render_launchplane_preview_status_page_html,
         preview_profile_rows=_launchplane_preview_profile_rows,
-        build_preview_enablement_record=_build_launchplane_preview_enablement_record,
-        load_github_webhook_json_bytes=_load_github_webhook_json_bytes,
-        json_object=_json_object,
     ),
 )

@@ -30989,11 +30989,6 @@
             "title": "Domain Certificate Type",
             "type": "string"
           },
-          "enable_label": {
-            "default": "launchplane-preview",
-            "title": "Enable Label",
-            "type": "string"
-          },
           "enabled": {
             "default": false,
             "title": "Enabled",
@@ -75847,11 +75842,6 @@
                         "title": "Preview Context",
                         "type": "string"
                       },
-                      "preview_label": {
-                        "default": "launchplane-preview",
-                        "title": "Preview Label",
-                        "type": "string"
-                      },
                       "product": {
                         "title": "Product",
                         "type": "string"
@@ -76381,11 +76371,6 @@
                           "letsencrypt"
                         ],
                         "title": "Domain Certificate Type",
-                        "type": "string"
-                      },
-                      "enable_label": {
-                        "default": "launchplane-preview",
-                        "title": "Enable Label",
                         "type": "string"
                       },
                       "enabled": {
