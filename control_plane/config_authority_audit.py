@@ -2215,8 +2215,11 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
             config_authority_uses_indent = None
         if generic_web_preview_uses_indent is not None and indent < generic_web_preview_uses_indent:
             generic_web_preview_uses_indent = None
-        context_stack = _yaml_context_for_indent(context_stack, indent=indent)
         list_match = YAML_LIST_ITEM_PATTERN.match(line)
+        # YAML permits a block sequence at the same indent as its mapping key.
+        context_stack = _yaml_context_for_indent(
+            context_stack, indent=indent + 1 if list_match is not None else indent
+        )
         if list_match is not None:
             list_value = _unquote(list_match.group("value"))
             list_scalar = YAML_SCALAR_PATTERN.match(list_value)
@@ -2343,14 +2346,14 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
                 continue
             if block_value:
                 block_candidate = (
-                    _YamlRunnerScalar(block_value) if yaml_key == "runs-on" else block_value
+                    _YamlRunnerScalar(block_value) if key == "runs-on" else block_value
                 )
                 candidates.append((line_number, key, block_candidate))
             index = next_index
             continue
         if value:
             scalar_value = _unquote(value)
-            if yaml_key == "runs-on" and value.startswith(("'", '"')):
+            if key == "runs-on" and value.startswith(("'", '"')):
                 scalar_value = _YamlRunnerScalar(scalar_value)
             if yaml_key == "uses" and _is_github_checkout_action_reference(scalar_value):
                 checkout_uses_indent = indent
@@ -2387,6 +2390,8 @@ def _yaml_context_for_indent(
 
 
 def _yaml_candidate_key(context_stack: Sequence[tuple[int, str]], key: str) -> str:
+    if key == "labels" and context_stack and context_stack[-1][1] == "runs-on":
+        return "runs-on"
     if key == "default":
         input_name = _yaml_workflow_input_name(context_stack)
         if input_name:
@@ -2410,6 +2415,8 @@ def _yaml_candidate_key(context_stack: Sequence[tuple[int, str]], key: str) -> s
 
 def _yaml_list_candidate_key(context_stack: Sequence[tuple[int, str]]) -> str:
     if context_stack and context_stack[-1][1] == "runs-on":
+        return "runs-on"
+    if [key for _, key in context_stack[-2:]] == ["runs-on", "labels"]:
         return "runs-on"
     return ""
 
