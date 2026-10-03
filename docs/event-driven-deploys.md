@@ -200,6 +200,13 @@ needs no workflow to report previews or testing deploys.
   Without it (or with an invalid one) the comment has no mention, the reconcile
   is unaffected, and `pr_feedback.owner_review` says why (`no_public_origin` or
   `invalid_public_origin`; otherwise `mentioned` or `owner_not_set`).
+  Before the comment is written, the reconciler writes the
+  `launchplane/owner-review` status with the preview context's feedback
+  credential (the merge-train App cannot write statuses), carrying an acceptance
+  across a base-only merge train refresh when it qualifies (see
+  [carried acceptance](owner-acceptance.md#carried-acceptance)). When the head
+  is accepted, the comment says so without mentioning the Client, and
+  `pr_feedback.owner_review` is `accepted`.
 - **Missing preview settings:** a preview refused because its runtime
   environment is incomplete names the missing keys (names only, never values)
   on the plan as `missing_keys`, in the request's error, and in the PR comment.

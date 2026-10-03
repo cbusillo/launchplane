@@ -3500,6 +3500,13 @@ export type ProductPublicIngressSummary = {
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
 };
 
+export type ProductReviewCarry = {
+    head_sha: string;
+    reason: 'merge_train_base_refresh';
+    record_id: string;
+    refresh_record_ids: Array<string>;
+};
+
 export type ProductReviewDecisionEnvelope = {
     decision: 'accepted' | 'changes_requested';
     pull_request: number;
@@ -3508,6 +3515,7 @@ export type ProductReviewDecisionEnvelope = {
 };
 
 export type ProductReviewDecisionRecord = {
+    carried_from: ProductReviewCarry | null;
     decided_at: string;
     decision: 'accepted' | 'changes_requested';
     feedback_requested: boolean;

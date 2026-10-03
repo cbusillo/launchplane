@@ -2896,6 +2896,7 @@ export function productReviewDecisionForFixture(
     owner_github_id: "9001",
     owner_github_login: "example-owner",
     decided_at: OBSERVED_AT,
+    carried_from: null,
   };
 }
 

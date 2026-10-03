@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import json
 from hashlib import sha256
 import logging
@@ -57,6 +58,20 @@ from control_plane.merge_train import MergeTrainPullRequestState
 from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionDeniedError
 
 logger = logging.getLogger(__name__)
+
+
+class MergeTrainBranchRefreshRecorder(Protocol):
+    """Keeps the train's own branch refreshes, after the provider accepted each one."""
+
+    def __call__(
+        self,
+        *,
+        repository: str,
+        pull_request_number: int,
+        expected_head_sha: str,
+        requested_at: datetime,
+    ) -> None: ...
+
 
 if TYPE_CHECKING:
     from control_plane.tenant_admission_controller import TenantAdmissionTechnicalChecks
@@ -194,9 +209,11 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         *,
         transport: MergeTrainGitHubTransport,
         effect_executor: MergeTrainSemanticEffectExecutor | None = None,
+        branch_refresh_recorder: MergeTrainBranchRefreshRecorder | None = None,
     ) -> None:
         self.transport = transport
         self._effect_executor = effect_executor
+        self._branch_refresh_recorder = branch_refresh_recorder
 
     def read_merge_train_snapshot(
         self, *, repository: str, base_branch: str
@@ -1494,6 +1511,8 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         self, *, repository: str, pull_request_number: int, expected_head_sha: str
     ) -> None:
         repository_path = _repository_path(repository)
+        # Taken before the request, so the commit the provider makes is never older.
+        requested_at = datetime.now(timezone.utc)
         self.transport.request(
             method="PUT",
             path=f"/repos/{repository_path}/pulls/{pull_request_number}/update-branch",
@@ -1503,6 +1522,22 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 )
             },
         )
+        if self._branch_refresh_recorder is None:
+            return
+        try:
+            self._branch_refresh_recorder(
+                repository=repository,
+                pull_request_number=pull_request_number,
+                expected_head_sha=expected_head_sha,
+                requested_at=requested_at,
+            )
+        except Exception:
+            # The refresh happened; only carrying a Client's acceptance across it is lost.
+            logger.warning(
+                "The merge train refreshed a pull request but could not record it.",
+                exc_info=True,
+                extra={"repository": repository, "pull_request_number": pull_request_number},
+            )
 
     def merge_pull_request(
         self,

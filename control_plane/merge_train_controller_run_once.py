@@ -64,6 +64,10 @@ from control_plane.merge_train_batch_landing import (
     MergeTrainBatchLandingPlanRecordStore,
     validate_stack_collapse_record_for_landing,
 )
+from control_plane.merge_train_branch_refresh import (
+    MergeTrainBranchRefreshWriteStore,
+    merge_train_branch_refresh_recorder,
+)
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     MergeTrainGitHubError,
@@ -335,6 +339,7 @@ def execute_merge_train_controller_run_once(
     admission_evaluator: MergeAdmissionEvaluator,
     before_release: Callable[[MergeTrainControllerRunOnceResult], None] | None = None,
     effect_executor: MergeTrainSemanticEffectExecutor | None = None,
+    branch_refresh_store: MergeTrainBranchRefreshWriteStore | None = None,
 ) -> MergeTrainControllerRunOnceResult:
     transport = UrllibMergeTrainGitHubTransport(
         token=token,
@@ -343,6 +348,15 @@ def execute_merge_train_controller_run_once(
     github_client = GitHubMergeTrainClient(
         transport=transport,
         effect_executor=effect_executor,
+        branch_refresh_recorder=(
+            merge_train_branch_refresh_recorder(
+                store=branch_refresh_store,
+                base_branch=request.base_branch,
+                trace_id=trace_id,
+            )
+            if branch_refresh_store is not None
+            else None
+        ),
     )
     return execute_merge_train_controller_with_client(
         request=request,

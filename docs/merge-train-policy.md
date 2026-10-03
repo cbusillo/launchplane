@@ -774,7 +774,11 @@ the blocked pull request has been labeled.
 When the selected pull request needs a branch refresh, Launchplane updates that
 pull request using the observed head SHA as the compare point. The worker must
 then re-read mergeability and required checks before any later merge decision;
-pre-update check results are stale after a branch refresh.
+pre-update check results are stale after a branch refresh. The controller
+records each refresh it requested (`launchplane_merge_train_branch_refreshes`),
+so a Client's acceptance of the refreshed pull request can carry to the new head
+when the change itself is unchanged (see
+[carried acceptance](owner-acceptance.md#carried-acceptance)).
 
 The reread step rebuilds the dry-run decision from a fresh pull request snapshot.
 If checks are still pending or mergeability is unknown, the next action remains

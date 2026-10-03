@@ -1383,6 +1383,13 @@ decision (`accepted` or `changes_requested` with its reason), the Client's GitHu
 id and login, and `decided_at`. The newest record for a repository and pull
 request is the current decision. The record authorizes nothing.
 
+A record with `carried_from` was not decided again: it carries an acceptance to
+a new head after a base-only refresh by the merge train (see
+[carried acceptance](owner-acceptance.md#carried-acceptance)). `carried_from`
+names the decision record and head it came from, the reason
+(`merge_train_base_refresh`), and the merge train branch refresh records that
+produced the new head. Its `decided_at` is when Launchplane carried it.
+
 ## Product Reconcile Request Records
 
 `launchplane_product_reconcile_requests` holds at most one row per target key
@@ -2744,6 +2751,15 @@ preflights.
   id is not copied into the compact public queue response.
   The record is evidence for a single Level 1 ordered-queue service call, not
   queue authority for a later pass.
+- Merge train branch refreshes are persisted as
+  `launchplane_merge_train_branch_refreshes` records, one each time the train's
+  GitHub client has GitHub merge a pull request's base branch into it
+  (`update-branch`). Each record stores the repository, base branch, pull request
+  number, the head SHA the train expected, the time just before the request, and
+  the controller trace id. It is written after GitHub accepts the request; a
+  write failure is logged and never fails the refresh. It is the proof that a
+  merge commit on a pull request was made by the train, used to carry a Client's
+  acceptance across it.
 - Merge train pull-request feedback is persisted as
   `launchplane_merge_train_pr_feedback` records. Each record stores the
   repository/base branch, PR number/url, feedback event, hidden managed-comment

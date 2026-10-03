@@ -77,6 +77,9 @@ from control_plane.contracts.merge_train_controller_state import (
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
 )
+from control_plane.contracts.merge_train_branch_refresh_record import (
+    MergeTrainBranchRefreshRecord,
+)
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyCompareWriteResult,
@@ -1911,6 +1914,26 @@ class FilesystemRecordStore:
             records = records[offset:]
         if limit is not None:
             records = records[:limit]
+        return tuple(records)
+
+    def write_merge_train_branch_refresh_record(
+        self, record: MergeTrainBranchRefreshRecord
+    ) -> Path:
+        return self._write_model(
+            "launchplane_merge_train_branch_refreshes", record.record_id, record
+        )
+
+    def list_merge_train_branch_refresh_records(
+        self, *, repository: str, pull_request_number: int
+    ) -> tuple[MergeTrainBranchRefreshRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                MergeTrainBranchRefreshRecord, "launchplane_merge_train_branch_refreshes"
+            )
+            if record.repository == repository and record.pull_request_number == pull_request_number
+        ]
+        records.sort(key=lambda record: (record.requested_at, record.record_id), reverse=True)
         return tuple(records)
 
     def write_merge_train_run_record(self, record: MergeTrainRunRecord) -> Path:

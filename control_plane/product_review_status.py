@@ -25,6 +25,7 @@ from control_plane.github_app_identity import (
 )
 from control_plane.product_review import ProductReviewStore
 from control_plane.github_payload import json_object, required_positive_int
+from control_plane.product_review_carry import carry_owner_acceptance
 from control_plane.product_review_feedback import publish_owner_feedback
 from control_plane.workflows.launchplane import (
     github_api_request,
@@ -58,6 +59,7 @@ class _PullRequestFacts:
     head_sha: str
     labels: frozenset[str]
     repository_id: str
+    base_branch: str = ""
 
 
 def owner_review_status(
@@ -85,9 +87,12 @@ def owner_review_status(
     if decision.feedback_requested and not decision.feedback_url:
         return OwnerReviewStatus(state="pending", description="Owner feedback delivery is pending")
     if decision.decision == "accepted":
-        return OwnerReviewStatus(
-            state="success", description=f"Accepted by @{decision.owner_github_login}"
-        )
+        description = f"Accepted by @{decision.owner_github_login}"
+        if decision.carried_from is not None:
+            description += (
+                f" (carried from {decision.carried_from.head_sha[:7]} after a base-only refresh)"
+            )
+        return OwnerReviewStatus(state="success", description=description)
     return OwnerReviewStatus(
         state="failure", description=f"Changes requested by @{decision.owner_github_login}"
     )
@@ -260,6 +265,7 @@ class OwnerReviewStatusPublisher:
             if isinstance(item, dict) and isinstance(item.get("name"), str)
         )
         base = payload.get("base")
+        base_ref = base.get("ref") if isinstance(base, dict) else None
         base_repository = base.get("repo") if isinstance(base, dict) else None
         raw_repository_id = base_repository.get("id") if isinstance(base_repository, dict) else None
         repository_id = (
@@ -268,7 +274,10 @@ class OwnerReviewStatusPublisher:
             else ""
         )
         return _PullRequestFacts(
-            head_sha=head_sha.strip().lower(), labels=labels, repository_id=repository_id
+            head_sha=head_sha.strip().lower(),
+            labels=labels,
+            repository_id=repository_id,
+            base_branch=base_ref.strip() if isinstance(base_ref, str) else "",
         )
 
     def _write_status(
@@ -280,6 +289,25 @@ class OwnerReviewStatusPublisher:
         facts: _PullRequestFacts,
         token: str,
     ) -> OwnerReviewStatus:
+        try:
+            carry_owner_acceptance(
+                store=store,
+                profile=profile,
+                pull_request_number=pull_request_number,
+                head_sha=facts.head_sha,
+                base_branch=facts.base_branch,
+                read=lambda path: self.api_request(path=path, token=token),
+            )
+        except Exception:
+            # Not carried: the head waits for the Client, as it would without a carry.
+            _LOGGER.warning(
+                "Owner acceptance could not be checked for a carry.",
+                exc_info=True,
+                extra={
+                    "repository": profile.repository,
+                    "pull_request_number": pull_request_number,
+                },
+            )
         status = owner_review_status(
             owner=profile.owner,
             head_sha=facts.head_sha,

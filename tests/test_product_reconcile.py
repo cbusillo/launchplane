@@ -62,7 +62,7 @@ from control_plane.odoo_preview_apply_http import (
     OdooPreviewApplyConfigError,
 )
 from control_plane.product_reconcile_read import product_reconcile_request_view
-from control_plane.product_review_status import owner_review_reference_url
+from control_plane.product_review_status import OwnerReviewStatus, owner_review_reference_url
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy, MergeTrainPolicyRecord
 from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.product_reconcile import (
@@ -418,6 +418,10 @@ class ProductReconcileTestCase(unittest.TestCase):
         self.comments = FakeGitHubComments()
         self.public_origin = "https://launchplane.example.test"
         self.testing_hooks = TestingProviderHooks()
+        # The Owner-review status writes with the preview context's credential, not
+        # the reconciler's App; tests that need a written status replace this.
+        self.owner_review_status: OwnerReviewStatus | None = None
+        self.owner_review_status_calls: list[tuple[str, int]] = []
         for module in (
             "control_plane.workflows.launchplane",
             "control_plane.product_reconcile_feedback",
@@ -442,9 +446,16 @@ class ProductReconcileTestCase(unittest.TestCase):
             testing_hooks=self.testing_hooks,
             feedback_token=lambda _store, _profile: "feedback-token",
             public_origin=lambda: self.public_origin,
+            owner_review_status=self.write_owner_review_status,
         )
         assert completed is not None
         return completed
+
+    def write_owner_review_status(
+        self, profile: LaunchplaneProductProfileRecord, pull_request_number: int
+    ) -> OwnerReviewStatus | None:
+        self.owner_review_status_calls.append((profile.product, pull_request_number))
+        return self.owner_review_status
 
     def reconcile(self) -> dict[str, object]:
         completed = self.run_once()
@@ -1836,6 +1847,29 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
                     self.assertIn(link, body)
                 else:
                     self.assertNotIn("@site-owner", body)
+
+    def test_ready_preview_on_an_accepted_head_says_so_instead_of_asking_again(self) -> None:
+        payload = _profile()
+        payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.github.pull_request["labels"] = [{"name": "owner-review"}]
+        self.owner_review_status = OwnerReviewStatus(
+            state="success",
+            description="Accepted by @site-owner (carried from bd92cee after a base-only refresh)",
+        )
+
+        feedback = cast(dict[str, object], self.reconcile_preview()["pr_feedback"])
+
+        self.assertEqual(feedback.get("owner_review"), "accepted")
+        self.assertEqual(self.owner_review_status_calls, [("site", 5)])
+        body = self.comment_body()
+        self.assertIn(
+            "Accepted by site-owner (carried from bd92cee after a base-only refresh).", body
+        )
+        self.assertNotIn("@site-owner", body)
 
     def test_owner_label_added_after_the_preview_is_up_adds_the_mention(self) -> None:
         payload = _profile()

@@ -32225,6 +32225,41 @@
         "title": "ProductRetirementRequest",
         "type": "object"
       },
+      "ProductReviewCarry": {
+        "additionalProperties": false,
+        "description": "Where a carried acceptance came from: the Client decided on another head.\n\n`merge_train_base_refresh`: the merge train only merged the base branch into the\npull request, and the pull request's change against its base is byte-identical.",
+        "properties": {
+          "head_sha": {
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "reason": {
+            "const": "merge_train_base_refresh",
+            "default": "merge_train_base_refresh",
+            "title": "Reason",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "refresh_record_ids": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Refresh Record Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "record_id",
+          "head_sha",
+          "refresh_record_ids"
+        ],
+        "title": "ProductReviewCarry",
+        "type": "object"
+      },
       "ProductReviewDecisionEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -32267,6 +32302,16 @@
         "additionalProperties": false,
         "description": "One Owner decision about one pull request preview.\n\nThe decision is a recorded opinion: it never merges or deploys anything.",
         "properties": {
+          "carried_from": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductReviewCarry"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "decided_at": {
             "title": "Decided At",
             "type": "string"
