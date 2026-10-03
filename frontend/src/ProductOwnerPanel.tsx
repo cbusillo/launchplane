@@ -56,7 +56,7 @@ export function ProductOwnerPanel({
   const [plan, setPlan] = useState<ProductOwnerPlan | null>(null);
   const [plannedDraft, setPlannedDraft] = useState<{ clear: boolean; key: string } | null>(null);
   const [saved, setSaved] = useState(false);
-  const planOperation = useProductOwnerOperation(`${product}:owner:plan`, product, fixtureMode);
+  const planOperation = useProductOwnerOperation(`${product}:owner:plan`, product, fixtureMode, true);
   const applyOperation = useProductOwnerOperation(`${product}:owner:apply`, product, fixtureMode);
   const busy = isOperationBusy(planOperation.state) || isOperationBusy(applyOperation.state);
   const locked = busy || applyOperation.state.requiresIdempotencyContinuity;
@@ -284,7 +284,7 @@ export function ProductOwnerPanel({
   );
 }
 
-function useProductOwnerOperation(scope: string, product: string, fixtureMode: DevFixtureMode) {
+function useProductOwnerOperation(scope: string, product: string, fixtureMode: DevFixtureMode, readOnly = false) {
   async function execute(
     payload: ProductOwnerRequest,
     options: Parameters<typeof applyProductOwner>[2],
@@ -300,6 +300,7 @@ function useProductOwnerOperation(scope: string, product: string, fixtureMode: D
     execute,
     failureCertainty: productConfigFailureCertainty,
     failureFor: productConfigOperationFailure,
+    readOnly,
     scope,
   });
 }
