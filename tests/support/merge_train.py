@@ -68,8 +68,10 @@ class _FakeMergeTrainGitHubClient:
         *,
         transport: object,
         effect_executor: MergeTrainSemanticEffectExecutor | None = None,
+        branch_refresh_recorder: object | None = None,
     ) -> None:
         self.transport = transport
+        self.branch_refresh_recorder = branch_refresh_recorder
         self.semantic_effect_executor = (
             effect_executor
             if effect_executor is not None

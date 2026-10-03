@@ -342,6 +342,7 @@ from control_plane.merge_admission import (
     require_merge_admission_record_store,
 )
 from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator
+from control_plane.merge_train_branch_refresh import optional_merge_train_branch_refresh_store
 from control_plane.governance_projection import LiveGovernanceCurrentReadinessProvider
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerAdoptionRejectedError,
@@ -6264,6 +6265,7 @@ def create_launchplane_fastapi_app(
                 admission_store=admission_store,
                 admission_evaluator=admission_evaluator,
                 before_release=store_controller_idempotency_before_release,
+                branch_refresh_store=optional_merge_train_branch_refresh_store(record_store),
             )
         except MergeTrainGitHubStaleHeadError as error:
             return merge_train_github_stale_state_response(trace_id=trace_id, error=error)
