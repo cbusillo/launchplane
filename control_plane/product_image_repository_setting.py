@@ -47,13 +47,14 @@ class ProductImageRepositoryApplyRequest(BaseModel):
     schema_version: Literal[1] = 1
     mode: ProductImageRepositoryMode = "dry-run"
     image_repository: str
-    expected_image_repository: str = ""
+    expected_image_repository: str | None = None
     reason: str
 
     @model_validator(mode="after")
     def _validate_request(self) -> "ProductImageRepositoryApplyRequest":
         self.image_repository = self.image_repository.strip().rstrip("/")
-        self.expected_image_repository = self.expected_image_repository.strip().rstrip("/")
+        if self.expected_image_repository is not None:
+            self.expected_image_repository = self.expected_image_repository.strip().rstrip("/")
         self.reason = self.reason.strip()
         if not self.reason:
             raise ValueError("Product image repository request requires reason.")
@@ -62,7 +63,7 @@ class ProductImageRepositoryApplyRequest(BaseModel):
                 "Product image repository must be an untagged lowercase "
                 "ghcr.io/<owner>/<name> repository."
             )
-        if self.mode == "apply" and not self.expected_image_repository:
+        if self.mode == "apply" and self.expected_image_repository is None:
             raise ValueError(
                 "Product image repository apply requires expected_image_repository from "
                 "the dry run."

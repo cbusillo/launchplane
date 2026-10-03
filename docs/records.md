@@ -39,6 +39,11 @@ rehearsal parity only.
 
 ### Ordinary-Agent Lifecycle
 
+Status: retired. Ordinary-agent delegated delivery is retired in
+[DIRECTION.md](../DIRECTION.md); its code and tables remain only until they are
+deleted (cbusillo/launchplane#2437). Do not extend them. This section describes
+what is still in the code.
+
 Four DB-backed tables hold the authoritative ordinary-agent lifecycle boundary:
 
 - `launchplane_ordinary_agent_principals` stores linear principal revisions and
@@ -81,6 +86,9 @@ cannot block unrelated privileged-operation execution. The worker's normal poll
 heartbeat does not assert cleanup success.
 
 ### Provider Delivery Inspection
+
+Status: retired with ordinary-agent delegated delivery; deletion is tracked in
+cbusillo/launchplane#2437. Do not extend it.
 
 `launchplane_provider_delivery_inspections` stores private demand generations,
 bounded provider attempts, independent token custody and terminal observations.
@@ -159,17 +167,16 @@ LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... uv run python -m control_plane
 ```
 
 Do not run `alembic upgrade head` directly against the shared service database
-during a staged rollout. The authorization compatibility image was deployed at
-revision `f3b5d7e9a1c2` before this release advanced the migration target to the
-fenced `f4c6e8a0b2d4` schema, then to `a1c3e5f7b9d2` for the dedicated Odoo
-production backup-restore operation table, and then to `b3d5f7a9c1e4` for the
-retained-volume backup-import operation table. The full reconciliation image
-accepts older revisions only as serialized migration sources; its ORM and
-runtime compatibility contract requires b3. After the database reaches b3,
-rollback is supported only to an image that understands both production
-recovery operation tables. The runtime status route reports the observed
-database revision, the image's b3-only runtime compatibility set, and its
-migration target so deployment verification can enforce this boundary.
+during a staged rollout. The release's migration target is
+`SCHEMA_MIGRATION_TARGET_REVISION` in `control_plane/storage/schema_migration.py`,
+currently the checked-in head (`EXPECTED_ALEMBIC_HEAD_REVISION` in
+`control_plane/storage/schema_invariants.py`). Older revisions are accepted only
+as serialized migration sources; the runtime compatibility set
+(`RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS`) holds only that head. After the
+database reaches the head, rollback is supported only to an image that
+understands it. The runtime status route reports the observed database
+revision, the image's runtime compatibility set, and its migration target so
+deployment verification can enforce this boundary.
 
 JSONB `payload` columns remain durable evidence envelopes and original typed
 payload snapshots. Fields that the GUI or drivers need to filter, order, join,
@@ -408,7 +415,7 @@ also ensure the GitHub issue is closed after marker reconciliation.
 
 ## Durable Provider Operations
 
-The shared durable provider-operation runner (`control_plane/provider_operations`)
+The shared durable provider-operation runner (`control_plane/provider_operations.py`)
 implements this contract for external-effect routes. It reserves with the
 deterministic provider reconciliation key bound from the start, so `acquired`
 always means a brand-new attempt with no prior effect, while an expired bound
@@ -940,12 +947,19 @@ repository's workflow token. Move a profile there with
 `POST /v1/product-profiles/{product}/image-repository` rather than a
 whole-record write. The dry run shows the repository before and after, and what
 each lane runs now. Apply must name the starting repository the dry run showed,
-and no other profile field changes. The profile's repository applies to
+including an explicitly empty string for a profile with no image repository;
+no other profile field changes. The profile's repository applies to
 artifacts a caller supplies: a deploy, a testing deploy, a promotion request.
 An immutable image Launchplane already recorded on a deployment, an inventory or
 a deploy reservation stays valid after the move, so rollback, deploy recovery
 and promotion evidence still work. Promotion refuses a testing lane that runs an
 image outside the current repository.
+
+`POST /v1/product-profiles/{product}/production-use` changes only the production-use
+classification and profile metadata under `product_profile.write`. Dry run returns a
+digest of the full starting profile, requested value, and reason; Apply must match it.
+Atomic compare-and-write and idempotency evidence record the caller, before/after,
+reason and timestamps. The Client panel reads the resulting profile back.
 
 Expected-config metadata changes use
 `POST /v1/product-profiles/expected-config/apply`. The request carries
@@ -1350,6 +1364,10 @@ records remain the source of truth for active public-ingress state.
 
 ## Every Code Feedback Resume Evidence
 
+Status: Every Code is retired in [DIRECTION.md](../DIRECTION.md); Codex Lab runs
+agent work. The Every Code records below stay only until their readers move
+(cbusillo/launchplane#1313). Do not extend them.
+
 The independent [feedback continuation foundation](every-code-feedback-resume.md)
 stores immutable acceptance, terminal intent, operation, explicit PR closure,
 startup/handoff receipt and recovery evidence in separate SQL tables. Their
@@ -1366,6 +1384,9 @@ resolution; those service-owned transitions remain separately implemented and
 gated as described in the linked contract.
 
 ## Every Code Notification Records
+
+Status: retired with Every Code; see the note under Every Code Feedback Resume
+Evidence.
 
 Every Code notification policy records are DB-backed Launchplane records under
 `launchplane_every_code_notification_policies`. They select enabled
@@ -1588,15 +1609,10 @@ These records are the durable Odoo-first Launchplane truth for this repo today.
 Stable lane records (`testing`, `prod`) and preview records are separate on
 purpose: previews are not another long-lived environment lane.
 
-The current cross-product posture is evidence-first. A second product such as
-VeriReel should first land in these existing Launchplane record shapes through
-deployment, promotion, inventory, and preview evidence ingestion before this
-control plane takes over product-specific runtime actions.
-
-Under the target Launchplane shape, product workflows and drivers should speak in
-typed evidence payloads. Launchplane may still store those facts in file-backed
-JSON for local development, but the shared-service path should write the same
-record nouns into Postgres-backed tables without inventing a second record model.
+Under the target Launchplane shape, drivers speak in typed evidence payloads.
+Launchplane may still store those facts in file-backed JSON for local
+development, but the shared-service path should write the same record nouns
+into Postgres-backed tables without inventing a second record model.
 
 ## Layout
 
@@ -1610,7 +1626,7 @@ state/
     <record-id>.json
   launchplane_preview_generations/
     <generation-id>.json
-  launchplane_preview_enablements/
+  launchplane_preview_enablement/
     <enablement-id>.json
   launchplane_previews/
     <preview-id>.json
@@ -1659,9 +1675,6 @@ provider message or rollback health exception is embedded in the detail.
   shelling out for a pre-rendered JSON request.
 - Promotion execution requires the source lane to have a current release tuple
   record for the requested artifact before it can deploy to the destination.
-- For a second product such as VeriReel, promotion evidence from the existing
-  production-promotion workflow is the smallest proof point that this record
-  shape works beyond Odoo.
 
 ## Production Backup Authority Records
 
@@ -2137,9 +2150,6 @@ run` is the foreground loop intended for an external process supervisor, and
   the Odoo base-image digests/tags/source refs and `odoo-devkit` provenance from
   Launchplane read evidence without treating support repos as owning the release
   tuple.
-- For a second product such as VeriReel, the first Launchplane onboarding slice
-  should ingest deployment evidence from that product's existing release
-  workflows into this record shape before Launchplane owns the deploy execution.
 
 ## Release Tuple Record
 
@@ -2303,10 +2313,11 @@ run` is the foreground loop intended for an external process supervisor, and
 
 - Repository human role policies (the manager and delegate roles) and the
   technical human waiver are retired. Their routes, contracts, evaluation, and
-  store methods are deleted. Existing
+  store methods are deleted. Migration `b7e9f1a3c5d8` drops
   `launchplane_repository_human_role_policies` and
-  `launchplane_tenant_technical_human_waiver_events` rows stay in the database
-  unread until the Director decides whether to drop them.
+  `launchplane_tenant_technical_human_waiver_events`, including all rows, under
+  the Director's #2006 decision to keep nothing. It exports no rows or counts.
+  Downgrade recreates empty historical schemas, not the deleted data.
 - Trusted-maintenance policy records are a separate contract, not a human role
   policy and not a generic authz-policy reuse. Each policy revision is keyed by
   immutable numeric `repository_id` plus `repository_owner_id`, `repository`,
@@ -2494,13 +2505,9 @@ delete provider values or deploy an application.
 - Higher-level transition commands may also rewrite preview records through the
   tested Launchplane transition helpers so admins do not have to hand-edit link
   fields for common lifecycle states.
-- For a second product such as VeriReel, preview-control-plane and cleanup
-  workflow evidence is the first candidate source for proving this preview
-  model without forcing Launchplane to provision or destroy those previews itself
-  on day one.
 - `launchplane-previews write-destroyed` is the matching cleanup-evidence ingest
-  surface for that model: it accepts typed teardown evidence and applies the
-  stored destroyed transition without implying Launchplane executed the cleanup.
+  surface for the preview record: it accepts typed teardown evidence and applies
+  the stored destroyed transition without implying Launchplane executed the cleanup.
   Under the target Launchplane service shape, that same payload should enter through
   authenticated API ingress rather than a repo-local CLI command.
 
@@ -2539,9 +2546,12 @@ delete provider values or deploy an application.
 Manager preview approval is retired. Its contracts, evaluator, command parser,
 reconcile endpoint, projection writer, and store methods are deleted, and
 filesystem-to-database import no longer copies manager events. Existing
-`launchplane_manager_preview_approval_events` rows stay in the database unread
-until the Director decides whether to drop them. Current approval uses product
-review and the release checklist.
+`launchplane_manager_preview_approval_events` rows are deleted with the table
+by migration `b7e9f1a3c5d8`, under the Director's #2006 decision to keep nothing.
+There is no export or row-count record; downgrade recreates only an empty table.
+Hosted service startup applies the release's migration target, so deployment of
+this revision deletes the retired rows. Current approval uses product review
+and the release checklist.
 
 The configured `/v1/manager-preview-approval/github-webhook` URL and its existing
 bootstrap secret remain solely as a transport compatibility boundary for signed
@@ -2569,12 +2579,10 @@ credential, runtime grant, or stored record is changed by this code retirement.
 ## Launchplane Preview Lifecycle Plan Record
 
 - One append-only decision record per preview lifecycle planning run.
-- Record the desired preview anchors submitted by a product repo, the latest
+- Record the submitted desired preview anchors, the latest
   desired-state discovery record when present, the latest inventory scan used as
   current provider state, and the derived keep/orphaned/missing slug sets.
-- The plan record is the required input for cleanup execution. Product repos
-  should eventually submit thin desired-state adapters to this boundary instead
-  of each owning a separate preview janitor implementation.
+- The plan record is the required input for cleanup execution.
 
 ## Launchplane Preview Desired State Record
 
@@ -2604,11 +2612,13 @@ credential, runtime grant, or stored record is changed by this code retirement.
 - Record the product/context/source, anchor repository and PR, preview status,
   rendered comment markdown, delivery status, delivery action, GitHub comment id
   and URL, and any skip/failure reason.
-- Product repos should send outcome facts rather than hand-rendering or upserting
-  GitHub comments themselves. This keeps PR feedback aligned with Launchplane's
-  durable preview lifecycle records.
+- Launchplane renders and upserts these comments from outcome facts, so PR
+  feedback stays aligned with Launchplane's durable preview lifecycle records.
 
 ## Every Code Work Request Record
+
+Status: retired with Every Code; see the note under Every Code Feedback Resume
+Evidence. The local Mac worker below no longer runs agent work.
 
 See [agent-context-boundary.md](agent-context-boundary.md) for the agent-facing
 rules that compose these records into public-safe context and scoped intent
@@ -2731,6 +2741,9 @@ preflights.
   ids, blocked error messages, issue bodies, prompt text, local checkout paths,
   or local worker hostnames. Summary entries include compact agent-context
   provenance and evidence for the source issue and recorded work-request state.
+
+## Agent Context, Authorization, and Merge Train Records
+
 - Agent callers should prefer `GET /v1/previews/readiness` over raw preview-gate
   reads when they only need preview gate status. The readiness projection maps
   gate state to waiting, ready, needs-attention, or cancelled statuses with
@@ -2881,11 +2894,8 @@ implicitly exact.
   evidence: accepted deployment evidence refreshes inventory immediately, and
   accepted promotion evidence refreshes destination inventory when the
   promotion record carries explicit deployment linkage.
-- For a second product such as VeriReel, shared inventory should first be
-  derived from accepted service-backed deployment/promotion evidence before
-  Launchplane becomes the runtime executor for that product. Local
-  `inventory write-from-deployment` and `inventory write-from-promotion` remain
-  file-backed rehearsal helpers only.
+- Local `inventory write-from-deployment` and `inventory write-from-promotion`
+  remain file-backed rehearsal helpers only.
 
 ## Product retirement records
 
@@ -2955,8 +2965,8 @@ secret mutation, target rewrite, or runtime mutation fields.
 Guarded merge authorization is persisted separately from mutable batch landing
 progress. `MergeAdmissionRecord` is append-only evidence written immediately
 before one exact provider merge attempt. It binds the current L2 readiness
-result and digest, structural result and provenance digest, Client and
-engineering evidence carried by L2, all seven policy fingerprints, repository,
+result and digest, structural result and provenance digest, engineering
+evidence carried by L2, all six current policy fingerprints, repository,
 base branch, PR and queue position, candidate and landing-plan identity,
 rolling base/head/tree identity, algorithm version, controller lease, expected
 effect SHA, attempt sequence, and actual creation time. Each admission carries
@@ -3028,6 +3038,11 @@ history ID. PostgreSQL enforces one active
 the privileged worker uses atomic expected-active-policy compare-and-write,
 operation-scoped idempotency, and exact active/superseded read-back before an
 operation reaches `executed`.
+
+Status: the `owner-control` trusted-host confirmation channel and
+second-administrator enrollment described below are retired designs. Their
+code is inert and its deletion is tracked in cbusillo/launchplane#2522; do not
+extend it.
 
 The checked schema-version-6 `contracts/owner-control-contract.json` artifact is
 not a record or runtime authority. It supplies deterministic cross-host

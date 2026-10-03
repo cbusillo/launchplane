@@ -26,7 +26,8 @@ TLS.
 ## Release Rule
 
 This is the target rule; it lands with the code migration (cbusillo/direction#13
-step (d) and cbusillo/launchplane#2716). Until then, release review requires a
+step (d); the server-side promotion it needs is cbusillo/launchplane#2792, which
+carried on from the closed #2716). Until then, release review requires a
 recorded Client acceptance or admin override, as
 [release-review.md](release-review.md) describes, even when the Client is the
 Director.

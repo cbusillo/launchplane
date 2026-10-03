@@ -335,11 +335,12 @@ inventory and registration-token requests. The default `GITHUB_TOKEN` from the
 Launchplane workflow is not sufficient authority for product repository runner
 administration.
 
-This executor is the proving-ground adapter for #1231. Mutating runs require an
-`ACTIONS_RUNNER_TARBALL_URL` value that points to an `actions/runner` release
-tarball on GitHub, plus a preinstalled `launchplane-runner@.service` template
-and a narrow sudo rule or equivalent root helper for `systemctl enable --now`
-and `systemctl is-active` on that template. Durable service-backed audit
+This executor is the proving-ground adapter for #1231. Mutating runs require a
+`runner_package_url` workflow input (passed as `--runner-package-url`) that
+points to an `actions/runner` release tarball on GitHub, plus a preinstalled
+`launchplane-runner@.service` template and a narrow sudo rule or equivalent
+root helper for `systemctl enable --now` and `systemctl is-active` on that
+template. Durable service-backed audit
 persistence is available through
 `POST /v1/evidence/runner-lane-registration/audits` under
 `runner_lane_registration_audit.write`; descriptor-backed admin routing for

@@ -15,11 +15,10 @@ Feedback sessions use the built-in Codex Lab command, independently of the
 initial work-request shell override.
 
 This current worker choice does not make Codex Lab the only engineering client.
-The reconciled target in issue `#2240` gives Codex CLI and Codex Lab
-the same scoped Launchplane service path. Codex Lab release/runtime work remains
-separate and is not an ordinary Codex CLI pilot prerequisite unless a
-concrete dependency is demonstrated. Nothing in this target statement changes
-the deployed worker command or grants a client new authority.
+Issue `#2240`, which proposed one shared service path for Codex CLI and Codex
+Lab, was closed as superseded when `DIRECTION.md` was adopted, and the ordinary
+Codex CLI delegated-delivery pilot is retired. Nothing here changes the deployed
+worker command or grants a client new authority.
 
 ## Session provenance
 
@@ -86,8 +85,9 @@ The worker test module's `_EveryCodeApiHandler` is a transport fixture with
 direct record writes; its successful reruns and feedback sessions do not prove
 service authorization or atomic restart behavior. Direct-store delayed-feedback
 tests establish workspace retention only. Issue
-[#2328](https://github.com/cbusillo/launchplane/issues/2328) tracks the approved
-implementation and remaining service/PostgreSQL acceptance matrix.
+[#2328](https://github.com/cbusillo/launchplane/issues/2328), which tracked the
+service-backed implementation, was closed on 2026-09-23 when `DIRECTION.md` was
+adopted; no open issue continues it.
 
 The [feedback continuation foundation](every-code-feedback-resume.md) adds strict
 contracts, isolated SQL evidence and inert launch protocol tests. It does not
@@ -118,9 +118,7 @@ check, or treat a repository change as proof that live authority was updated.
 
 ## Cutover verification
 
-These checks qualify the Codex Lab-hosted worker lane. They do not gate an
-ordinary Codex CLI delegated-delivery pilot unless that pilot actually uses
-this worker runtime or another concrete dependency is recorded.
+These checks qualify the Codex Lab-hosted worker lane.
 
 1. Inspect the current worker arguments and queued/claimed requests through
    the supported operational surfaces. Drain or reconcile existing leases;

@@ -119,6 +119,7 @@ class MergeTrainPullRequestSnapshot(BaseModel):
     base_ref: str = ""
     base_repository: str = ""
     mergeable: MergeTrainMergeableState = "unknown"
+    owner_review_required: bool = Field(default=False, exclude_if=lambda value: not value)
     required_checks_status: MergeTrainCheckStatus = "unknown"
     branch_update_required: bool = False
     # Set only for bot-authored pull requests; see merge_train_dependency_updates.
@@ -182,6 +183,7 @@ class MergeTrainQueueEntry(BaseModel):
     labels: tuple[str, ...]
     actor_role: str
     mergeable: MergeTrainMergeableState
+    owner_review_required: bool = Field(default=False, exclude_if=lambda value: not value)
     required_checks_status: MergeTrainCheckStatus
     branch_update_required: bool
     eligible: bool
@@ -320,6 +322,24 @@ def build_merge_train_dry_run_result(
             and sum(entry.eligible for entry in queue) > 1
         ),
     )
+    if batch_landing and intended_next_action == "merge":
+        # Candidate CI does not include constituent Client statuses. Every
+        # labelled member must be ready, even when the oldest entry passed.
+        waiting_review = next(
+            (
+                entry
+                for entry in queue
+                if entry.eligible
+                and entry.owner_review_required
+                and entry.required_checks_status != "pass"
+            ),
+            None,
+        )
+        if waiting_review is not None:
+            selected_pr = waiting_review
+            intended_next_action, next_action_detail = _next_action_for_selected_pr(
+                repository_policy, selected_pr, skip_branch_update=True
+            )
     return MergeTrainDryRunResult(
         repository=snapshot.repository,
         base_branch=snapshot.base_branch,
@@ -635,6 +655,7 @@ def _build_queue_entry(
         labels=pull_request.labels,
         actor_role=actor_role,
         mergeable=pull_request.mergeable,
+        owner_review_required=pull_request.owner_review_required,
         required_checks_status=pull_request.required_checks_status,
         branch_update_required=pull_request.branch_update_required,
         eligible=not ineligible_reasons,

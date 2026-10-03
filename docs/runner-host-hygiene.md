@@ -642,6 +642,7 @@ The privileged scope must match the planned action exactly:
 - `remove_buildkit_state_volumes` requires `docker_volume` and may only remove
   one explicitly requested, allowlisted, zero-link `buildx_buildkit_*_state`
   named volume observed in the pre-apply report.
+- `prune_generated_run_cache` requires `generated_cache`.
 - `prune_runner_workdir` requires `runner_workdir`.
 - `restart_runner_service` requires `runner_service`.
 

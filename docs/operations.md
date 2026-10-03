@@ -74,8 +74,8 @@ original idempotency key.
 
 ## Command Groups
 
-Use `uv run launchplane --help` for the complete CLI surface. The current
-top-level groups are:
+Use `uv run launchplane --help` for the complete CLI surface. Frequently used
+top-level groups include:
 
 Today this CLI is the local Launchplane admin/client surface around the
 service API. Shared or production mutations must prefer the deployed service API
@@ -108,15 +108,11 @@ checkout.
   run the scheduled merge-train pass for every scheduler-enabled policy target;
   the `launchplane-merge-train-workers` compose service runs it every five
   minutes.
-  `service ordinary-agent-workers run-once` and `run` are a dormant,
-  PostgreSQL-only finite-job worker definition. They use an independent scan
-  cursor and telemetry surface, perform an exact startup schema/relation probe,
-  and deploy at zero replicas until a separately reviewed readiness and
-  enablement step.
-  Guarded ingress and continuation perform automatic
-  [provider delivery inspection](provider-delivery-inspection.md) under the
-  same finite delegation. They require a separate DB-backed inspection App and
-  governed protection expectation; source deployment configures neither.
+  `service ordinary-agent-workers run-once` and `run` belong to the retired
+  ordinary-agent delegated-delivery design, as does its
+  [provider delivery inspection](provider-delivery-inspection.md). The worker
+  deploys at zero replicas; do not enable or extend it. Its code is scheduled
+  for deletion (#2437).
 - `ship`: plan, resolve, and execute artifact-backed deploy requests.
 - `storage provider-target-audit`: run the read-only provider-target parity
   preflight before backfill or provider-target authority cutover.
@@ -702,7 +698,15 @@ provider payload data.
 
 ## Target Launchplane Ingress
 
-The target communication model is:
+> **Status:** product repositories calling Launchplane (workflow-identity
+> grants, pinned reusable Launchplane workflows, Launchplane-held build
+> settings) is retired in [DIRECTION.md](../DIRECTION.md). Launchplane now
+> reacts to source-control events and deploys the product's own artifact; see
+> [event-driven deploys](event-driven-deploys.md). Product-workflow call paths
+> described in this doc remain only until their deletion (#2606, #2740); do not
+> extend them or onboard a product onto them.
+
+The original communication model was:
 
 - Launchplane runs as a long-running service behind an admin-owned stable
   host.
@@ -867,7 +871,9 @@ without session renewal or rotation, and no policy, session, denial, audit,
 idempotency, outbox, provider, runtime, secret, or durable-operation record is
 written.
 
-Schema-v3 candidate previews include `ordinary_agents` in structural rule
+Authorization schema v3 belongs to the retired ordinary-agent
+delegated-delivery design and is scheduled for deletion (#2437); do not build
+on it. Schema-v3 candidate previews include `ordinary_agents` in structural rule
 counts and changed-collection reporting. Effective-access probes remain closed
 to the five established caller identity types, and ordinary rules do not enter
 administrator reachability, applying-administrator retention, strict-human
@@ -1620,7 +1626,7 @@ itself into logs, issues, or records.
 A product's event-driven switch-over needs only its repository tracked in the
 repository inventory: webhook mapping, reconcile, build provenance and the
 reconcile grant read the immutable ids from there. Recording a copy of them on
-the profile is optional (and deleted in #2606); when wanted, use the deployed
+the profile is optional (and slated for deletion in #2606); when wanted, use the deployed
 service route `POST /v1/product-profiles/repository-identity/apply`, not a
 whole-profile `POST /v1/product-profiles` rewrite. Run `mode=dry-run` with the
 product and a reason, review the before/after identity, the inventory record it
@@ -1776,7 +1782,9 @@ Required GitHub configuration for that workflow:
 - repository variables:
   - `LAUNCHPLANE_PUBLIC_URL`
   - optional `LAUNCHPLANE_SERVICE_AUDIENCE`; when unset, trusted workflows
-    derive the GitHub OIDC audience from `LAUNCHPLANE_PUBLIC_URL`'s host
+    derive the GitHub OIDC audience from `LAUNCHPLANE_PUBLIC_URL`'s host.
+    `Deploy Launchplane` itself ignores it and derives its service URL and
+    audience from the first `LAUNCHPLANE_DEPLOY_HEALTH_URLS` entry
   - `LAUNCHPLANE_DOKPLOY_TARGET_TYPE`
   - `LAUNCHPLANE_DOKPLOY_TARGET_ID`
   - `LAUNCHPLANE_DEPLOY_HEALTH_URLS`
@@ -2955,29 +2963,13 @@ profile preview context, runtime bindings, template compose, public preview URL,
 and provider operations inside the service boundary. Odoo-specific
 `preview-refresh` and `preview-destroy` compatibility routes are retired.
 
-Stage-MVP Odoo previews may point at a Dokploy `compose` template lane only when
-the product profile uses `driver_id="odoo"` and `preview.data_transport_mode` is
-`bootstrap`. In that mode Launchplane reuses the configured compose target,
-renders the Odoo raw compose file for the requested immutable image, overlays
-runtime-environment records when present, requires the Odoo raw-compose safety
-env keys already present on the live target, including non-default Odoo master
-and admin password values, applies profile-owned preview override env such as
-`ODOO_INSTALL_MODULES`, applies preview URL env keys, deploys the compose
-target, and records the requested PR URL as the preview generation. This is
-intentionally not generic compose preview support:
-generic-web application previews still require application template lanes, and
-stable deploy/promotion routes do not inherit Odoo's compose preview behavior.
-Inventory and destroy for the staged compose MVP inspect compose-attached domains
-whose hostnames match the product preview slug template. Destroy deletes only the
-matching preview domain and must not delete the shared compose target or stable
-hostnames.
-
-The long-term Odoo preview target is isolated per-PR runtime state, either by a
-provider-supported compose clone/create/delete path or by a dedicated
-application-backed template if Odoo can be safely reduced to an application
-shape. Until that follow-up lands, CM previews are a single active staged target
-behind pre-existing DNS/nginx routing and are intended to make the client-visible
-Odoo system usable before full ephemeral preview infrastructure exists.
+Odoo previews run as an isolated per-PR Dokploy compose (the
+`isolated_dokploy_compose` strategy) created from the product's template
+compose; the plan blocks any other strategy. The earlier staged single-target
+compose preview was replaced (#495). This is not generic compose preview
+support: generic-web application previews still require application template
+lanes, and stable deploy/promotion routes do not inherit Odoo's compose preview
+behavior.
 
 For stable Odoo target replacement planning, use the read-only dry-run command
 before considering any provider mutation. Product identity is always explicit;
@@ -3476,6 +3468,10 @@ Attach the remediation and companion feedback record ids to the governing issue.
 
 ### VeriReel Preview Evidence Handoff
 
+> **Status:** this handoff is a product repository calling Launchplane, which
+> is retired. VeriReel's preview workflows are being replaced by its own build
+> and event-driven deploys (#2740); do not extend this path.
+
 VeriReel already computes the route, PR slug, image tags, and workflow run URL
 inside `.github/workflows/preview-control-plane.yml` and
 `.github/workflows/preview-cleanup.yml`. The scheduled orphan backstop in
@@ -3656,14 +3652,13 @@ Phase one provides **Reusable Detached Application Retirement** as a
 **Detached Application Retirement** `workflow_dispatch` wrapper, pinned to the
 exact merged worker SHA below. The wrapper only defines the manual inputs,
 forwards them unchanged, and grants `contents: read` plus `id-token: write`; it
-does not define a runner, environment, steps, or concurrency. Do not configure
-the live authz managed-set secret, deploy this branch, or attempt a provider
-mutation as part of this code phase. The worker uses the protected
+does not define a runner, environment, steps, or concurrency. Both phases are
+merged; configuring the live authz grant is still a stop boundary (see below).
+The worker uses the protected
 `launchplane-authz-admin` environment, OIDC, target-digest concurrency, exact
 input validation, and redacted evidence.
 
-The protected identity pair to configure only after this wrapper is merged and
-deployed is:
+The protected identity pair a grant would bind is:
 
 ```text
 workflow_ref=cbusillo/launchplane/.github/workflows/detached-application-retirement.yml@refs/heads/main
@@ -3751,7 +3746,9 @@ remain diagnostic and do not block a valid DB heartbeat. Target lookup, service
 selection, container configuration/identity, and image identity failures remain
 hard failures.
 
-The same supervised process performs bounded expiry maintenance for private
+The ordinary-agent delivery cleanup below belongs to the retired
+delegated-delivery design and goes with its code (#2437). The same supervised
+process performs bounded expiry maintenance for private
 ordinary-agent credential deliveries after its startup schema probe confirms
 the delivery tables and expiry index. Deploying that worker image therefore
 starts the scanner automatically, although an empty table makes it inert and no

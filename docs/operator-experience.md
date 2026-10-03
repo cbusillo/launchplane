@@ -4,9 +4,8 @@ title: Launchplane UI Experience
 
 ## Direction
 
-Launchplane admin work is API-first, but the minimum trusted Client preview page
-and readable denial explanation ship with the end-to-end delegated-delivery
-slice. Do not defer that usable path until every backend abstraction is complete.
+Launchplane admin work is API-first. The Client's browser path is the release
+review page described in [release-review.md](release-review.md).
 The current React context picker and product-config layout remain transitional.
 Do not refine those transitional layouts except to correct secret-safety
 regressions.
@@ -43,9 +42,10 @@ but those jobs must have separate navigation:
   engineering-review evidence, dependency health, admission, landing outcomes,
   and only the exact-change/dependency state needed to decide whether a change
   may enter an environment.
-- **Client Review** (target) will show a plain-language change, isolated preview,
-  decision, and observed delivery state. It will allow only accept, request
-  changes, revoke, and feedback for the Client's product; it will expose no source,
+- **Client Review** (`/ui/owner-review`; see
+  [release-review.md](release-review.md)) shows the release checklist and
+  testing site for the Client's product. It allows only accept or request
+  changes with feedback; it exposes no source,
   configuration, deploy, merge, secret, or access-administration action.
 
 Product Ops is the default surface. Delivery Governance may reuse the same
@@ -141,7 +141,7 @@ Launchplane
         Diagnostics
   Delivery Governance
     Changes
-    Owner acceptance
+    Client acceptance
     Engineering evidence
     Dependency health
     Admission and landing
@@ -288,11 +288,9 @@ admission, landing outcome, and GitHub observations in separately named
 regions. The route name is transitional; the evidence contract is forge-neutral.
 It is read-only and does not add a browser mutation contract.
 
-The issue `#2240` target adds a trusted Client route over the same separated
-evidence. It must distinguish proposed, accepted, waiting, live, and
-failed/unknown state; observed runtime state remains independent from delivery
-job state. This route and its narrow Client writes are prospective until the
-corresponding service contract is implemented and activated.
+Issue `#2240`'s delegated-delivery Client route is retired and the issue is
+closed. The Client's release decision uses the release review route in
+[release-review.md](release-review.md).
 
 The transitional Engineering privileged-operation route consumes the
 server-computed semantic review projection for its list cards and activity
@@ -608,9 +606,9 @@ The clean-slate shell uses URL-owned product selection under the service-owned
   may show exact-change identity, Client acceptance, independent engineering
   evidence, dependency health, admission, and landing outcomes.
 - Existing `/ui/engineering/work-graph`, `/ui/engineering/issue-inbox`, and
-  `/ui/engineering/every-code` routes are transitional and receive no new
-  product investment. Remove them after any admission-relevant evidence moves
-  into forge-neutral delivery-governance read models.
+  `/ui/engineering/every-code` routes belong to designs
+  [DIRECTION.md](../DIRECTION.md) retires (work graphs and Every Code). They
+  receive no investment and are scheduled for deletion.
 - Existing `/ui/engineering/merge-train` behavior remains in scope only where
   it presents or executes guarded admission and truthful landing evidence from
   DB-backed policy. It must not infer a planning queue or make forge projections

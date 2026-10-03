@@ -2,15 +2,15 @@
 
 ## Terminology
 
-Launchplane currently ships a GitHub-backed Level 1 ordered merge queue baseline.
-It reads a fresh GitHub snapshot, orders eligible pull requests, selects the first
-eligible entry, and applies at most one worker transition per service call. That
-baseline is useful for fail-closed ordering, but it is not the provider-neutral
-delivery target.
+Launchplane has two GitHub-backed runner modes. The Level 1 ordered merge queue
+reads a fresh GitHub snapshot, orders eligible pull requests, selects the first
+eligible entry, and applies at most one worker transition per service call. The
+controller runs the batch-validating train and is the preferred entrypoint; see
+`POST /v1/work-graph/merge-train/controller/run-once` below.
 
-The full Launchplane merge train target is a provider-neutral, batch-validating
-train. Source-control-specific reads and effects belong behind an adapter; the
-steps below describe the current GitHub adapter:
+The merge train is provider-neutral and batch-validating. Source-control-specific
+reads and effects belong behind an adapter; the steps below describe the current
+GitHub adapter:
 
 1. Collect eligible queued pull requests for one repository/base branch.
 2. Build one combined batch candidate from the base branch plus queued pull
@@ -22,9 +22,6 @@ steps below describe the current GitHub adapter:
 5. If the candidate fails or cannot be built, split or reduce the batch to
    isolate blockers, then mark or requeue entries according to policy.
 
-Until the batch candidate and landing records exist, docs and admins should
-describe the live implementation as the ordered merge queue baseline.
-
 Launchplane merge trains use an explicit repository policy before any worker is
 allowed to enqueue, update, or merge pull requests. Live service routes resolve
 the active `launchplane_merge_train_policies` record from Launchplane storage.
@@ -34,6 +31,10 @@ new DB-backed policy record, not by relying on checked-in config files,
 service-host env, or generic service-code conditionals.
 
 ## Preparing An Ordinary-Agent Target
+
+> Ordinary-agent delegated delivery is retired under
+> [DIRECTION.md](../DIRECTION.md). This surface remains only until its code is
+> deleted; do not build on it.
 
 The Engineering Ops Merge-train policy workbench can prepare one new target
 without reconstructing the active policy. The supported service surface is:
@@ -198,6 +199,12 @@ plans a fresh candidate under the current policy; old checks, admissions, and
 terminal records from the previous policy cannot authorize or suppress it.
 Candidate refs remain as recovery evidence; a rebuild reuses one only when its
 base and heads still identify the same batch.
+The same retirement applies when landing admission is denied with
+`landing_lineage_changed` before any entry has merged, for example when an
+older pull request is labelled after the plan and now sorts ahead of it. Such a
+plan can never match the live queue again, so the controller retires it instead
+of blocking on every pass, and the next pass plans a candidate from the live
+queue.
 An interrupted retirement resumes from its persisted evidence. Partial landings,
 collapsed stacks, retired ordinary-agent jobs, and unreadable or conflicting
 provider evidence still require explicit reconciliation.
@@ -258,6 +265,15 @@ numeric user id in `trusted_automation_github_user_ids`. Matching identities are
 reported as `trusted_automation` in controller dry-run output. The default list
 is empty, so existing owner/admin-only policies remain fail-closed and unchanged.
 Logins are diagnostic labels, not policy identity, because logins can be renamed.
+
+PRs labelled for Client review require the newest `launchplane/owner-review`
+commit status on their current head. Missing status is pending, even if check
+runs already passed; pending or failed review cannot admit the PR. Only active product profiles' configured review labels mark this
+boundary; an unrelated label on a repository without such a profile creates no
+review requirement. Every batch member is checked during planning and again
+before the provider landing effect. The standalone landing route also requires
+that profile reader and refuses if it is unavailable. Successful review still
+requires all other current-head checks.
 
 Only an actor allowed to enqueue may put a pull request in the train: a trusted
 automation identity, or an actor whose role is in `allowed_actor_roles` (by
@@ -453,10 +469,12 @@ identity before waiting on checks, so a pending or failed check cannot hide a
 new source head. A manually closed batch PR is not automatically reopened.
 Change or remove the queued source entries to build a replacement; an unchanged
 failed candidate remains visibly failed rather than being rebuilt in a loop.
-It is never rebuilt, but a candidate that failed on check evidence is re-read at
-its recorded SHA on each controller call, so re-running the failed check lets it
-continue once the re-run is no longer failing. A multi-entry batch whose batch
-PR was closed on failure is not re-read, because that PR is never reopened.
+A candidate that failed on check evidence may be re-read at its recorded SHA,
+so re-running the failed check lets it continue once the re-run is no longer
+failing. A multi-entry batch whose batch PR was closed is never reopened. It
+has one narrow rebuild exception: a changed generated batch body, confirmed
+closed and unmerged binding, and a persisted unused retry budget, as described
+under `candidate_failed` below.
 
 The landing plan binds `candidate_pull_request_number` into its immutable
 digest. The controller evaluates every constituent before appending the first
@@ -875,9 +893,9 @@ selects `merge`.
 A Level 1 ordered-queue worker pass applies at most one transition from one
 fresh snapshot. It may add the block label, request a branch refresh, record a
 wait boundary, perform one guarded merge, or report an idle queue; it must not
-chain follow-up reads or mutations in the same pass. The full batch train will
-use separate batch candidate and landing-plan records instead of treating a
-single selected PR as the whole train state.
+chain follow-up reads or mutations in the same pass. The controller's batch
+train uses separate batch candidate and landing-plan records instead of treating
+a single selected PR as the whole train state.
 
 The service endpoint `POST /v1/work-graph/merge-train/run-once` uses the same
 policy. Request payloads name `repository`, `base_branch`, and optional
@@ -1016,8 +1034,21 @@ Controller actions have these retry/stop semantics:
   rebuilt until the queue or base changes. If one failed on check evidence and a
   re-run of the failed check at that SHA is now pending or passing, the controller
   returns `observe_candidate`, retires the failed record, and continues from the
-  re-read evidence. Multi-entry merge batches, whose batch PR was closed on
-  failure, stay failed.
+  re-read evidence. A multi-entry merge batch whose service PR is closed and
+  confirmed unmerged may be rebuilt once for the same ordered heads and base,
+  only when the body Launchplane would generate now differs from that bound
+  failed PR's body. The replacement uses a separate candidate ref and persists
+  `batch_body_retry_of`; candidate history preserves the used budget across
+  controller restarts. No second rebuild is admitted for that queue/base, even
+  if generation changes again. Missing, unbound, open, or merged batch evidence
+  cannot authorize recovery. Ambiguous provider-effect evidence still requires
+  reconciliation rather than being treated as an ordinary failed check.
+  The replacement still passes current checks,
+  constituent validation, and every admission gate. Otherwise the controller
+  reports the failed candidate and its recovery reason.
+  When the current queue head waits for checks, both read-only and mutating
+  passes report `wait_for_checks` with that PR and its dry-run reason, retaining
+  the failure and retry budget until the wait resolves.
 - `plan_landing`: A passed candidate still matches the live eligible queue,
   recorded PR head SHAs, and base SHA and is ready for PR-native landing-plan
   creation. Mutate once, then call again.
@@ -1097,9 +1128,9 @@ phase before planning new train work.
 
 Controller landing and direct batch landing use the same per-entry guarded
 boundary documented in [merge-admission.md](merge-admission.md). Immediately
-before each provider merge, Launchplane re-resolves current Client,
-change-impact, engineering-review, technical-check, policy, candidate, queue,
-rolling-base, head/tree, lease, and expected-effect evidence. It persists one
+before each provider merge, Launchplane re-resolves current engineering-review,
+technical-check, policy, candidate, queue, rolling-base, head/tree, lease, and
+expected-effect evidence. Retired Client and change-impact gates are not read. It persists one
 immutable admission before mutation and a separate truthful landing outcome
 afterward.
 

@@ -82,6 +82,7 @@ from tests.http_app_test_support import (
     _UnsupportedStackMergeTrainSnapshotReader,
 )
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
+from tests.support.openapi import openapi_document, openapi_response
 from tests.support.auth import _identity, _local_operator_policy, _StubVerifier
 from tests.support.merge_train import (
     _AdmissionInvokingMergeTrainGitHubClient,
@@ -554,13 +555,7 @@ class FastApiMergeTrainReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
     async def test_openapi_includes_merge_train_read_contracts(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_merge_train_service_identity()),
-            authz_policy=_merge_train_service_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         openapi = response.json()
@@ -1152,13 +1147,7 @@ class FastApiMergeTrainBatchLandingRunOnceTests(unittest.IsolatedAsyncioTestCase
         self.assertEqual(response.json()["error"]["code"], "database_storage_required")
 
     async def test_openapi_includes_batch_landing_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_merge_train_service_identity()),
-            authz_policy=_merge_train_service_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         route = response.json()["paths"]["/v1/work-graph/merge-train/batch-landing/run-once"][
@@ -1513,13 +1502,7 @@ class FastApiMergeTrainStackCollapseRunOnceTests(unittest.IsolatedAsyncioTestCas
         )
 
     async def test_openapi_includes_stack_collapse_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_merge_train_service_identity()),
-            authz_policy=_merge_train_service_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         route = response.json()["paths"]["/v1/work-graph/merge-train/stack-collapse/run-once"][
@@ -1989,13 +1972,7 @@ class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(records, ())
 
     async def test_openapi_includes_run_once_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_merge_train_service_identity()),
-            authz_policy=_merge_train_service_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         route = response.json()["paths"]["/v1/work-graph/merge-train/run-once"]["post"]
@@ -4902,12 +4879,9 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("merge train repository must be owner/name", payload["error"]["message"])
 
     async def test_openapi_includes_controller_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_merge_train_service_identity()),
-            authz_policy=_merge_train_service_policy(),
-            record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("/tmp/unused")),
-        )
-        route = app.openapi()["paths"]["/v1/work-graph/merge-train/controller/run-once"]["post"]
+        route = openapi_document()["paths"]["/v1/work-graph/merge-train/controller/run-once"][
+            "post"
+        ]
         success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
         request_schema = route["requestBody"]["content"]["application/json"]["schema"]
 
@@ -5743,13 +5717,7 @@ class FastApiMergeTrainBatchCandidateRunOnceTests(unittest.IsolatedAsyncioTestCa
         )
 
     async def test_openapi_includes_batch_candidate_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_merge_train_service_identity()),
-            authz_policy=_merge_train_service_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         route = response.json()["paths"]["/v1/work-graph/merge-train/batch-candidate/run-once"][
@@ -6202,13 +6170,7 @@ class FastApiMergeTrainPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
     async def test_openapi_includes_pr_feedback_contract(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_merge_train_service_identity()),
-            authz_policy=_merge_train_service_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _asgi_get(app, "/openapi.json")
+        response = await openapi_response()
 
         self.assertEqual(response.status_code, 200)
         route = response.json()["paths"]["/v1/work-graph/merge-train/pr-feedback"]["post"]

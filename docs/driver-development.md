@@ -11,9 +11,11 @@ admins and future UI actions.
 
 Drivers exist to move lifecycle knowledge out of product repos, not to rename
 product-specific hard-coding inside Launchplane. The common contract is:
-product repos build, test, smoke, and publish immutable artifacts, then pass
-minimal facts; Launchplane derives lifecycle meaning and owns runtime authority
-through driver routes, reusable workflows, DB-backed records, managed secrets,
+product repos build, test, and publish immutable artifacts with a build
+manifest ([artifact-provenance.md](artifact-provenance.md)) and never call
+Launchplane ([DIRECTION.md](../DIRECTION.md)); Launchplane reacts to
+source-control events, verifies the build, derives lifecycle meaning, and owns
+runtime authority through driver routes, DB-backed records, managed secrets,
 provider adapters, and durable evidence.
 
 Use `generic-web` directly when a product fits the common web-app lifecycle. Add
@@ -166,7 +168,7 @@ secrets, or driver-owned derivation.
 5. Write records through existing storage contracts when possible.
 6. Add focused unit tests for validation, authorization, execution, and failure
    evidence.
-7. Update docs and any product-repo trigger examples.
+7. Update docs.
 8. Seed or migrate DB-backed product profile, target, runtime environment,
    managed secret, and authz policy records outside the product repo.
 
@@ -344,7 +346,8 @@ admin-selected filters.
 
 Driver development should make product repos thinner, not larger. When a new
 driver needs a product workflow, the workflow should only build/test/publish the
-artifact and send a minimal Launchplane trigger request. See
+artifact and its build manifest; Launchplane picks it up from the build event
+([event-driven-deploys.md](event-driven-deploys.md)). See
 [product-repo-contract.md](product-repo-contract.md) for the approval gate.
 
 Legacy product repos may still carry scripts that shape Launchplane evidence or
@@ -359,10 +362,12 @@ payload construction in the product repo.
 
 Generic runtime health, public page readiness, and build identity checks belong
 in the driver once Launchplane has the lane profile, target, health path, and
-expected artifact identity. Product repos should call the driver route, not keep
-their own URL derivation or health polling scripts.
+expected artifact identity. Product repos should not keep their own URL
+derivation or health polling scripts.
 
-For example, VeriReel preview refresh writes the initial preview generation from
-the provider result, then the product repo reports only the product smoke result
-to `/v1/drivers/verireel/preview-verification`. Launchplane updates the latest
-preview generation to `ready` or `failed` and owns the durable record shape.
+Transitional: on the old call-in path, VeriReel preview refresh writes the
+initial preview generation from the provider result, then the product repo
+reports only the product smoke result to
+`/v1/drivers/verireel/preview-verification`. Event-driven previews replace that:
+Launchplane's own health check of the expected build marks the preview ready
+(#2740).

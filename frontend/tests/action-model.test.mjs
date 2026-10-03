@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 
 import {
   browserActionPresentation,
@@ -26,30 +27,9 @@ function action(overrides = {}) {
 }
 
 test("browser write routes are the generated UI write allowlist", () => {
-  assert.deepEqual(new Set(Object.values(BROWSER_WRITE_ROUTES)), new Set([
-    "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/approve",
-    "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/cancel",
-    "/v1/ordinary-agent-sessions/{principal_id}/{session_id}/revoke",
-    "/v1/ordinary-agent-connections/{principal_id}/disconnect",
-    "/v1/products/{product}/environments/{environment}/config/apply",
-    "/v1/product-profiles/{product}/owner",
-    "/v1/products/{product}/environments/{environment}/promotion/dry-run",
-    "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch",
-    "/v1/work-graph/rank",
-    "/v1/production-backup-gates",
-    "/v1/odoo-prod-promotions",
-    "/v1/odoo-prod-rollbacks",
-    "/v1/product-review/decisions",
-    "/v1/product-review/feedback/retry",
-    "/v1/owner-secret-inputs/submit",
-    "/v1/release-review/decisions",
-    "/v1/privileged-operations/plans/{operation_id}/approve",
-    "/v1/privileged-operations/plans/{operation_id}/revoke",
-    "/v1/privileged-operations/ordinary-agent-delivery-activation/plans",
-    "/v1/privileged-operations/authorization-candidates/prepare",
-    "/v1/privileged-operations/merge-train-targets/prepare",
-    "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/prepare",
-  ]));
+  const canonical = JSON.parse(readFileSync(new URL("../generated/openapi-canonical.json", import.meta.url), "utf8"));
+  assert.deepEqual(new Set(Object.values(BROWSER_WRITE_ROUTES)),
+    new Set(Object.keys(canonical["x-launchplane-ui-write-operations"])));
 });
 
 test("generic-web promotion descriptors stay diagnostics for the product-owned flow", () => {

@@ -39,17 +39,13 @@ before those operations and are pinned to the same immutable standard. Artifact,
 cache, GitHub API, and CodeQL actions remain fully pinned because they execute
 remote code or move workflow data across trust boundaries.
 
-The current compatibility manager-preview approval is not emitted by pull-request
-Actions. Launchplane validates signed webhook input against its durable preview
-and policy records and stores the decision; it no longer writes the
-`manager-preview-approval` status from the webhook. Tenant workflows may request
-preview lifecycle operations, but they cannot record a manager decision or
-provide a status-writer token.
-
-Issue `#2240` replaces this as the target admission path with trusted Launchplane
-Client acceptance. The legacy credential boundary remains enforced until that
-migration and rollback are implemented; neither path grants a Client operational
-authority.
+Manager-preview approval is retired and its decision code is deleted. The signed
+webhook route `/v1/manager-preview-approval/github-webhook` keeps its transport
+and secret only to capture trusted-maintenance evidence and accepts no approval
+command. Launchplane writes the `manager-preview-approval` commit status only to
+mark a stale one retired. Neither pull-request Actions nor tenant workflows can
+record a manager decision or provide a status-writer token, and Client
+acceptance grants a Client no operational authority.
 
 The runner-host hygiene workflow's GitHub App token action receives a private
 key and can mint installation credentials, so its reviewed commit pin and input
@@ -83,9 +79,13 @@ written to the workflow log by the upstream implementation.
   protected immutable detached application retirement,
   exact-instance immutable Odoo artifact publication, and exact-instance Odoo
   target-replacement plan/apply workers whose actions are separately authorized.
-  It also includes exact-instance redacted target-log diagnostics and Odoo
-  website-bootstrap repair workers; their dispatch wrappers and service actions
-  remain separately authorized.
+  It also includes exact-instance redacted target-log diagnostics, Odoo
+  website-bootstrap repair, ingress-route dry-run and apply, Odoo testing
+  route-binding refresh, stable-lane repair, product prelaunch rebuild policy,
+  and Odoo production backup verification, backup restore, and retained-volume
+  backup import workers; their dispatch wrappers and service actions remain
+  separately authorized. `PINNED_SELF_REUSABLE_WORKFLOWS` in
+  `tests/test_github_actions_security.py` is the exact list.
 - Changes to an approved privileged worker's `workflow_call` interface require
   two landings. First land the worker contract without changing caller pins,
   then pin each caller to that landed commit and start passing the new input or

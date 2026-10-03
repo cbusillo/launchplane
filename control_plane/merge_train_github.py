@@ -1091,6 +1091,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 expected_base_ref=landing_plan.base_branch,
                 expected_base_sha=current_base_sha,
                 expected_base_tree_sha=current_base_tree_sha,
+                require_client_review=True,
             )
             admission_guard.reconcile_existing_no_effect(
                 entry=entry,
@@ -1569,6 +1570,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         expected_base_ref: str,
         expected_base_sha: str,
         expected_base_tree_sha: str,
+        require_client_review: bool = False,
     ) -> bool:
         pull_request = _json_object(
             self.transport.request(
@@ -1614,6 +1616,24 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             ):
                 raise MergeTrainGitHubStaleHeadError(
                     "Target base branch moved outside the batch landing plan.", status_code=409
+                )
+        review_reader = GitHubMergeTrainSnapshotReader(
+            transport=self.transport, branch_refresh_store=self._branch_refresh_store
+        )
+        if require_client_review and review_reader._owner_review_required(
+            labels=_labels(pull_request.get("labels")), repository=repository_path
+        ):
+            review_status = _owner_review_status(
+                _list_commit_statuses(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    encoded_head_sha=quote(head_sha, safe=""),
+                )
+            )
+            if review_status != "pass":
+                raise MergeAdmissionDeniedError(
+                    f"Pull request #{entry.pull_request_number} requires current-head Client review.",
+                    reason_code="client_review_not_ready",
                 )
         return pull_request.get("mergeable_state") == "behind"
 
@@ -2276,7 +2296,11 @@ class GitHubMergeTrainSnapshotReader:
             if str(user.get("type") or "") == "Bot"
             else None
         )
+        owner_review_required = self._owner_review_required(
+            labels=labels, repository=base_repository
+        )
         return MergeTrainPullRequestSnapshot(
+            owner_review_required=owner_review_required,
             number=pull_request_number,
             url=str(source.get("html_url") or "").strip(),
             title=str(source.get("title") or "").strip(),
@@ -2297,7 +2321,9 @@ class GitHubMergeTrainSnapshotReader:
             base_repository=base_repository,
             mergeable=_mergeable_state(source),
             required_checks_status=self._required_checks_status(
-                repository_path=repository_path, head_sha=head_sha
+                repository_path=repository_path,
+                head_sha=head_sha,
+                owner_review_required=owner_review_required,
             ),
             branch_update_required=_branch_update_required(source),
             dependency_update_class=dependency_update_class,
@@ -2559,14 +2585,26 @@ class GitHubMergeTrainSnapshotReader:
             raise
         return "repo_admin" if str(payload.get("permission") or "") == "admin" else "unknown"
 
+    def _owner_review_required(self, *, labels: tuple[str, ...], repository: str) -> bool:
+        review_labels: set[str] = set()
+        list_profiles = getattr(self._branch_refresh_store, "list_product_profile_records", None)
+        if callable(list_profiles):
+            review_labels.update(
+                profile.owner.review_label.strip().casefold()
+                for profile in list_profiles()
+                if profile.is_active and profile.repository.casefold() == repository.casefold()
+            )
+        return bool(review_labels.intersection(label.casefold() for label in labels))
+
     def _required_checks_status(
-        self, *, repository_path: str, head_sha: str
+        self, *, repository_path: str, head_sha: str, owner_review_required: bool = False
     ) -> MergeTrainCheckStatus:
         encoded_head_sha = quote(head_sha, safe="")
         return _required_checks_status(
             transport=self.transport,
             repository_path=repository_path,
             encoded_head_sha=encoded_head_sha,
+            owner_review_required=owner_review_required,
         )
 
     def _list_check_runs(self, *, repository_path: str, encoded_head_sha: str) -> dict[str, object]:
@@ -3148,6 +3186,7 @@ def _required_checks_status(
     transport: MergeTrainGitHubTransport,
     repository_path: str,
     encoded_head_sha: str,
+    owner_review_required: bool = False,
 ) -> MergeTrainCheckStatus:
     status_payload = _list_commit_statuses(
         transport=transport,
@@ -3159,9 +3198,29 @@ def _required_checks_status(
         repository_path=repository_path,
         encoded_head_sha=encoded_head_sha,
     )
-    return _combine_check_statuses(
-        _combined_status_state(status_payload), _check_runs_status(check_runs_payload)
+    statuses = [_combined_status_state(status_payload), _check_runs_status(check_runs_payload)]
+    if owner_review_required:
+        statuses.append(_owner_review_status(status_payload))
+    return _combine_check_statuses(*statuses)
+
+
+def _owner_review_status(status_payload: dict[str, object]) -> MergeTrainCheckStatus:
+    from control_plane.product_review_status import OWNER_REVIEW_STATUS_CONTEXT
+
+    raw_statuses = status_payload["statuses"]
+    assert isinstance(raw_statuses, list)
+    owner_status = next(
+        (
+            item
+            for item in raw_statuses
+            if isinstance(item, dict)
+            and str(item.get("context") or "").casefold() == OWNER_REVIEW_STATUS_CONTEXT.casefold()
+        ),
+        None,
     )
+    # Current-head status responses are newest-first; unknown review evidence waits.
+    state = _commit_status_state(owner_status) if owner_status is not None else "pending"
+    return "pending" if state == "unknown" else state
 
 
 def _candidate_required_checks_status(

@@ -48,6 +48,10 @@
     "advisoryGovernanceChecks": "docs/advisory-governance-checks.md",
     "publicReadiness": "docs/public-readiness.md",
     "roleWords": "docs/role-words.md",
+    "artifactProvenance": "docs/artifact-provenance.md",
+    "eventDrivenDeploys": "docs/event-driven-deploys.md",
+    "releaseReview": "docs/release-review.md",
+    "productionBackupProvider": "docs/production-backup-provider.md",
     "style": ["docs/style/python.md", "docs/style/testing.md"],
     "policies": ["docs/policies/coding-standards.md"]
   },
