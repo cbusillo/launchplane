@@ -1424,8 +1424,25 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         with patch.object(self.provider, "build_inputs") as inputs:
             self.assertEqual(self.reconcile()["reason"], "preview_destroy_retry_limit")
             inputs.assert_not_called()
+        self.assertEqual(
+            self.store.read_product_reconcile_request("site:preview:5").last_plan[
+                "last_failed_error_code"
+            ],
+            "preview_plan_blocked",
+        )
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(self.provider.applied, [])
+
+        # A profile repair re-arms the automatic budget without changing the preview.
+        profile = self.store.read_product_profile_record("site")
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"updated_at": "2026-09-30T09:00:00Z"})
+        )
+        self.request("preview", 5)
+        with patch.object(self.provider, "build_inputs", side_effect=blocked_inputs):
+            with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                repaired = self.run_once()
+        self.assertEqual(repaired.last_plan["destroy_failed_attempts"], 1)
 
         # A supported record repair changes the lifecycle; a fresh bounded run may succeed.
         preview = self.store.list_preview_records()[0]
@@ -1462,6 +1479,37 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
             busy = self.run_once()
         self.assertEqual(busy.state, "pending")
         self.assertEqual(busy.last_plan["destroy_failed_attempts"], 0)
+        self.assertEqual(self.reconcile()["preview_result_status"], "pass")
+
+    def test_unknown_destroy_keeps_observing_without_consuming_attempts(self) -> None:
+        self.write_preview()
+        self.github.pull_request["state"] = "closed"
+        with patch(
+            "control_plane.product_reconcile.run_odoo_preview_apply_operation",
+        ) as operation:
+            operation.return_value.status = "reconcile_required"
+            operation.return_value.response_payload = {}
+            for _attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1):
+                self.request("preview", 5)
+                with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                    unknown = self.run_once()
+                self.assertEqual(unknown.last_plan["destroy_failed_attempts"], 0)
+            self.assertEqual(operation.call_count, PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1)
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["preview_result_status"], "pass")
+
+    def test_transport_failure_during_destroy_does_not_consume_attempts(self) -> None:
+        self.write_preview()
+        self.github.pull_request["state"] = "closed"
+        with patch.object(
+            self.provider, "build_inputs", side_effect=OSError("network unavailable")
+        ):
+            for _attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1):
+                self.request("preview", 5)
+                with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                    failed = self.run_once()
+                self.assertEqual(failed.last_plan["destroy_failed_attempts"], 0)
+        self.request("preview", 5)
         self.assertEqual(self.reconcile()["preview_result_status"], "pass")
 
     def test_preview_plan_records_the_credentials_the_preview_leaves_out(self) -> None:
@@ -1719,8 +1767,8 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
         self.github.pull_request["state"] = "closed"
         before = self.snapshot()
         with patch(
-            "control_plane.generic_web_preview_http.execute_generic_web_preview_destroy",
-            side_effect=RuntimeError("provider transport unavailable"),
+            "control_plane.product_reconcile.resolve_generic_web_preview_slug",
+            side_effect=click.ClickException("preview slug unavailable"),
         ) as destroy:
             for _attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS):
                 self.request("preview", 5)

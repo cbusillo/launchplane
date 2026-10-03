@@ -1055,6 +1055,7 @@ def reconcile_preview_target(
         retry_key = _fingerprint(
             {
                 "lifecycle": decision.lifecycle_token,
+                "profile_updated_at": profile.updated_at,
                 "context": plan["context"],
                 "reason": plan["reason"],
             }
@@ -1074,11 +1075,12 @@ def reconcile_preview_target(
                 last_failed_error_summary=previous.get("last_failed_error_summary", ""),
                 destroy_retry_stop_reason=(
                     f"Preview destroy failed {failed_attempts} times; Launchplane stops retrying "
-                    "until the preview lifecycle record or destroy reason changes. "
+                    "until the preview lifecycle record, product profile, or destroy reason changes. "
                     "The preview remains recorded; retirement requires an operator."
                 ),
             )
             return ReconcileOutcome(plan)
+    count_failure = True
     try:
         if not odoo:
             outcome = _run_generic_web_preview_operation(
@@ -1108,8 +1110,17 @@ def reconcile_preview_target(
         ):
             raise
         _LOGGER.warning("Preview destroy of %s raised: %s", profile.product, error)
-        outcome = _preview_failure(plan, "preview_reconcile_failed")
-    if plan["action"] == "destroy" and outcome.error:
+        count_failure = not isinstance(error, OSError)
+        code = (
+            error.code if isinstance(error, ProductReconcileError) else "preview_reconcile_failed"
+        )
+        outcome = _preview_failure(plan, code)
+    if (
+        plan["action"] == "destroy"
+        and outcome.error
+        and count_failure
+        and plan.get("preview_operation_status") != "reconcile_required"
+    ):
         plan["destroy_failed_attempts"] = failed_attempts + 1
     return outcome
 
@@ -1637,6 +1648,11 @@ def run_product_reconcile_once(
         }:
             code = "preview_reconcile_failed"
         outcome = _preview_failure(dict(outcome.plan), str(code))
+        if "action" not in outcome.plan and "destroy_retry_key" in outcome.plan:
+            # A pre-plan read failure is not the destroy failure that exhausted the budget.
+            for key in ("last_failed_error_code", "last_failed_error_summary"):
+                if key in request.last_plan:
+                    outcome.plan[key] = request.last_plan[key]
     plan = dict(outcome.plan)
     feedback = post_reconcile_feedback(
         record_store=record_store,
