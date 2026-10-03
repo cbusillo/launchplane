@@ -676,8 +676,10 @@ a source and writing testing do not authorize this production-lane write.
 
 Every copy requires a declared class and an allowlisted sharing reason with
 reason and evidence, in addition to normal runtime key safety. The caller needs
-existing source-lane `secret.read` access and destination product-config access;
-the route creates no grant. Launchplane does not verify token permissions: a
+existing `secret.read` access to the resolved source record's scope (whole
+context for a site-shared source, exact instance for a lane source) and
+destination product-config access; the route creates no grant. The resolved
+scope is authorized before decryption. Launchplane does not verify token permissions: a
 person verifies them and records who, when and what they checked.
 
 Use the normal product-config dry run first, then apply the same reviewed

@@ -219,6 +219,7 @@ def plan_product_config_authority_bundle(
     actor: str,
     source_label: str,
     lane_provider_env_reader: LaneProviderEnvReader | None = None,
+    secret_copy_source_authorizer: Callable[[SecretRecord], bool] | None = None,
 ) -> tuple[dict[str, object], ProductAuthorityBundle]:
     if mode not in {"dry-run", "apply"}:
         raise ProductConfigError("Product config mode must be 'dry-run' or 'apply'.")
@@ -250,6 +251,11 @@ def plan_product_config_authority_bundle(
             )
         except product_secret_copy.ProductSecretCopyError as error:
             raise ProductConfigError(str(error), code="secret_copy_refused") from error
+        if secret_copy_source_authorizer is not None and not secret_copy_source_authorizer(record):
+            raise ProductConfigError(
+                "The caller cannot read the resolved secret copy source.",
+                code="authorization_denied",
+            )
         if copy_profile is not None and profile != copy_profile:
             raise ProductConfigError("Product changed during secret copy planning.")
         copy_profile = profile

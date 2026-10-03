@@ -360,6 +360,36 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
                 }
             ],
         }
+        read_rule = (
+            _local_operator_policy(actions=("secret.read",))
+            .local_operators[0]
+            .model_copy(update={"instances": ("prod",)})
+        )
+        write_rule = (
+            _local_operator_policy(actions=("product_config.plan", "product_config.apply"))
+            .local_operators[0]
+            .model_copy(update={"instances": ("testing",)})
+        )
+        narrow_reader = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(
+                schema_version=2, local_operators=(read_rule, write_rule)
+            ),
+            record_store_factory=lambda: self.store,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="test-operator-token",
+                local_operator_subject="local-owner-agent",
+                local_operator_token_label="local-owner-write",
+            ),
+        )
+        with patch.object(
+            secrets,
+            "_decrypt_secret_value",
+            side_effect=AssertionError("Refused copy must not decrypt"),
+        ):
+            denied = await self.post(payload, app=narrow_reader)
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(denied.json()["error"]["code"], "authorization_denied")
         self.assertEqual((await self.post(payload)).status_code, 202)
         response = await self.post({**payload, "mode": "apply"}, key="shared-source")
         self.assertEqual(response.status_code, 202, response.text)

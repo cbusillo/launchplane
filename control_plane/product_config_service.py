@@ -271,6 +271,9 @@ def product_config_service_error(
     error_code = error.code
     error_message = "Product config request failed validation."
     status_code = 400
+    if error_code == "authorization_denied":
+        status_code = 403
+        error_message = "The caller cannot read the resolved secret copy source."
     if error_code == "secret_configuration_required":
         status_code = 503
         error_message = "Launchplane service is missing required secret write configuration."

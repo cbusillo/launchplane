@@ -705,7 +705,7 @@ from control_plane.contracts.route_binding_record import (
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.contracts.secret_reencryption_request import SecretReencryptionRequest
-from control_plane.contracts.secret_record import SecretBinding
+from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
 from control_plane.drivers import native_routes
 from control_plane.drivers.route_paths import (
@@ -14874,6 +14874,18 @@ def create_launchplane_fastapi_app(
                 def lane_provider_env_reader() -> LaneProviderEnv:
                     return lane_provider_env
 
+            def authorize_copy_source(source: SecretRecord) -> bool:
+                return resolved_authz_policy_runtime.policy.allows(
+                    identity=identity,
+                    action="secret.read",
+                    product="launchplane",
+                    context=source.context,
+                    target=AuthorizationTarget(
+                        scope="instance" if source.instance else "context",
+                        instances=(source.instance,) if source.instance else (),
+                    ),
+                )
+
             planned_driver_result, authority_bundle = (
                 control_plane_product_config.plan_product_config_authority_bundle(
                     record_store=database_store,
@@ -14882,6 +14894,7 @@ def create_launchplane_fastapi_app(
                     actor=launchplane_identity_actor(identity),
                     source_label=product_config_request.source_label,
                     lane_provider_env_reader=lane_provider_env_reader,
+                    secret_copy_source_authorizer=authorize_copy_source,
                 )
             )
         except control_plane_product_config.ProductConfigError as error:
