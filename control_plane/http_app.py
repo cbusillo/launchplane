@@ -21646,8 +21646,8 @@ def create_launchplane_fastapi_app(
             route_path=_PRODUCT_RETIREMENT_ROUTE,
             idempotency_key=normalized_key,
             trace_id=trace_id,
-            # The durable runner owns no-target replay and uncertain-commit reconciliation.
-            check_replay=not retirement_request.no_target,
+            # The durable runner owns replay and uncertain-completion reconciliation.
+            check_replay=False,
             request_payload=retirement_request.model_dump(
                 mode="json", exclude={"no_target"} if not retirement_request.no_target else set()
             ),

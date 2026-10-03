@@ -864,6 +864,107 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(TARGET_ID, json.dumps(apply.json()))
         self.assertEqual(sum(record.outcome == "started" for record in records), 1)
 
+    async def test_tracked_uncertain_completion_retry_preserves_conflict_guards(self) -> None:
+        for change in ("key", "request", "plan", "observation", "unknown", "unchanged"):
+            with self.subTest(change=change), TemporaryDirectory() as directory:
+                store = self._store(Path(directory))
+                app = self._app(
+                    store, actions=("product_retirement.plan", "product_retirement.apply")
+                )
+                with patch(
+                    "control_plane.product_retirement.observe_tracked_dokploy_application",
+                    return_value=_observation(),
+                ):
+                    plan = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=self.headers,
+                        payload=_plan_payload(),
+                    )
+                    replacement_plan = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers={**self.headers, "Idempotency-Key": "another-plan-key"},
+                        payload=_plan_payload(),
+                    )
+                self.assertEqual(plan.status_code, 202, plan.text)
+                self.assertEqual(replacement_plan.status_code, 202, replacement_plan.text)
+                payload = _apply_payload(plan.json())
+                with (
+                    patch(
+                        "control_plane.product_retirement.observe_tracked_dokploy_application",
+                        return_value=_observation(),
+                    ),
+                    patch(
+                        "control_plane.product_retirement.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "test"),
+                    ),
+                    patch(
+                        "control_plane.product_retirement.dokploy_api.delete_dokploy_application",
+                        side_effect=TimeoutError("lost delete response"),
+                    ),
+                ):
+                    failed = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=self.headers,
+                        payload=payload,
+                    )
+                self.assertEqual(failed.status_code, 409, failed.text)
+                headers = self.headers
+                if change == "key":
+                    headers = {**headers, "Idempotency-Key": "different-apply-key"}
+                elif change == "request":
+                    payload = {**payload, "reason": "A different retirement intent."}
+                elif change == "plan":
+                    payload = _apply_payload(replacement_plan.json())
+                observations: list[ProductRetirementProviderObservation | Exception] = [
+                    _observation(name="changed-name")
+                    if change == "observation"
+                    else TimeoutError("observation unavailable")
+                ]
+                if change == "unchanged":
+                    observations = [_observation(), _observation(), _absent_observation()]
+                with (
+                    patch(
+                        "control_plane.product_retirement.observe_tracked_dokploy_application",
+                        side_effect=observations,
+                    ),
+                    patch(
+                        "control_plane.product_retirement.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "test"),
+                    ),
+                    patch(
+                        "control_plane.product_retirement.dokploy_api.delete_dokploy_application"
+                    ) as delete,
+                ):
+                    retry = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=headers,
+                        payload=payload,
+                    )
+                if change == "unchanged":
+                    self.assertEqual(retry.status_code, 202, retry.text)
+                    self.assertTrue(retry.json()["result"]["provider_absence_verified"])
+                    self.assertEqual(
+                        store.read_product_profile_record("example-site").lifecycle_state,
+                        "retired",
+                    )
+                    delete.assert_called_once()
+                else:
+                    self.assertEqual(retry.status_code, 409, retry.text)
+                    self.assertEqual(
+                        store.read_product_profile_record("example-site").lifecycle_state,
+                        "retiring",
+                    )
+                    delete.assert_not_called()
+                store.close()
+
     async def test_provider_failure_persists_reconciliation_and_retiring_lifecycle(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = self._store(Path(temporary_directory_name))
@@ -948,6 +1049,29 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 f"/v1/product-retirements/{reconcile_record.record_id}",
                 headers={"Authorization": "Bearer local-operator-token"},
             )
+            with (
+                patch(
+                    "control_plane.product_retirement.observe_tracked_dokploy_application",
+                    return_value=_absent_observation(),
+                ) as observe,
+                patch(
+                    "control_plane.product_retirement.dokploy_api.delete_dokploy_application"
+                ) as delete,
+            ):
+                retry = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/product-retirement",
+                    headers=self.headers,
+                    payload=_apply_payload(plan.json()),
+                )
+                self.assertEqual(retry.status_code, 202, retry.text)
+                self.assertTrue(retry.json()["result"]["provider_absence_verified"])
+                self.assertEqual(
+                    store.read_product_profile_record("example-site").lifecycle_state, "retired"
+                )
+                self.assertGreater(observe.call_count, 0)
+                delete.assert_not_called()
             store.close()
         self.assertEqual(apply.status_code, 409)
         self.assertEqual(profile.lifecycle_state, "retiring")
