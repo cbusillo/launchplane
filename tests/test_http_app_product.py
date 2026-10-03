@@ -3215,7 +3215,7 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(status, 403, payload)
                 error = cast(dict[str, object], payload["error"])
                 self.assertEqual(error["code"], "live_product_requires_operator")
-                self.assertIn("changed by the Director", str(error["message"]))
+                self.assertIn("changed by an admin", str(error["message"]))
                 self.assertEqual(stored.expected_config.managed_secret_bindings, ())
 
     async def test_apply_product_expected_config_workflow_still_allowed_on_live(self) -> None:

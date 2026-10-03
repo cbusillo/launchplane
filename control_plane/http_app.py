@@ -12283,7 +12283,7 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="live_product_requires_operator",
                 message=(
-                    "A live product's expected configuration is changed by the Director, "
+                    "A live product's expected configuration is changed by an admin, "
                     "not with the local_operator credential the Director's agent uses."
                 ),
             )
