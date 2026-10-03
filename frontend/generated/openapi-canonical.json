@@ -4568,6 +4568,11 @@
             "title": "Context",
             "type": "string"
           },
+          "custom_git_branch": {
+            "default": "",
+            "title": "Custom Git Branch",
+            "type": "string"
+          },
           "deploy_timeout_seconds": {
             "anyOf": [
               {
@@ -4641,6 +4646,7 @@
               "adopt",
               "create-application",
               "create-compose",
+              "complete-compose-source",
               "prune-compose-domain",
               "reconcile-compose-domain",
               "repair-domain-authority"

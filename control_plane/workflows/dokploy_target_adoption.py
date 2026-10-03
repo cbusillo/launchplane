@@ -7,6 +7,8 @@ from pydantic import BaseModel, ConfigDict
 from control_plane.contracts.deploy_target import DeployedTargetReference, ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord, DokployTargetType
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.dokploy.target_source_setup import configure_empty_compose_source
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProductAuthorityBundleStore,
@@ -314,6 +316,7 @@ def adopt_dokploy_target(
     apply: bool = False,
     fetch_target_payload: FetchDokployTargetPayload,
     required_context_owner: tuple[str, str] | None = None,
+    expected_product_profile: LaunchplaneProductProfileRecord | None = None,
 ) -> DokployTargetAdoptionResult:
     normalized_context = _normalize_route_part(context, "context")
     normalized_instance = _normalize_route_part(instance, "instance")
@@ -400,6 +403,9 @@ def adopt_dokploy_target(
         record_store.write_product_authority_bundle(
             ProductAuthorityBundle(
                 required_context_owner=required_context_owner,
+                expected_product_profiles=(expected_product_profile,)
+                if expected_product_profile
+                else (),
                 dokploy_targets=(target_record,),
                 dokploy_target_ids=(target_id_record,),
                 provider_target_writes=(
@@ -633,6 +639,9 @@ def create_dokploy_compose_target(
     source_git_ref: str = "origin/main",
     source_type: str = "raw",
     compose_path: str = "docker-compose.yml",
+    custom_git_url: str = "",
+    custom_git_branch: str = "",
+    expected_product_profile: LaunchplaneProductProfileRecord | None = None,
     healthcheck_path: str = "",
     domains: tuple[str, ...] = (),
     deploy_timeout_seconds: int | None = None,
@@ -700,6 +709,28 @@ def create_dokploy_compose_target(
         },
     )
 
+    if custom_git_url:
+        source_plan = {
+            "source_type": "git",
+            "custom_git_url": custom_git_url,
+            "custom_git_branch": custom_git_branch,
+            "compose_path": compose_path,
+        }
+        plan.compose.update(source_plan)
+        provider_requests += (
+            {
+                "path": "/api/compose.update",
+                "payload": {
+                    "composeId": "<created-compose-id>",
+                    "sourceType": "git",
+                    "customGitUrl": custom_git_url,
+                    "customGitBranch": custom_git_branch,
+                    "composePath": compose_path,
+                    "autoDeploy": False,
+                },
+            },
+        )
+
     recorded_at = updated_at.strip() or utc_now_timestamp()
     if not apply:
         target_record = DokployTargetRecord(
@@ -710,6 +741,8 @@ def create_dokploy_compose_target(
             target_name=normalized_target_name,
             source_git_ref=source_git_ref.strip() or "origin/main",
             source_type=source_type.strip() or "raw",
+            custom_git_url=custom_git_url,
+            custom_git_branch=custom_git_branch,
             compose_path=compose_path.strip() or "docker-compose.yml",
             deploy_timeout_seconds=deploy_timeout_seconds,
             healthcheck_path=normalized_healthcheck_path,
@@ -780,6 +813,44 @@ def create_dokploy_compose_target(
     created_compose = mutate_provider(host, token, "/api/compose.create", compose_payload)
     compose_id = _extract_provider_id(created_compose, "composeId", "compose")
 
+    adoption_fetch = fetch_target_payload
+    if custom_git_url:
+        verified_source = configure_empty_compose_source(
+            host=host,
+            token=token,
+            compose_id=compose_id,
+            custom_git_url=custom_git_url,
+            branch=custom_git_branch,
+            compose_path=compose_path,
+            fetch_target_payload=fetch_target_payload,
+            mutate_provider=mutate_provider,
+        )
+
+        def fetch_verified_source(
+            fetch_host: str,
+            fetch_token: str,
+            fetch_type: DokployTargetType,
+            fetch_id: str,
+        ) -> JsonObject:
+            current = fetch_target_payload(fetch_host, fetch_token, fetch_type, fetch_id)
+            if any(
+                current.get(key) != verified_source.get(key)
+                for key in (
+                    "composeId",
+                    "environmentId",
+                    "serverId",
+                    "sourceType",
+                    "customGitUrl",
+                    "customGitBranch",
+                    "composePath",
+                    "autoDeploy",
+                )
+            ):
+                raise ValueError("Compose source changed before adoption.")
+            return current
+
+        adoption_fetch = fetch_verified_source
+
     adoption = adopt_dokploy_target(
         record_store=record_store,
         host=host,
@@ -798,8 +869,9 @@ def create_dokploy_compose_target(
         source_label=source_label,
         updated_at=updated_at,
         apply=True,
-        fetch_target_payload=fetch_target_payload,
+        fetch_target_payload=adoption_fetch,
         required_context_owner=required_context_owner,
+        expected_product_profile=expected_product_profile,
     )
     target_record = adoption.target_record.model_copy(
         update={

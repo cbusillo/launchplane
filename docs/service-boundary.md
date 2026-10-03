@@ -2445,7 +2445,8 @@ changed.
 
 Besides `dokploy_target.setup` (or `dokploy_target.plan` for dry-run), checked on
 product and context `launchplane`, the route accepts the lane-scoped
-`dokploy_target.lane_setup` action for `create-compose` only. It is checked on
+`dokploy_target.lane_setup` action for `create-compose` and the narrow
+`complete-compose-source` operation. It is checked on
 the one product whose lanes or historical contexts use the request's context
 (which must be lowercase and not `launchplane`), with that context and the
 request's instance, so a grant names exactly one product's lane and stops
@@ -2453,12 +2454,41 @@ matching if the context moves to another product. It covers dry-run and apply of
 creating that lane's compose, and only when the request carries no
 `expected_current_provider_target`, `project_id` or `environment_id`: the
 compose then lands in a new provider project and environment and can't replace
-a binding or join another lane's environment. It never authorizes `adopt`,
+a binding or join another lane's environment. Its creation path never authorizes `adopt`,
 domain reconcile or prune, or domain authority repair. Which product holds the
 context is checked again when the target records commit, under the lock product-profile
 writes take, so a context reassigned during the provider calls is refused
 (`local_operator_lane_scope_required`); the compose already created stays
 unrecorded.
+
+For a generic-web compose's repository source, `create-compose` accepts
+`custom_git_branch` and an explicit `compose_path`. The service resolves the
+repository from the exclusively owning product profile, sets the provider's git
+source before adoption, and verifies read-back. The caller cannot supply a
+repository URL or credentials. Dry-run reports the resolved source and planned
+provider update. Existing callers without these source inputs keep their
+existing creation behavior.
+
+`complete-compose-source` completes only an already tracked, empty compose on
+its product's existing `testing` lane. Its source inputs are exactly
+`custom_git_branch` and `compose_path`; target identity, placement, domains,
+source type, replacement expectation and credential inputs are refused. The
+service reads the target, target-id and provider-target records, requires their
+binding to agree and be exclusive, and refuses any configured or partial live
+source, including an already matching source. Provider default source type and
+compose path alone do not count as a configured source. It holds product
+ownership and tracked-record locks across the provider update, source read-back
+and record write. It changes only source fields and their target-record
+provenance; target-id, provider binding, runtime settings and domains remain
+unchanged. `autoDeploy` is disabled, so source setup starts no deployment.
+Dry-run performs the same source/identity checks without writes; apply retains
+the confirmation, reason and idempotency requirements above. Apply replay with
+the same key returns its saved result. If the provider accepts an update but
+read-back or the record commit fails, report the exact partial outcome for
+admin reconciliation; do not replace the target or overwrite its configured
+source by retrying with a new key. No new grant, credential, deploy or production
+operation is part of source completion. After delivery, RepairShopr Sync's
+setup session can complete its tracked testing source through this operation.
 
 Dokploy target inspect uses the native FastAPI
 `GET /v1/dokploy-targets/inspect` route. The route is a read-only proof surface
