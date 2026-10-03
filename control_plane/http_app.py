@@ -14781,6 +14781,24 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
         )
         try:
+            config_profile = control_plane_product_config_service.resolve_product_config_profile(
+                database_store,
+                product=product_config_request.product,
+                context=product_config_request.context,
+                instance=product_config_request.instance,
+            )
+        except control_plane_product_config.ProductConfigError as error:
+            profile_error = control_plane_product_config_service.product_config_service_error(error)
+            raise _launchplane_http_error(
+                status_code=profile_error.status_code,
+                trace_id=trace_id,
+                code=profile_error.code,
+                message=profile_error.message,
+            ) from error
+        if expected_product_profile is not None and expected_product_profile != config_profile:
+            raise ProductProfileConflictError("Product profile changed before config planning.")
+        expected_product_profile = config_profile
+        try:
             (
                 normalized_idempotency_key,
                 payload_fingerprint,

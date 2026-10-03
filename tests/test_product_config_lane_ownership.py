@@ -1,0 +1,165 @@
+import os
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
+
+from control_plane import secrets as control_plane_secrets
+from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.storage.postgres import PostgresRecordStore
+from tests.http_app_test_support import _post_product_config_apply
+from tests.support.auth import _identity, _StubVerifier
+from tests.support.profiles import _generic_site_profile_payload, _odoo_preview_profile_payload
+from tests.support.stores import _sqlite_database_url
+
+
+class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    async def test_authorized_product_cannot_plan_or_write_another_lane(self) -> None:
+        for driver in ("generic-web", "odoo"):
+            for mode in ("dry-run", "apply"):
+                for target in (
+                    ("other-site", "testing"),
+                    ("own-site", "foreign"),
+                    ("other-site", ""),
+                    ("", ""),
+                ):
+                    with self.subTest(driver=driver, mode=mode, target=target):
+                        await self._request_config(
+                            driver=driver, mode=mode, target=target, refused=True
+                        )
+
+    async def test_missing_or_noncanonical_product_is_refused(self) -> None:
+        for product in ("unknown", "own-context"):
+            with self.subTest(product=product):
+                await self._request_config(product=product, refused=True)
+
+    async def test_own_lane_and_context_work_for_both_drivers(self) -> None:
+        for driver in ("generic-web", "odoo"):
+            for mode in ("dry-run", "apply"):
+                for instance in ("testing", ""):
+                    with self.subTest(driver=driver, mode=mode, instance=instance):
+                        await self._request_config(
+                            driver=driver, mode=mode, target=("own-site", instance)
+                        )
+
+    async def test_profile_changed_before_commit_refuses_without_config_writes(self) -> None:
+        await self._request_config(mode="apply", change_profile=True, refused=True)
+
+    async def test_replay_does_not_bypass_current_ownership(self) -> None:
+        await self._request_config(mode="apply", replay_after_change=True)
+
+    async def _request_config(
+        self,
+        *,
+        driver: str = "generic-web",
+        mode: str = "dry-run",
+        target: tuple[str, str] = ("own-site", "testing"),
+        product: str = "own-site",
+        refused: bool = False,
+        change_profile: bool = False,
+        replay_after_change: bool = False,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "test.sqlite3")
+            )
+            store.ensure_schema()
+            profile_payload = (
+                _generic_site_profile_payload("own-site")
+                if driver == "generic-web"
+                else _odoo_preview_profile_payload("own-site")
+            )
+            profile_payload["lanes"] = [{"context": "own-site", "instance": "testing"}]
+            profile = LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            store.write_product_profile_record(profile)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(
+                    _generic_site_profile_payload("other-site")
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": [product],
+                            "actions": ["product_config.plan", "product_config.apply"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+            )
+            payload: dict[str, object] = {
+                "mode": mode,
+                "product": product,
+                "context": target[0],
+                "instance": target[1],
+                "runtime_env": {"env": {"SITE_MODE": "private-setting"}},
+            }
+            if refused and not change_profile:
+                payload["secrets"] = [{"name": "SMTP_PASSWORD", "value": "private-secret"}]
+            original_write = store.write_product_authority_bundle
+
+            def change_then_write(bundle: ProductAuthorityBundle) -> None:
+                store.write_product_profile_record(profile.model_copy(update={"lanes": ()}))
+                original_write(bundle)
+
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                with patch.object(
+                    store,
+                    "write_product_authority_bundle",
+                    side_effect=change_then_write if change_profile else original_write,
+                ) as writer:
+                    response = await _post_product_config_apply(
+                        app, payload, idempotency_key="ownership-test"
+                    )
+                    if refused:
+                        self.assertEqual(
+                            response.status_code, 409 if change_profile else 403, response.text
+                        )
+                        self.assertEqual(
+                            response.json()["error"]["code"],
+                            "product_profile_conflict"
+                            if change_profile
+                            else "product_config_lane_not_owned",
+                        )
+                        self.assertEqual(store.list_runtime_environment_records(), ())
+                        self.assertEqual(store.list_secret_records(), ())
+                        self.assertNotIn("private-secret", response.text)
+                        self.assertNotIn("private-setting", response.text)
+                        if not change_profile:
+                            writer.assert_not_called()
+                    else:
+                        self.assertEqual(response.status_code, 202, response.text)
+                        if mode == "apply":
+                            self.assertEqual(
+                                store.list_runtime_environment_records()[0].env,
+                                {"SITE_MODE": "private-setting"},
+                            )
+                        else:
+                            self.assertEqual(store.list_runtime_environment_records(), ())
+                    if replay_after_change:
+                        store.write_product_profile_record(profile.model_copy(update={"lanes": ()}))
+                        replay = await _post_product_config_apply(
+                            app, payload, idempotency_key="ownership-test"
+                        )
+                        self.assertEqual(replay.status_code, 403, replay.text)
+                        self.assertEqual(
+                            replay.json()["error"]["code"], "product_config_lane_not_owned"
+                        )
+            store.close()

@@ -2242,7 +2242,15 @@ return a typed blocked result rather than guessing a domain.
   until the service has recorded a matching dry-run. Terminal-agent read bearer
   credentials stay read-only and cannot apply product config. The service
   response is redacted and the route rejects nested runtime or secret targets
-  that differ from the authorized top-level context/instance. It fails closed
+  that differ from the authorized top-level context/instance. Both modes require
+  the canonical DB-backed product id and a context/instance owned by that
+  product's profile, regardless of driver. Missing profiles, foreign lanes,
+  and global targets return `403 product_config_lane_not_owned` before planning
+  or replay. Context-scoped requests require a context declared by the profile.
+  Apply rechecks the profile under the bundle's write lock; an ownership change
+  returns `409 product_profile_conflict` without config writes. Use canonical
+  product ids rather than lane context aliases (for example, `odoo-tenant-opw`,
+  not `opw`, for `opw/testing`). It fails closed
   when secret writes are requested without valid Launchplane secret-key
   configuration in the service runtime or when no active runtime key-safety
   policy allows the requested binding. Apply commits through a product

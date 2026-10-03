@@ -44,6 +44,28 @@ class ProductConfigServiceError:
     message: str
 
 
+def resolve_product_config_profile(
+    record_store: PostgresRecordStore, *, product: str, context: str, instance: str
+) -> LaunchplaneProductProfileRecord:
+    """Bind a config target to its stored product, independent of the driver."""
+    try:
+        profile = record_store.read_product_profile_record(product)
+    except FileNotFoundError as error:
+        raise control_plane_product_config.ProductConfigError(
+            "Product config target is not owned by the named product.",
+            code="product_config_lane_not_owned",
+        ) from error
+    if not context or not any(
+        lane.context == context and (not instance or lane.instance == instance)
+        for lane in profile.lanes
+    ):
+        raise control_plane_product_config.ProductConfigError(
+            "Product config target is not owned by the named product.",
+            code="product_config_lane_not_owned",
+        )
+    return profile
+
+
 def product_config_write_prerequisites(
     record_store: object,
     *,
@@ -271,6 +293,9 @@ def product_config_service_error(
     error_code = error.code
     error_message = "Product config request failed validation."
     status_code = 400
+    if error_code == "product_config_lane_not_owned":
+        status_code = 403
+        error_message = "Product config target is not owned by the named product."
     if error_code == "secret_configuration_required":
         status_code = 503
         error_message = "Launchplane service is missing required secret write configuration."
