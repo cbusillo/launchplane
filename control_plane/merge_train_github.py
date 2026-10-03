@@ -2215,7 +2215,11 @@ class GitHubMergeTrainSnapshotReader:
             base_repository=base_repository,
             mergeable=_mergeable_state(source),
             required_checks_status=self._required_checks_status(
-                repository_path=repository_path, head_sha=head_sha
+                repository_path=repository_path,
+                head_sha=head_sha,
+                owner_review_required=self._owner_review_required(
+                    labels=labels, repository=base_repository
+                ),
             ),
             branch_update_required=_branch_update_required(source),
             dependency_update_class=dependency_update_class,
@@ -2477,14 +2481,28 @@ class GitHubMergeTrainSnapshotReader:
             raise
         return "repo_admin" if str(payload.get("permission") or "") == "admin" else "unknown"
 
+    def _owner_review_required(self, *, labels: tuple[str, ...], repository: str) -> bool:
+        from control_plane.contracts.product_profile_record import ProductOwnerProfile
+
+        review_labels = {ProductOwnerProfile().review_label.casefold()}
+        list_profiles = getattr(self._branch_refresh_store, "list_product_profile_records", None)
+        if callable(list_profiles):
+            review_labels.update(
+                profile.owner.review_label.strip().casefold()
+                for profile in list_profiles()
+                if profile.is_active and profile.repository.casefold() == repository.casefold()
+            )
+        return bool(review_labels.intersection(label.casefold() for label in labels))
+
     def _required_checks_status(
-        self, *, repository_path: str, head_sha: str
+        self, *, repository_path: str, head_sha: str, owner_review_required: bool = False
     ) -> MergeTrainCheckStatus:
         encoded_head_sha = quote(head_sha, safe="")
         return _required_checks_status(
             transport=self.transport,
             repository_path=repository_path,
             encoded_head_sha=encoded_head_sha,
+            owner_review_required=owner_review_required,
         )
 
     def _list_check_runs(self, *, repository_path: str, encoded_head_sha: str) -> dict[str, object]:
@@ -3066,6 +3084,7 @@ def _required_checks_status(
     transport: MergeTrainGitHubTransport,
     repository_path: str,
     encoded_head_sha: str,
+    owner_review_required: bool = False,
 ) -> MergeTrainCheckStatus:
     status_payload = _list_commit_statuses(
         transport=transport,
@@ -3077,9 +3096,27 @@ def _required_checks_status(
         repository_path=repository_path,
         encoded_head_sha=encoded_head_sha,
     )
-    return _combine_check_statuses(
-        _combined_status_state(status_payload), _check_runs_status(check_runs_payload)
-    )
+    statuses = [_combined_status_state(status_payload), _check_runs_status(check_runs_payload)]
+    if owner_review_required:
+        from control_plane.product_review_status import OWNER_REVIEW_STATUS_CONTEXT
+
+        raw_statuses = status_payload["statuses"]
+        assert isinstance(raw_statuses, list)
+        owner_status = next(
+            (
+                item
+                for item in raw_statuses
+                if isinstance(item, dict)
+                and str(item.get("context") or "").casefold()
+                == OWNER_REVIEW_STATUS_CONTEXT.casefold()
+            ),
+            None,
+        )
+        # The current-head status endpoint is newest-first. Missing review
+        # evidence must not be masked by successful check runs.
+        owner_state = _commit_status_state(owner_status) if owner_status is not None else "pending"
+        statuses.append("pending" if owner_state == "unknown" else owner_state)
+    return _combine_check_statuses(*statuses)
 
 
 def _candidate_required_checks_status(

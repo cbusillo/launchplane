@@ -95,6 +95,7 @@ class MergeTrainBatchCandidate(BaseModel):
     status: MergeTrainBatchCandidateStatus = "planned"
     entries: tuple[MergeTrainBatchEntry, ...]
     held_out: tuple[MergeTrainBatchHeldOutEntry, ...] = ()
+    batch_body_retry_of: str = ""
     stack_collapse_root: MergeTrainStackCollapseRootProof | None = None
     structural_provenance: MergeTrainStructuralProvenance | None = None
     required_checks_status: Literal["unknown", "pending", "pass", "fail"] = "unknown"

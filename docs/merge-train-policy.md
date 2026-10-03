@@ -998,8 +998,19 @@ Controller actions have these retry/stop semantics:
   rebuilt until the queue or base changes. If one failed on check evidence and a
   re-run of the failed check at that SHA is now pending or passing, the controller
   returns `observe_candidate`, retires the failed record, and continues from the
-  re-read evidence. Multi-entry merge batches, whose batch PR was closed on
-  failure, stay failed.
+  re-read evidence. A multi-entry merge batch whose service PR is closed and
+  confirmed unmerged may be rebuilt once for the same ordered heads and base,
+  only when the body Launchplane would generate now differs from that bound
+  failed PR's body. The replacement uses a separate candidate ref and persists
+  `batch_body_retry_of`; candidate history preserves the used budget across
+  controller restarts. No second rebuild is admitted for that queue/base, even
+  if generation changes again. Missing, unbound, open, or merged batch evidence
+  cannot authorize recovery. The replacement still passes current checks,
+  constituent validation, and every admission gate. Otherwise the controller
+  reports the failed candidate and its recovery reason.
+  When the current queue head waits for checks, both read-only and mutating
+  passes report `wait_for_checks` with that PR and its dry-run reason, retaining
+  the failure and retry budget until the wait resolves.
 - `plan_landing`: A passed candidate still matches the live eligible queue,
   recorded PR head SHAs, and base SHA and is ready for PR-native landing-plan
   creation. Mutate once, then call again.
@@ -1275,3 +1286,9 @@ Live worker reads build the same `MergeTrainDryRunSnapshot` contract from
 GitHub pull requests for the policy repository/base branch. The reader only uses
 GET requests, preserves unknown mergeability or check evidence as `unknown` or
 `pending`, and fails closed when required pull request fields are missing.
+
+PRs labelled for Client review require the newest `launchplane/owner-review`
+commit status on their current head. Missing status is pending, even if check
+runs already passed; pending or failed review cannot admit the PR. The default
+review label and active product profiles' configured review labels mark this
+boundary. Successful review still requires all other current-head checks.

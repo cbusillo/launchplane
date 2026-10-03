@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from email.message import Message
 from http.client import IncompleteRead
 from unittest.mock import patch
@@ -2831,6 +2831,74 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
 
 class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
+    def test_client_review_waits_for_current_head_status_before_checks_can_admit(self) -> None:
+        from types import SimpleNamespace
+
+        cases: tuple[tuple[str, tuple[dict[str, object], ...], str], ...] = (
+            ("owner-review", (), "pending"),
+            ("owner-review", ({"context": "other", "state": "success"},), "pending"),
+            (
+                "owner-review",
+                ({"context": "launchplane/owner-review", "state": "pending"},),
+                "pending",
+            ),
+            (
+                "owner-review",
+                ({"context": "launchplane/owner-review", "state": "failure"},),
+                "fail",
+            ),
+            (
+                "owner-review",
+                ({"context": "launchplane/owner-review", "state": "success"},),
+                "pass",
+            ),
+            (
+                "owner-review",
+                (
+                    {"context": "launchplane/owner-review", "state": "pending"},
+                    {"context": "launchplane/owner-review", "state": "success"},
+                ),
+                "pending",
+            ),
+            (
+                "owner-review",
+                ({"context": "launchplane/owner-review", "state": "unknown"},),
+                "pending",
+            ),
+            ("client-check", (), "pending"),
+            ("unrelated", (), "pass"),
+        )
+        for label, statuses, expected in cases:
+            with self.subTest(label=label, statuses=statuses):
+                pull = _github_pull_request(42)
+                pull["labels"] = [{"name": "ready-to-merge"}, {"name": label}]
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _github_branch(),
+                        [pull],
+                        pull,
+                        {"permission": "admin"},
+                        _label_events(),
+                        _combined_status(statuses=statuses),
+                        {"check_runs": [_check_run("completed", "success")]},
+                    )
+                )
+                profile = SimpleNamespace(
+                    is_active=True,
+                    repository="cbusillo/sellyouroutboard",
+                    owner=SimpleNamespace(review_label="client-check"),
+                )
+                store = SimpleNamespace(list_product_profile_records=lambda: (profile,))
+                snapshot = GitHubMergeTrainSnapshotReader(
+                    transport=transport, branch_refresh_store=cast(Any, store)
+                ).read_merge_train_snapshot(repository=profile.repository, base_branch="main")
+                self.assertEqual(snapshot.pull_requests[0].required_checks_status, expected)
+                status_paths = [
+                    request.path for request in transport.requests if "/status?" in request.path
+                ]
+                self.assertTrue(status_paths)
+                self.assertTrue(all("/commits/head-42/" in path for path in status_paths))
+
     def test_snapshot_reader_builds_pull_request_snapshots_from_base_rooted_graph(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
