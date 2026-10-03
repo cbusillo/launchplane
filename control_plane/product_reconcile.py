@@ -28,6 +28,7 @@ import click
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane import secrets
+from control_plane.runtime_environments import RuntimeEnvironmentRecordStore
 from control_plane.build_provenance import (
     BUILD_WORKFLOW_PATH,
     BuildProvenanceError,
@@ -283,6 +284,12 @@ class TestingProviderHooks:
     generic_web_deploy_provider: Callable[[], GenericWebDeployProvider] = (
         default_generic_web_deploy_provider
     )
+
+
+class _TestingLaneAuthorityStore(
+    secrets.SecretBindingSelectionStore, RuntimeEnvironmentRecordStore, Protocol
+):
+    pass
 
 
 @dataclass(frozen=True)
@@ -576,7 +583,7 @@ def _deploy_generic_web_testing(
     It runs the deploy route's durable provider operation under the reconcile's
     reservation scope. A deploy whose provider outcome is unknown stays reserved
     for generic-web deploy recovery and is never bypassed; a recorded result for
-    the same image and starting point is replayed, not run again.
+    the same image, lane authority and starting point is replayed, not run again.
     """
     if control_plane_root is None:
         raise ProductReconcileError("A generic-web testing deploy needs the control-plane root.")
@@ -619,9 +626,10 @@ def _deploy_generic_web_testing(
     # every deploy and rollback records a new one, so a lane changed since gets the
     # desired image again instead of a replay of an earlier success.
     starting_point = _current_testing_deployment_id(record_store=record_store, lane=lane) or "none"
+    authority = _generic_web_testing_authority(record_store=record_store, lane=lane)
     idempotency_key = (
         f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:{TESTING_INSTANCE}:"
-        f"{desired.manifest.image.digest}:from-{starting_point}"
+        f"{desired.manifest.image.digest}:authority-{authority}:from-{starting_point}"
     )
     trace_id = f"{RECONCILE_SOURCE}-{uuid4().hex}"
     plan.update(held=False, deploy_idempotency_key=idempotency_key)
@@ -676,6 +684,63 @@ def _deploy_generic_web_testing(
         )
     plan.update(current_artifact_id=current_artifact_id, current_image_digest=current_digest)
     return outcome
+
+
+def _generic_web_testing_authority(
+    *, record_store: ProductReconcileStore, lane: ProductLaneProfile
+) -> str:
+    """Identify stored configuration and effective managed-secret versions.
+
+    Ignore audit timestamps: identical configuration must keep replaying. Protect
+    legacy plaintext target/settings values with the service's keyed fingerprint;
+    managed-secret values are never read. Include inherited settings, but exclude
+    other lanes and Launchplane's worker/service credentials.
+    """
+    authority_store = cast(_TestingLaneAuthorityStore, record_store)
+    try:
+        target = record_store.read_dokploy_target_record(
+            context_name=lane.context, instance_name=lane.instance
+        )
+    except FileNotFoundError:
+        target_authority: object = None
+    else:
+        target_authority = target.model_dump(mode="json", exclude={"updated_at", "source_label"})
+    settings = [
+        record.model_dump(mode="json", exclude={"updated_at", "source_label"})
+        for record in authority_store.list_runtime_environment_records()
+        if record.scope == "global"
+        or (record.scope == "context" and record.context == lane.context)
+        or (
+            record.scope == "instance"
+            and record.context == lane.context
+            and record.instance == lane.instance
+        )
+    ]
+    bindings = secrets.resolve_effective_secret_bindings_from_store(
+        record_store=authority_store,
+        integration=secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+        context_name=lane.context,
+        instance_name=lane.instance,
+    )
+    return secrets.keyed_secret_payload_fingerprint(
+        json.dumps(
+            {
+                "target": target_authority,
+                "settings": sorted(settings, key=lambda record: json.dumps(record, sort_keys=True)),
+                "secrets": {
+                    key: {
+                        "binding": binding.model_dump(
+                            mode="json", exclude={"created_at", "updated_at"}
+                        ),
+                        "version_id": record.current_version_id,
+                    }
+                    for key, (binding, record) in bindings.items()
+                },
+            },
+            sort_keys=True,
+        ),
+        purpose="generic-web-testing-authority",
+    )
 
 
 def _current_testing_deployment_id(

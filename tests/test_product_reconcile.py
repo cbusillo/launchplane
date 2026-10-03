@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from email.message import Message
 import io
 import json
+import os
 import time
 import unittest
 import zipfile
@@ -14,6 +15,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 
 import click
+from cryptography.fernet import Fernet
 
 from control_plane.build_provenance import BUILD_WORKFLOW_PATH, GitHubBuildProvenanceTransport
 from control_plane.contracts.dokploy_target_record import (
@@ -47,6 +49,8 @@ from control_plane.contracts.product_reconcile import (
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
 )
@@ -1173,6 +1177,15 @@ def _generic_web_profile() -> LaunchplaneProductProfileRecord:
 class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
     def setUp(self) -> None:
         super().setUp()
+        encryption_key = patch.dict(
+            os.environ,
+            {
+                "LAUNCHPLANE_MASTER_ENCRYPTION_KEY": Fernet.generate_key().decode(),
+                "LAUNCHPLANE_SECRET_KEYS_JSON": "",
+            },
+        )
+        encryption_key.start()
+        self.addCleanup(encryption_key.stop)
         self.store.write_product_profile_record(_generic_web_profile())
         self.github = FakeGenericWebGitHub()
         self.deploys = _FakeGenericWebDeployProvider(
@@ -1186,6 +1199,162 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             target_name="site-testing-app",
         )
         self.testing_hooks = TestingProviderHooks(generic_web_deploy_provider=lambda: self.deploys)
+
+    def failed_deploy(self) -> ProductReconcileRequestRecord:
+        self.github.add_run(20, DEPLOYABLE)
+        self.deploys.observation = self.deploys.observation.model_copy(
+            update={"deployment_status": "error"}
+        )
+        self.request()
+        self.run_once()
+        # A failed provider effect is held until its terminal failure is observed.
+        self.request()
+        failed = self.run_once()
+        self.assertEqual(failed.state, "failed")
+        self.assertEqual(failed.last_plan["deploy_status"], "fail")
+        return failed
+
+    def retry_after_lane_change(self, failed: ProductReconcileRequestRecord) -> None:
+        self.deploys.observation = self.deploys.observation.model_copy(
+            update={"deployment_status": "success"}
+        )
+        self.request()
+        retried = self.run_once()
+        self.assertEqual(retried.state, "done")
+        self.assertEqual(retried.last_plan["deploy_status"], "pass")
+        self.assertNotEqual(
+            retried.last_plan["deploy_idempotency_key"], failed.last_plan["deploy_idempotency_key"]
+        )
+        self.assertEqual(len(self.deploys.runtime_identities), 2)
+        self.assertEqual(
+            self.deploys.runtime_identities[0].artifact_id,
+            self.deploys.runtime_identities[1].artifact_id,
+        )
+
+    def test_failed_deploy_replays_until_its_target_source_changes(self) -> None:
+        self.store.write_dokploy_target_record(
+            DokployTargetRecord(context="cm", instance="testing", updated_at="2026-10-02T00:00:00Z")
+        )
+        failed = self.failed_deploy()
+        self.request()
+        repeated = self.run_once()
+        self.assertEqual(repeated.last_plan["deploy_operation_status"], "replayed")
+        self.assertEqual(len(self.deploys.runtime_identities), 1)
+
+        target = self.store.read_dokploy_target_record(context_name="cm", instance_name="testing")
+        self.store.write_dokploy_target_record(
+            target.model_copy(
+                update={
+                    "custom_git_url": "https://example.test/site.git",
+                    "custom_git_branch": "main",
+                    "compose_path": "./compose.yml",
+                    # Writers use second-resolution timestamps; content still differs.
+                    "updated_at": target.updated_at,
+                }
+            )
+        )
+        self.retry_after_lane_change(failed)
+
+    def retry_after_settings_change(
+        self, scope: Literal["global", "context", "instance"], context: str, instance: str
+    ) -> None:
+        settings = RuntimeEnvironmentRecord(
+            scope=scope,
+            context=context,
+            instance=instance,
+            env={"SYNC_INTERVAL_SECONDS": 1800},
+            updated_at="2026-10-02T00:00:00Z",
+        )
+        self.store.write_runtime_environment_record(settings)
+        failed = self.failed_deploy()
+        self.store.write_runtime_environment_record(
+            settings.model_copy(
+                update={
+                    "env": {"SYNC_INTERVAL_SECONDS": 3600},
+                    "updated_at": settings.updated_at,
+                }
+            )
+        )
+        self.retry_after_lane_change(failed)
+
+    def test_failed_deploy_retries_after_global_settings_change(self) -> None:
+        self.retry_after_settings_change("global", "", "")
+
+    def test_failed_deploy_retries_after_context_settings_change(self) -> None:
+        self.retry_after_settings_change("context", "cm", "")
+
+    def test_failed_deploy_retries_after_lane_settings_change(self) -> None:
+        self.retry_after_settings_change("instance", "cm", "testing")
+
+    def test_failed_deploy_retries_after_runtime_secret_rotation_without_reading_values(
+        self,
+    ) -> None:
+        record = SecretRecord(
+            secret_id="test-runtime-secret",
+            scope="context_instance",
+            context="cm",
+            instance="testing",
+            integration="runtime_environment",
+            name="API_TOKEN",
+            current_version_id="version-before",
+            created_at="2026-10-02T00:00:00Z",
+            updated_at="2026-10-02T00:00:00Z",
+        )
+        self.store.write_secret_record(record)
+        self.store.write_secret_binding(
+            SecretBinding(
+                binding_id="test-runtime-binding",
+                secret_id=record.secret_id,
+                integration=record.integration,
+                context=record.context,
+                instance=record.instance,
+                binding_key=record.name,
+                created_at=record.created_at,
+                updated_at=record.updated_at,
+            )
+        )
+        with patch.object(
+            self.store, "read_secret_version", side_effect=AssertionError("value read")
+        ):
+            failed = self.failed_deploy()
+            self.store.write_secret_record(
+                record.model_copy(update={"current_version_id": "version-after"})
+            )
+            self.retry_after_lane_change(failed)
+
+    def test_other_lane_settings_do_not_retry_a_failed_deploy(self) -> None:
+        self.failed_deploy()
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context="cm",
+                instance="prod",
+                env={"SYNC_INTERVAL_SECONDS": 1800},
+                updated_at="2026-10-02T01:00:00Z",
+            )
+        )
+        self.request()
+        repeated = self.run_once()
+        self.assertEqual(repeated.last_plan["deploy_operation_status"], "replayed")
+        self.assertEqual(len(self.deploys.runtime_identities), 1)
+
+    def test_audit_timestamp_changes_do_not_retry_identical_settings(self) -> None:
+        settings = RuntimeEnvironmentRecord(
+            scope="instance",
+            context="cm",
+            instance="testing",
+            env={"SYNC_INTERVAL_SECONDS": 1800},
+            updated_at="2026-10-02T00:00:00Z",
+        )
+        self.store.write_runtime_environment_record(settings)
+        self.failed_deploy()
+        self.store.write_runtime_environment_record(
+            settings.model_copy(update={"updated_at": "2026-10-02T01:00:00Z"})
+        )
+        self.request()
+        repeated = self.run_once()
+        self.assertEqual(repeated.last_plan["deploy_operation_status"], "replayed")
+        self.assertEqual(len(self.deploys.runtime_identities), 1)
 
     def test_a_merge_deploys_its_verified_image_to_testing_with_no_grant(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
@@ -1285,6 +1454,15 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.request()
 
         first = self.run_once()
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context="cm",
+                instance="testing",
+                env={"SYNC_INTERVAL_SECONDS": 3600},
+                updated_at="2026-10-02T01:00:00Z",
+            )
+        )
         self.request()
         second = self.run_once()
 

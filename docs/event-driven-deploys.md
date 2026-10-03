@@ -84,8 +84,9 @@ reservation. The webhook request never waits on a deploy.
     process, through the generic-web deploy route's durable provider
     operation, under reservation scope `launchplane-reconcile:<product>`.
     Nothing goes to the artifact store; the deploy records the image as the
-    lane's runtime identity. Its key is the desired digest plus the deployment
-    record testing ran when the deploy was decided, so a repeated reconcile
+    lane's runtime identity. Its key is the desired digest, the stored lane
+    authority, and the deployment record testing ran when the deploy
+    was decided, so a repeated reconcile
     replays a recorded result instead of deploying again. Every deploy and
     rollback records a new deployment, so a lane changed since (even back to the
     same older image) gets the desired image again. A replayed success whose
@@ -94,7 +95,17 @@ reservation. The webhook request never waits on a deploy.
     being announced; the next verified build or an admin deploy records it. A deploy whose
     provider outcome is unknown stays reserved for generic-web deploy recovery
     and fails the reconcile until it settles; one that failed with a recorded
-    result is not retried until a newer build or the lane changes. A refusal
+    result is not retried until a newer build or the lane changes. Changes to
+    the tracked target's source/configuration, applicable global/context/lane
+    runtime settings, or effective runtime-secret bindings/versions allow a
+    real retry of the same digest. Target and settings writes identify their
+    configuration by content, excluding audit timestamps. The service's existing
+    keyed fingerprint protects plaintext target/settings values; managed-secret
+    values are neither read nor hashed for the key. Identical stored authority
+    replays the failure. The existing
+    provider-target reservation still fences an unknown or concurrent operation
+    even when authority changes. Provider-only edits outside Launchplane's
+    records do not authorize a retry. A refusal
     before any provider change (a missing target, say) is tried again at the
     next event or sweep. The plan records `deploy_operation_status`,
     `deploy_status`, `post_deploy_status` and `deployment_record_id`, never the
