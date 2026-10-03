@@ -1,3 +1,4 @@
+from control_plane.dokploy.api import DokployRequestFailed
 from control_plane.contracts.record_failures import record_failure_summary
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone, tzinfo
@@ -1778,6 +1779,30 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
             self.assertEqual(self.reconcile()["reason"], "preview_destroy_retry_limit")
             self.assertEqual(destroy.call_count, PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS)
         self.assertEqual(self.snapshot(), before)
+
+    def test_retryable_dokploy_outages_do_not_exhaust_destroy_budget(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.reconcile()
+        self.github.pull_request["state"] = "closed"
+        for status_code in (None, 503):
+            error = DokployRequestFailed(
+                method="POST",
+                path="/compose.delete",
+                detail="unavailable",
+                status_code=status_code,
+            )
+            with patch(
+                "control_plane.generic_web_preview_http.execute_generic_web_preview_destroy",
+                side_effect=error,
+            ):
+                for _attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1):
+                    self.request("preview", 5)
+                    with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                        failed = self.run_once()
+                    self.assertEqual(failed.last_plan["destroy_failed_attempts"], 0)
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["preview_result_status"], "pass")
 
     def test_a_new_push_replaces_the_preview_it_serves(self) -> None:
         self.github.add_run(50, PR_HEAD, event="pull_request")

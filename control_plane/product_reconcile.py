@@ -28,6 +28,7 @@ import click
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane import secrets
+from control_plane.dokploy.api import DokployRequestFailed
 from control_plane.build_provenance import (
     BUILD_WORKFLOW_PATH,
     BuildProvenanceError,
@@ -1120,6 +1121,7 @@ def reconcile_preview_target(
         and outcome.error
         and count_failure
         and plan.get("preview_operation_status") != "reconcile_required"
+        and not plan.get("preview_transport_retryable")
     ):
         plan["destroy_failed_attempts"] = failed_attempts + 1
     return outcome
@@ -1349,7 +1351,9 @@ def _run_preview_operation(
         return _preview_failure(plan, "preview_config_refused")
     except OdooPreviewPlanProvenanceError:
         return _preview_failure(plan, "preview_provenance_refused")
-    except (FileNotFoundError, ValueError, click.ClickException):
+    except (FileNotFoundError, ValueError, click.ClickException) as error:
+        if isinstance(error, DokployRequestFailed) and error.retryable:
+            plan["preview_transport_retryable"] = True
         return _preview_failure(plan, "preview_apply_failed")
     return ReconcileOutcome(plan)
 
@@ -1465,6 +1469,8 @@ def _run_generic_web_preview_operation(
             )
             status = str(result.get("destroy_status") or "")
     except (FileNotFoundError, ValueError, click.ClickException) as error:
+        if isinstance(error, DokployRequestFailed) and error.retryable:
+            plan["preview_transport_retryable"] = True
         _LOGGER.warning(
             "Generic-web preview %s of %s refused: %s", operation, profile.product, error
         )
