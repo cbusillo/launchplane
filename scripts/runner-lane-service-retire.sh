@@ -68,7 +68,14 @@ if [[ $(systemctl show "$unit_name" --property=User --value 2>/dev/null) != "$se
   fail
 fi
 unit_exec_start=$(systemctl show "$unit_name" --property=ExecStart --value 2>/dev/null) || fail
-if [[ "$unit_exec_start" != *"${registration_root}/${lane_name}"* ]]; then
+# systemctl renders ExecStart as a structured entry. Check its executable
+# path, not a substring that could also name a sibling lane or an argument.
+if [[ "$unit_exec_start" != "{ path="*" ; argv[]="* ]]; then
+  fail
+fi
+unit_exec_start_path=${unit_exec_start#"{ path="}
+unit_exec_start_path=${unit_exec_start_path%%" ;"*}
+if [[ "$unit_exec_start_path" != "${registration_root}/${lane_name}/bin/runsvc.sh" ]]; then
   fail
 fi
 
