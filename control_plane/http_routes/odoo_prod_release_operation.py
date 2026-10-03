@@ -49,6 +49,11 @@ from control_plane.durable_operation_authorization import (
 )
 from control_plane.http_routes.mutation_support import idempotency_scope
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
+from control_plane.operation_status_read import (
+    OPERATION_STATUS_READ_ACTION,
+    OPERATION_STATUS_READ_PRODUCT,
+    safe_operation_error_code,
+)
 from control_plane.odoo_prod_promotion_http import (
     OdooProdPromotionProductMismatchError,
     OdooProdPromotionRouteDependencyError,
@@ -147,26 +152,39 @@ def _common_view_fields(operation: object) -> dict[str, object]:
     }
 
 
+def _structured_view_fields(operation: object) -> dict[str, object]:
+    # A caller holding only operations.read: no error message or result text.
+    return {
+        **_common_view_fields(operation),
+        "error_code": safe_operation_error_code(str(getattr(operation, "error_code", ""))),
+        "error_message": "",
+        "result": None,
+    }
+
+
 def _promotion_response(
-    operation: OdooProdPromotionOperationRecord, trace_id: str
+    operation: OdooProdPromotionOperationRecord, trace_id: str, *, full: bool = True
 ) -> OdooProdPromotionOperationResponse:
+    view_fields = _common_view_fields(operation) if full else _structured_view_fields(operation)
     return OdooProdPromotionOperationResponse(
         trace_id=trace_id,
         operation=OdooProdPromotionOperationView.model_validate(
-            {**_common_view_fields(operation), "request_id": operation.request.request_id}
+            {**view_fields, "request_id": operation.request.request_id}
         ),
     )
 
 
 def _rollback_response(
-    operation: OdooProdRollbackOperationRecord, trace_id: str
+    operation: OdooProdRollbackOperationRecord, trace_id: str, *, full: bool = True
 ) -> OdooProdRollbackOperationResponse:
+    view_fields = _common_view_fields(operation) if full else _structured_view_fields(operation)
     return OdooProdRollbackOperationResponse(
         trace_id=trace_id,
         operation=OdooProdRollbackOperationView.model_validate(
             {
-                **_common_view_fields(operation),
-                "reason": operation.request.reason,
+                **view_fields,
+                # The rollback reason is requester text, so the read view omits it.
+                "reason": operation.request.reason if full else "",
                 "target_artifact_id": operation.target.artifact_id,
                 "target_deployment_record_id": operation.target.deployment_record_id,
             }
@@ -510,14 +528,28 @@ def register_odoo_prod_release_operation_routes(
         identity: LaunchplaneIdentity,
         record_store: object,
         trace_id: str,
-    ) -> OdooProdPromotionOperationRecord | OdooProdRollbackOperationRecord:
+        allow_read_view: bool = False,
+    ) -> tuple[OdooProdPromotionOperationRecord | OdooProdRollbackOperationRecord, bool]:
+        """The operation, and whether the caller reads it in full.
+
+        The run or rollback grant reads it in full. With ``allow_read_view``,
+        ``operations.read`` on the context's prod instance reads its structured
+        view.
+        """
         scope = (product.strip(), context.strip().lower())
-        if not common.authorization_allows(
-            identity=identity,
-            action=action,
-            product=scope[0],
-            context=scope[1],
-            target=AuthorizationTarget(scope="instance", instances=("prod",)),
+        target = AuthorizationTarget(scope="instance", instances=("prod",))
+        full = common.authorization_allows(
+            identity=identity, action=action, product=scope[0], context=scope[1], target=target
+        )
+        if not full and not (
+            allow_read_view
+            and common.authorization_allows(
+                identity=identity,
+                action=OPERATION_STATUS_READ_ACTION,
+                product=OPERATION_STATUS_READ_PRODUCT,
+                context=scope[1],
+                target=target,
+            )
         ):
             raise common.http_error(
                 status_code=403,
@@ -537,7 +569,7 @@ def register_odoo_prod_release_operation_routes(
                 code="not_found",
                 message="Odoo prod release operation was not found.",
             ) from error
-        return operation
+        return operation, full
 
     def read_promotion_operation(
         operation_id: Annotated[str, Path(min_length=1, max_length=256)],
@@ -547,7 +579,7 @@ def register_odoo_prod_release_operation_routes(
         record_store: Annotated[object, Depends(common.get_record_store)],
     ) -> OdooProdPromotionOperationResponse:
         trace_id = common.next_trace_id()
-        operation = scoped_operation(
+        operation, full = scoped_operation(
             read=lambda store, key: store.read_odoo_prod_promotion_operation_record(key),
             action=ODOO_PROD_PROMOTION_RUN_ACTION,
             operation_id=operation_id,
@@ -556,8 +588,11 @@ def register_odoo_prod_release_operation_routes(
             identity=identity,
             record_store=record_store,
             trace_id=trace_id,
+            allow_read_view=True,
         )
-        return _promotion_response(cast(OdooProdPromotionOperationRecord, operation), trace_id)
+        return _promotion_response(
+            cast(OdooProdPromotionOperationRecord, operation), trace_id, full=full
+        )
 
     def read_rollback_operation(
         operation_id: Annotated[str, Path(min_length=1, max_length=256)],
@@ -567,7 +602,7 @@ def register_odoo_prod_release_operation_routes(
         record_store: Annotated[object, Depends(common.get_record_store)],
     ) -> OdooProdRollbackOperationResponse:
         trace_id = common.next_trace_id()
-        operation = scoped_operation(
+        operation, full = scoped_operation(
             read=lambda store, key: store.read_odoo_prod_rollback_operation_record(key),
             action=ODOO_PROD_ROLLBACK_ACTION,
             operation_id=operation_id,
@@ -576,8 +611,11 @@ def register_odoo_prod_release_operation_routes(
             identity=identity,
             record_store=record_store,
             trace_id=trace_id,
+            allow_read_view=True,
         )
-        return _rollback_response(cast(OdooProdRollbackOperationRecord, operation), trace_id)
+        return _rollback_response(
+            cast(OdooProdRollbackOperationRecord, operation), trace_id, full=full
+        )
 
     def cancel_promotion_operation(
         operation_id: Annotated[str, Path(min_length=1, max_length=256)],
