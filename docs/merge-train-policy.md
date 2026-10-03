@@ -294,10 +294,9 @@ a user's access token is always refused, including a repository owner's token,
 before either the trusted-automation or allowed-role check. An App's own
 installation token acts as its bot account and needs a trusted automation id. A
 label applied by anyone else, or whose labeler cannot be read, is ignored for
-admission, and the dry run reports
-`<label> label ignored: applied by <login> (<role>), who is not allowed to
-enqueue`. Removing the label, by anyone, still takes the pull request out of
-the queue.
+admission. The dry run reports the specific refusal reason and identifies the
+labeler when available. Removing the label, by anyone, still takes the pull
+request out of the queue.
 
 `dependency_update_github_user_ids` names dependency-update bots, for example
 Dependabot. Each id must also be in `trusted_automation_github_user_ids`. A pull
