@@ -256,21 +256,18 @@ reviewed digest also binds the exact active source and destination target
 record IDs and digests resolved during dry-run, including policy-only updates
 that do not write new target revisions.
 
-The legacy migration route is
-`POST /v1/production-backup-authority/legacy-runtime-migration`. It requires an
-exact product/context/instance/action, admin-chosen stable target IDs, the
-source runtime record's exact `updated_at`, review timestamps, evidence-age
-limits, source, and reason. Dry-run reads only the exact DB-backed instance
-runtime record and requires both snapshot and `vzdump` modes. Apply requires the
-reviewed digest and idempotency key. The migration copies only non-secret host,
-user, guest, storage, prefix, and retention facts into typed records; SSH key
-and known-host material are never copied or returned.
+The compatibility route
+`POST /v1/production-backup-authority/legacy-runtime-migration` refuses new
+migration attempts without reading runtime-environment backup values or writing
+targets and policies. Submit explicit reviewed typed records through
+`POST /v1/production-backup-authority/apply` instead. Historical idempotent
+responses remain replayable; they do not create new authority.
 
-Do not remove the legacy VeriReel runtime keys after this migration. The current
-worker continues to use them until the provider-neutral execution slice and
-promotion-enforcement slice are merged and verified. This migration establishes
-typed authority without weakening the live backup gate or claiming provider
-execution has moved.
+Legacy VeriReel backup dispatch and worker commands also refuse without host
+effects. Capture through `POST /v1/production-backup-gates` after typed policy
+onboarding. Both snapshot and independent backup remain mandatory. Removing
+obsolete live runtime keys, onboarding production policy and proving a real
+promotion remain separate guarded operations under #2309.
 
 ## Mutation Reservation Recovery
 
