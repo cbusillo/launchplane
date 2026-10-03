@@ -1744,8 +1744,9 @@ provider message or rollback health exception is embedded in the detail.
   `verireel_prod_backup_gate_operations` for file-backed local state. The HTTP
   route writes a pending backup-gate record plus a typed operation record; the
   supervised `verireel-workers` process claims the operation, heartbeats its
-  lease, runs the delegated backup worker, writes the terminal backup-gate
-  evidence, and completes the operation record. Expired operations retry only
+  lease, executes shared captures from typed bindings, writes terminal backup-gate
+  evidence, and completes the operation record. Legacy requests without a typed
+  binding receive failed records without invoking the delegated host worker. Expired operations retry only
   before the external backup side-effect boundary; once the phase reaches
   `backup_gate`, lease expiry fails closed for admin review.
   A pending operation can be cancelled through the deployed service. The
