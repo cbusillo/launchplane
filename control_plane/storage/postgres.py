@@ -35134,13 +35134,24 @@ class PostgresRecordStore(HumanSessionStore):
         from control_plane.product_retirement import ProductRetirementBlockedError
 
         profile = bound.profile
-        contexts = {lane.context for lane in profile.lanes} | {
-            profile.preview.context,
-            *profile.historical_contexts,
-        }
+        contexts = (
+            {lane.context for lane in profile.lanes}
+            | {
+                profile.preview.context,
+                *profile.historical_contexts,
+            }
+        ) - {""}
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
+            self._lock_landing_authority(
+                session,
+                landing_authority.product_profile(profile.product),
+                *(
+                    landing_authority.preview_anchor(preview.anchor_repo, preview.anchor_pr_number)
+                    for preview in bound.previews
+                ),
+            )
             if not self.database_url.startswith("sqlite"):
                 # Include insertions and generation writes, not only existing preview rows.
                 tables = ", ".join(

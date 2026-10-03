@@ -145,15 +145,18 @@ def _absence_scope(bound: BoundProductRetirement) -> dict[str, object]:
         "preview_prefix": effective_preview_app_name_prefix(profile=bound.profile) + "-",
         "domains": sorted(
             {
-                *bound.dokploy_target.domains,
-                *(
-                    urlsplit(url).hostname or ""
-                    for url in (
-                        bound.profile.lanes[0].base_url,
-                        *(preview.canonical_url for preview in bound.previews),
-                    )
-                    if url
-                ),
+                domain.strip().lower()
+                for domain in {
+                    *bound.dokploy_target.domains,
+                    *(
+                        urlsplit(url).hostname or ""
+                        for url in (
+                            bound.profile.lanes[0].base_url,
+                            *(preview.canonical_url for preview in bound.previews),
+                        )
+                        if url
+                    ),
+                }
             }
         ),
     }
@@ -183,17 +186,26 @@ def observe_no_target_absence(
             raise ProductRetirementBlockedError(
                 "Provider inventory application evidence is incomplete."
             )
-        repository_values = (
-            str(payload.get("customGitUrl") or ""),
-            str(payload.get("repository") or ""),
-        )
         repository = bound.profile.repository.lower()
+        repository_name = repository.partition("/")[2]
+        repository_values = tuple(
+            str(payload.get(field) or "").strip().lower().rstrip("/").removesuffix(".git")
+            for field in (
+                "customGitUrl",
+                "repository",
+                "githubRepository",
+                "gitlabRepository",
+                "giteaRepository",
+                "bitbucketRepository",
+            )
+        )
         image = str(payload.get("dockerImage") or "").strip()
         image_repository = bound.profile.image.repository
         if (
             name == bound.dokploy_target.target_name
             or name.startswith(str(scope["preview_prefix"]))
-            or any(repository in value.lower() for value in repository_values)
+            # A bare repository without reliable owner evidence is a potential match.
+            or any(repository in value or value == repository_name for value in repository_values)
             or image == image_repository
             or image.startswith((image_repository + ":", image_repository + "@"))
         ):

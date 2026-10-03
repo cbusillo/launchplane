@@ -21349,7 +21349,9 @@ def create_launchplane_fastapi_app(
             idempotency_key=normalized_key,
             trace_id=trace_id,
             check_replay=True,
-            request_payload=retirement_request.model_dump(mode="json"),
+            request_payload=retirement_request.model_dump(
+                mode="json", exclude={"no_target"} if not retirement_request.no_target else set()
+            ),
         )
         if replayed_response is not None:
             return replayed_response
