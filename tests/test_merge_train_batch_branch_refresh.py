@@ -2,6 +2,9 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+from typing import Literal
+
+from control_plane.contracts.merge_train_batch import MergeTrainBatchHeldOutEntry
 
 from control_plane.merge_train import build_merge_train_dry_run_result
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
@@ -20,10 +23,43 @@ from tests.support.merge_train import (
 
 
 class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
-    async def _check_planning(self, *, multiple: bool, failed_candidate: bool = False) -> None:
+    async def _check_planning(
+        self,
+        *,
+        multiple: bool,
+        failed_candidate: bool = False,
+        conflict: Literal["none", "leaves_batch", "leaves_single"] = "none",
+    ) -> None:
         snapshot = _FakeExpandedMergeTrainSnapshotReader(
             transport=object()
         ).read_merge_train_snapshot(repository="cbusillo/sellyouroutboard", base_branch="main")
+        if conflict == "leaves_batch":
+            snapshot = snapshot.model_copy(
+                update={
+                    "pull_requests": (
+                        *snapshot.pull_requests,
+                        snapshot.pull_requests[1].model_copy(
+                            update={
+                                "number": 3,
+                                "head_sha": "head-3",
+                                "head_ref": "feature/third",
+                                "url": f"https://github.com/{snapshot.repository}/pull/3",
+                                "created_at": "2026-05-08T10:10:00Z",
+                            }
+                        ),
+                    )
+                }
+            )
+        conflicts = (
+            ()
+            if conflict == "none"
+            else (
+                MergeTrainBatchHeldOutEntry(
+                    pull_request_number=2,
+                    head_sha=snapshot.pull_requests[1].head_sha,
+                ),
+            )
+        )
         pull_requests = snapshot.pull_requests if multiple else snapshot.pull_requests[:1]
         behind_snapshot = snapshot.model_copy(
             update={
@@ -33,6 +69,9 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
                 )
             }
         )
+        if failed_candidate:
+            # Base movement makes the failed candidate eligible for replanning.
+            snapshot = snapshot.model_copy(update={"base_sha": "previous-base"})
         with (
             TemporaryDirectory() as directory,
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
@@ -73,10 +112,18 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
                     failed = await _post_merge_train_controller_run_once(app, payload)
                 self.assertEqual(failed.status_code, 202, failed.text)
                 self.assertEqual(failed.json()["result"]["candidate"]["status"], "failed")
-            with patch.object(
-                _FakeMergeTrainGitHubClient,
-                "read_merge_train_snapshot",
-                return_value=behind_snapshot,
+            with (
+                patch.object(
+                    _FakeMergeTrainGitHubClient,
+                    "read_merge_train_snapshot",
+                    return_value=behind_snapshot,
+                ),
+                patch.object(
+                    _FakeMergeTrainGitHubClient,
+                    "probe_batch_entry_conflicts",
+                    return_value=conflicts,
+                    create=True,
+                ) as probe,
             ):
                 dry_run = await _post_merge_train_controller_run_once(
                     app, {**payload, "mutate": False}
@@ -86,7 +133,18 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(dry_run.status_code, 202, dry_run.text)
             self.assertEqual(mutated.status_code, 202, mutated.text)
             result = mutated.json()["result"]
-            if multiple:
+            expected_entries = tuple(
+                entry
+                for entry in behind_snapshot.pull_requests
+                if entry.number not in {held.pull_request_number for held in conflicts}
+            )
+            if conflict != "none":
+                probe.assert_called_once()
+                self.assertEqual(
+                    [entry.number for entry in probe.call_args.kwargs["queue"]],
+                    [entry.number for entry in behind_snapshot.pull_requests],
+                )
+            if len(expected_entries) > 1:
                 update.assert_not_called()
                 self.assertEqual(dry_run.json()["result"]["controller_action"], "plan_candidate")
                 self.assertEqual(result["controller_action"], "plan_candidate")
@@ -97,7 +155,7 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
                         (entry["pull_request_number"], entry["head_sha"])
                         for entry in candidate["entries"]
                     ],
-                    [(entry.number, entry.head_sha) for entry in behind_snapshot.pull_requests],
+                    [(entry.number, entry.head_sha) for entry in expected_entries],
                 )
                 records = store.list_merge_train_batch_candidate_records(
                     repository=snapshot.repository, base_branch=snapshot.base_branch
@@ -127,6 +185,15 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_candidate_reflows_to_a_single_entry_and_refreshes(self) -> None:
         await self._check_planning(multiple=False, failed_candidate=True)
+
+    async def test_probe_leaves_a_batch_and_preserves_the_remaining_heads(self) -> None:
+        await self._check_planning(multiple=True, conflict="leaves_batch")
+
+    async def test_probe_leaves_one_entry_and_restores_its_refresh(self) -> None:
+        await self._check_planning(multiple=True, conflict="leaves_single")
+
+    async def test_failed_candidate_probe_leaves_one_entry_and_restores_its_refresh(self) -> None:
+        await self._check_planning(multiple=True, failed_candidate=True, conflict="leaves_single")
 
 
 class BatchBranchRefreshDecisionTests(unittest.TestCase):
