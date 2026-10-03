@@ -126,11 +126,18 @@ governed expectation, custody and currentness contract.
     payloads
 - native FastAPI Odoo operation status reads:
   - `GET /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}`,
-    requiring `odoo_stable_bootstrap.execute` for the stored operation product
-    and context
-  - `GET /v1/drivers/odoo/target-replacement/operations/{operation_id}`,
-    requiring `odoo_target_replacement_apply.execute` for the stored operation
-    product and context
+    `.../target-replacement/operations/{operation_id}`,
+    `.../prod-backup-restore/operations/{operation_id}` and
+    `.../prod-retained-volume-backup-import/operations/{operation_id}`, plus
+    `GET /v1/odoo-prod-promotions/operations/{operation_id}` and
+    `GET /v1/odoo-prod-rollbacks/operations/{operation_id}`. The action that
+    starts the operation, on the stored operation's product, context and
+    instance, reads the full record. `operations.read` on the Launchplane
+    product for the operation's context and instance, the scope that reads
+    the context's recent deployments, reads its structured status: ids,
+    statuses, phases, times, attempt, the error code and the env-key names the
+    failure is about, marked `free_text_omitted`. It never carries the error
+    message, request, plan, checkpoint evidence or provider output.
 - native FastAPI protected artifact inventory route:
   - `GET /v1/artifacts/protected`, requiring `artifact_protection.read` for
     the requested product and either the requested context or whole-product
@@ -2436,6 +2443,23 @@ for apply and `dokploy_target.repair_domain_authority.plan` for dry-run. It
 remains fail-closed when any tracked or live identity/evidence is missing or
 changed.
 
+Besides `dokploy_target.setup` (or `dokploy_target.plan` for dry-run), checked on
+product and context `launchplane`, the route accepts the lane-scoped
+`dokploy_target.lane_setup` action for `create-compose` only. It is checked on
+the one product whose lanes or historical contexts use the request's context
+(which must be lowercase and not `launchplane`), with that context and the
+request's instance, so a grant names exactly one product's lane and stops
+matching if the context moves to another product. It covers dry-run and apply of
+creating that lane's compose, and only when the request carries no
+`expected_current_provider_target`, `project_id` or `environment_id`: the
+compose then lands in a new provider project and environment and can't replace
+a binding or join another lane's environment. It never authorizes `adopt`,
+domain reconcile or prune, or domain authority repair. Which product holds the
+context is checked again when the target records commit, under the lock product-profile
+writes take, so a context reassigned during the provider calls is refused
+(`local_operator_lane_scope_required`); the compose already created stays
+unrecorded.
+
 Dokploy target inspect uses the native FastAPI
 `GET /v1/dokploy-targets/inspect` route. The route is a read-only proof surface
 for provider identity before an adoption, creation, or repair: callers may pass
@@ -4012,6 +4036,28 @@ already-absent applications. Mutable runtime and target records
 are removed only after provider absence is verified; runtime deletion events
 and preserved managed-secret references remain audit evidence. The profile is
 never deleted and becomes `retired` with previews disabled.
+
+`GET /v1/products/{product}/path-check?path=testing|promote` answers, in one
+read, whether the caller can take the product along that path and what is in
+the way. It needs `product_environment.read` on the product's lane contexts and
+writes nothing. Each step is `clear`, `blocked` or `unknown` with a code,
+Launchplane's fixed description, the kind of fix (`code`, `grant`,
+`owner_approval`, `client_acceptance`, `by_hand` or `wait`) and the record ids
+it read. `testing` checks the lane, the staff-testing hold and the last
+reconcile attempt, naming the `deploy_blocked.*` or other code that stopped it.
+`promote` checks the caller's own promotion grant, Client acceptance, the prod
+lane's backup authority and the last promotion's failure. A step whose evidence
+cannot be read is `unknown`, never `clear`, and the response never carries
+provider or exception text.
+
+`GET /v1/product-retirements/{record_id}` reads one retirement record's
+structured outcome with `operations.read` on the Launchplane product for the
+record's context and instance: ids, mode, outcome, times, lifecycle before and
+after, provider-effect flags and the error code. The reason, the error message,
+provider observations and authority snapshots are not returned.
+`GET /v1/detached-application-retirements/{record_id}` does the same for a
+detached application with `operations.read` on the Launchplane service context,
+without provider names.
 
 ## Detached application retirement
 

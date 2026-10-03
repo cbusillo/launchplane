@@ -11,6 +11,7 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.product_profile_record import (
+    ProductLaneProfile,
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
 )
@@ -29,6 +30,7 @@ from control_plane.contracts.secret_record import (
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import (
+    ProductContextOwnershipError,
     ProductAuthorityBundle,
     ProviderTargetWrite,
     RuntimeEnvironmentConflictError,
@@ -1158,3 +1160,43 @@ class ProductAuthorityBundleTransactionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BundleContextOwnerTests(unittest.TestCase):
+    def test_bundle_refuses_a_context_another_product_now_uses(self) -> None:
+        bundle = ProductAuthorityBundle(
+            runtime_environments=(_runtime_environment(),),
+            required_context_owner=("example-product", "example-context"),
+        )
+        owner = _product_profile().model_copy(
+            update={"lanes": (ProductLaneProfile(instance="testing", context="example-context"),)}
+        )
+        intruder = owner.model_copy(update={"product": "other-product"})
+        for store_kind in ("postgres", "filesystem"):
+            with self.subTest(store=store_kind), TemporaryDirectory() as directory:
+                root = Path(directory)
+                store: PostgresRecordStore | FilesystemRecordStore
+                if store_kind == "postgres":
+                    store = PostgresRecordStore(
+                        database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+                    )
+                    store.ensure_schema()
+                else:
+                    store = FilesystemRecordStore(root / "state")
+                store.write_product_profile_record(owner)
+                store.write_product_authority_bundle(bundle)
+                store.write_product_profile_record(intruder)
+                with self.assertRaises(ProductContextOwnershipError):
+                    store.write_product_authority_bundle(
+                        bundle.model_copy(
+                            update={
+                                "runtime_environments": (
+                                    _runtime_environment().model_copy(
+                                        update={"updated_at": "2026-07-02T00:00:00Z"}
+                                    ),
+                                )
+                            }
+                        )
+                    )
+                if isinstance(store, PostgresRecordStore):
+                    store.close()

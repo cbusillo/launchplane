@@ -1154,7 +1154,8 @@
             "enum": [
               "ordinary-agent-delivery-administration",
               "administrator-product-evidence-read",
-              "ordinary-agent-enrollment-requester"
+              "ordinary-agent-enrollment-requester",
+              "agent-product-setup"
             ],
             "title": "Candidate Id",
             "type": "string"
@@ -1166,6 +1167,18 @@
             ],
             "title": "Intent",
             "type": "string"
+          },
+          "products": {
+            "default": [],
+            "description": "Product identifiers selected for agent product setup. Accepted only when adding agent-product-setup; the server validates each one.",
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Products",
+            "type": "array"
           },
           "source_event_id": {
             "maxLength": 128,
@@ -3800,9 +3813,29 @@
           "destination_health": {
             "$ref": "#/components/schemas/HealthcheckEvidence"
           },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecordFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "instance": {
             "title": "Instance",
             "type": "string"
+          },
+          "integration_key_readback": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IntegrationKeyReadbackEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "no_cache": {
             "default": false,
@@ -3915,9 +3948,29 @@
           "destination_health": {
             "$ref": "#/components/schemas/HealthcheckEvidence"
           },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecordFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "instance": {
             "title": "Instance",
             "type": "string"
+          },
+          "integration_key_readback": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IntegrationKeyReadbackEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "no_cache": {
             "default": false,
@@ -4011,6 +4064,105 @@
           "record"
         ],
         "title": "DeploymentRecordResponse",
+        "type": "object"
+      },
+      "DetachedApplicationRetirementOutcomeView": {
+        "additionalProperties": false,
+        "properties": {
+          "completed_at": {
+            "title": "Completed At",
+            "type": "string"
+          },
+          "error_code": {
+            "title": "Error Code",
+            "type": "string"
+          },
+          "free_text_omitted": {
+            "const": true,
+            "default": true,
+            "title": "Free Text Omitted",
+            "type": "boolean"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "plan_record_id": {
+            "title": "Plan Record Id",
+            "type": "string"
+          },
+          "protected_targets_unchanged": {
+            "title": "Protected Targets Unchanged",
+            "type": "boolean"
+          },
+          "provider_absence_verified": {
+            "title": "Provider Absence Verified",
+            "type": "boolean"
+          },
+          "provider_effect_attempted": {
+            "title": "Provider Effect Attempted",
+            "type": "boolean"
+          },
+          "provider_effect_performed": {
+            "title": "Provider Effect Performed",
+            "type": "boolean"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "recorded_at": {
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "requested_at": {
+            "title": "Requested At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_id",
+          "plan_record_id",
+          "mode",
+          "outcome",
+          "requested_at",
+          "recorded_at",
+          "completed_at",
+          "provider_effect_attempted",
+          "provider_effect_performed",
+          "provider_absence_verified",
+          "error_code",
+          "protected_targets_unchanged"
+        ],
+        "title": "DetachedApplicationRetirementOutcomeView",
+        "type": "object"
+      },
+      "DetachedApplicationRetirementRecordResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "record": {
+            "$ref": "#/components/schemas/DetachedApplicationRetirementOutcomeView"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "record"
+        ],
+        "title": "DetachedApplicationRetirementRecordResponse",
         "type": "object"
       },
       "DetachedApplicationRetirementRequest": {
@@ -11871,6 +12023,61 @@
           }
         },
         "title": "InspectionSetupRuntimeMetadata",
+        "type": "object"
+      },
+      "IntegrationKeyReadbackEvidence": {
+        "additionalProperties": false,
+        "description": "Key safety of the integration keys a deploy delivered to its lane.\n\nNames and finding codes only, never values. ``reported`` means every key is\nallowed but a shared_safe production key has no recorded sharing reason;\n``fail`` means a key breaks the lane's key-safety rules. Both are recorded,\nnot enforced, after the deploy.",
+        "properties": {
+          "checked_binding_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Checked Binding Keys",
+            "type": "array"
+          },
+          "findings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/IntegrationKeyReadbackFinding"
+            },
+            "title": "Findings",
+            "type": "array"
+          },
+          "status": {
+            "default": "skipped",
+            "enum": [
+              "pass",
+              "reported",
+              "fail",
+              "unavailable",
+              "skipped"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "title": "IntegrationKeyReadbackEvidence",
+        "type": "object"
+      },
+      "IntegrationKeyReadbackFinding": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_key": {
+            "title": "Binding Key",
+            "type": "string"
+          },
+          "code": {
+            "title": "Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding_key",
+          "code"
+        ],
+        "title": "IntegrationKeyReadbackFinding",
         "type": "object"
       },
       "JsonValue": {},
@@ -22929,6 +23136,62 @@
         "title": "OwnerSecretInputResponse",
         "type": "object"
       },
+      "PathCheckStep": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "fix": {
+            "default": "none",
+            "enum": [
+              "none",
+              "code",
+              "grant",
+              "owner_approval",
+              "client_acceptance",
+              "by_hand",
+              "wait"
+            ],
+            "title": "Fix",
+            "type": "string"
+          },
+          "record_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Record Ids",
+            "type": "array"
+          },
+          "state": {
+            "enum": [
+              "clear",
+              "blocked",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "step_id": {
+            "title": "Step Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "step_id",
+          "state",
+          "code",
+          "description"
+        ],
+        "title": "PathCheckStep",
+        "type": "object"
+      },
       "PostDeployUpdateEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -25845,6 +26108,8 @@
               "Managed authorization policy review",
               "Review agent delivery administration",
               "Review administrator product evidence access",
+              "Review agent product setup access",
+              "Review removing agent product setup access",
               "Review client delivery access",
               "Review terminal client connection requests",
               "Review removing terminal client connection requests",
@@ -30574,6 +30839,81 @@
         "title": "ProductOwnerSecretInput",
         "type": "object"
       },
+      "ProductPathCheck": {
+        "additionalProperties": false,
+        "properties": {
+          "blocked_count": {
+            "title": "Blocked Count",
+            "type": "integer"
+          },
+          "path": {
+            "enum": [
+              "testing",
+              "promote"
+            ],
+            "title": "Path",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "clear",
+              "blocked",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/PathCheckStep"
+            },
+            "title": "Steps",
+            "type": "array"
+          },
+          "unknown_count": {
+            "title": "Unknown Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "product",
+          "path",
+          "state",
+          "blocked_count",
+          "unknown_count",
+          "steps"
+        ],
+        "title": "ProductPathCheck",
+        "type": "object"
+      },
+      "ProductPathCheckResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "check": {
+            "$ref": "#/components/schemas/ProductPathCheck"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "check"
+        ],
+        "title": "ProductPathCheckResponse",
+        "type": "object"
+      },
       "ProductPreviewProfile": {
         "additionalProperties": false,
         "properties": {
@@ -32161,6 +32501,125 @@
         "title": "ProductReconcileRequestsResponse",
         "type": "object"
       },
+      "ProductRetirementOutcomeView": {
+        "additionalProperties": false,
+        "properties": {
+          "completed_at": {
+            "title": "Completed At",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "error_code": {
+            "title": "Error Code",
+            "type": "string"
+          },
+          "free_text_omitted": {
+            "const": true,
+            "default": true,
+            "title": "Free Text Omitted",
+            "type": "boolean"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "lifecycle_after": {
+            "title": "Lifecycle After",
+            "type": "string"
+          },
+          "lifecycle_before": {
+            "title": "Lifecycle Before",
+            "type": "string"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "plan_record_id": {
+            "title": "Plan Record Id",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "provider_absence_verified": {
+            "title": "Provider Absence Verified",
+            "type": "boolean"
+          },
+          "provider_effect_attempted": {
+            "title": "Provider Effect Attempted",
+            "type": "boolean"
+          },
+          "provider_effect_performed": {
+            "title": "Provider Effect Performed",
+            "type": "boolean"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "recorded_at": {
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "requested_at": {
+            "title": "Requested At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_id",
+          "plan_record_id",
+          "mode",
+          "outcome",
+          "requested_at",
+          "recorded_at",
+          "completed_at",
+          "provider_effect_attempted",
+          "provider_effect_performed",
+          "provider_absence_verified",
+          "error_code",
+          "product",
+          "context",
+          "instance",
+          "lifecycle_before",
+          "lifecycle_after"
+        ],
+        "title": "ProductRetirementOutcomeView",
+        "type": "object"
+      },
+      "ProductRetirementRecordResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "record": {
+            "$ref": "#/components/schemas/ProductRetirementOutcomeView"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "record"
+        ],
+        "title": "ProductRetirementRecordResponse",
+        "type": "object"
+      },
       "ProductRetirementRequest": {
         "additionalProperties": false,
         "properties": {
@@ -32682,6 +33141,24 @@
             "title": "Context",
             "type": "string"
           },
+          "declared_secret_class": {
+            "anyOf": [
+              {
+                "enum": [
+                  "prod_only",
+                  "testing",
+                  "preview",
+                  "non_prod",
+                  "shared_safe"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Declared Secret Class"
+          },
           "instance": {
             "title": "Instance",
             "type": "string"
@@ -32693,6 +33170,16 @@
           "secret_id": {
             "title": "Secret Id",
             "type": "string"
+          },
+          "sharing_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SecretSharingReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "status": {
             "title": "Status",
@@ -33605,6 +34092,11 @@
             "title": "Error Code",
             "type": "string"
           },
+          "error_description": {
+            "default": "",
+            "title": "Error Description",
+            "type": "string"
+          },
           "evidence": {
             "additionalProperties": {
               "type": "string"
@@ -34087,6 +34579,16 @@
           "destination_health": {
             "$ref": "#/components/schemas/HealthcheckEvidence"
           },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecordFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "from_instance": {
             "title": "From Instance",
             "type": "string"
@@ -34157,6 +34659,16 @@
           },
           "destination_health": {
             "$ref": "#/components/schemas/HealthcheckEvidence"
+          },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecordFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "from_instance": {
             "title": "From Instance",
@@ -35049,6 +35561,34 @@
           "recent_previews"
         ],
         "title": "RecentOperationsResponse",
+        "type": "object"
+      },
+      "RecordFailure": {
+        "additionalProperties": false,
+        "description": "Why a deploy or promotion failed: a code, Launchplane's fixed description\nof it, and the env-key names it is about. Never provider, script or\nexception text.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Keys",
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "description"
+        ],
+        "title": "RecordFailure",
         "type": "object"
       },
       "ReleaseChecklist": {
@@ -38935,6 +39475,7 @@
               "context_not_allowed",
               "instance_not_allowed",
               "secret_class_not_allowed",
+              "sharing_reason_missing",
               "unclassified_binding",
               "unknown_environment_class"
             ],
@@ -39372,6 +39913,16 @@
             "title": "Secret Id",
             "type": "string"
           },
+          "sharing_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SecretSharingReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "status": {
             "default": "configured",
             "enum": [
@@ -39395,6 +39946,54 @@
           "updated_at"
         ],
         "title": "SecretBinding",
+        "type": "object"
+      },
+      "SecretSharingReason": {
+        "additionalProperties": false,
+        "description": "Why a production integration key may sit on one non-production lane.\n\nThe kinds are the lane integration allowances' (``dev_store``,\n``read_only_source``, ``pre_live``) plus ``site_shared`` for a key the site's\nstable lanes share on purpose. ``evidence`` says who verified the key's\npermissions, when, and what they saw. Launchplane cannot check a token's\npermissions; a person does and records it here.",
+        "properties": {
+          "evidence": {
+            "title": "Evidence",
+            "type": "string"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "dev_store",
+                  "read_only_source",
+                  "pre_live"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "site_shared",
+                "type": "string"
+              }
+            ],
+            "title": "Kind"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "recorded_at": {
+            "default": "",
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "recorded_by": {
+            "default": "",
+            "title": "Recorded By",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "reason",
+          "evidence"
+        ],
+        "title": "SecretSharingReason",
         "type": "object"
       },
       "SecretStatusAuditEvent": {
@@ -49303,6 +49902,108 @@
           }
         },
         "summary": "Plan or apply audited detached Dokploy application retirement"
+      }
+    },
+    "/v1/detached-application-retirements/{record_id}": {
+      "get": {
+        "operationId": "read_detached_application_retirement_record",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "record_id",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Record Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetachedApplicationRetirementRecordResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read one detached application retirement record's structured outcome"
       }
     },
     "/v1/dokploy-targets/inspect": {
@@ -77840,6 +78541,108 @@
         "summary": "Plan or apply audited generic-web product retirement"
       }
     },
+    "/v1/product-retirements/{record_id}": {
+      "get": {
+        "operationId": "read_product_retirement_record",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "record_id",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Record Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductRetirementRecordResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read one product retirement record's structured outcome"
+      }
+    },
     "/v1/product-review": {
       "get": {
         "operationId": "read_product_review",
@@ -81182,6 +81985,111 @@
           }
         },
         "summary": "Read persisted Odoo website bootstrap settings"
+      }
+    },
+    "/v1/products/{product}/path-check": {
+      "get": {
+        "operationId": "read_product_path_check",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "enum": [
+                "testing",
+                "promote"
+              ],
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductPathCheckResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Report every step that stands between the caller and the end of a path"
       }
     },
     "/v1/promotions/{record_id}": {

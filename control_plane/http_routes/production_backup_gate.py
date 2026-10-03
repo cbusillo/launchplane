@@ -5,6 +5,10 @@ from typing import Annotated, Literal
 from fastapi import Depends, Header, Path, Query
 from pydantic import BaseModel, ConfigDict
 
+from control_plane.contracts.production_backup_failures import (
+    BACKUP_FAILED_CODE,
+    backup_failure_description,
+)
 from control_plane.contracts.production_backup_gate import (
     PRODUCTION_BACKUP_GATE_EXECUTE_ACTION,
     ProductionBackupGateRequest,
@@ -22,6 +26,7 @@ from control_plane.durable_operation_authorization import (
 )
 from control_plane.http_routes.mutation_support import idempotency_scope
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
+from control_plane.operation_status_read import safe_operation_error_code
 from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.production_backup_gate import enqueue_production_backup_gate
@@ -49,18 +54,57 @@ class ProductionBackupGateResponse(BaseModel):
     backup_record_id: str
     evidence: dict[str, str]
     error_code: str
+    # Launchplane's fixed description of error_code; never provider text.
+    error_description: str = ""
+
+
+# Structured evidence the backup provider writes: record ids, digests, stage,
+# snapshot and archive ids, times and statuses. Anything else, such as an older
+# driver path's error_message, stays out of the response.
+_BACKUP_EVIDENCE_KEYS = frozenset(
+    {
+        "provider",
+        "product",
+        "context",
+        "instance",
+        "promotion_action",
+        "policy_record_id",
+        "policy_revision",
+        "policy_digest",
+        "source_target_record_id",
+        "source_target_digest",
+        "destination_target_record_id",
+        "destination_target_digest",
+        "provider_stage",
+        "requested_snapshot_name",
+        "snapshot_name",
+        "snapshot_started_at",
+        "snapshot_finished_at",
+        "independent_backup_started_at",
+        "independent_backup_id",
+        "independent_backup_finished_at",
+        "capture_status",
+        "retention_status",
+        "retention_error_code",
+    }
+)
 
 
 def _response(
     operation: VeriReelProdBackupGateOperationRecord, trace_id: str
 ) -> ProductionBackupGateResponse:
+    evidence = operation.result.evidence if operation.result else operation.progress_evidence
+    error_code = safe_operation_error_code(operation.error_code) or (
+        BACKUP_FAILED_CODE if operation.status == "fail" else ""
+    )
     return ProductionBackupGateResponse(
         trace_id=trace_id,
         operation_id=operation.operation_id,
         operation_status=operation.status,
         backup_record_id=operation.backup_record_id,
-        evidence=operation.result.evidence if operation.result else operation.progress_evidence,
-        error_code=operation.error_code or ("backup_failed" if operation.status == "fail" else ""),
+        evidence={key: value for key, value in evidence.items() if key in _BACKUP_EVIDENCE_KEYS},
+        error_code=error_code,
+        error_description=backup_failure_description(error_code),
     )
 
 
@@ -148,7 +192,14 @@ def register_production_backup_gate_routes(
         record_store: object,
         trace_id: str,
         action: str,
+        allow_unbound: bool = False,
     ) -> VeriReelProdBackupGateOperationRecord:
+        """The operation in the requested scope.
+
+        Only a read accepts ``allow_unbound``: an operation an older VeriReel
+        driver path queued has no shared-gate binding, but the read still shows
+        its structured status.
+        """
         scope = (product.strip().lower(), context.strip().lower(), instance.strip().lower())
         if not common.authorization_allows(
             identity=identity,
@@ -172,10 +223,11 @@ def register_production_backup_gate_routes(
             )
         try:
             operation = record_store.read_verireel_prod_backup_gate_operation_record(operation_id)
-            if (
-                operation.binding is None
-                or (operation.product, operation.context, operation.instance) != scope
-            ):
+            if (operation.binding is None and not allow_unbound) or (
+                operation.product,
+                operation.context,
+                operation.instance,
+            ) != scope:
                 raise FileNotFoundError(operation_id)
         except FileNotFoundError as error:
             raise common.http_error(
@@ -204,6 +256,7 @@ def register_production_backup_gate_routes(
             record_store,
             trace_id,
             "production_backup_authority.read",
+            allow_unbound=True,
         )
         return _response(operation, trace_id)
 

@@ -4,6 +4,10 @@ A non-production lane must not hold production integration settings unless an
 allowance recorded here says why. The allowance list lives on the lane's tracked
 Dokploy target record. Writes replace the whole list: dry-run returns a redacted diff
 and a digest, and apply requires that digest, then reads the record back.
+
+The read also lists the integration keys stored for the lane itself, with each
+one's declared class and recorded sharing reason (names and metadata, never
+values), so a later reader can see why a production key is on the lane.
 """
 
 from __future__ import annotations
@@ -21,7 +25,15 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecordChanged,
     IntegrationAllowanceKind,
 )
-from control_plane.runtime_key_safety import runtime_key_safety_environment_class
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretClass,
+)
+from control_plane.contracts.secret_record import SecretBinding, SecretSharingReason
+from control_plane.runtime_key_safety import (
+    is_integration_runtime_key,
+    runtime_key_safety_environment_class,
+)
 
 INTEGRATION_ALLOWANCES_ROUTE = "/v1/product-config/integration-allowances"
 INTEGRATION_ALLOWANCES_APPLY_ROUTE = "/v1/product-config/integration-allowances/apply"
@@ -85,6 +97,32 @@ class IntegrationAllowancesStore(Protocol):
         expected_record: DokployTargetRecord,
         replacement_record: DokployTargetRecord,
     ) -> DokployTargetRecord: ...
+
+
+class IntegrationAllowancesReadStore(IntegrationAllowancesStore, Protocol):
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]: ...
+
+    def list_runtime_key_safety_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]: ...
+
+
+class LaneIntegrationKey(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    binding_key: str
+    declared_secret_class: RuntimeSecretClass | None = None
+    sharing_reason: SecretSharingReason | None = None
 
 
 class IntegrationAllowanceInput(BaseModel):
@@ -153,6 +191,7 @@ class IntegrationAllowancesReadResult(BaseModel):
     instance: str
     environment_class: str
     allowances: tuple[DokployTargetIntegrationAllowance, ...]
+    integration_keys: tuple[LaneIntegrationKey, ...] = ()
     record_sha256: str
 
 
@@ -255,8 +294,35 @@ def _changes(
     return tuple(changes)
 
 
+def _lane_integration_keys(
+    *, record_store: IntegrationAllowancesReadStore, context: str, instance: str
+) -> tuple[LaneIntegrationKey, ...]:
+    active_policies = record_store.list_runtime_key_safety_policy_records(status="active", limit=1)
+    extra_markers = active_policies[0].integration_key_markers if active_policies else ()
+    return tuple(
+        LaneIntegrationKey(
+            binding_key=binding.binding_key,
+            declared_secret_class=binding.declared_secret_class,
+            sharing_reason=binding.sharing_reason,
+        )
+        for binding in sorted(
+            record_store.list_secret_bindings(
+                integration="runtime_environment",
+                context_name=context,
+                instance_name=instance,
+                limit=None,
+            ),
+            key=lambda binding: binding.binding_key,
+        )
+        if binding.status == "configured"
+        and binding.context == context
+        and binding.instance == instance
+        and is_integration_runtime_key(binding.binding_key, extra_markers=extra_markers)
+    )
+
+
 def read_integration_allowances(
-    *, record_store: IntegrationAllowancesStore, product: str, context: str, instance: str
+    *, record_store: IntegrationAllowancesReadStore, product: str, context: str, instance: str
 ) -> IntegrationAllowancesReadResult:
     context = context.strip().lower()
     instance = instance.strip().lower()
@@ -267,6 +333,9 @@ def read_integration_allowances(
         instance=instance,
         environment_class=runtime_key_safety_environment_class(instance),
         allowances=target.policies.integration_allowances,
+        integration_keys=_lane_integration_keys(
+            record_store=record_store, context=context, instance=instance
+        ),
         record_sha256=target_record_sha256(target),
     )
 

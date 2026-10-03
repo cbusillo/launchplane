@@ -46,11 +46,13 @@ from control_plane.contracts.privileged_operation import (
     privileged_operation_request_digest_candidates,
 )
 from control_plane.authz_candidate_preparation import (
+    agent_product_setup_request_grants,
     is_administrator_product_evidence_read_request,
     is_legacy_administrator_product_evidence_read_request,
     is_ordinary_agent_delivery_administration_request,
     is_terminal_enrollment_requester_request,
 )
+from control_plane.service_auth import LocalOperatorIdentity
 from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationRevokeHumanEvidence,
     OrdinaryAgentDeliveryActivationSetupHumanEvidence,
@@ -345,6 +347,9 @@ def _build_privileged_operation_semantic_review(
     record: PrivilegedOperationRecord,
     events: tuple[PrivilegedOperationEventRecord, ...] = (),
     generated_at: datetime | None = None,
+    configured_local_operator_identity: LocalOperatorIdentity | None = None,
+    product_setup_grants_verified: Callable[[tuple[tuple[str, str, str, str], ...]], bool]
+    | None = None,
 ) -> PrivilegedOperationSemanticReview:
     observed_at = (generated_at or _utc_now()).astimezone(timezone.utc)
     try:
@@ -533,9 +538,51 @@ def _build_privileged_operation_semantic_review(
         is_terminal_enrollment_requester_removal = is_terminal_enrollment_requester_request(
             record.request, intent="remove"
         )
+        # The agent wording names the operator's agent, so it is used only when
+        # every rule binds the service's configured local operator identity.
+        operator = configured_local_operator_identity
+        setup_grants = (
+            agent_product_setup_request_grants(record.request, intent="add")
+            if operator is not None
+            else None
+        )
+        # The wording also claims each rule stays on its product's own lanes, so
+        # it needs the product records to confirm every grant's context.
+        is_agent_product_setup = (
+            operator is not None
+            and bool(setup_grants)
+            and setup_grants is not None
+            and setup_grants[0][2:] == (operator.subject, operator.token_label)
+            and product_setup_grants_verified is not None
+            and product_setup_grants_verified(setup_grants)
+        )
+        is_agent_product_setup_removal = (
+            operator is not None
+            and agent_product_setup_request_grants(record.request, intent="remove") == ()
+        )
         adds_candidate_access = bool(record.request.desired_policy.github_humans)
         authz_review_title: PrivilegedOperationSemanticReviewTitle
-        if is_ordinary_agent_delivery_policy:
+        if is_agent_product_setup or is_agent_product_setup_removal:
+            authz_review_title = (
+                "Review agent product setup access"
+                if is_agent_product_setup
+                else "Review removing agent product setup access"
+            )
+            setup_products = ", ".join(grant[0] for grant in setup_grants or ())
+            authz_change_summary = (
+                "Allow the operator's agent, on these products only: "
+                f"{setup_products}. On each it may plan and apply settings and secrets on "
+                "the testing lane, create the testing lane's Dokploy compose target in a new "
+                "provider project (create only), and write the production backup policy that promotion's backup gate "
+                "relies on. It cannot change the Client or release review, deploy, promote, "
+                "roll back, run a backup, or reach any other product. This standing access "
+                "remains until a separately governed removal; the Approve-by deadline only "
+                "bounds this plan."
+                if is_agent_product_setup
+                else "Remove the operator's agent's product setup access. Other agent "
+                "access, including its read access, is not changed."
+            )
+        elif is_ordinary_agent_delivery_policy:
             context = record.request.ordinary_agent_preparation_context
             assert context is not None
             ordinary_rule = next(
@@ -939,12 +986,17 @@ def privileged_operation_semantic_review(
     record: PrivilegedOperationRecord,
     events: tuple[PrivilegedOperationEventRecord, ...] = (),
     generated_at: datetime | None = None,
+    configured_local_operator_identity: LocalOperatorIdentity | None = None,
+    product_setup_grants_verified: Callable[[tuple[tuple[str, str, str, str], ...]], bool]
+    | None = None,
 ) -> PrivilegedOperationSemanticReview:
     try:
         return _build_privileged_operation_semantic_review(
             record=record,
             events=events,
             generated_at=generated_at,
+            configured_local_operator_identity=configured_local_operator_identity,
+            product_setup_grants_verified=product_setup_grants_verified,
         )
     except ValidationError as error:
         raise PrivilegedOperationSemanticReviewError(

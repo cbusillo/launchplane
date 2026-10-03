@@ -7,6 +7,10 @@ from typing import Any, cast
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductImageProfile,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 import tests.test_service as service_tests
 from tests.support.auth import _StubVerifier, _identity
@@ -179,6 +183,124 @@ class DokployTargetSetupHttpTests(unittest.TestCase):
 
         self.assertEqual(status_code, 202)
         self.assertTrue(payload["result"]["applied"])
+
+    def test_lane_setup_grant_plans_create_compose_on_its_own_lane_only(self) -> None:
+        create = {
+            "operation": "create-compose",
+            "context": "synthetic-context",
+            "instance": "testing",
+            "target_name": "synthetic-testing",
+            "project_name": "Synthetic",
+            "server_id": "server-synthetic",
+            "domains": ["synthetic-testing.invalid"],
+        }
+        replacement = {
+            "expected_current_provider_target": {
+                "provider_id": "dokploy",
+                "target_id": "compose-existing",
+                "display_name": "synthetic-testing",
+            }
+        }
+        for overrides, owners, expected_status in (
+            ({}, ("synthetic-product",), 202),
+            ({"instance": "prod"}, ("synthetic-product",), 403),
+            ({"context": "other-context"}, ("synthetic-product",), 403),
+            (
+                {"operation": "adopt", "target_id": "compose-production"},
+                ("synthetic-product",),
+                403,
+            ),
+            (replacement, ("synthetic-product",), 403),
+            ({"project_id": "project-existing"}, ("synthetic-product",), 403),
+            ({"environment_id": "environment-existing"}, ("synthetic-product",), 403),
+            ({}, ("synthetic-product", "other-product"), 403),
+            ({}, ("other-product",), 403),
+            ({}, (), 403),
+        ):
+            with self.subTest(overrides=overrides, owners=owners):
+                status_code, payload = self._invoke_with_lane_setup_grant(
+                    {**create, **overrides}, owners=owners
+                )
+                self.assertEqual(status_code, expected_status, payload)
+                if expected_status == 403:
+                    self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def _invoke_with_lane_setup_grant(
+        self, request: dict[str, object], *, owners: tuple[str, ...]
+    ) -> tuple[int, dict[str, Any]]:
+        temporary_directory = TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        root = Path(temporary_directory.name)
+        database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+        store = PostgresRecordStore(database_url=database_url)
+        store.ensure_schema()
+        for product in owners:
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(
+                    {
+                        "product": product,
+                        "display_name": product,
+                        "repository": f"synthetic-owner/{product}",
+                        "driver_id": "generic-web",
+                        "image": ProductImageProfile().model_dump(mode="json"),
+                        "lanes": [{"instance": "prod", "context": "synthetic-context"}],
+                        "updated_at": "2026-10-02T00:00:00Z",
+                        "source": "test:lane-setup",
+                    }
+                )
+            )
+        store.close()
+        workflow_ref = (
+            "synthetic-owner/synthetic-repo/.github/workflows/"
+            "dokploy-target-setup.yml@refs/heads/main"
+        )
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "github_actions": [
+                    {
+                        "repository": "synthetic-owner/synthetic-repo",
+                        "workflow_refs": [workflow_ref],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["synthetic-product"],
+                        "contexts": ["synthetic-context"],
+                        "instances": ["testing"],
+                        "actions": ["dokploy_target.lane_setup"],
+                    }
+                ],
+            }
+        )
+        create_app = cast(Any, service_tests.create_launchplane_dokploy_target_setup_app)
+        invoke_setup = cast(Any, service_tests._invoke_dokploy_target_setup_app)
+        app = create_app(
+            state_dir=root / "state",
+            verifier=_StubVerifier(
+                _identity(
+                    repository="synthetic-owner/synthetic-repo",
+                    workflow_ref=workflow_ref,
+                    event_name="workflow_dispatch",
+                )
+            ),
+            authz_policy=policy,
+            control_plane_root_path=root,
+            database_url=database_url,
+        )
+        with patch(
+            "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
+            return_value=("https://provider.synthetic.invalid", "synthetic-token"),
+        ):
+            return cast(
+                tuple[int, dict[str, Any]],
+                invoke_setup(
+                    app,
+                    payload={
+                        "schema_version": 1,
+                        "mode": "dry-run",
+                        "product": "launchplane",
+                        **request,
+                    },
+                ),
+            )
 
     def _invoke_repair_with_actions(
         self,

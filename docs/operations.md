@@ -2547,8 +2547,8 @@ context only, and `context_instance` has both context and instance.
     testing lane may keep the tenant's real integration settings, because
     testing is the working instance. Only testing and dev lanes accept it.
 - Read a lane's allowances with `GET /v1/product-config/integration-allowances`
-  (query `product`, `context`, `instance`; needs `product_config.plan`). Set
-  them with `POST /v1/product-config/integration-allowances/apply`. The request
+  (query `product`, `context`, `instance`; needs `product_environment.read` or
+  `product_config.plan`). Set them with `POST /v1/product-config/integration-allowances/apply`. The request
   carries the lane's whole allowance list, so an omitted integration is removed.
   - Dry-run needs `product_config.plan`, and apply needs
     `product_config.apply`, both instance-scoped. Terminal agent credentials are
@@ -2612,7 +2612,8 @@ context only, and `context_instance` has both context and instance.
   so a merge doesn't deploy mid-session; see
   [event-driven deploys](event-driven-deploys.md#staff-testing-hold). Read the
   hold with `GET /v1/product-config/testing-hold` (query `product`, `context`,
-  `instance`; needs `product_config.plan`). Set or lift it with
+  `instance`; needs `product_environment.read` or `product_config.plan`). Set or
+  lift it with
   `POST /v1/product-config/testing-hold/apply` (`hold`, `reason`). It follows
   the allowances route above: the same actions, dry-run digest, reviewed apply,
   `Idempotency-Key`, lane ownership check, stale refusal and read-back. It
@@ -3293,6 +3294,25 @@ a newly published stored artifact before it has become inventory; the service
 refuses mismatches against the stored artifact manifest. Do not manually delete
 canonical stable targets as a replacement shortcut; add the missing Launchplane
 apply coverage first, then use the service-backed workflow.
+
+Before it writes the provider env, the deploy step checks the target and the
+site's settings. Each check that stops the deploy has its own code,
+`deploy_blocked.<check>`: `provider_target_unreadable`,
+`site_environment_unresolved`, `platform_credential_refused`,
+`lane_profile_unresolved`, `retirement_changed`,
+`retirement_conflict`, `runtime_secret_values_missing`,
+`runtime_key_safety_refused`, `runtime_key_safety_unavailable`,
+`runtime_settings_unavailable`, `compose_keys_missing`,
+`upstream_restore_blocked`, `provider_only_keys`, `unportable_values` and
+`override_secret_keys_missing`. Any other deploy-step failure is
+`deploy_failed`. The failed deployment record's `failure` holds the code,
+Launchplane's fixed description of it
+(`control_plane/contracts/odoo_target_replacement_failures.py`) and the env-key
+names it is about. The operation holds the same code, key names and
+description, and the reconciler's testing summary uses them. None of them carry
+the check's message, which can name provider targets, hosts or values.
+`deployment.read` reads the record, and `operations.read` reads the
+operation's structured status.
 
 Before the worker's first provider mutation it reauthorizes the stored caller,
 exact target, and managed rule against the current active policy. Revoked or
