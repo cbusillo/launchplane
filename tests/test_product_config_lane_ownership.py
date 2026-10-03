@@ -283,3 +283,50 @@ class ProductConfigContextCommitTests(unittest.TestCase):
                 self.assertEqual(store.list_runtime_environment_records(), ())
                 if isinstance(store, PostgresRecordStore):
                     store.close()
+
+    def test_copy_context_guard_and_lane_guard_both_run_before_publish(self) -> None:
+        for store_type in (FilesystemRecordStore, PostgresRecordStore):
+            with self.subTest(store=store_type.__name__), TemporaryDirectory() as directory:
+                root = Path(directory)
+                store = (
+                    FilesystemRecordStore(state_dir=root)
+                    if store_type is FilesystemRecordStore
+                    else PostgresRecordStore(
+                        database_url=_sqlite_database_url(root / "test.sqlite3")
+                    )
+                )
+                if isinstance(store, PostgresRecordStore):
+                    store.ensure_schema()
+                profile = LaunchplaneProductProfileRecord.model_validate(
+                    _generic_site_profile_payload("own-site")
+                )
+                store.write_product_profile_record(profile)
+                bundle = ProductAuthorityBundle(
+                    required_context_owners=(("own-site", "own-site"),),
+                    required_product_config_target=("own-site", "own-site", "testing"),
+                    runtime_environments=(
+                        RuntimeEnvironmentRecord(
+                            scope="instance",
+                            context="own-site",
+                            instance="testing",
+                            env={"SITE_MODE": "private-setting"},
+                            updated_at="2026-10-03T00:00:00Z",
+                            source_label="test",
+                        ),
+                    ),
+                )
+                store.write_product_authority_bundle(bundle)
+                # The context remains owned, but the destination lane is removed.
+                store.write_product_profile_record(
+                    profile.model_copy(
+                        update={
+                            "lanes": tuple(
+                                lane for lane in profile.lanes if lane.instance != "testing"
+                            )
+                        }
+                    )
+                )
+                with self.assertRaises(ProductProfileConflictError):
+                    store.write_product_authority_bundle(bundle)
+                if isinstance(store, PostgresRecordStore):
+                    store.close()

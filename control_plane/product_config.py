@@ -9,6 +9,7 @@ from typing import Literal, NotRequired, Protocol, TypedDict, cast, get_args
 import click
 
 from control_plane import provider_key_adoption
+from control_plane import product_secret_copy
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentScope
@@ -34,6 +35,7 @@ from control_plane.runtime_key_safety import (
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundleStore
 from control_plane.storage.product_authority_bundle import RuntimeEnvironmentWrite
+from control_plane.storage.product_authority_bundle import SecretCopySourceExpectation
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -217,6 +219,7 @@ def plan_product_config_authority_bundle(
     actor: str,
     source_label: str,
     lane_provider_env_reader: LaneProviderEnvReader | None = None,
+    secret_copy_source_authorizer: Callable[[SecretRecord], bool] | None = None,
 ) -> tuple[dict[str, object], ProductAuthorityBundle]:
     if mode not in {"dry-run", "apply"}:
         raise ProductConfigError("Product config mode must be 'dry-run' or 'apply'.")
@@ -228,6 +231,33 @@ def plan_product_config_authority_bundle(
     runtime_env = cast(dict[str, ScalarValue], runtime_input["env"])
     secrets = tuple(cast(list[dict[str, object]], normalized_payload["secrets"]))
     _require_product_config_master_key_if_needed(secrets)
+    copy_sources: dict[int, SecretVersion] = {}
+    copy_contexts: set[tuple[str, str]] = set()
+    copy_expectations: list[SecretCopySourceExpectation] = []
+    copy_profile = None
+    for index, secret in enumerate(secrets):
+        if secret.get("copy_from") is None:
+            continue
+        try:
+            profile, binding, record, version = product_secret_copy.resolve_copy_source(
+                cast(product_secret_copy.ProductSecretCopyStore, record_store),
+                product=product,
+                target_context=context_name,
+                target_instance=instance_name,
+                binding_key=str(secret["binding_key"]),
+                reference=product_secret_copy.ProductSecretCopyFrom.model_validate(
+                    secret["copy_from"]
+                ),
+                authorizer=secret_copy_source_authorizer,
+            )
+        except product_secret_copy.ProductSecretCopyError as error:
+            raise ProductConfigError(str(error), code=error.code) from error
+        if copy_profile is not None and profile != copy_profile:
+            raise ProductConfigError("Product changed during secret copy planning.")
+        copy_profile = profile
+        copy_sources[index] = version
+        copy_contexts.add((product, record.context))
+        copy_expectations.append(SecretCopySourceExpectation(record=record, binding=binding))
 
     existing_runtime_records = record_store.list_runtime_environment_records()
     retired_provider_keys = runtime_input.get("retired_provider_keys")
@@ -280,18 +310,26 @@ def plan_product_config_authority_bundle(
     secret_records: list[SecretRecord] = []
     secret_bindings: list[SecretBinding] = []
     secret_audit_events: list[SecretAuditEvent] = []
-    for secret in secrets:
+    for index, secret in enumerate(secrets):
         planned_action, existing_secret_id = _product_config_secret_current_action(
             record_store=record_store,
             secret=secret,
         )
         if apply_changes:
+            try:
+                plaintext_value = (
+                    product_secret_copy.copy_source_value(copy_sources[index])
+                    if index in copy_sources
+                    else str(secret["value"])
+                )
+            except product_secret_copy.ProductSecretCopyError as error:
+                raise ProductConfigError(str(error), code=error.code) from error
             secret_plan = _plan_product_config_secret_write(
                 record_store=record_store,
                 scope=cast(SecretScope, str(secret["scope"])),
                 integration=str(secret["integration"]),
                 name=str(secret["name"]),
-                plaintext_value=str(secret["value"]),
+                plaintext_value=plaintext_value,
                 binding_key=str(secret["binding_key"]),
                 context_name=str(secret["context"]),
                 instance_name=str(secret["instance"]),
@@ -302,6 +340,14 @@ def plan_product_config_authority_bundle(
                 source_label=source_label,
             )
             secret_id = secret_plan["secret_id"]
+            if index in copy_sources:
+                for event in secret_plan["secret_audit_events"]:
+                    event.metadata.update(
+                        {
+                            "copy_from_secret_id": copy_sources[index].secret_id,
+                            "copy_from_version_id": copy_sources[index].version_id,
+                        }
+                    )
             secret_versions.extend(secret_plan["secret_versions"])
             secret_records.extend(secret_plan["secret_records"])
             secret_bindings.extend(secret_plan["secret_bindings"])
@@ -372,6 +418,11 @@ def plan_product_config_authority_bundle(
         },
     }
     bundle = ProductAuthorityBundle(
+        expected_product_profiles=(copy_profile,) if copy_profile is not None else (),
+        secret_copy_sources=tuple(copy_expectations),
+        required_context_owners=tuple(sorted(copy_contexts | {(product, context_name)}))
+        if copy_profile is not None
+        else (),
         runtime_environment_writes=runtime_environment_writes,
         secret_versions=tuple(secret_versions),
         secret_records=tuple(secret_records),
@@ -563,7 +614,17 @@ def _product_config_secret_inputs(
             raise ProductConfigError(f"Product config secret #{index} requires binding_key.")
         if not name:
             raise ProductConfigError(f"Product config secret #{index} requires name.")
-        if not isinstance(plaintext_value, str) or not plaintext_value.strip():
+        copy_from = raw_secret.get("copy_from")
+        if copy_from is not None:
+            if plaintext_value is not None:
+                raise ProductConfigError("Secret copy cannot also supply a value.")
+            try:
+                copy_from = product_secret_copy.ProductSecretCopyFrom.model_validate(
+                    copy_from
+                ).model_dump()
+            except ValueError as error:
+                raise ProductConfigError("Secret copy reference is invalid.") from error
+        elif not isinstance(plaintext_value, str) or not plaintext_value.strip():
             raise ProductConfigError(f"Product config secret #{index} requires a non-empty value.")
         expected_scope = _default_secret_scope(
             context_name=context_name, instance_name=instance_name
@@ -623,6 +684,16 @@ def _product_config_secret_inputs(
             instance_name=secret_instance,
             index=index,
         )
+        if copy_from is not None and (
+            validated_scope != "context_instance"
+            or integration != control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
+            or secret_class is None
+            or sharing_reason is None
+        ):
+            raise ProductConfigError(
+                "Secret copy requires a lane-exact runtime secret, declared class, "
+                "sharing reason and evidence."
+            )
         normalized.append(
             {
                 "scope": validated_scope,
@@ -630,6 +701,7 @@ def _product_config_secret_inputs(
                 "name": name,
                 "binding_key": binding_key,
                 "value": plaintext_value,
+                **({"copy_from": copy_from} if copy_from is not None else {}),
                 "context": secret_context,
                 "instance": secret_instance,
                 "description": str(raw_secret.get("description", "") or "").strip(),
@@ -1106,6 +1178,8 @@ def _summarize_product_config_secret_input(
         summary["secret_class"] = secret["secret_class"]
     if secret["sharing_reason"] is not None:
         summary["sharing_reason"] = secret["sharing_reason"]
+    if secret.get("copy_from") is not None:
+        summary["copy_from"] = secret["copy_from"]
     if secret_id:
         summary["secret_id"] = secret_id
     return summary

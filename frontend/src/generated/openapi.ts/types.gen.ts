@@ -2691,12 +2691,16 @@ export type ProductConfigSecretResult = {
     action: 'created' | 'rotated' | 'unchanged';
     binding_key: string;
     context: string;
+    copy_from?: ProductSecretCopyFrom | null;
     instance: string;
     integration: string;
     name: string;
     scope: 'global' | 'context' | 'context_instance';
     secret_class?: 'prod_only' | 'testing' | 'preview' | 'non_prod' | 'shared_safe' | null;
     secret_id: string;
+    sharing_reason?: {
+        [key: string]: string;
+    } | null;
 };
 
 export type ProductConfigWriteAvailability = {
@@ -3619,6 +3623,12 @@ export type ProductSecretConfigRequirement = {
     instance: string;
     integration: string;
     owner_input: ProductOwnerSecretInput | null;
+};
+
+export type ProductSecretCopyFrom = {
+    context: string;
+    instance: string;
+    version_id: string;
 };
 
 export type ProductSiteOverview = {

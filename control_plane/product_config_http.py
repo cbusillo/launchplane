@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane import provider_key_adoption
+from control_plane.product_secret_copy import ProductSecretCopyFrom
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentScope,
     ScalarValue,
@@ -19,6 +20,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeSecretClass,
 )
 from control_plane.contracts.secret_record import SecretScope
+from control_plane.contracts.secret_record import SecretSharingKind
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -43,6 +45,14 @@ class ProductConfigRuntimeInput(BaseModel):
     adopt_provider_keys: tuple[str, ...] | None = None
 
 
+class ProductConfigSharingReasonInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: SecretSharingKind
+    reason: str
+    evidence: str
+
+
 class ProductConfigSecretInput(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -52,14 +62,18 @@ class ProductConfigSecretInput(BaseModel):
     integration: str | None = None
     name: str | None = None
     binding_key: str | None = None
-    value: str
+    value: str | None = Field(default=None, repr=False)
+    copy_from: ProductSecretCopyFrom | None = None
     description: str = ""
     secret_class: RuntimeSecretClass | None = None
+    sharing_reason: ProductConfigSharingReasonInput | None = None
 
     @model_validator(mode="after")
     def _require_secret_identity(self) -> "ProductConfigSecretInput":
         if not (self.name or "").strip() and not (self.binding_key or "").strip():
             raise ValueError("Product config secrets require name or binding_key.")
+        if (self.value is not None) == (self.copy_from is not None):
+            raise ValueError("Product config secrets require exactly one value or copy_from.")
         return self
 
 
@@ -196,6 +210,14 @@ class ProductConfigSecretResult(BaseModel):
     context: str
     instance: str
     secret_id: str = ""
+    copy_from: ProductSecretCopyFrom | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    sharing_reason: dict[str, str] | None = Field(
+        default=None, json_schema_extra={"x-launchplane-optional-response": True}
+    )
     secret_class: RuntimeSecretClass | None = Field(
         default=None,
         json_schema_extra={"x-launchplane-optional-response": True},

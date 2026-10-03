@@ -663,6 +663,7 @@ from control_plane.service_human_auth import HumanSessionStore, LaunchplaneHuman
 from control_plane.storage import landing_authority
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
+    SecretCopySourceConflictError,
     ProductProfileConflictError,
     require_bundle_context_owner,
     ProductAuthorityBundle,
@@ -6272,6 +6273,7 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if (
                 bundle.required_context_owner is not None
+                or bundle.required_context_owners
                 or bundle.required_product_config_target is not None
             ):
                 require_bundle_context_owner(
@@ -6294,6 +6296,26 @@ class PostgresRecordStore(HumanSessionStore):
                     raise ProductProfileConflictError(
                         "Product profile changed during bundle write."
                     )
+            for expected_source in bundle.secret_copy_sources:
+                source_row = session.scalar(
+                    select(LaunchplaneSecretRow)
+                    .where(LaunchplaneSecretRow.secret_id == expected_source.record.secret_id)
+                    .with_for_update()
+                )
+                binding_row = session.scalar(
+                    select(LaunchplaneSecretBindingRow)
+                    .where(
+                        LaunchplaneSecretBindingRow.binding_id == expected_source.binding.binding_id
+                    )
+                    .with_for_update()
+                )
+                if (
+                    source_row is None
+                    or binding_row is None
+                    or SecretRecord.model_validate(source_row.payload) != expected_source.record
+                    or SecretBinding.model_validate(binding_row.payload) != expected_source.binding
+                ):
+                    raise SecretCopySourceConflictError("Secret copy source changed before commit.")
             for delete_item in bundle.delete_runtime_environments:
                 row = session.scalar(
                     self._runtime_environment_statement(

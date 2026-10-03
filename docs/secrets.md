@@ -625,3 +625,72 @@ and revocation is possible only before worker claim. See
 
 **Preserved history:** Phase 1 described planning evidence before a deployed
 worker existed; it is not current root-rotation operating guidance.
+
+## Copying a product's own managed runtime secret
+
+`GET /v1/products/{product}/secret-bindings` returns the product's configured
+runtime secret bindings: name, binding key, scope, context, instance, declared
+class, sharing reason and current version ID. It reads no ciphertext or value,
+excludes global and worker/service stores, and requires product-profile read
+access. It returns only bindings covered by the caller's existing `secret.list`
+access, so an empty result does not prove absence outside that access. Preview
+and removed-lane bindings and contexts shared ambiguously between products are
+excluded.
+
+A product-config secret entry can use `copy_from` instead of `value`:
+
+```json
+{
+  "binding_key": "INTEGRATION_TOKEN",
+  "copy_from": {
+    "context": "example-site",
+    "instance": "prod",
+    "version_id": "<version_id from the metadata read>"
+  },
+  "secret_class": "shared_safe",
+  "sharing_reason": {
+    "kind": "read_only_source",
+    "reason": "Testing reads the same source",
+    "evidence": "Client verified read-only permissions on <date>"
+  },
+  "description": "Read-only source verified by the Client"
+}
+```
+
+The top-level product-config target is the destination lane. The source must be
+a stable lane of that same product, and the destination must be lane-exact
+in `runtime_environment`. The source binding key is the destination binding key;
+renaming a token to bypass integration key safety is not supported. Neither a
+source product nor another secret store can be supplied. Site-shared sources
+may be selected when that source lane has no configured exact binding. Ambiguous,
+disabled, missing or superseded sources are refused. Copies to previews are refused.
+An explicit class on the source must allow the destination lane; a `prod_only`
+source cannot be copied to testing by relabelling its destination `shared_safe`.
+
+If a person verifies that such a source is shareable, a writer authorized for
+the source lane can reclassify it without collecting its value: target that
+same lane with `copy_from` pointing to its own current version, declare the
+new class, reason and evidence, and dry-run/apply normally. This preserves the
+value while writing a new encrypted version and its binding metadata. Reading
+a source and writing testing do not authorize this production-lane write.
+
+Every copy requires a declared class and an allowlisted sharing reason with
+reason and evidence, in addition to normal runtime key safety. The caller needs
+existing `secret.read` access to the resolved source record's scope (whole
+context for a site-shared source, exact instance for a lane source) and
+destination product-config access; the route creates no grant. The resolved
+scope is authorized before decryption. Launchplane does not verify token
+permissions: a person verifies them and records who, when and what they checked.
+
+Use the normal product-config dry run first, then apply the same reviewed
+request with its idempotency key. The source version ID pins the review; a
+rotation requires reading metadata and reviewing a fresh request. Dry runs
+resolve metadata without decrypting. Apply decrypts inside the service and
+writes a separately encrypted destination secret atomically, leaving the source
+unchanged. Product ownership and source record/binding changes before commit
+abort the copy. The database-backed service also aborts if the product profile changes;
+filesystem rehearsal bundles do not fence other profile-field changes. The
+audit records the source secret and version IDs.
+Completed retries replay before resolving or decrypting the source. Request,
+response and audit metadata contain no secret value; subsequent live runtime
+sync or deployment remains a separate operation.
