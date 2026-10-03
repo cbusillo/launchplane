@@ -219,7 +219,7 @@ def register_release_review_routes(
             decision = decision.model_copy(update={"release_issue_url": issue_url})
             store.write_release_review_decision_record(decision)
         blockers: tuple[str, ...] = (
-            ("The Owner requested changes.",) if decision.decision == "changes_requested" else ()
+            ("The Client requested changes.",) if decision.decision == "changes_requested" else ()
         )
         if not issue_url:
             blockers += (RELEASE_RECORD_PENDING,)
