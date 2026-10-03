@@ -130,6 +130,16 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
                 )
                 update.assert_not_called()
                 mutated = await _post_merge_train_controller_run_once(app, payload)
+                if multiple and conflict == "none":
+                    actions = []
+                    for _ in range(4):
+                        response = await _post_merge_train_controller_run_once(app, payload)
+                        self.assertEqual(response.status_code, 202, response.text)
+                        actions.append(response.json()["result"]["controller_action"])
+                    self.assertEqual(
+                        actions,
+                        ["build_candidate", "observe_candidate", "plan_landing", "land_batch"],
+                    )
             self.assertEqual(dry_run.status_code, 202, dry_run.text)
             self.assertEqual(mutated.status_code, 202, mutated.text)
             result = mutated.json()["result"]
