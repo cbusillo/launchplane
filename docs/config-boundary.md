@@ -301,7 +301,11 @@ admin-supplied inputs, and thin connector mechanics keep explicit allow
 reasons and do not fail the default gate. Runner mechanic selectors use the same
 allowed labels in scalar, JSON, and YAML flow-list forms (for example,
 `self-hosted` and `[self-hosted]`); empty lists and lists containing custom
-runtime runner labels remain findings. The `product-repo` profile also
+runtime runner labels remain findings. Quoted or block-scalar job `runs-on`
+values and each block-sequence member are single labels: `"[self-hosted]"`
+is a custom label and remains a finding, while `[self-hosted]` is a sequence
+of allowed mechanics. Reusable-workflow `runs_on` inputs retain their serialized
+JSON-selector contract, including `'["self-hosted"]'`. The `product-repo` profile also
 rejects test fixtures that carry Launchplane lifecycle authority such as authz,
 runtime-environment, provider target, target-id, managed-secret, route-batch, or
 topology material. Product repos should use this changed-file gate to reject
