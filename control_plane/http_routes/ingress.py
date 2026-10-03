@@ -175,22 +175,53 @@ def _ensure_ingress_route_audit_read_allowed(
     trace_id: str,
     product: str,
     context_name: str,
-) -> None:
-    if not dependencies.authorization_allows(
+) -> bool:
+    """True for the full audit record; False for the read view; 403 otherwise.
+
+    The plan grant reads the full record. ``route_binding.read``, which already
+    reads the same domains through route bindings, reads it without provider
+    host ids, the certificate reference or the request's reason.
+    """
+    if dependencies.authorization_allows(
         identity=identity,
         action="ingress_route.plan",
         product=product,
         context=context_name,
     ):
-        raise dependencies.http_error(
-            status_code=403,
-            trace_id=trace_id,
-            code="authorization_denied",
-            message=(
-                "Workflow cannot read ingress route audit records for the requested "
-                "product/context."
+        return True
+    if dependencies.authorization_allows(
+        identity=identity,
+        action="route_binding.read",
+        product=product,
+        context=context_name,
+    ):
+        return False
+    raise dependencies.http_error(
+        status_code=403,
+        trace_id=trace_id,
+        code="authorization_denied",
+        message=(
+            "Workflow cannot read ingress route audit records for the requested product/context."
+        ),
+    )
+
+
+_OMITTED_AUDIT_REASON = "Omitted for a route_binding.read caller."
+
+
+def ingress_route_audit_read_view(record: IngressRouteAuditRecord) -> IngressRouteAuditRecord:
+    """The audit record without provider host ids, certificate reference or reason."""
+    return record.model_copy(
+        update={
+            "provider_host_id": None,
+            "expected_host_id": None,
+            "provider_certificate_ref": "",
+            "reason": _OMITTED_AUDIT_REASON,
+            "operations": tuple(
+                operation.model_copy(update={"host_id": None}) for operation in record.operations
             ),
-        )
+        }
+    )
 
 
 def register_ingress_read_routes(
@@ -302,13 +333,21 @@ def register_ingress_read_routes(
                 code="invalid_query",
                 message="Ingress route audit list requires product and context query parameters.",
             )
-        _ensure_ingress_route_audit_read_allowed(
+        full = _ensure_ingress_route_audit_read_allowed(
             dependencies=dependencies,
             identity=identity,
             trace_id=request_trace_id,
             product=normalized_product,
             context_name=context_name,
         )
+        if provider_host_id.strip() and not full:
+            # Filtering by host id would let a read caller probe host ids it cannot see.
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=request_trace_id,
+                code="authorization_denied",
+                message="Filtering ingress route audits by provider host needs the plan grant.",
+            )
         try:
             normalized_limit = control_plane_service_status.query_int_value(
                 limit,
@@ -359,7 +398,11 @@ def register_ingress_read_routes(
             context=context_name,
             limit=normalized_limit,
             count=len(limited_records),
-            records=limited_records,
+            records=(
+                limited_records
+                if full
+                else tuple(ingress_route_audit_read_view(record) for record in limited_records)
+            ),
         )
 
     def read_ingress_route_audit_record(
@@ -381,7 +424,7 @@ def register_ingress_read_routes(
                     "Ingress route audit record reads require product and context query parameters."
                 ),
             )
-        _ensure_ingress_route_audit_read_allowed(
+        full = _ensure_ingress_route_audit_read_allowed(
             dependencies=dependencies,
             identity=identity,
             trace_id=request_trace_id,
@@ -412,7 +455,10 @@ def register_ingress_read_routes(
                 code="not_found",
                 message=f"Record not found: {record_id}",
             )
-        return IngressRouteAuditRecordResponse(trace_id=request_trace_id, record=record)
+        return IngressRouteAuditRecordResponse(
+            trace_id=request_trace_id,
+            record=record if full else ingress_route_audit_read_view(record),
+        )
 
     app.add_api_route(
         "/v1/ingress/canary-routes/records",
