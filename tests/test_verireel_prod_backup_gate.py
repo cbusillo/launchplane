@@ -6,7 +6,6 @@ from unittest.mock import patch
 import click
 
 from control_plane import runtime_environments as control_plane_runtime_environments
-from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.durable_operation_authorization import (
     DurableOperationAuthorization,
@@ -108,28 +107,6 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
         )
         self.authorization_policy_patcher.start()
         self.addCleanup(self.authorization_policy_patcher.stop)
-
-    def _write_prod_worker_secret_bindings(self, store: PostgresRecordStore) -> None:
-        plaintext_values = {
-            "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS": "runtime-known-hosts",
-            "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY": "runtime-private-key",
-        }
-        with patch.dict(
-            "os.environ",
-            {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
-        ):
-            for binding_key, plaintext_value in plaintext_values.items():
-                control_plane_secrets.write_secret_value(
-                    record_store=store,
-                    scope="context_instance",
-                    integration=control_plane_secrets.LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
-                    name=binding_key,
-                    plaintext_value=plaintext_value,
-                    binding_key=binding_key,
-                    context_name="verireel",
-                    instance_name="prod",
-                    actor="test",
-                )
 
     def test_schema_v2_operation_requires_authorization_provenance(self) -> None:
         legacy_record = self._operation_record(include_authorization=False)

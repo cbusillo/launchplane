@@ -261,7 +261,9 @@ The compatibility route
 migration attempts without reading runtime-environment backup values or writing
 targets and policies. Submit explicit reviewed typed records through
 `POST /v1/production-backup-authority/apply` instead. Historical idempotent
-responses remain replayable; they do not create new authority.
+responses remain replayable; they do not create new authority. A new attempt
+returns the compatibility error `legacy_backup_migration_conflict` (409); this
+is a permanent refusal, so retrying it cannot migrate authority.
 
 Legacy VeriReel backup dispatch and worker commands also refuse without host
 effects. Capture through `POST /v1/production-backup-gates` after typed policy
