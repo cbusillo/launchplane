@@ -6237,7 +6237,20 @@ class PostgresRecordStore(HumanSessionStore):
                     self._secret_version_row(version),
                     step_name="write_secret_version",
                 )
+            absent_secret_ids = frozenset(bundle.absent_secret_ids)
             for secret_record in bundle.secret_records:
+                if secret_record.secret_id in absent_secret_ids:
+                    # Create-only: no lock covers an absent row, so insert and let a
+                    # concurrent writer's committed row fail it on the primary key.
+                    session.add(self._secret_row(secret_record))
+                    try:
+                        session.flush()
+                    except IntegrityError as error:
+                        raise SecretRecordConflictError(
+                            "A secret adopted from the provider was recorded before commit."
+                        ) from error
+                    self._after_product_authority_bundle_step("write_secret_record")
+                    continue
                 self._merge_authority_row(
                     session, self._secret_row(secret_record), step_name="write_secret_record"
                 )
