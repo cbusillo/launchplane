@@ -672,7 +672,9 @@ The set deliberately leaves out:
 
 - `product_profile.write`. It also lets the holder override release review,
   and a production release needs the Client's acceptance. The Director sets the
-  Client and `production_use` in the Client panel.
+  Client, image repository, and `production_use` in the Client panel under
+  `product_profile.write`; image and production-use changes have a dry run,
+  Apply bound to that dry run, and a profile read-back.
 - `product_onboarding.apply`. It is checked on product `launchplane` with no
   product or lane scope, so it would reach every product. Adding the lane record
   stays with Launchplane's own onboarding workflow.

@@ -109,7 +109,9 @@ Existing records default to `unknown`, which requires review. No real product
 names or classifications are supplied by code or checked-in configuration.
 The Director must review this distinction before deploying the gate; deployment
 does not change product classifications, Client identities, or existing grants.
-Classification changes use the existing authorized product-profile write path.
+The Director changes classification in the Client panel through
+`POST /v1/product-profiles/{product}/production-use` under `product_profile.write`: dry run,
+Apply bound to the reviewed plan digest, audit record, and profile read-back.
 
 The gate replaces manager-preview approval in the product promotion read model
 and raw generic-web promotion routes. Odoo evaluates it before backup in the

@@ -3246,3 +3246,28 @@ export function releaseDecisionForFixture(
     },
   } };
 }
+
+// Development-only profile controls; this module is excluded from production builds.
+const fixtureProfileFields = new Map<string, string>();
+export function productProfileFieldForFixture(fixture: DataFixtureMode, product: string, field: "image" | "production"): string {
+  assertFixtureAvailable(fixture);
+  return fixtureProfileFields.get(`${product}:${field}`) ?? (field === "image" ? "ghcr.io/example/old-package" : "unknown");
+}
+export async function applyProductProfileFieldForFixture(
+  fixture: DataFixtureMode, product: string, field: "image" | "production",
+  payload: { mode?: "dry-run" | "apply"; reason: string; image_repository?: string; production_use?: string },
+): Promise<AcceptedEvidenceResponse> {
+  const before = productProfileFieldForFixture(fixture, product, field);
+  const after = field === "image" ? payload.image_repository : payload.production_use;
+  const prefix = field === "image" ? "image_repository" : "production_use";
+  const applied = payload.mode === "apply";
+  if (applied && after) fixtureProfileFields.set(`${product}:${field}`, after);
+  return {
+    status: "accepted", trace_id: "fixture-profile-field", original_trace_id: null, replayed: null,
+    records: { product_profile: product },
+    result: { [`${prefix}_before`]: before, [`${prefix}_after`]: after, changed: before !== after, applied,
+      plan_sha256: "a".repeat(64), reason: payload.reason,
+      lanes: field === "image" ? [{ instance: "prod", current_artifact_id: "ghcr.io/example/old-package@sha256:fixture" }] : [],
+    },
+  };
+}
