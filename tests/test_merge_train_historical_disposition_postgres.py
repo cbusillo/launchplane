@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Event
 from tempfile import TemporaryDirectory
@@ -329,8 +330,14 @@ def _changed_policy_record(fixture: _HistoricalCompletionFixture) -> MergeTrainP
 
 def _fresh_candidate_and_landing(
     fixture: _HistoricalCompletionFixture,
+    *,
+    after: str,
 ) -> tuple[MergeTrainBatchCandidateRecord, MergeTrainBatchLandingPlanRecord]:
-    # Dated after the wall-clock successor that finalize writes, so these stay the latest records.
+    # Follow the persisted successor, regardless of the clock used by finalize.
+    candidate_time = datetime.fromisoformat(after.replace("Z", "+00:00")) + timedelta(seconds=1)
+    landing_time = candidate_time + timedelta(seconds=1)
+    candidate_timestamp = candidate_time.isoformat().replace("+00:00", "Z")
+    landing_timestamp = landing_time.isoformat().replace("+00:00", "Z")
     candidate_payload = fixture.candidate_record.candidate.model_dump(mode="python")
     candidate_payload.update(
         {
@@ -341,25 +348,25 @@ def _fresh_candidate_and_landing(
                 batch_id="historical-followup-batch",
             ),
             "status": "passed",
-            "created_at": "2099-01-01T14:00:00Z",
-            "updated_at": "2099-01-01T14:00:00Z",
+            "created_at": candidate_timestamp,
+            "updated_at": candidate_timestamp,
         }
     )
     candidate = MergeTrainBatchCandidate.model_validate(candidate_payload)
     candidate_record = build_merge_train_batch_candidate_record(
         candidate=candidate,
         source="test:historical-disposition-followup",
-        updated_at="2099-01-01T14:00:00Z",
+        updated_at=candidate_timestamp,
     )
     landing_plan = build_merge_train_batch_landing_plan(
         candidate=candidate,
         merge_method="merge",
-        created_at="2099-01-01T14:01:00Z",
+        created_at=landing_timestamp,
     )
     landing_record = build_merge_train_batch_landing_plan_record(
         landing_plan=landing_plan,
         source="test:historical-disposition-followup",
-        updated_at="2099-01-01T14:01:00Z",
+        updated_at=landing_timestamp,
     )
     return candidate_record, landing_record
 
@@ -429,7 +436,9 @@ class NativeHistoricalDispositionPostgresTests(unittest.TestCase):
                 )
                 if record.historical_completion is not None
             )
-            fresh_candidate, fresh_landing = _fresh_candidate_and_landing(fixture)
+            fresh_candidate, fresh_landing = _fresh_candidate_and_landing(
+                fixture, after=historical_successor.updated_at
+            )
             store.write_merge_train_batch_candidate_record(fresh_candidate)
             store.write_merge_train_batch_landing_plan_record(fresh_landing)
 
@@ -1007,3 +1016,19 @@ class NativeHistoricalDispositionPostgresTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HistoricalFollowupFixtureTests(unittest.TestCase):
+    def test_followup_orders_after_the_successor_even_past_the_old_fixture_date(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _HistoricalCompletionFixture(Path(directory))
+            for timestamp in ("2001-02-03T00:00:00Z", "2101-02-03T00:00:00.123456Z"):
+                with self.subTest(timestamp=timestamp):
+                    candidate, landing = _fresh_candidate_and_landing(fixture, after=timestamp)
+                    successor_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                    candidate_time = datetime.fromisoformat(candidate.updated_at)
+                    landing_time = datetime.fromisoformat(landing.updated_at)
+                    self.assertGreater(candidate_time, successor_time)
+                    self.assertGreater(landing_time, candidate_time)
+                    self.assertEqual(candidate.candidate.updated_at, candidate.updated_at)
+                    self.assertEqual(landing.landing_plan.created_at, landing.updated_at)
