@@ -312,6 +312,34 @@ class GenericWebRollbackPlanTests(unittest.TestCase):
         )
         self.assertEqual(plan.backup_gate.status, "skipped")
 
+    def test_plan_keeps_a_target_deployed_before_the_image_repository_moved(self) -> None:
+        previous = f"ghcr.io/cbusillo/sellyouroutboard-app@sha256:{'d' * 64}"
+        store = _GenericWebRollbackStore(
+            _profile().model_copy(
+                update={
+                    "image": ProductImageProfile(repository="ghcr.io/cbusillo/sellyouroutboard")
+                }
+            )
+        )
+        store.deployments["deployment-syo-prod-previous"] = _deployment_record(
+            artifact_id=previous,
+            runtime_identity=RuntimeIdentity(
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                instance="prod",
+                deployment_record_id="deployment-syo-prod-previous",
+                artifact_id=previous,
+                source_git_ref="abc123",
+                image_reference="ghcr.io/cbusillo/sellyouroutboard-app:sha-abc123",
+            ),
+        )
+
+        plan = build_generic_web_rollback_plan(record_store=store, request=_request())
+
+        self.assertEqual(plan.status, "ready", plan.blockers)
+        assert plan.planned_deploy is not None
+        self.assertEqual(plan.planned_deploy.artifact_id, previous)
+
     def test_plan_blocks_application_digest_without_deploy_reference(self) -> None:
         artifact_id = "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123"
         store = _GenericWebRollbackStore(_profile())
