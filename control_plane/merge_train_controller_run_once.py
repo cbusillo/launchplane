@@ -915,7 +915,19 @@ def stack_collapse_records_for_completed_landing(
             )
         if contained[lineage]:
             landed_records.append(record)
-    return tuple(landed_records)
+    # A later collapse of the same root replaces old child-head expectations.
+    # Replaying both would reject a child legitimately updated before re-collapse.
+    records_by_root: dict[int, MergeTrainStackCollapsePlanRecord] = {}
+    for record in landed_records:
+        root_number = record.plan.root_pull_request_number
+        previous = records_by_root.get(root_number)
+        if previous is None or (record.plan.created_at, record.updated_at, record.record_id) > (
+            previous.plan.created_at,
+            previous.updated_at,
+            previous.record_id,
+        ):
+            records_by_root[root_number] = record
+    return tuple(records_by_root.values())
 
 
 def _advance_active_landing_record(

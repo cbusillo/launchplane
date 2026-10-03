@@ -933,7 +933,9 @@ Controller actions have these retry/stop semantics:
   root leaves the open snapshot, recording the reason in the record source.
   Dry runs leave records unchanged. Retirement preserves the collapse history:
   landing reconciles every collapsed root whose landed head equals or descends
-  from its collapsed head, including retired waits. Each stack and child has
+  from its collapsed head, including retired waits. If a root was collapsed
+  again, its newest applicable plan supplies the current child-head expectations.
+  Each stack and child has
   its own persisted checkpoint, so an interruption resumes unfinished children
   without repeating completed stacks. `stack_collapse_plans` lists every
   reconciled plan; the singular fields remain available for existing readers.

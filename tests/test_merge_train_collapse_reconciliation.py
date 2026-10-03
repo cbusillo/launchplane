@@ -10,7 +10,7 @@ from control_plane.contracts.merge_train_stack_collapse import (
 )
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.merge_train import MergeTrainDryRunSnapshot
-from control_plane.merge_train_github import MergeTrainGitHubError
+from control_plane.merge_train_github import MergeTrainGitHubError, MergeTrainGitHubStaleHeadError
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.merge_train_controller import (
     decide_merge_train_controller_record_action,
@@ -143,7 +143,9 @@ class CollapseReconciliationTests(unittest.IsolatedAsyncioTestCase):
                 snapshot = super().read_merge_train_snapshot(
                     repository=repository, base_branch=base_branch
                 )
-                root = snapshot.pull_requests[0]
+                root = snapshot.pull_requests[0].model_copy(
+                    update={"head_sha": "refreshed-new-root"}
+                )
                 other = root.model_copy(
                     update={
                         "number": 11,
@@ -163,7 +165,18 @@ class CollapseReconciliationTests(unittest.IsolatedAsyncioTestCase):
             def branch_contains_commit(
                 self, *, repository: str, branch_ref: str, commit_sha: str
             ) -> bool:
-                return (branch_ref, commit_sha) == ("refreshed-other", "collapsed-other")
+                return (branch_ref, commit_sha) in {
+                    ("refreshed-other", "collapsed-other"),
+                    ("refreshed-new-root", "stack-merge-2-into-1"),
+                    ("refreshed-new-root", "new-collapsed-root"),
+                }
+
+            def pull_request_is_closed(
+                self, *, repository: str, pull_request_number: int, expected_head_sha: str
+            ) -> bool:
+                if pull_request_number == 2 and expected_head_sha != "child-new-head":
+                    raise MergeTrainGitHubStaleHeadError("old child head cannot be disposed")
+                return True
 
             def comment_pull_request(
                 self, *, repository: str, pull_request_number: int, body: str
@@ -230,6 +243,27 @@ class CollapseReconciliationTests(unittest.IsolatedAsyncioTestCase):
                     store.write_merge_train_stack_collapse_plan_record(
                         record.model_copy(update={"status": "superseded"})
                     )
+            latest_plan = first.plan.model_copy(
+                update={
+                    "collapse_id": "new-collapse-of-first-root",
+                    "created_at": "2026-05-14T21:02:00Z",
+                    "mutations": tuple(
+                        mutation.model_copy(update={"merge_commit_sha": "new-collapsed-root"})
+                        for mutation in first.plan.mutations
+                    ),
+                    "child_dispositions": tuple(
+                        disposition.model_copy(update={"expected_head_sha": "child-new-head"})
+                        for disposition in first.plan.child_dispositions
+                    ),
+                }
+            )
+            store.write_merge_train_stack_collapse_plan_record(
+                build_merge_train_stack_collapse_plan_record(
+                    plan=latest_plan,
+                    source="test:new-child-head",
+                    updated_at="2026-05-14T21:02:00Z",
+                )
+            )
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_merge_train_service_identity()),
                 authz_policy=_merge_train_service_policy(),
