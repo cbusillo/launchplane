@@ -1165,6 +1165,7 @@ def _execute_managed_merge_train_policy_import(
     ):
         raise ValueError("approved_plan_drift")
     candidate_record = record.request.record
+    candidate_record.policy.require_advisory_review()
     changed = candidate_record.policy_sha256 != expected_record.policy_sha256
     response_payload = {
         "status": "ok",

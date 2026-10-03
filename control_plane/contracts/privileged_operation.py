@@ -9,7 +9,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.merge_train_policy import (
     MergeTrainEnqueuePolicy,
-    MergeTrainEngineeringReviewMode,
     MergeTrainFailurePolicy,
     MergeTrainIdentity,
     MergeTrainMergeMethod,
@@ -451,7 +450,8 @@ class OrdinaryAgentMergeTrainTargetIntent(BaseModel):
     blocked_label: str = Field(min_length=1, max_length=255)
     stack_child_disposition_label: str = Field(default="", max_length=255)
     merge_method: MergeTrainMergeMethod
-    engineering_review_mode: MergeTrainEngineeringReviewMode = "advisory"
+    # Historical operation requests retain their original intent and digest.
+    engineering_review_mode: Literal["advisory", "required"] = "advisory"
     failure_policy: MergeTrainFailurePolicy
     enqueue: MergeTrainEnqueuePolicy
     merge_identity: MergeTrainIdentity

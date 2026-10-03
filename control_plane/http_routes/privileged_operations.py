@@ -315,6 +315,8 @@ class OrdinaryAgentMergeTrainTargetPrepareEnvelope(BaseModel):
         if self.schema_version != 1:
             raise ValueError("Unsupported ordinary-agent merge target preparation schema version.")
         self.source_event_id = normalize_privileged_operation_source_event_id(self.source_event_id)
+        if self.intent.engineering_review_mode != "advisory":
+            raise ValueError("Required engineering-review merge mode is retired; use advisory")
         return self
 
 
@@ -1852,6 +1854,18 @@ def register_privileged_operation_routes(
                     operation_id=operation_id,
                 )
             active_record = read_current_merge_train_policy(record_store=record_store)
+            try:
+                active_record.policy.require_advisory_review()
+            except ValueError as error:
+                raise dependencies.common.http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="merge_train_engineering_review_mode_retired",
+                    message=(
+                        "The active policy contains retired required engineering review. "
+                        "Import a replacement policy using advisory review before preparing a target."
+                    ),
+                ) from error
             inventory_by_id = {
                 record.repository_id: record
                 for record in current_tracked_inventory(record_store=record_store)
