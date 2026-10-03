@@ -15367,13 +15367,33 @@ def create_launchplane_fastapi_app(
                 code="matching_dry_run_required",
                 message="Secret copy requires a prior matching dry-run.",
             )
-        for reference in copy_references:
-            if not resolved_authz_policy_runtime.policy.allows(
+
+        def secret_copy_source_readable(*, context: str, instance: str) -> bool:
+            # A copy source is a record read: ``secret.read`` or the standing
+            # ``product_environment.read`` on the source's own product and lane
+            # (or context, for a context-scoped secret). The copy itself remains a
+            # write under the destination's ``product_config.apply``.
+            target = AuthorizationTarget(
+                scope="instance" if instance else "context",
+                instances=(instance,) if instance else (),
+            )
+            return resolved_authz_policy_runtime.policy.allows(
                 identity=identity,
                 action="secret.read",
                 product="launchplane",
-                context=reference.context,
-                target=AuthorizationTarget(scope="instance", instances=(reference.instance,)),
+                context=context,
+                target=target,
+            ) or resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="product_environment.read",
+                product=product_config_request.product,
+                context=context,
+                target=target,
+            )
+
+        for reference in copy_references:
+            if not secret_copy_source_readable(
+                context=reference.context, instance=reference.instance
             ):
                 raise _launchplane_http_error(
                     status_code=403,
@@ -15398,15 +15418,8 @@ def create_launchplane_fastapi_app(
                     return lane_provider_env
 
             def authorize_copy_source(source: SecretRecord) -> bool:
-                return resolved_authz_policy_runtime.policy.allows(
-                    identity=identity,
-                    action="secret.read",
-                    product="launchplane",
-                    context=source.context,
-                    target=AuthorizationTarget(
-                        scope="instance" if source.instance else "context",
-                        instances=(source.instance,) if source.instance else (),
-                    ),
+                return secret_copy_source_readable(
+                    context=source.context, instance=source.instance or ""
                 )
 
             planned_driver_result, authority_bundle = (
