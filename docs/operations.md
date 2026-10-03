@@ -1523,6 +1523,14 @@ or monitor passes therefore re-plan against current state instead of overwriting
 admin state, opening a second incident, or losing evidence. Any supported
 non-monitor incident-state mutation must increment `state_version`.
 
+A deploy records its new runtime identity once its own rollout check passes,
+and the public route can still answer from the previous container for a few
+seconds. So a `wrong_runtime_identity` probe is confirmed before it counts: the
+scheduled run waits once (30 seconds, however many lanes mismatched), reads
+each lane's expected identity again, and probes it again. Only the
+confirming probe is stored. A mismatch that persists opens or updates the
+incident as before; a handover that settles records a pass.
+
 Notification policies carry a reminder interval from 15 minutes through seven
 days; the generic migrated/default interval is six hours. Each incident/policy
 pair stores its material-event anchor, current reminder window, last reminder,

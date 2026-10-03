@@ -363,6 +363,27 @@ def _identity() -> RuntimeIdentity:
     )
 
 
+def _lane_summary(identity: RuntimeIdentity, *, instance: str = "prod") -> LaunchplaneLaneSummary:
+    return LaunchplaneLaneSummary(
+        context="example-site",
+        instance=instance,
+        inventory=EnvironmentInventory(
+            context="example-site",
+            instance=instance,
+            source_git_ref=identity.source_git_ref,
+            deploy=DeploymentEvidence(
+                target_name=f"example-site-{instance}",
+                target_type="application",
+                deploy_mode="git",
+                status="pass",
+            ),
+            runtime_identity=identity,
+            updated_at="2026-05-29T12:10:00Z",
+            deployment_record_id=identity.deployment_record_id,
+        ),
+    )
+
+
 def _route_binding(
     *,
     product: str = "example-site",
@@ -1705,6 +1726,155 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(health.runtime_identity_status, "mismatch")
         self.assertEqual(health.status, "fail")
         self.assertIn("deployment_record_id", health.runtime_identity_detail)
+
+    def test_runtime_identity_mismatch_that_clears_on_reprobe_opens_no_incident(self) -> None:
+        expected_identity = _identity()
+        previous_identity = expected_identity.model_copy(
+            update={"deployment_record_id": "deploy-previous"}
+        )
+        store = _Store((_profile(),))
+        store.lane_summaries[("example-site", "prod")] = _lane_summary(expected_identity)
+        served = [previous_identity, expected_identity]
+        sleeps: list[float] = []
+
+        def handover_get(url: str, _timeout: int) -> HttpObservation:
+            # The base URL carries no identity; the health URL hands over once.
+            payload: object = None
+            if url.endswith("/healthz"):
+                payload = {"runtime_identity": served.pop(0).model_dump(mode="json")}
+            return HttpObservation(
+                status_code=200, final_url=url, redirect_count=0, payload=payload
+            )
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:10:00Z",
+            http_get=handover_get,
+            runtime_identity_confirmation_delay_seconds=30,
+            sleep=sleeps.append,
+        )
+
+        self.assertEqual(sleeps, [30])
+        self.assertEqual(result.pass_count, 1)
+        self.assertEqual(result.fail_count, 0)
+        self.assertEqual(len(store.records), 1)
+        self.assertEqual(store.records[0].targets[-1].runtime_identity_status, "match")
+        self.assertEqual(store.incidents, [])
+
+    def test_runtime_identity_mismatch_that_persists_opens_incident(self) -> None:
+        expected_identity = _identity()
+        observed_identity = expected_identity.model_copy(
+            update={"deployment_record_id": "deploy-other"}
+        )
+        store = _Store((_profile(),))
+        store.lane_summaries[("example-site", "prod")] = _lane_summary(expected_identity)
+        sleeps: list[float] = []
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:10:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+                payload={"runtime_identity": observed_identity.model_dump(mode="json")},
+            ),
+            runtime_identity_confirmation_delay_seconds=30,
+            sleep=sleeps.append,
+        )
+
+        self.assertEqual(sleeps, [30])
+        self.assertEqual(result.fail_count, 1)
+        self.assertEqual(store.records[0].failure_code, "wrong_runtime_identity")
+        self.assertEqual(store.incidents[0].status, "open")
+        self.assertEqual(store.incidents[0].failure_code, "wrong_runtime_identity")
+
+    def test_runtime_identity_reprobe_reads_expected_identity_again(self) -> None:
+        previous_identity = _identity()
+        deployed_identity = previous_identity.model_copy(
+            update={"deployment_record_id": "deploy-2", "source_git_ref": "def456"}
+        )
+        store = _Store((_profile(),))
+        store.lane_summaries[("example-site", "prod")] = _lane_summary(previous_identity)
+
+        def deploy_records_during_wait(_seconds: float) -> None:
+            store.lane_summaries[("example-site", "prod")] = _lane_summary(deployed_identity)
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:10:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+                payload={"runtime_identity": deployed_identity.model_dump(mode="json")},
+            ),
+            runtime_identity_confirmation_delay_seconds=30,
+            sleep=deploy_records_during_wait,
+        )
+
+        self.assertEqual(result.pass_count, 1)
+        self.assertEqual(store.records[0].expected_runtime_identity, deployed_identity)
+        self.assertEqual(store.incidents, [])
+
+    def test_runtime_identity_reprobe_waits_once_for_every_lane(self) -> None:
+        lanes = tuple(
+            ProductLaneProfile(
+                instance=instance,
+                context="example-site",
+                base_url=f"https://{instance}.example.test",
+                health_monitoring=_public_health_monitoring(),
+            )
+            for instance in ("testing", "prod")
+        )
+        store = _Store((_profile().model_copy(update={"lanes": lanes}),))
+        for instance in ("testing", "prod"):
+            store.lane_summaries[("example-site", instance)] = _lane_summary(
+                _identity().model_copy(update={"instance": instance}), instance=instance
+            )
+        sleeps: list[float] = []
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:10:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+                payload={
+                    "runtime_identity": _identity()
+                    .model_copy(update={"deployment_record_id": "deploy-other"})
+                    .model_dump(mode="json")
+                },
+            ),
+            runtime_identity_confirmation_delay_seconds=30,
+            sleep=sleeps.append,
+        )
+
+        self.assertEqual(sleeps, [30])
+        self.assertEqual(result.fail_count, 2)
+
+    def test_monitor_does_not_wait_without_runtime_identity_mismatch(self) -> None:
+        identity = _identity()
+        store = _Store((_profile(),))
+        store.lane_summaries[("example-site", "prod")] = _lane_summary(identity)
+        sleeps: list[float] = []
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:10:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+                payload={"runtime_identity": identity.model_dump(mode="json")},
+            ),
+            runtime_identity_confirmation_delay_seconds=30,
+            sleep=sleeps.append,
+        )
+
+        self.assertEqual(result.pass_count, 1)
+        self.assertEqual(sleeps, [])
 
     def test_observations_do_not_use_standing_issue_notification_keys(self) -> None:
         store = _Store((_profile(),))
