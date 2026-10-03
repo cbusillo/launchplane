@@ -123,5 +123,5 @@ def register_product_path_check_read_routes(
         response_model=ProductPathCheckResponse,
         operation_id="read_product_path_check",
         summary="Report every step that stands between the caller and the end of a path",
-        responses={code: {"model": common.error_response_model} for code in (401, 404, 422, 503)},
+        responses={code: {"model": common.error_response_model} for code in (401, 404, 503)},
     )
