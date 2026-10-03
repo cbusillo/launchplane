@@ -122,7 +122,7 @@ reservation. The webhook request never waits on a deploy.
     preview lifecycle record, product-profile revision, context, and destroy
     reason. Busy operations, unknown provider outcomes that still need
     observation, retryable transport exceptions, transient storage errors, and
-    moved PRs do not consume attempts. A terminal provider failure result still
+    moved PRs do not consume attempts. A generic-web terminal failure result still
     consumes an attempt even if its provider-side cause was an outage; the
     automatic limit does not reinterpret unstructured provider messages. Later events and sweeps record a held
     destroy with reason `preview_destroy_retry_limit` and complete the request
