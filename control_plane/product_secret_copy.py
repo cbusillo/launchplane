@@ -14,6 +14,10 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord, SecretVersion
 from control_plane.contracts.secret_record import SecretScope, SecretSharingReason
 from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretClass
+from control_plane.runtime_key_safety import (
+    ALLOWED_SECRET_CLASSES_BY_ENVIRONMENT,
+    runtime_key_safety_environment_class,
+)
 
 
 class ProductSecretCopyFrom(BaseModel):
@@ -84,8 +88,6 @@ def resolve_copy_source(
         product=product,
         routes=((target_context, target_instance), (reference.context, reference.instance)),
     )
-    if (target_context, target_instance) == (reference.context, reference.instance):
-        raise ProductSecretCopyError("Secret copy source must be a different lane.")
     candidates = product_secret_bindings(store, product=product)
     # Use the same lane precedence as delivery, while refusing ambiguous bindings.
     candidates = [
@@ -100,6 +102,18 @@ def resolve_copy_source(
     if len(selected) != 1:
         raise ProductSecretCopyError("Secret copy source is missing or ambiguous.")
     binding, record = selected[0]
+    if (
+        binding.declared_secret_class is not None
+        and binding.declared_secret_class
+        not in (
+            ALLOWED_SECRET_CLASSES_BY_ENVIRONMENT[
+                runtime_key_safety_environment_class(target_instance)
+            ]
+        )
+    ):
+        raise ProductSecretCopyError(
+            "Secret copy source class does not allow the destination lane."
+        )
     if record.current_version_id != reference.version_id:
         raise ProductSecretCopyError("Secret copy source changed; read metadata and review again.")
     try:
@@ -129,6 +143,7 @@ def product_secret_bindings(
         raise ProductSecretCopyError("Product secret bindings require an existing product.")
     owners = product_context_owner_map(profiles)
     contexts = {lane.context for lane in profile.lanes}
+    lane_routes = {(lane.context, lane.instance) for lane in profile.lanes}
     records = {
         record.secret_id: record
         for record in store.list_secret_records(
@@ -138,6 +153,7 @@ def product_secret_bindings(
         and record.status == "configured"
         and record.scope in {"context", "context_instance"}
         and record.context in contexts
+        and (record.scope == "context" or (record.context, record.instance) in lane_routes)
         and is_exclusive_product_context(context=record.context, product=product, owners=owners)
     }
     return [

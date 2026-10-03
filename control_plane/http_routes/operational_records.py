@@ -655,9 +655,10 @@ def register_managed_secret_read_routes(
             bindings = product_secret_copy.product_secret_binding_metadata(
                 cast(product_secret_copy.ProductSecretCopyStore, record_store), product=product
             )
+            visible_bindings = []
             for binding in bindings:
                 instance = str(binding["instance"])
-                if not dependencies.authorization_allows(
+                if dependencies.authorization_allows(
                     identity=identity,
                     action="secret.list",
                     product=LAUNCHPLANE_SERVICE_CONTEXT,
@@ -667,12 +668,7 @@ def register_managed_secret_read_routes(
                         instances=(instance,) if instance else (),
                     ),
                 ):
-                    raise dependencies.http_error(
-                        status_code=403,
-                        trace_id=trace_id,
-                        code="authorization_denied",
-                        message="The caller cannot list this product's secret bindings.",
-                    )
+                    visible_bindings.append(binding)
         except product_secret_copy.ProductSecretCopyError as error:
             raise dependencies.http_error(
                 status_code=404,
@@ -692,7 +688,7 @@ def register_managed_secret_read_routes(
             product=product,
             bindings=[
                 product_secret_copy.ProductSecretBindingMetadata.model_validate(binding)
-                for binding in bindings
+                for binding in visible_bindings
             ],
         )
 

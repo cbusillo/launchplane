@@ -632,7 +632,10 @@ worker existed; it is not current root-rotation operating guidance.
 runtime secret bindings: name, binding key, scope, context, instance, declared
 class, sharing reason and current version ID. It reads no ciphertext or value,
 excludes global and worker/service stores, and requires product-profile read
-access. Contexts shared ambiguously between products are excluded.
+access. It returns only bindings covered by the caller's existing `secret.list`
+access, so an empty result does not prove absence outside that access. Preview
+and removed-lane bindings and contexts shared ambiguously between products are
+excluded.
 
 A product-config secret entry can use `copy_from` instead of `value`:
 
@@ -655,12 +658,21 @@ A product-config secret entry can use `copy_from` instead of `value`:
 ```
 
 The top-level product-config target is the destination lane. The source must be
-another stable lane of that same product, and the destination must be lane-exact
+a stable lane of that same product, and the destination must be lane-exact
 in `runtime_environment`. The source binding key is the destination binding key;
 renaming a token to bypass integration key safety is not supported. Neither a
 source product nor another secret store can be supplied. Site-shared sources
 may be selected when that source lane has no configured exact binding. Ambiguous,
 disabled, missing or superseded sources are refused. Copies to previews are refused.
+An explicit class on the source must allow the destination lane; a `prod_only`
+source cannot be copied to testing by relabelling its destination `shared_safe`.
+
+If a person verifies that such a source is shareable, a writer authorized for
+the source lane can reclassify it without collecting its value: target that
+same lane with `copy_from` pointing to its own current version, declare the
+new class, reason and evidence, and dry-run/apply normally. This preserves the
+value while writing a new encrypted version and its binding metadata. Reading
+a source and writing testing do not authorize this production-lane write.
 
 Every copy requires a declared class and an allowlisted sharing reason with
 reason and evidence, in addition to normal runtime key safety. The caller needs

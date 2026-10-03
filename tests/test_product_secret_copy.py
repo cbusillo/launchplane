@@ -1,4 +1,7 @@
 import os
+import json
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -16,8 +19,9 @@ from control_plane.product_config import (
     plan_product_config_authority_bundle,
 )
 from control_plane.product_config_http import ProductConfigApplyEnvelope
-from control_plane.service_auth import BearerIdentityConfig
+from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
     ProductContextOwnershipError,
     ProductProfileConflictError,
@@ -359,3 +363,133 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
             if record.name == "SITE_PASSWORD" and record.instance == "testing"
         )
         self.assertEqual(destination.scope, "context_instance")
+
+    async def test_explicit_source_class_requires_authorized_source_reclassification(self) -> None:
+        binding = self.store.list_secret_bindings(limit=None)[0]
+        self.store.write_secret_binding(
+            binding.model_copy(update={"declared_secret_class": "prod_only"})
+        )
+        refused = await self.post()
+        self.assertEqual(refused.status_code, 400, refused.text)
+        self.assertEqual(refused.json()["error"]["code"], "secret_copy_refused")
+        reclassification = {**self.payload, "instance": "prod"}
+        write_rule = (
+            _local_operator_policy(actions=("product_config.plan", "product_config.apply"))
+            .local_operators[0]
+            .model_copy(update={"instances": ("testing",)})
+        )
+        read_rule = _local_operator_policy(actions=("secret.read",)).local_operators[0]
+        testing_writer = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(
+                schema_version=2, local_operators=(write_rule, read_rule)
+            ),
+            record_store_factory=lambda: self.store,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="test-operator-token",
+                local_operator_subject="local-owner-agent",
+                local_operator_token_label="local-owner-write",
+            ),
+        )
+        denied = await self.post(reclassification, app=testing_writer)
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(denied.json()["error"]["code"], "authorization_denied")
+        dry_run = await self.post(reclassification)
+        self.assertEqual(dry_run.status_code, 202, dry_run.text)
+        applied = await self.post({**reclassification, "mode": "apply"}, key="reclassify-source")
+        self.assertEqual(applied.status_code, 202, applied.text)
+        source = self.store.read_secret_record(self.source.secret_id)
+        request = {
+            **self.payload,
+            "secrets": [
+                {
+                    **self.payload["secrets"][0],
+                    "copy_from": {
+                        "context": "example-site",
+                        "instance": "prod",
+                        "version_id": source.current_version_id,
+                    },
+                }
+            ],
+        }
+        self.assertEqual((await self.post(request)).status_code, 202)
+        copied = await self.post({**request, "mode": "apply"}, key="reclassified-copy")
+        self.assertEqual(copied.status_code, 202, copied.text)
+        version = self.store.read_secret_version(source.current_version_id)
+        self.assertEqual(
+            secrets._decrypt_secret_value(version.ciphertext, version.key_id),
+            "source-only-test-token",
+        )
+
+    async def test_metadata_filters_restricted_bindings_instead_of_blocking_copy_discovery(
+        self,
+    ) -> None:
+        secrets.write_secret_value(
+            record_store=self.store,
+            scope="context",
+            integration="runtime_environment",
+            name="SITE_PASSWORD",
+            binding_key="SITE_PASSWORD",
+            context_name="example-site",
+            plaintext_value="shared-test-password",
+        )
+        profile_rule = _local_operator_policy(actions=("product_profile.read",)).local_operators[0]
+        list_rule = (
+            _local_operator_policy(actions=("secret.list",))
+            .local_operators[0]
+            .model_copy(update={"instances": ("prod", "testing")})
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(
+                schema_version=2, local_operators=(profile_rule, list_rule)
+            ),
+            record_store_factory=lambda: self.store,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="test-operator-token",
+                local_operator_subject="local-owner-agent",
+                local_operator_token_label="local-owner-write",
+            ),
+        )
+        response = await _asgi_request(
+            app,
+            "GET",
+            "/v1/products/example-site/secret-bindings",
+            headers={"Authorization": "Bearer test-operator-token"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            [item["binding_key"] for item in response.json()["bindings"]], ["REPAIRSHOPR_TOKEN"]
+        )
+        self.assertNotIn("SITE_PASSWORD", response.text)
+
+    def test_filesystem_copy_commits_without_nested_lock_deadlock(self) -> None:
+        root = Path(self.directory.name) / "file-state"
+        store = FilesystemRecordStore(root)
+        store.write_product_profile_record(self.profile)
+        store.write_secret_record(self.source)
+        store.write_secret_version(self.store.read_secret_version(self.source.current_version_id))
+        store.write_secret_binding(self.store.list_secret_bindings(limit=None)[0])
+        for policy in self.store.list_runtime_key_safety_policy_records():
+            store.write_runtime_key_safety_policy_record(policy)
+        script = """
+import json, sys
+from pathlib import Path
+from control_plane import secrets
+from control_plane.product_config import apply_product_config_bundle
+from control_plane.storage.filesystem import FilesystemRecordStore
+store = FilesystemRecordStore(Path(sys.argv[1]))
+result = apply_product_config_bundle(record_store=store, payload=json.loads(sys.argv[2]), mode='apply', actor='test', source_label='test')
+assert result['status'] == 'ok'
+record = next(record for record in store.list_secret_records() if record.instance == 'testing')
+version = store.read_secret_version(record.current_version_id)
+assert secrets._decrypt_secret_value(version.ciphertext, version.key_id) == 'source-only-test-token'
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(root), json.dumps(self.payload)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
