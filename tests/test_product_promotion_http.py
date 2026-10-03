@@ -430,6 +430,39 @@ class ProductPromotionStatusTests(unittest.TestCase):
             status.direct_dry_run.disabled_reasons,
         )
 
+    def test_status_reads_production_deployed_before_the_image_repository_moved(self) -> None:
+        store = _store()
+        previous = f"ghcr.io/example/atlas-commerce-app@sha256:{'b' * 64}"
+        prod_key = ("atlas-commerce", "prod")
+        store.summaries[prod_key] = store.summaries[prod_key].model_copy(
+            update={
+                "inventory": _inventory(
+                    instance="prod", artifact_id=previous, source_git_ref=PROD_SOURCE_REF
+                )
+            }
+        )
+
+        _, _, status = _status(store)
+
+        self.assertEqual(status.destination.artifact_id, previous)
+        self.assertTrue(status.workflow_live.enabled, status.workflow_live.disabled_reasons)
+
+    def test_status_blocks_promoting_testing_from_the_previous_image_repository(self) -> None:
+        previous = f"ghcr.io/example/atlas-commerce-app@sha256:{'a' * 64}"
+        inventory = _inventory(
+            instance="testing", artifact_id=previous, source_git_ref=TESTING_SOURCE_REF
+        )
+
+        _, _, status = _status(_store(testing_inventory=inventory))
+
+        self.assertEqual(status.source.artifact_id, previous)
+        self.assertFalse(status.direct_dry_run.enabled)
+        self.assertIn(
+            "Testing runs an image outside the product's image repository; deploy testing "
+            "from that repository before promoting.",
+            status.direct_dry_run.disabled_reasons,
+        )
+
     def test_status_blocks_missing_or_stale_production_evidence(self) -> None:
         store = _store()
         prod_key = ("atlas-commerce", "prod")

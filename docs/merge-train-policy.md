@@ -408,7 +408,12 @@ provider adapter.
 
 After a multi-entry candidate passes, repositories configured for `merge` use a
 Launchplane-created batch pull request whose head is that exact candidate. Its
-body identifies every constituent PR and reviewed head. The original PRs and
+body identifies every constituent PR and reviewed head, and its
+`Owner test notes` section carries each constituent's own notes under a
+`### #<number> <title>` subheading, read when the batch PR is created. Headings
+inside those notes are demoted so they stay within the section, and a
+constituent without notes is named as having none. Later edits to a
+constituent's notes are not copied into an existing batch PR. The original PRs and
 source branches remain intact. GitHub enforces normal protected-PR checks,
 reviews, CodeQL, and base freshness on the batch PR; Launchplane never pushes
 the protected base ref. The batch PR has no enqueue label and is not another
@@ -544,13 +549,38 @@ releases the controller lease without replaying the rejected merge. The same
 queue-change rule then governs replacement planning; an unchanged queue remains
 stopped for Director attention.
 
-A merge conflict is the exception. When an entry does not merge cleanly into
-the candidate built before it, the controller reports
-`merge_train_candidate_entry_conflict` and records that pull request and head as
-`held_out` on the failed candidate. The replacement candidate leaves it out and
-carries the hold-out forward, so the rest of the queue lands. A new head on the
-held-out pull request brings it back into the queue; until then, its author
-resolves the conflict, typically after the others land.
+A merge conflict between queued pull requests is caught before the build.
+GitHub computes a pull request's mergeability only against its base, so two
+queued pull requests can each be clean and still conflict with each other.
+Before a mutating pass plans a candidate with more than one entry, the
+controller runs a conflict probe: it resets a dedicated ref in the
+`launchplane/construct/` namespace to the base SHA and merges each queued head
+in queue order. A head that does not merge cleanly onto the heads accepted
+before it writes no commit; the probe records it and continues. The probe ref
+is unique to the controller's lease acquisition. The probe renews the lease
+before each merge, and the controller renews it again before persisting the
+planned or replacement candidate. A pass that lost its lease stops before its next merge,
+deletes only its own ref, and cannot touch the probe of the pass that adopted
+the train. The probe ref is deleted afterwards. It never writes the canonical
+train ref or a pull request branch. A probe costs
+one ref write, one merge per queued pull request, and one delete.
+
+The candidate is planned from the heads that merged cleanly. Each conflicting
+pull request and head is recorded as `held_out` with reason `entry_conflict` and
+`conflicts_with`, the pull requests accepted ahead of it (empty when it does not
+merge onto the base). The controller result reports the probe as
+`conflict_probe`, and PR feedback tells each held-out pull request which pull
+requests it conflicts with. Later candidates carry the hold-out forward while
+its head is unchanged, so the rest of the queue lands. A new head brings it
+back into the queue; until then, its author resolves the conflict, typically
+after the others land. A dry run writes no ref and reports
+`conflict_probe.status: will_run` with the pull requests a mutating pass would
+probe.
+
+The build keeps the same rule as a backstop. When an entry does not merge
+cleanly into the candidate built before it, the controller reports
+`merge_train_candidate_entry_conflict`, records that pull request and head as
+`held_out` on the failed candidate, and the replacement candidate leaves it out.
 
 An exhausted final-publication readback also fails closed, with no individual
 failed pull request: its checkpoint identifies the publication phase and the
@@ -782,7 +812,11 @@ the blocked pull request has been labeled.
 When the selected pull request needs a branch refresh, Launchplane updates that
 pull request using the observed head SHA as the compare point. The worker must
 then re-read mergeability and required checks before any later merge decision;
-pre-update check results are stale after a branch refresh.
+pre-update check results are stale after a branch refresh. The controller
+records each refresh it requested (`launchplane_merge_train_branch_refreshes`),
+so a Client's acceptance of the refreshed pull request can carry to the new head
+when the change itself is unchanged (see
+[carried acceptance](owner-acceptance.md#carried-acceptance)).
 
 The reread step rebuilds the dry-run decision from a fresh pull request snapshot.
 If checks are still pending or mergeability is unknown, the next action remains

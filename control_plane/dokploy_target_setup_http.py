@@ -33,6 +33,7 @@ class DokployTargetSetupEnvelope(BaseModel):
         "adopt",
         "create-application",
         "create-compose",
+        "complete-compose-source",
         "prune-compose-domain",
         "reconcile-compose-domain",
         "repair-domain-authority",
@@ -55,6 +56,7 @@ class DokployTargetSetupEnvelope(BaseModel):
     source_git_ref: str = "origin/main"
     source_type: str = "raw"
     compose_path: str = "docker-compose.yml"
+    custom_git_branch: str = ""
     healthcheck_path: str = ""
     domains: tuple[str, ...] = ()
     runtime_port: int | None = Field(default=None, ge=1, le=65535)
@@ -65,6 +67,7 @@ class DokployTargetSetupEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_setup(self) -> "DokployTargetSetupEnvelope":
+        supplied_fields = self.model_fields_set.copy()
         if self.product.strip() != "launchplane":
             raise ValueError("Dokploy target setup requires product 'launchplane'.")
         self.product = "launchplane"
@@ -81,6 +84,32 @@ class DokployTargetSetupEnvelope(BaseModel):
         self.source_git_ref = self.source_git_ref.strip() or "origin/main"
         self.source_type = self.source_type.strip() or "raw"
         self.compose_path = self.compose_path.strip() or "docker-compose.yml"
+        self.custom_git_branch = self.custom_git_branch.strip()
+        if self.custom_git_branch:
+            if "compose_path" not in supplied_fields:
+                raise ValueError("Repository source setup requires an explicit compose path.")
+            from control_plane.dokploy.target_source_setup import validate_compose_source_inputs
+
+            validate_compose_source_inputs(self.custom_git_branch, self.compose_path)
+            if self.operation not in {"create-compose", "complete-compose-source"}:
+                raise ValueError("Repository source inputs require compose creation or completion.")
+        if self.operation == "complete-compose-source":
+            if self.instance != "testing" or not self.custom_git_branch:
+                raise ValueError("Source completion requires testing and an explicit branch.")
+            allowed = {
+                "schema_version",
+                "mode",
+                "operation",
+                "product",
+                "context",
+                "instance",
+                "custom_git_branch",
+                "compose_path",
+                "confirmation",
+                "reason",
+            }
+            if supplied_fields - allowed:
+                raise ValueError("Source completion accepts only branch and compose path inputs.")
         self.healthcheck_path = self.healthcheck_path.strip()
         self.confirmation = self.confirmation.strip()
         self.reason = self.reason.strip()
@@ -290,6 +319,22 @@ def execute_dokploy_target_setup(
         record_store=record_store,
         context=request.context,
     )
+    if request.operation == "complete-compose-source":
+        from control_plane.dokploy_compose_source_setup import complete_compose_source
+
+        return complete_compose_source(
+            control_plane_root_path=control_plane_root_path,
+            record_store=record_store,
+            request=request,
+        )
+    source_profile = None
+    source_url = ""
+    if request.operation == "create-compose" and request.custom_git_branch:
+        from control_plane.dokploy_compose_source_setup import resolve_compose_source_profile
+        from control_plane.dokploy.target_source_setup import repository_source_url
+
+        source_profile = resolve_compose_source_profile(record_store, request.context)
+        source_url = repository_source_url(source_profile.repository)
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root_path)
     result: (
         DokployTargetAdoptionResult
@@ -399,8 +444,11 @@ def execute_dokploy_target_setup(
             app_name=request.app_name,
             compose_description=request.description,
             source_git_ref=request.source_git_ref,
-            source_type=request.source_type,
+            source_type="git" if source_url else request.source_type,
             compose_path=request.compose_path,
+            custom_git_url=source_url,
+            custom_git_branch=request.custom_git_branch,
+            expected_product_profile=source_profile,
             healthcheck_path=request.healthcheck_path,
             domains=request.domains,
             deploy_timeout_seconds=request.deploy_timeout_seconds,
@@ -409,7 +457,9 @@ def execute_dokploy_target_setup(
             apply=apply_changes,
             mutate_provider=mutate_dokploy_payload_for_target_setup,
             fetch_target_payload=fetch_dokploy_target_payload_for_setup,
-            required_context_owner=required_context_owner,
+            required_context_owner=(source_profile.product, request.context)
+            if source_profile
+            else required_context_owner,
         )
     route_domain_ids = (
         list(result.route_domain_ids)

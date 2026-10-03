@@ -68,6 +68,8 @@ class MergeTrainBatchHeldOutEntry(BaseModel):
     pull_request_number: int = Field(gt=0)
     head_sha: str
     reason: Literal["entry_conflict"] = "entry_conflict"
+    # Queued pull requests merged ahead of it; empty when it conflicts with the base.
+    conflicts_with: tuple[int, ...] = ()
 
     @model_validator(mode="after")
     def _validate_held_out_entry(self) -> "MergeTrainBatchHeldOutEntry":

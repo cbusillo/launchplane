@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 from unittest import TestCase
 
 from control_plane import merge_train_controller_feedback as feedback
@@ -34,6 +34,33 @@ class MergeTrainControllerFeedbackTests(TestCase):
         self.assertEqual(
             {"workflow:merge-train-runner"}, {payload["source"] for payload in payloads}
         )
+
+    def test_planned_candidate_tells_held_out_prs_what_they_conflict_with(self) -> None:
+        response: dict[str, Any] = {
+            "result": {
+                "repository": "cbusillo/example",
+                "base_branch": "main",
+                "controller_action": "plan_candidate",
+                "candidate": {
+                    "status": "planned",
+                    "entries": [{"pull_request_number": 92}, {"pull_request_number": 118}],
+                    "held_out": [
+                        {"pull_request_number": 97, "conflicts_with": [92]},
+                        {"pull_request_number": 120, "conflicts_with": []},
+                    ],
+                },
+            },
+            "records": {"merge_train_batch_candidate_record_id": "candidate-123"},
+        }
+
+        payloads = feedback.build_feedback_payloads(response=response)
+
+        self.assertEqual(
+            [(payload["pull_request_number"], payload["event"]) for payload in payloads],
+            [(92, "building"), (118, "building"), (97, "blocked"), (120, "blocked")],
+        )
+        self.assertIn("#92", cast(str, payloads[2]["message"]))
+        self.assertIn("`main`", cast(str, payloads[3]["message"]))
 
     def test_build_feedback_payloads_marks_pending_checks_waiting(self) -> None:
         response: dict[str, Any] = {

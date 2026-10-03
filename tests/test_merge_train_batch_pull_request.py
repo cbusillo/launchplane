@@ -23,6 +23,7 @@ from control_plane.merge_train_github import (
     MergeTrainGitHubMergeRejectedError,
     MergeTrainGitHubStaleHeadError,
 )
+from control_plane.release_review_github import owner_test_notes
 from tests.test_merge_train_github import (
     _combined_status,
     _git_commit,
@@ -49,6 +50,7 @@ class _BatchProvider:
         self.base_sha = candidate.base_sha
         self.heads = {entry.pull_request_number: entry.head_sha for entry in candidate.entries}
         self.body = ""
+        self.member_bodies: dict[int, str] = {}
         self.requests: list[tuple[str, str, dict[str, object] | None]] = []
         self.before_merge: Callable[[], None] = lambda: None
 
@@ -65,7 +67,8 @@ class _BatchProvider:
             "merged": merged,
             "merge_commit_sha": self.merge_sha if merged else None,
             "draft": False,
-            "body": self.body,
+            "title": f"Change {number}",
+            "body": self.body if batch else self.member_bodies.get(number, ""),
             "head": {
                 "sha": self.candidate.candidate_sha if batch else self.heads[number],
                 "ref": self.candidate.candidate_ref.removeprefix("refs/heads/")
@@ -291,6 +294,28 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
         for entry in self.provider.candidate.entries:
             self.assertEqual(self.provider.heads[entry.pull_request_number], entry.head_sha)
             self.assertIn(f"#{entry.pull_request_number} at `{entry.head_sha}`", self.provider.body)
+
+    def test_batch_body_carries_each_constituent_owner_test_notes(self) -> None:
+        provider = _BatchProvider(self.guard.candidate_record.candidate)
+        provider.member_bodies = {
+            1: "## Why\nCart fix.\n# Owner test notes\nOpen the cart.\n## Checkout\n"
+            "Pay with a test card.\n```md\n## Owner test notes\n```\n# Tests\nPassed.",
+            2: "## Why\nDependency bump without notes.",
+        }
+        GitHubMergeTrainClient(transport=provider).ensure_batch_pull_request(
+            candidate=self.guard.candidate_record.candidate
+        )
+
+        notes = owner_test_notes(provider.body)
+        first, second = notes.split("### #2 Change 2")
+        self.assertEqual(
+            first.strip(),
+            "### #1 Change 1\n\nOpen the cart.\n#### Checkout\nPay with a test card.\n"
+            "```md\n## Owner test notes\n```",
+        )
+        self.assertTrue(second.strip())
+        self.assertNotIn("Passed.", notes)
+        self.assertNotIn("Dependency bump", notes)
 
     def test_both_entries_land_through_one_sha_guarded_protected_merge(self) -> None:
         landed = self.land()

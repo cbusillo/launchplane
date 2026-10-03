@@ -4568,6 +4568,11 @@
             "title": "Context",
             "type": "string"
           },
+          "custom_git_branch": {
+            "default": "",
+            "title": "Custom Git Branch",
+            "type": "string"
+          },
           "deploy_timeout_seconds": {
             "anyOf": [
               {
@@ -4641,6 +4646,7 @@
               "adopt",
               "create-application",
               "create-compose",
+              "complete-compose-source",
               "prune-compose-domain",
               "reconcile-compose-domain",
               "repair-domain-authority"
@@ -32684,6 +32690,41 @@
         "title": "ProductRetirementRequest",
         "type": "object"
       },
+      "ProductReviewCarry": {
+        "additionalProperties": false,
+        "description": "Where a carried acceptance came from: the Client decided on another head.\n\n`merge_train_base_refresh`: the merge train only merged the base branch into the\npull request, and the pull request's change against its base is byte-identical.",
+        "properties": {
+          "head_sha": {
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "reason": {
+            "const": "merge_train_base_refresh",
+            "default": "merge_train_base_refresh",
+            "title": "Reason",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "refresh_record_ids": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Refresh Record Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "record_id",
+          "head_sha",
+          "refresh_record_ids"
+        ],
+        "title": "ProductReviewCarry",
+        "type": "object"
+      },
       "ProductReviewDecisionEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -32726,6 +32767,21 @@
         "additionalProperties": false,
         "description": "One Owner decision about one pull request preview.\n\nThe decision is a recorded opinion: it never merges or deploys anything.",
         "properties": {
+          "base_branch": {
+            "default": "",
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "carried_from": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductReviewCarry"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "decided_at": {
             "title": "Decided At",
             "type": "string"
@@ -78113,6 +78169,171 @@
           }
         },
         "summary": "Read a Launchplane product profile"
+      }
+    },
+    "/v1/product-profiles/{product}/image-repository": {
+      "post": {
+        "operationId": "apply_product_image_repository",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "expected_image_repository": {
+                    "default": "",
+                    "title": "Expected Image Repository",
+                    "type": "string"
+                  },
+                  "image_repository": {
+                    "title": "Image Repository",
+                    "type": "string"
+                  },
+                  "mode": {
+                    "default": "dry-run",
+                    "enum": [
+                      "dry-run",
+                      "apply"
+                    ],
+                    "title": "Mode",
+                    "type": "string"
+                  },
+                  "reason": {
+                    "title": "Reason",
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "const": 1,
+                    "default": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "image_repository",
+                  "reason"
+                ],
+                "title": "ProductImageRepositoryApplyRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Preview or change the image repository of a product"
       }
     },
     "/v1/product-profiles/{product}/owner": {

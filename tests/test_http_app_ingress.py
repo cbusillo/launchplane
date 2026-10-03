@@ -8,6 +8,7 @@ from typing import (
 )
 
 from click import ClickException
+from fastapi import FastAPI
 from fastapi.routing import APIRoute
 
 from control_plane.http_app import create_launchplane_fastapi_app
@@ -2746,6 +2747,56 @@ class FastApiIngressRouteAuditReadTests(unittest.IsolatedAsyncioTestCase):
         payload = response.json()
         self.assertEqual(payload["status"], "rejected")
         self.assertEqual(payload["error"]["code"], "not_found")
+
+    async def test_route_binding_read_grant_reads_audits_without_provider_ids(self) -> None:
+        record = _ingress_route_audit_record().model_copy(
+            update={"reason": "Cut over app.example.com on npm-host-1 (10.2.3.4)."}
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_ingress_route_audit_record(record)
+
+            def app_with(action: str) -> FastAPI:
+                return create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_record_read_policy(action=action, context="reon-prod"),
+                    record_store_factory=lambda: store,
+                )
+
+            reader = app_with("route_binding.read")
+            listed = await _get_ingress_route_audit_records(
+                reader, product="launchplane", context="reon-prod"
+            )
+            read = await _get_ingress_route_audit_record(
+                reader, record.record_id, product="launchplane", context="reon-prod"
+            )
+            host_filter = await _get_ingress_route_audit_records(
+                reader, product="launchplane", context="reon-prod", provider_host_id="78"
+            )
+            other_context = await _get_ingress_route_audit_records(
+                reader, product="launchplane", context="cm-prod"
+            )
+            planner_read = await _get_ingress_route_audit_record(
+                app_with("ingress_route.plan"),
+                record.record_id,
+                product="launchplane",
+                context="reon-prod",
+            )
+
+        self.assertEqual(listed.status_code, 200, listed.text)
+        self.assertEqual(read.status_code, 200, read.text)
+        view = read.json()["record"]
+        self.assertEqual(view["requested_domains"], ["app.example.com"])
+        self.assertIsNone(view["provider_host_id"])
+        self.assertIsNone(view["operations"][0]["host_id"])
+        self.assertEqual(listed.json()["records"][0], view)
+        for response in (listed, read):
+            self.assertNotIn("npm-host-1", response.text)
+            self.assertNotIn("10.2.3.4", response.text)
+        self.assertEqual(host_filter.status_code, 403)
+        self.assertEqual(other_context.status_code, 403)
+        self.assertEqual(planner_read.json()["record"]["provider_host_id"], 78)
+        self.assertIn("npm-host-1", planner_read.text)
 
     async def test_ingress_route_audit_reads_require_scoped_query(self) -> None:
         app = create_launchplane_fastapi_app(

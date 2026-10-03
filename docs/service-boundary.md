@@ -329,6 +329,11 @@ governed expectation, custody and currentness contract.
   - `POST /v1/product-profiles/{product}/owner` (native FastAPI for bearer-token
     and signed-in admin callers, server-side GitHub login resolution, profile
     compare-and-write, and apply-only atomic idempotency enforcement)
+  - `POST /v1/product-profiles/{product}/image-repository` (native FastAPI for
+    bearer-token and signed-in admin callers, dry-run/apply limited to the GHCR
+    package named after the product's repository, apply bound to the dry run's
+    starting repository, profile compare-and-write, and apply-only atomic
+    idempotency enforcement)
   - `POST /v1/product-profiles/preview-tls/apply` (native FastAPI for
     Launchplane admin workflow callers, DB-backed dry-run/apply planning,
     reviewed-plan continuity, and apply-only idempotency enforcement)
@@ -1931,6 +1936,7 @@ refresh/destroy flow.
 - `POST /v1/product-profiles/prelaunch-rebuild/apply`
 - `POST /v1/product-profiles/preview-tls/apply`
 - `POST /v1/product-profiles/{product}/owner`
+- `POST /v1/product-profiles/{product}/image-repository`
 
 Product profiles are Launchplane-owned product/driver bindings. They are written
 through native FastAPI authenticated service ingress and stored in Launchplane
@@ -2445,7 +2451,8 @@ changed.
 
 Besides `dokploy_target.setup` (or `dokploy_target.plan` for dry-run), checked on
 product and context `launchplane`, the route accepts the lane-scoped
-`dokploy_target.lane_setup` action for `create-compose` only. It is checked on
+`dokploy_target.lane_setup` action for `create-compose` and the narrow
+`complete-compose-source` operation. It is checked on
 the one product whose lanes or historical contexts use the request's context
 (which must be lowercase and not `launchplane`), with that context and the
 request's instance, so a grant names exactly one product's lane and stops
@@ -2453,12 +2460,49 @@ matching if the context moves to another product. It covers dry-run and apply of
 creating that lane's compose, and only when the request carries no
 `expected_current_provider_target`, `project_id` or `environment_id`: the
 compose then lands in a new provider project and environment and can't replace
-a binding or join another lane's environment. It never authorizes `adopt`,
+a binding or join another lane's environment. Its creation path never authorizes `adopt`,
 domain reconcile or prune, or domain authority repair. Which product holds the
 context is checked again when the target records commit, under the lock product-profile
 writes take, so a context reassigned during the provider calls is refused
 (`local_operator_lane_scope_required`); the compose already created stays
-unrecorded.
+unrecorded. When repository source has already been applied during creation,
+this refusal is reported as `dokploy_source_partial_outcome` (502) instead,
+so the caller knows the provider changed and records were not adopted.
+
+For a generic-web compose's repository source, `create-compose` accepts
+`custom_git_branch` and an explicit `compose_path`. Branches and relative paths
+use letters, digits, dot, underscore, hyphen and slash; shell syntax and parent
+path traversal are refused. The service resolves the
+repository from the exclusively owning product profile, sets the provider's git
+source before adoption, and verifies read-back. The caller cannot supply a
+repository URL or credentials. Dry-run reports the resolved source and planned
+provider update. Existing callers without these source inputs keep their
+existing creation behavior.
+
+`complete-compose-source` completes only an already tracked, empty compose on
+its product's existing `testing` lane. Its source inputs are exactly
+`custom_git_branch` and `compose_path`; target identity, placement, domains,
+source type, replacement expectation and credential inputs are refused. The
+service reads the target, target-id and provider-target records, requires their
+binding to agree and be exclusive, and refuses any configured or partial live
+source, including an already matching source. Provider default source type and
+compose path alone do not count as a configured source. It holds product
+ownership and tracked-record locks across the provider update, source read-back
+and record write. It changes only source fields and their target-record
+provenance; target-id, provider binding, runtime settings and domains remain
+unchanged. `autoDeploy` is disabled, so source setup starts no deployment.
+Dry-run performs the same source/identity checks without writes; apply retains
+the confirmation, reason and idempotency requirements above. Successful apply
+replay with the same key returns its saved result. Partial failures are not saved
+as idempotency responses; do not retry them with either the same key or a new key
+before admin reconciliation. If the provider accepts an update but
+read-back or the record commit fails, the route reports
+`dokploy_source_partial_outcome` (502) for admin reconciliation; do not replace the target or overwrite its configured
+source by retrying with a new key. No new grant, credential, deploy or production
+operation is part of source completion. After service delivery and the bounded helper support tracked in
+[cbusillo/codex-skills#1067](https://github.com/cbusillo/codex-skills/issues/1067),
+RepairShopr Sync's setup session can complete its tracked testing source through
+this operation. The existing creation-only helper cannot call completion.
 
 Dokploy target inspect uses the native FastAPI
 `GET /v1/dokploy-targets/inspect` route. The route is a read-only proof surface
@@ -2805,12 +2849,16 @@ context, preserve the `driver_id` filter, and continue accepting the dedicated
 Every Code worker token for the collection route only. Product profile show
 reads load the stored profile first, check `product_profile.read` against the
 stored profile product and Launchplane service context, and return the typed
-profile envelope. Ingress route audit reads check `ingress_route.plan` against
-the requested query product/context before storage access, require those
-scope query parameters for list and single-record reads, preserve optional
-`status`, `mode`, `provider_host_id`, `trace_id`, `idempotency_key`, and `limit`
-list filters, and return `404 not_found` when a record exists outside the
-requested scope. Endpoint apply and ingress route apply routes use native
+profile envelope. Ingress route audit reads check `ingress_route.plan` or
+`route_binding.read` against the requested query product/context before
+storage access, require those scope query parameters for list and
+single-record reads, preserve optional `status`, `mode`, `provider_host_id`,
+`trace_id`, `idempotency_key`, and `limit` list filters, and return
+`404 not_found` when a record exists outside the requested scope.
+`ingress_route.plan` reads the full record. A caller with only
+`route_binding.read` reads it with provider host ids cleared, an empty
+certificate reference and a fixed reason, and is refused the
+`provider_host_id` filter with `403 authorization_denied`. Endpoint apply and ingress route apply routes use native
 FastAPI write handlers with the apply contracts above.
 
 Environment route-binding reads check `route_binding.read` against the requested

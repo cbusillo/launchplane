@@ -79,6 +79,15 @@ decision remains saved and promotion stays blocked; records are not split into
 comments. Retry recovery checks the complete issue body. Multiple `Owner test notes`
 sections are collected together; CI checks presence, not their number or content.
 
+GitHub attributes commits landed through a merge-train batch pull request to
+that batch PR only, so the checklist shows the batch PR, not its constituents.
+The batch PR body therefore carries every constituent's `Owner test notes`, each
+under its own subheading, which satisfies the CI requirement below and shows
+the Client each change's notes once; see
+[Merge Train Policy](merge-train-policy.md#pr-native-landing). A constituent the
+batch body names as having no notes is still a release blocker, as it would be
+on its own.
+
 Product CI must require a nonempty **`Owner test notes`** section on every pull
 request, including changes that need no manual test. The shared
 `.github/actions/owner-test-notes` action checks presence only, using the pull

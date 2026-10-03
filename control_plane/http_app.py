@@ -48,6 +48,7 @@ from control_plane.authz_candidate_preparation import (
     product_context_owners,
 )
 from control_plane.authz_scope import DOKPLOY_TARGET_LANE_SETUP_ACTION
+from control_plane.dokploy.target_source_setup import DokployComposeSourcePartialError
 from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
     execute_dokploy_target_setup,
@@ -58,6 +59,9 @@ from control_plane.provider_key_adoption import LaneProviderEnv
 from control_plane import product_health_monitoring as control_plane_product_health_monitoring
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
 from control_plane import product_owner_setting as control_plane_product_owner_setting
+from control_plane import (
+    product_image_repository_setting as control_plane_product_image_repository_setting,
+)
 from control_plane.generic_web_onboarding import (
     GenericWebOnboardingIntent,
     build_generic_web_onboarding_manifest,
@@ -342,6 +346,7 @@ from control_plane.merge_admission import (
     require_merge_admission_record_store,
 )
 from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator
+from control_plane.merge_train_branch_refresh import optional_merge_train_branch_refresh_store
 from control_plane.governance_projection import LiveGovernanceCurrentReadinessProvider
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerAdoptionRejectedError,
@@ -983,6 +988,7 @@ _PRODUCT_PRELAUNCH_REBUILD_POLICY_APPLY_ROUTE = "/v1/product-profiles/prelaunch-
 _PRODUCT_STABLE_LANE_REPAIR_APPLY_ROUTE = "/v1/product-profiles/stable-lane-repair/apply"
 _PRODUCT_REPOSITORY_IDENTITY_APPLY_ROUTE = "/v1/product-profiles/repository-identity/apply"
 _PRODUCT_OWNER_SETTING_ROUTE = "/v1/product-profiles/{product}/owner"
+_PRODUCT_IMAGE_REPOSITORY_SETTING_ROUTE = "/v1/product-profiles/{product}/image-repository"
 _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     **{
         route: ("Evidence ingress", _EVIDENCE_INGRESS_MAX_BODY_BYTES, True, False)
@@ -6264,6 +6270,7 @@ def create_launchplane_fastapi_app(
                 admission_store=admission_store,
                 admission_evaluator=admission_evaluator,
                 before_release=store_controller_idempotency_before_release,
+                branch_refresh_store=optional_merge_train_branch_refresh_store(record_store),
             )
         except MergeTrainGitHubStaleHeadError as error:
             return merge_train_github_stale_state_response(trace_id=trace_id, error=error)
@@ -12922,6 +12929,257 @@ def create_launchplane_fastapi_app(
             )
         return response
 
+    async def apply_product_image_repository(
+        product: str,
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not isinstance(
+            identity,
+            GitHubHumanIdentity
+            | LocalOperatorIdentity
+            | LocalAdminIdentity
+            | GitHubActionsIdentity,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Product image repository changes require an operator or workflow identity.",
+            )
+        try:
+            raw_payload = await request.json()
+            if not isinstance(raw_payload, dict):
+                raise ValueError("Product image repository request body must be an object.")
+            image_request = control_plane_product_image_repository_setting.ProductImageRepositoryApplyRequest.model_validate(
+                raw_payload
+            )
+        except (ValidationError, ValueError) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Product image repository request failed validation.",
+            ) from error
+        normalized_product = product.strip()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="product_profile.write",
+            product=normalized_product,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Caller cannot change the image repository of the requested product.",
+            )
+        normalized_idempotency_key = idempotency_key.strip()
+        if image_request.mode == "apply" and not normalized_idempotency_key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Product image repository apply requests require an Idempotency-Key header.",
+            )
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message="Product image repository changes require Launchplane database storage.",
+            )
+        database_store = record_store
+        payload_fingerprint = ""
+        if image_request.mode == "apply":
+            payload_fingerprint = idempotency_request_fingerprint(
+                route_path=_PRODUCT_IMAGE_REPOSITORY_SETTING_ROUTE,
+                payload={**raw_payload, "product": normalized_product},
+            )
+            preflight = database_store.prepare_db_only_mutation(
+                scope=idempotency_scope(identity),
+                route_path=_PRODUCT_IMAGE_REPOSITORY_SETTING_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint=payload_fingerprint,
+            )
+            if preflight.status == "replayed":
+                if preflight.record is None:
+                    raise RuntimeError(
+                        "Product image repository mutation preflight requires evidence."
+                    )
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=preflight.record,
+                    route_path=_PRODUCT_IMAGE_REPOSITORY_SETTING_ROUTE,
+                )
+            if preflight.status == "conflict":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different "
+                        "Launchplane request payload on this route."
+                    ),
+                )
+            if preflight.status == "in_progress":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_in_progress",
+                    message=(
+                        "A matching product image repository change is already running. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                )
+            if preflight.status == "reconcile_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message="The product image repository change requires reconciliation before retry.",
+                )
+            if preflight.status not in {"missing", "released"}:
+                raise RuntimeError(
+                    f"Unsupported product image repository mutation preflight status: {preflight.status}"
+                )
+        try:
+            profile = database_store.read_product_profile_record(normalized_product)
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Product profile was not found.",
+            ) from error
+        try:
+            plan = (
+                control_plane_product_image_repository_setting.build_product_image_repository_plan(
+                    record_store=database_store,
+                    profile=profile,
+                    request=image_request,
+                )
+            )
+        except (
+            control_plane_product_image_repository_setting.ProductImageRepositoryRefusal
+        ) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="image_repository_not_repository_named",
+                message=str(error),
+            ) from error
+        except (
+            control_plane_product_image_repository_setting.ProductImageRepositoryChangedError
+        ) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="stale",
+                message=str(error),
+            ) from error
+        records = {"product_profile": profile.product}
+        if image_request.mode != "apply":
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records=records,
+                result=plan.model_dump(mode="json"),
+            )
+        replacement_profile = profile
+        if plan.changed:
+            try:
+                replacement_profile = control_plane_product_image_repository_setting.updated_product_image_repository_profile(
+                    profile=profile,
+                    image_repository=plan.image_repository_after,
+                    updated_at=utc_now_timestamp(),
+                )
+            except ValueError as error:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="invalid_product_profile",
+                    message="Updated product profile failed validation.",
+                ) from error
+        applied_plan = plan.model_copy(
+            update={
+                "applied": True,
+                "profile_updated_at_after": replacement_profile.updated_at,
+            }
+        )
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=records,
+            result=applied_plan.model_dump(mode="json"),
+        )
+        write_result = database_store.compare_and_write_product_profile_record(
+            expected_record=profile,
+            replacement_record=replacement_profile,
+            mutation=DbOnlyMutationRequest(
+                scope=idempotency_scope(identity),
+                route_path=_PRODUCT_IMAGE_REPOSITORY_SETTING_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint=payload_fingerprint,
+                lease_owner=trace_id,
+                response_status_code=202,
+                response_trace_id=trace_id,
+                response_payload=response.model_dump(mode="json", exclude_none=True),
+                lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
+            ),
+        )
+        if write_result.status == "replayed":
+            if write_result.idempotency_record is None:
+                raise RuntimeError("Replayed product image repository write requires evidence.")
+            return replay_idempotent_response(
+                trace_id=trace_id,
+                stored_record=write_result.idempotency_record,
+                route_path=_PRODUCT_IMAGE_REPOSITORY_SETTING_ROUTE,
+            )
+        if write_result.status == "idempotency_conflict":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="idempotency_key_reused",
+                message=(
+                    "Idempotency-Key was already used for a different "
+                    "Launchplane request payload on this route."
+                ),
+            )
+        if write_result.status == "missing":
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Product profile disappeared before the image repository change could be applied.",
+            )
+        if write_result.status == "changed":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="stale",
+                message="Product profile changed while applying the image repository change. Review and retry.",
+            )
+        if write_result.status == "reservation_in_progress":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="mutation_in_progress",
+                message=(
+                    "A matching product image repository change is already running. "
+                    "Retry with the same Idempotency-Key."
+                ),
+            )
+        if write_result.status == "reconciliation_required":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="mutation_reconciliation_required",
+                message="The product image repository change requires reconciliation before retry.",
+            )
+        return response
+
     async def apply_product_prelaunch_rebuild_policy(
         request: Request,
         identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
@@ -14780,6 +15038,28 @@ def create_launchplane_fastapi_app(
             record_store=record_store,
             trace_id=trace_id,
         )
+        context_wide_config = not product_config_request.instance or any(
+            secret.scope == "context" for secret in product_config_request.secrets
+        )
+        try:
+            config_profile = control_plane_product_config_service.resolve_product_config_profile(
+                database_store,
+                product=product_config_request.product,
+                context=product_config_request.context,
+                instance=product_config_request.instance,
+                context_wide=context_wide_config,
+            )
+        except control_plane_product_config.ProductConfigError as error:
+            profile_error = control_plane_product_config_service.product_config_service_error(error)
+            raise _launchplane_http_error(
+                status_code=profile_error.status_code,
+                trace_id=trace_id,
+                code=profile_error.code,
+                message=profile_error.message,
+            ) from error
+        if expected_product_profile is not None and expected_product_profile != config_profile:
+            raise ProductProfileConflictError("Product profile changed before config planning.")
+        expected_product_profile = config_profile
         try:
             (
                 normalized_idempotency_key,
@@ -14903,6 +15183,15 @@ def create_launchplane_fastapi_app(
             authority_bundle = authority_bundle.model_copy(
                 update={"expected_product_profiles": (expected_product_profile,)}
             )
+        authority_bundle = authority_bundle.model_copy(
+            update={
+                "required_product_config_target": (
+                    product_config_request.product,
+                    product_config_request.context,
+                    "" if context_wide_config else product_config_request.instance,
+                )
+            }
+        )
         driver_result: dict[str, object] = {
             **planned_driver_result,
             "reason": product_config_request.reason,
@@ -23333,10 +23622,8 @@ def create_launchplane_fastapi_app(
             record_store=record_store,
             trace_id=trace_id,
         )
-        # A lane-scoped grant may only create a new compose, in a new provider
-        # project and environment, for its own lane: adopting, re-pointing,
-        # replacing or reusing existing placement could reach another lane's
-        # resources. It is checked on the one product that owns the context.
+        # Creation uses new placement; source completion keeps the testing
+        # lane's tracked binding. Both require exclusive context ownership.
         lane_owner = _lane_setup_context_owner(
             record_store=database_store, context=setup_request.context
         )
@@ -23347,7 +23634,13 @@ def create_launchplane_fastapi_app(
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         )
         lane_scoped_only = not service_scoped and (
-            setup_request.operation == "create-compose"
+            (
+                setup_request.operation == "create-compose"
+                or (
+                    setup_request.operation == "complete-compose-source"
+                    and setup_request.instance == "testing"
+                )
+            )
             and setup_request.expected_current_provider_target is None
             and not setup_request.project_id
             and not setup_request.environment_id
@@ -23449,6 +23742,13 @@ def create_launchplane_fastapi_app(
                     (lane_owner, setup_request.context) if lane_scoped_only else None
                 ),
             )
+        except DokployComposeSourcePartialError as error:
+            raise _launchplane_http_error(
+                status_code=502,
+                trace_id=trace_id,
+                code="dokploy_source_partial_outcome",
+                message=str(error),
+            ) from error
         except ProductContextOwnershipError as error:
             raise _launchplane_http_error(
                 status_code=403,
@@ -26225,6 +26525,37 @@ def create_launchplane_fastapi_app(
         },
         operation_id="apply_product_owner",
         summary="Preview or change the Owner of a product",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PRODUCT_IMAGE_REPOSITORY_SETTING_ROUTE,
+        apply_product_image_repository,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": _openapi_model_schema(
+                            control_plane_product_image_repository_setting.ProductImageRepositoryApplyRequest
+                        )
+                    }
+                },
+            }
+        },
+        operation_id="apply_product_image_repository",
+        summary="Preview or change the image repository of a product",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

@@ -168,7 +168,8 @@ class ProviderKeyRetirementApiTests(unittest.IsolatedAsyncioTestCase):
             wrong_lane,
             authorization="Bearer local-operator-token",
         )
-        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json()["error"]["code"], "product_config_lane_not_owned")
         self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
 
     async def test_lane_without_declarations_can_retire_a_platform_credential(self) -> None:
