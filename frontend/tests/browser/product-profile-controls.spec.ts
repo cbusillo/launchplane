@@ -108,7 +108,7 @@ test("image dry run offers the repository-named package and refuses another pack
   await panel.getByLabel("Change reason").fill("Review new package.");
   await panel.getByLabel("Image repository", { exact: true }).fill("ghcr.io/example/wrong-package");
   await panel.getByRole("button", { name: "Dry run", exact: true }).click();
-  await expect(panel.getByRole("alert")).toContainText("ghcr.io/example/atlas-commerce");
+  await expect(panel.getByRole("status")).toContainText("ghcr.io/example/atlas-commerce");
   await expect(panel.getByRole("button", { name: "Apply", exact: true })).toBeDisabled();
   await panel.getByLabel("Image repository", { exact: true }).fill("ghcr.io/example/atlas-commerce");
   await panel.getByRole("button", { name: "Dry run", exact: true }).click();
