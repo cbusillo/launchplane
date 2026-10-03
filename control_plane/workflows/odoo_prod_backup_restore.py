@@ -1092,7 +1092,13 @@ def execute_odoo_prod_backup_restore_verification_replay(
                 if post_deploy_update is not None
                 else deployment_record.post_deploy_update
             ),
-            failure_code="restore_verification_failed",
+            failure_code=(
+                "restore_runtime_identity_failed"
+                if code.startswith("runtime_identity_")
+                else "restore_post_deploy_failed"
+                if code.startswith("post_deploy_")
+                else "restore_verification_failed"
+            ),
         )
         return result(
             restore_status="fail",
@@ -1822,7 +1828,7 @@ def _write_failed_deployment(
     resolved_target: ResolvedTargetEvidence,
     runtime_source: dict[str, str],
     runtime_identity: RuntimeIdentity,
-    failure_code: str = "restore_failed",
+    failure_code: str,
     post_deploy_update: PostDeployUpdateEvidence | None = None,
     deployment_id: str = "control-plane-dokploy",
 ) -> None:

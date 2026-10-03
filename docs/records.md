@@ -343,7 +343,6 @@ migrations, and archived authority-cutover rows remain readable. The retired
 evaluators and service routes are removed; these records cannot decide a merge
 or release. Current Client identity comes from the product profile.
 
-
 ## Retired Client Acceptance Event Records
 
 `OwnerAcceptanceEventRecord` remains a historical, read-only compatibility
@@ -365,7 +364,6 @@ payloads and digests in `launchplane_change_impact_policies` and its audit store
 Record contracts and storage compatibility remain; the classifier and policy
 service endpoints are deleted. Active merge admission reads Git identities
 independently and current engineering decisions use two authority-bound reviews.
-
 
 ## Transactional Outbox
 
@@ -1644,7 +1642,6 @@ Launchplane description, separate from the promotion's original `failure`.
 Rollback target and deployment ids remain in their structured fields. No deploy
 provider message or rollback health exception is embedded in the detail.
 
-
 - One file per promotion attempt.
 - Record source, destination, artifact id, gate evidence, deploy evidence, and
   destination health.
@@ -1762,7 +1759,6 @@ longer writes raw `runtime_source.restore_error`; verification-only replay also
 removes that legacy field. Synchronous workflow results retain their existing
 error messages. This changes new record writes, without a live historical-record
 backfill or authorization change.
-
 
 - One file per direct ship attempt owned by `launchplane`.
 - Record the requested source git ref, target, deploy status, recorded
@@ -2552,7 +2548,6 @@ bootstrap secret remain solely as a transport compatibility boundary for signed
 trusted-maintenance evidence. The receiver verifies the signature and ignores
 `issue_comment` commands; it cannot record approval or merge. No webhook,
 credential, runtime grant, or stored record is changed by this code retirement.
-
 
 ## Launchplane Preview Enablement Record
 

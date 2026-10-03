@@ -507,7 +507,7 @@ def execute_generic_web_prod_promotion(
         inventory_record_id=inventory_record_id,
         target_id=deploy_result.target_id,
         dry_run=False,
-        error_message=f"{failure} {rollback.evidence.detail}".strip(),
+        error_message=f"{failure} {rollback.error_message or rollback.evidence.detail}".strip(),
     )
     if final_result.promotion_status != "pass" or not request.release_tag:
         return final_result
@@ -568,6 +568,7 @@ class _RollbackOutcome:
     evidence: RollbackExecutionEvidence = field(default_factory=RollbackExecutionEvidence)
     health: HealthcheckEvidence = field(default_factory=HealthcheckEvidence)
     error: Exception | None = None
+    error_message: str = ""
 
 
 def _resolve_rollback_target(
@@ -649,7 +650,8 @@ def _roll_back_production(
             evidence=RollbackExecutionEvidence(
                 detail=record_failure_summary("rollback_unavailable"),
                 target_deployment_record_id=target_id,
-            )
+            ),
+            error_message=f"No automatic rollback: {rollback_target.unavailable_reason}.",
         )
     started_at = utc_now_timestamp()
     try:
@@ -696,7 +698,8 @@ def _roll_back_production(
                 deployment_record_id=deploy_result.deployment_record_id,
                 started_at=started_at,
                 finished_at=utc_now_timestamp(),
-            )
+            ),
+            error_message=f"Rollback deploy of {target_id} failed: {deploy_result.error_message or 'no detail'}",
         )
     rollback_record = _read_deployment_record(
         record_store=record_store,
@@ -708,13 +711,15 @@ def _roll_back_production(
         health_path=profile.health_path,
         status="pending",
     )
+    health_error = ""
     try:
         rollback_health = _verify_health_evidence_with_identity(
             rollback_health,
             expected_runtime_identity=rollback_record.runtime_identity,
         )
-    except click.ClickException:
+    except click.ClickException as error:
         rollback_health = _mark_health_failed(rollback_health)
+        health_error = str(error)
     rollback_record = _write_deployment_health(
         record_store=record_store,
         deployment_record=rollback_record,
@@ -743,6 +748,12 @@ def _roll_back_production(
             finished_at=utc_now_timestamp(),
         ),
         health=rollback_health,
+        error_message=(
+            f"Rolled production back to {target_id}."
+            if healthy
+            else f"Rolled production back to {target_id}, but it failed its health check: "
+            f"{health_error or _health_failure_detail(rollback_health) or 'unhealthy'}"
+        ),
     )
 
 
