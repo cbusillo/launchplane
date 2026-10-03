@@ -283,6 +283,70 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
             checkpoint=checkpoint or (lambda plan, _entry, _phase: self.progress.append(plan)),
         )
 
+    def _require_client_review_for_second_member(self, state: dict[str, str]) -> None:
+        original = self.provider.request
+
+        def request(*, method: str, path: str, body: dict[str, object] | None = None) -> object:
+            if method == "GET" and "/status?" in path and self.provider.heads[2] in path:
+                self.provider.requests.append((method, path, body))
+                statuses: tuple[dict[str, object], ...] = (
+                    ()
+                    if state["value"] == "missing"
+                    else ({"context": "launchplane/owner-review", "state": state["value"]},)
+                )
+                return _combined_status(statuses=statuses)
+            response = original(method=method, path=path, body=body)
+            if method == "GET" and path.endswith("/pulls/2") and isinstance(response, dict):
+                response["labels"] = [{"name": "client-check"}]
+            return response
+
+        provider_request = patch.object(self.provider, "request", side_effect=request)
+        provider_request.start()
+        self.addCleanup(provider_request.stop)
+        profile = SimpleNamespace(
+            is_active=True,
+            repository=self.provider.repository_name,
+            owner=SimpleNamespace(review_label="client-check"),
+        )
+        store = SimpleNamespace(list_product_profile_records=lambda: (profile,))
+        self.client = GitHubMergeTrainClient(
+            transport=self.provider, branch_refresh_store=cast(Any, store)
+        )
+
+    def test_batch_cannot_land_later_member_without_current_client_status(self) -> None:
+        state = {"value": "missing"}
+        self._require_client_review_for_second_member(state)
+        for value in ("missing", "pending", "failure"):
+            state["value"] = value
+            with self.subTest(value=value), self.assertRaises(MergeAdmissionDeniedError):
+                self.land()
+            self.assertFalse(self.provider.merge_calls)
+        state["value"] = "success"
+        self.land()
+        self.assertTrue(self.provider.merged)
+
+    def test_client_status_is_rechecked_after_admission_before_provider_effect(self) -> None:
+        state = {"value": "success"}
+        self._require_client_review_for_second_member(state)
+        self.guard.after_admit = lambda _number: state.update(value="pending")
+        with self.assertRaises(MergeAdmissionDeniedError):
+            self.land()
+        self.assertFalse(self.provider.merge_calls)
+        self.assertTrue(
+            all(value == "batch_not_dispatched" for value in self.guard.outcomes.values())
+        )
+
+    def test_unlanded_retirement_proof_does_not_require_client_acceptance(self) -> None:
+        state = {"value": "pending"}
+        self._require_client_review_for_second_member(state)
+        base = self.client.verify_unlanded_batch(
+            landing_plan=self.guard.landing_plan_record.landing_plan
+        )
+        self.assertEqual(base[0], self.provider.base_sha)
+        self.assertFalse(self.provider.merge_calls)
+        with self.assertRaises(MergeAdmissionDeniedError):
+            self.land()
+
     def test_creation_reuses_the_bound_candidate_pr_without_rewriting_sources(self) -> None:
         number = self.client.ensure_batch_pull_request(
             candidate=self.guard.candidate_record.candidate

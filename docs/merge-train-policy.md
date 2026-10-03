@@ -260,6 +260,15 @@ reported as `trusted_automation` in controller dry-run output. The default list
 is empty, so existing owner/admin-only policies remain fail-closed and unchanged.
 Logins are diagnostic labels, not policy identity, because logins can be renamed.
 
+PRs labelled for Client review require the newest `launchplane/owner-review`
+commit status on their current head. Missing status is pending, even if check
+runs already passed; pending or failed review cannot admit the PR. Only active product profiles' configured review labels mark this
+boundary; an unrelated label on a repository without such a profile creates no
+review requirement. Every batch member is checked during planning and again
+before the provider landing effect. The standalone landing route also requires
+that profile reader and refuses if it is unavailable. Successful review still
+requires all other current-head checks.
+
 Only an actor allowed to enqueue may put a pull request in the train: a trusted
 automation identity, or an actor whose role is in `allowed_actor_roles` (by
 default the repository owner and its admins). Pull-request write access
@@ -454,10 +463,12 @@ identity before waiting on checks, so a pending or failed check cannot hide a
 new source head. A manually closed batch PR is not automatically reopened.
 Change or remove the queued source entries to build a replacement; an unchanged
 failed candidate remains visibly failed rather than being rebuilt in a loop.
-It is never rebuilt, but a candidate that failed on check evidence is re-read at
-its recorded SHA on each controller call, so re-running the failed check lets it
-continue once the re-run is no longer failing. A multi-entry batch whose batch
-PR was closed on failure is not re-read, because that PR is never reopened.
+A candidate that failed on check evidence may be re-read at its recorded SHA,
+so re-running the failed check lets it continue once the re-run is no longer
+failing. A multi-entry batch whose batch PR was closed is never reopened. It
+has one narrow rebuild exception: a changed generated batch body, confirmed
+closed and unmerged binding, and a persisted unused retry budget, as described
+under `candidate_failed` below.
 
 The landing plan binds `candidate_pull_request_number` into its immutable
 digest. The controller evaluates every constituent before appending the first
@@ -999,8 +1010,21 @@ Controller actions have these retry/stop semantics:
   rebuilt until the queue or base changes. If one failed on check evidence and a
   re-run of the failed check at that SHA is now pending or passing, the controller
   returns `observe_candidate`, retires the failed record, and continues from the
-  re-read evidence. Multi-entry merge batches, whose batch PR was closed on
-  failure, stay failed.
+  re-read evidence. A multi-entry merge batch whose service PR is closed and
+  confirmed unmerged may be rebuilt once for the same ordered heads and base,
+  only when the body Launchplane would generate now differs from that bound
+  failed PR's body. The replacement uses a separate candidate ref and persists
+  `batch_body_retry_of`; candidate history preserves the used budget across
+  controller restarts. No second rebuild is admitted for that queue/base, even
+  if generation changes again. Missing, unbound, open, or merged batch evidence
+  cannot authorize recovery. Ambiguous provider-effect evidence still requires
+  reconciliation rather than being treated as an ordinary failed check.
+  The replacement still passes current checks,
+  constituent validation, and every admission gate. Otherwise the controller
+  reports the failed candidate and its recovery reason.
+  When the current queue head waits for checks, both read-only and mutating
+  passes report `wait_for_checks` with that PR and its dry-run reason, retaining
+  the failure and retry budget until the wait resolves.
 - `plan_landing`: A passed candidate still matches the live eligible queue,
   recorded PR head SHAs, and base SHA and is ready for PR-native landing-plan
   creation. Mutate once, then call again.
