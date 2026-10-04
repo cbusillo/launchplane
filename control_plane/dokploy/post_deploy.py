@@ -33,6 +33,7 @@ from control_plane.integration_readback import (
     integration_readback_refusal_detail,
     web_held_until_integration_readback,
 )
+from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 
 
 DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME = "platform-data-workflow"
@@ -442,6 +443,16 @@ def run_compose_post_deploy_update(
             desired_env_map=desired_env_map,
         )
         resolved_workflow_environment_overrides.update(upstream_restore_environment)
+        environment_class = runtime_key_safety_environment_class(target_definition.instance)
+        kept_integrations = (
+            allowance.integration
+            for allowance in target_definition.policies.integration_allowances
+            if environment_class not in {"prod", "preview"}
+            and allowance.kind in {"pre_live", "read_only_source"}
+        )
+        resolved_workflow_environment_overrides["ODOO_RESTORE_KEPT_INTEGRATIONS"] = ",".join(
+            sorted(kept_integrations)
+        )
         resolved_required_workflow_environment_keys = tuple(
             sorted(
                 {
