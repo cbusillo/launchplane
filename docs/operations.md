@@ -3621,7 +3621,11 @@ key, the reviewed record ID/digest, and the exact confirmation shown by the
 workflow input contract.
 
 An apply that returns reconciliation-required must be retried with the same
-idempotency key after the provider can be observed. A `retiring` profile is an
+idempotency key and reviewed request after the provider can be observed. The HTTP
+endpoint delegates replay to the durable runner, which observes uncertain tracked
+completion before retrying. Changed requests or reviewed plans and different
+keys cannot take over the held operation; unavailable or changed provider
+evidence leaves it reconciliation-required. A `retiring` profile is an
 intentional fail-closed state: deploys, monitoring, previews, onboarding,
 discovery, and work-graph automation must leave it untouched while the durable
 operation reconciles. Completion verifies provider absence, removes mutable

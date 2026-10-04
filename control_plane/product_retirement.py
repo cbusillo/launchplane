@@ -585,6 +585,9 @@ class DokployProductRetirementAdapter:
     ) -> ProviderMutationOutcome:
         try:
             self._write_started_record(provider_operation_key)
+            if self._lifecycle_before_value == "retiring":
+                # Restore the existing retirement checkpoint before retry validation.
+                self._checkpoint(lease, "profile_retiring")
             current_bound = bind_product_retirement_authority(
                 record_store=self._record_store,
                 request=self._request,
@@ -627,6 +630,7 @@ class DokployProductRetirementAdapter:
             click.ClickException,
             TimeoutError,
         ) as error:
+            self._terminal_error_message = _redacted_terminal_error_message(str(error))
             raise ProviderMutationRejectedError(error) from error
 
         self._ensure_retiring_profile()
