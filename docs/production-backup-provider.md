@@ -53,8 +53,9 @@ The shared operation uses schema version 3 of the existing backup-operation
 record. It reuses the database queue, claims, heartbeats, authorization checks,
 and atomic operation/evidence completion. Historical versions 1 and 2 retain
 the legacy request contract. The existing `launchplane-verireel-workers`
-service consumes both forms; its name, table and compatibility entrypoints stay
-unchanged during rollout. No new worker service is needed.
+service consumes typed captures and records failures for legacy operations without
+executing their host commands. Its name, table and compatibility entrypoints stay
+unchanged. No new worker service is needed.
 
 Before each provider mutation, the worker rechecks authorization, lease loss,
 and the exact policy/target binding. Missing, stale, retired or changed authority

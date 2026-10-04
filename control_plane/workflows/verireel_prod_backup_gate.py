@@ -1,15 +1,9 @@
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
-import shlex
-import subprocess
 from typing import Literal, Protocol
 
 import click
-from control_plane import runtime_environments as control_plane_runtime_environments
-from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.production_backup_gate import ProductionBackupGateRequest
 from control_plane.contracts.durable_operation_authorization import (
@@ -31,27 +25,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 
 DEFAULT_TIMEOUT_SECONDS = DEFAULT_VERIREEL_PROD_BACKUP_GATE_TIMEOUT_SECONDS
-WORKER_COMMAND_ENV_VAR = "LAUNCHPLANE_VERIREEL_PROD_BACKUP_GATE_WORKER_COMMAND"
 ASYNC_SOURCE = "launchplane-verireel-prod-backup-gate"
-WORKER_SSH_KEYS = frozenset(
-    {"VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY", "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS"}
-)
-WORKER_RUNTIME_ENV_KEYS = (
-    WORKER_COMMAND_ENV_VAR,
-    "VERIREEL_PROD_PROXMOX_HOST",
-    "VERIREEL_PROD_PROXMOX_USER",
-    "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY",
-    "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS",
-    "VERIREEL_PROD_CT_ID",
-    "VERIREEL_PROD_GATE_LOCAL",
-    "VERIREEL_PROD_BACKUP_MODE",
-    "VERIREEL_PROD_BACKUP_STORAGE",
-    "VERIREEL_PROD_SNAPSHOT_PREFIX",
-    "VERIREEL_PROD_SNAPSHOT_KEEP",
-    "VERIREEL_PROD_GATE_HEALTH_TIMEOUT_MS",
-    "VERIREEL_TESTING_BASE_URL",
-    "VERIREEL_PROD_OPERATOR_BASE_URL",
-)
 
 
 class VeriReelProdBackupGateStore(Protocol):
@@ -80,116 +54,15 @@ class VeriReelProdBackupGateOperationStore(VeriReelProdBackupGateStore, Protocol
     ) -> tuple[VeriReelProdBackupGateOperationRecord, ...]: ...
 
 
-def _resolve_worker_runtime_environment(
-    *,
-    control_plane_root: Path,
-    request: VeriReelProdBackupGateWorkerRequest,
-) -> dict[str, str]:
-    try:
-        resolved_values = control_plane_runtime_environments.resolve_runtime_environment_values(
-            control_plane_root=control_plane_root,
-            context_name=request.context,
-            instance_name=request.instance,
-        )
-    except click.ClickException:
-        resolved_values = {}
-    # Worker settings come from the lane's runtime environment; its SSH keys only from the
-    # worker store, never an inherited runtime secret.
-    resolved_values = {
-        key: value for key, value in resolved_values.items() if key not in WORKER_SSH_KEYS
-    }
-    resolved_values.update(
-        control_plane_secrets.resolve_lane_worker_secret_values(
-            context_name=request.context,
-            instance_name=request.instance,
-        )
-    )
-    return {
-        key: value
-        for key, value in resolved_values.items()
-        if key in WORKER_RUNTIME_ENV_KEYS and str(value).strip()
-    }
-
-
-def _worker_environment(
-    *,
-    control_plane_root: Path,
-    request: VeriReelProdBackupGateWorkerRequest,
-) -> dict[str, str]:
-    environment = {
-        key: value for key, value in os.environ.items() if key not in WORKER_RUNTIME_ENV_KEYS
-    }
-    environment.update(
-        _resolve_worker_runtime_environment(
-            control_plane_root=control_plane_root,
-            request=request,
-        )
-    )
-    return environment
-
-
-def _worker_command(*, environment: dict[str, str]) -> list[str]:
-    raw_value = environment.get(WORKER_COMMAND_ENV_VAR, "").strip()
-    if not raw_value:
-        raise click.ClickException(
-            f"Missing {WORKER_COMMAND_ENV_VAR} for VeriReel prod backup gate execution."
-        )
-    command = shlex.split(raw_value)
-    if not command:
-        raise click.ClickException(
-            f"{WORKER_COMMAND_ENV_VAR} did not resolve to an executable command."
-        )
-    return command
-
-
 def _run_delegated_worker(
     *,
     control_plane_root: Path,
     request: VeriReelProdBackupGateWorkerRequest,
 ) -> VeriReelProdBackupGateWorkerResult:
-    worker_environment = _worker_environment(
-        control_plane_root=control_plane_root,
-        request=request,
+    raise click.ClickException(
+        "Legacy VeriReel backup execution is unavailable; use /v1/production-backup-gates "
+        "with typed production backup authority."
     )
-    timeout_seconds = max(request.timeout_seconds, 1)
-    try:
-        completed = subprocess.run(
-            _worker_command(environment=worker_environment),
-            input=request.model_dump_json(),
-            text=True,
-            capture_output=True,
-            timeout=timeout_seconds,
-            check=False,
-            env=worker_environment,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise click.ClickException(
-            f"VeriReel prod backup gate worker timed out after {timeout_seconds} seconds."
-        ) from exc
-    stdout = completed.stdout.strip()
-    if not stdout:
-        detail = (
-            completed.stderr.strip() or "VeriReel prod backup gate worker returned no JSON payload."
-        )
-        raise click.ClickException(detail)
-    try:
-        payload = json.loads(stdout)
-    except json.JSONDecodeError as exc:
-        raise click.ClickException(
-            f"VeriReel prod backup gate worker returned invalid JSON: {stdout}"
-        ) from exc
-    try:
-        result = VeriReelProdBackupGateWorkerResult.model_validate(payload)
-    except Exception as exc:  # noqa: BLE001
-        raise click.ClickException(
-            f"VeriReel prod backup gate worker returned invalid result payload: {payload}"
-        ) from exc
-    if completed.returncode != 0 and result.status != "pass":
-        return result
-    if completed.returncode != 0:
-        detail = result.detail or completed.stderr.strip() or stdout
-        raise click.ClickException(detail)
-    return result
 
 
 def _build_backup_gate_record(
