@@ -2401,9 +2401,9 @@ run` is the foreground loop intended for an external process supervisor, and
   repository/product/context, exact-head/evidence/policy/actor indexes, and
   critical schema invariants.
 - Trusted-maintenance evidence capture is invoked only after existing signed
-  GitHub webhook verification in both current ingress surfaces: `POST
-  /v1/manager-preview-approval/github-webhook` and `POST
-  /v1/every-code/github-webhook`. This common post-signature handler adds no new
+  GitHub webhook verification through the trusted-maintenance receiver at
+  `POST /v1/manager-preview-approval/github-webhook`. The Every Code HTTP route
+  is removed. This common post-signature handler adds no new
   route, webhook secret, durable raw receipt table, or runtime config. It only
   considers authenticated `pull_request` deliveries with an explicit policy
   event/action match. Before any GitHub API call it uses the signed numeric
@@ -2731,20 +2731,11 @@ preflights.
 - Launchplane owns this coordination record so GitHub webhooks, reconciliation,
   local Mac workers, and the future Launchplane UI share one inspectable source of
   truth instead of relying on GitHub API polling or local shell lock files.
-- GitHub webhook ingress accepts signed `issues.labeled` deliveries for the
-  `every-code` label through `POST /v1/every-code/github-webhook`. The route
-  uses `X-Hub-Signature-256`, requires `X-GitHub-Delivery`, and dedupes repeated
-  deliveries by the deterministic repository/issue/label request id without
-  overwriting a request that is already claimed or finished. Re-applying the
-  same label to the same issue returns the existing request; a fresh retry model
-  should use a new trigger label or explicit retry record rather than mutating a
-  terminal request in place.
-- The same webhook ingress accepts signed pull-request `closed` deliveries to
-  terminalize linked Every Code requests. The close handler matches records by a
-  stored result PR URL, by recorded PR feedback, or by GitHub closing references
-  to linked issues. A single pull request can close multiple Every Code requests;
-  queued matches are terminalized with service-owned claim metadata so terminal
-  records still satisfy the work-request contract.
+- The retired `POST /v1/every-code/github-webhook` route is removed. Label,
+  feedback, and close deliveries cannot change these records through it.
+  Existing persisted records are retained until the separately authorized
+  storage retirement; #1313 tracks the remaining retired domain code.
+
 - Every Code PR feedback webhooks and `/preview ok` or `/preview changes ...`
   source-issue comments are actor-gated before they become pending work for a
   local session. The repository owner is trusted, the source issue author is

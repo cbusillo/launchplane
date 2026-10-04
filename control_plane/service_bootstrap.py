@@ -12,7 +12,6 @@ from fastapi import FastAPI
 import uvicorn
 
 from control_plane.drivers import native_routes
-from control_plane.every_code_github_webhook import handle_every_code_github_webhook_request
 from control_plane.github_app_webhook import handle_github_app_webhook_request
 from control_plane.trusted_maintenance_github_webhook import (
     handle_trusted_maintenance_github_webhook_request,
@@ -209,7 +208,6 @@ def create_launchplane_service_application(
         work_graph_planning_facts_provider=work_graph_planning_facts_provider,
         work_graph_issue_inbox_provider=work_graph_issue_inbox_provider,
         work_graph_issue_inbox_reconcile_provider=work_graph_issue_inbox_reconcile_provider,
-        every_code_github_webhook_handler=handle_every_code_github_webhook_request,
         trusted_maintenance_github_webhook_handler=(
             handle_trusted_maintenance_github_webhook_request
         ),
