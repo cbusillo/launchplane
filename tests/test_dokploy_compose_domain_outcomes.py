@@ -93,6 +93,8 @@ class ComposeDomainOutcomeTests(unittest.TestCase):
         ]
         self.writes: list[str] = []
         self.fail_at: int | None = None
+        self.fail_read_at: int | None = None
+        self.reads = 0
         self.failure: Exception = click.ClickException("private-provider-error private-token")
         provider_patch = patch(
             "control_plane.dokploy.api.dokploy_request", side_effect=self.provider_request
@@ -102,6 +104,9 @@ class ComposeDomainOutcomeTests(unittest.TestCase):
 
     def provider_request(self, **kwargs: Any) -> JsonValue:
         if kwargs["path"] == "/api/domain.byComposeId":
+            self.reads += 1
+            if self.reads == self.fail_read_at:
+                raise self.failure
             return cast(JsonValue, [dict(route) for route in self.routes])
         self.assertEqual(kwargs["method"], "POST")
         payload = kwargs["payload"]
@@ -221,6 +226,50 @@ class ComposeDomainOutcomeTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "invalid_dokploy_target_setup")
         self.assertEqual(self.writes, [])
 
+    def test_reconcile_preflight_failure_after_a_completed_route_is_partial(self) -> None:
+        self.fail_read_at = 2
+        status, payload = self.invoke("reconcile-compose-domain")
+        self.assert_partial(status, payload, completed=["domain-first"], stage="route-reconcile")
+        self.assertEqual(self.writes, ["domain-first"])
+
+    def test_first_reconcile_lookup_failure_is_distinct_and_has_no_effect(self) -> None:
+        self.fail_read_at = 1
+        status, payload = self.invoke("reconcile-compose-domain")
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_dokploy_target_setup")
+        self.assertNotIn("private-token", json.dumps(payload))
+        self.assertEqual(self.writes, [])
+
+    def test_invalid_route_inventory_is_refused_before_a_write(self) -> None:
+        with patch("control_plane.dokploy.api.dokploy_request", return_value={"not": "routes"}):
+            for mode in ("dry-run", "apply"):
+                with self.subTest(mode=mode):
+                    status, payload = self.invoke("reconcile-compose-domain", mode=mode)
+                    self.assertEqual(status, 400)
+                    self.assertEqual(payload["error"]["code"], "invalid_dokploy_target_setup")
+        self.assertEqual(self.writes, [])
+
+    def test_selected_route_without_id_is_refused_before_a_write(self) -> None:
+        self.routes[0].pop("domainId")
+        for mode in ("dry-run", "apply"):
+            with self.subTest(mode=mode):
+                status, payload = self.invoke("reconcile-compose-domain", mode=mode)
+                self.assertEqual(status, 400)
+                self.assertEqual(payload["error"]["code"], "invalid_dokploy_target_setup")
+        self.assertEqual(self.writes, [])
+
+    def test_prune_record_failure_after_deletions_remains_partial(self) -> None:
+        with patch.object(
+            PostgresRecordStore,
+            "write_dokploy_target_record",
+            side_effect=RuntimeError("db failed"),
+        ):
+            status, payload = self.invoke("prune-compose-domain")
+        self.assert_partial(
+            status, payload, completed=["domain-first", "domain-second"], stage="record-write"
+        )
+        self.assertEqual(self.routes, [])
+
     def test_dry_run_exposes_rewrite_and_duplicate_routes_without_effects(self) -> None:
         self.routes[0].update(
             {
@@ -228,6 +277,11 @@ class ComposeDomainOutcomeTests(unittest.TestCase):
                 "path": "/api",
                 "internalPath": "/backend",
                 "https": False,
+                "certificateType": "letsencrypt",
+                "stripPath": True,
+                "customCertResolver": "custom-resolver",
+                "applicationId": "old-app",
+                "previewDeploymentId": "old-preview",
                 "privatePayload": "private-provider-error",
             }
         )
@@ -247,6 +301,11 @@ class ComposeDomainOutcomeTests(unittest.TestCase):
                 "internal_path": "/backend",
                 "port": 8080,
                 "https": False,
+                "certificate_type": "letsencrypt",
+                "strip_path": True,
+                "custom_cert_resolver": "custom-resolver",
+                "application_id": "old-app",
+                "preview_deployment_id": "old-preview",
                 "selected_for_rewrite": True,
             },
         )
@@ -258,6 +317,12 @@ class ComposeDomainOutcomeTests(unittest.TestCase):
         self.assertEqual(self.routes[0]["serviceName"], "web")
         self.assertEqual(self.routes[0]["path"], "/")
         self.assertEqual(self.routes[0]["port"], 9000)
+        self.assertEqual(self.routes[0]["certificateType"], "none")
+        self.assertFalse(self.routes[0]["stripPath"])
+        self.assertIsNone(self.routes[0]["customCertResolver"])
+        self.assertIsNone(self.routes[0]["applicationId"])
+        self.assertIsNone(self.routes[0]["previewDeploymentId"])
+        self.assertEqual(self.routes[1]["certificateType"], "letsencrypt")
         self.assertEqual(self.routes[1]["serviceName"], "other-service")
 
 

@@ -2440,9 +2440,14 @@ with at least one domain. Reconcile targets the tracked compose and rewrites the
 first exact matching-host provider route to service `web`, paths `/`, HTTPS, and
 the requested port (or creates a route if none matches). Its dry-run reads live
 provider routes and returns `setup.existing_routes`: matching host/domain id,
-path, internal path, service name, port and HTTPS, with `selected_for_rewrite`
+path, internal path, service name, port, HTTPS, certificate type, strip-path,
+custom certificate resolver, application id and preview deployment id, with
+`selected_for_rewrite`
 identifying that first match. Duplicate matches remain visible; missing provider
-fields remain null. Unrelated route fields are excluded. This is a point-in-time
+fields remain null. Apply also resets certificate type to `none`, strip-path
+to false, and custom certificate resolver, application id and preview deployment
+id to null. Other provider fields are excluded. A selected route without a
+domain id is refused before a write, including in dry-run. This is a point-in-time
 preview, not a reservation against later provider changes. Domain pruning is restricted to tracked
 compose targets and explicit domain hosts; dry-run reports matched provider
 domain ids, while apply deletes only those matching ids and updates the tracked
@@ -2463,7 +2468,12 @@ call completed. Provider exception text and credentials are excluded. Inspect
 provider routes and tracked records before a new apply; neither automatic replay
 nor rollback is performed. A failure before a route attempt (envelope, tracked
 target, or prune inventory validation) retains its ordinary validation error.
-A provider read failure inside the reconcile attempt is conservatively uncertain.
+A reconcile preflight lookup/validation failure before any route write remains
+distinct (400); the same failure after a completed route is partial (502).
+Reconcile refuses malformed non-list inventory instead of assuming no existing
+routes. Keep the dry-run artifact to recover prior route settings if a later
+apply is partial; the recovery response is progress evidence, not a rollback
+snapshot.
 Successful idempotency responses remain unchanged; an uncertain response is not
 stored as a successful apply.
 

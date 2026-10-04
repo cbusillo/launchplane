@@ -195,6 +195,11 @@ class DokployComposeDomainRoutePreview(BaseModel):
     service_name: str | None = None
     port: int | None = None
     https: bool | None = None
+    certificate_type: str | None = None
+    strip_path: bool | None = None
+    custom_cert_resolver: str | None = None
+    application_id: str | None = None
+    preview_deployment_id: str | None = None
     selected_for_rewrite: bool
 
 
@@ -587,6 +592,8 @@ def _execute_dokploy_compose_domain_reconcile(
             route_host = str(route.get("host") or "").strip()
             if route_host not in requested_domains:
                 continue
+            if route_host not in selected_hosts and not str(route.get("domainId") or "").strip():
+                raise ValueError("Selected compose domain route is missing domainId.")
             existing_routes.append(
                 DokployComposeDomainRoutePreview.model_validate(
                     {
@@ -597,6 +604,11 @@ def _execute_dokploy_compose_domain_reconcile(
                         "service_name": route.get("serviceName"),
                         "port": route.get("port"),
                         "https": route.get("https"),
+                        "certificate_type": route.get("certificateType"),
+                        "strip_path": route.get("stripPath"),
+                        "custom_cert_resolver": route.get("customCertResolver"),
+                        "application_id": route.get("applicationId"),
+                        "preview_deployment_id": route.get("previewDeploymentId"),
                         "selected_for_rewrite": route_host not in selected_hosts,
                     }
                 )
@@ -630,6 +642,10 @@ def _execute_dokploy_compose_domain_reconcile(
                 )
                 record_store.write_dokploy_target_record(target_record)
         except Exception as error:
+            if not route_domain_ids and isinstance(
+                error, dokploy_compose.DokployComposeDomainRoutePreflightError
+            ):
+                raise
             raise DokployComposeDomainPartialError(
                 request=request,
                 compose_id=target_id_record.target_id,
