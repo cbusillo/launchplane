@@ -74,6 +74,9 @@ class SavedCollapseOrderingTests(unittest.IsolatedAsyncioTestCase):
         mutate: bool,
         padding: int = 0,
         obsolete_reason: str = "",
+        other_checks: str = "pass",
+        root_mergeable: str = "mergeable",
+        expected_action: str | None = None,
     ) -> None:
         class Reader(_FakeCollapsedRootStackedMergeTrainSnapshotReader):
             def read_merge_train_snapshot(
@@ -88,7 +91,7 @@ class SavedCollapseOrderingTests(unittest.IsolatedAsyncioTestCase):
                         "number": 11,
                         "head_ref": "feature/root-10",
                         "head_sha": "head-root" if other_status == "planned" else root.head_sha,
-                        "required_checks_status": "pass",
+                        "required_checks_status": other_checks,
                     }
                 )
                 if obsolete_reason == "root_moved":
@@ -104,7 +107,12 @@ class SavedCollapseOrderingTests(unittest.IsolatedAsyncioTestCase):
                 return snapshot.model_copy(
                     update={
                         "pull_requests": (
-                            root.model_copy(update={"required_checks_status": checks}),
+                            root.model_copy(
+                                update={
+                                    "required_checks_status": checks,
+                                    "mergeable": root_mergeable,
+                                }
+                            ),
                             child.model_copy(update={"required_checks_status": "pass"}),
                             other_root,
                             other_child,
@@ -184,17 +192,22 @@ class SavedCollapseOrderingTests(unittest.IsolatedAsyncioTestCase):
                 )
             self.assertEqual(response.status_code, 202, response.text)
             result = response.json()["result"]
-            expected_action = (
+            expected_action = expected_action or (
                 "admit_collapsed_root"
                 if other_status == "waiting_for_root_checks" or obsolete_reason
                 else "execute_stack_collapse"
             )
             self.assertEqual(result["controller_action"], expected_action)
+            if expected_action == "block":
+                self.assertEqual(result["dry_run_result"]["selected_pr"]["number"], 1)
             selected = waiting if obsolete_reason else other
-            if not mutate:
+            if not mutate and expected_action != "block":
                 self.assertEqual(
                     result["merge_train_stack_collapse_plan_record_id"], selected.record_id
                 )
+                self.assertEqual(store.list_merge_train_stack_collapse_plan_records(), before)
+            elif expected_action == "block":
+                self.assertFalse(store.list_merge_train_batch_candidate_records())
                 self.assertEqual(store.list_merge_train_stack_collapse_plan_records(), before)
             elif other_status == "waiting_for_root_checks" or obsolete_reason:
                 candidate = store.list_merge_train_batch_candidate_records()[0].candidate
@@ -249,3 +262,18 @@ class SavedCollapseOrderingTests(unittest.IsolatedAsyncioTestCase):
                         mutate=mutate,
                         obsolete_reason=reason,
                     )
+
+    async def test_pending_saved_wait_does_not_mask_blocked_queue_head(self) -> None:
+        for checks, mergeable in (("fail", "mergeable"), ("pass", "conflicting")):
+            for newer in (False, True):
+                for mutate in (False, True):
+                    with self.subTest(checks=checks, newer=newer, mutate=mutate):
+                        await self._run_case(
+                            other_status="waiting_for_root_checks",
+                            newer=newer,
+                            checks=checks,
+                            root_mergeable=mergeable,
+                            other_checks="pending",
+                            mutate=mutate,
+                            expected_action="block",
+                        )
