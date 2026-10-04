@@ -249,8 +249,13 @@ def _execute_plan_mode(
         policy=policy, snapshot=snapshot, batch_landing=True
     )
     selected_pr = dry_run_result.selected_pr
-    if selected_pr is not None and merge_train_snapshot_has_stack_topology(
-        snapshot=snapshot, dry_run_result=dry_run_result
+    # Report the selected queue block before discovering another collapse.
+    if (
+        dry_run_result.intended_next_action != "block"
+        and selected_pr is not None
+        and merge_train_snapshot_has_stack_topology(
+            snapshot=snapshot, dry_run_result=dry_run_result
+        )
     ):
         stack_discovery = discover_merge_train_stack(
             policy=policy,
