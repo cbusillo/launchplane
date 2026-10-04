@@ -43,6 +43,20 @@ def _failed_request(
 
 
 class MergeTrainGitHubFailureTests(unittest.TestCase):
+    def test_classic_graphql_body_quota_interrupts_policy_read(self) -> None:
+        transport = UrllibMergeTrainGitHubTransport(token="secret-token")
+        quota = {"type": "RATE_LIMITED", "message": "secret-provider-message"}
+        with patch.object(transport, "request", return_value={"data": None, "errors": [quota]}):
+            with self.assertRaises(MergeTrainGitHubError) as caught:
+                _conversation_resolution_rule(
+                    transport=transport,
+                    repository_path="private-owner/private-repo",
+                    base_branch="main",
+                )
+        detail = _controller_exception_reconciliation_detail(caught.exception)
+        self.assertEqual(detail, "retryable:github_rate_limited; request:POST /graphql")
+        self.assertNotIn("secret", str(caught.exception))
+
     def test_conversation_policy_quota_interrupts_preserve_retryable_evidence(self) -> None:
         for reader, method, path in (
             (_classic_conversation_rule, "POST", "/graphql"),
@@ -90,6 +104,8 @@ class MergeTrainGitHubFailureTests(unittest.TestCase):
             _failed_request(404, {}),
             _failed_request(422, {"X-RateLimit-Remaining": "0"}),
             {"errors": [{"message": "Resource not accessible by integration"}]},
+            {"errors": [{"type": "RATE_LIMITED"}, {"type": "FORBIDDEN"}]},
+            {"errors": ["RATE_LIMITED"]},
             {"data": {"repository": {"ref": {"refUpdateRule": {}}}}},
             [{"type": "pull_request", "parameters": None}],
         )

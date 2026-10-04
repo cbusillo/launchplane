@@ -3355,8 +3355,16 @@ def _graphql_repository(
         ),
         "GitHub GraphQL response",
     )
-    if payload.get("errors"):
-        raise MergeTrainGitHubError("GitHub GraphQL request returned errors.")
+    errors = payload.get("errors")
+    if errors:
+        rate_limited = isinstance(errors, list) and all(
+            isinstance(error, dict) and error.get("type") == "RATE_LIMITED" for error in errors
+        )
+        raise MergeTrainGitHubError(
+            "GitHub GraphQL request returned errors.",
+            rate_limited=rate_limited,
+            request_description="POST /graphql" if rate_limited else "",
+        )
     data = _json_object(payload.get("data"), "GitHub GraphQL data")
     return _json_object(data.get("repository"), "GitHub GraphQL repository")
 
