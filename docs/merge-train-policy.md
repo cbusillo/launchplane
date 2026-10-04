@@ -83,7 +83,7 @@ administration surface.
 
 ## Credential Source And Policy Readback
 
-A repository policy names one GitHub credential source:
+A repository policy names one supported GitHub credential source.
 
 Stored historical policies retain `github_token.env_var` and their original
 digests for readback. New policy validation and imports reject a nonempty
@@ -908,9 +908,11 @@ GH_TOKEN=... uv run launchplane work-graph merge-train-run-once \
   --policy-file path/to/merge-train-policy.toml
 ```
 
-The deployed Launchplane service projects the work-graph GitHub credential into
-`GH_TOKEN` from the `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN` deployment secret, so the
-imported policies normally reference that same explicit GitHub credential source.
+This local rehearsal command reads its explicit `--github-token-env` option
+(default `GH_TOKEN`) independently of the policy's managed credential source.
+The deployed merge train resolves the policy's `github_app` or
+`runtime_context` source instead. The work-graph read credential remains a
+separate consumer of `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN`.
 
 Passing `--mutate` applies exactly one ordered-queue worker transition from that
 fresh snapshot. Use it only from the intended admin environment for the smoke
