@@ -971,8 +971,9 @@ policy-backed, DB-backed boundary. It accepts `mode: plan`, `mode: build`, or
 does not land original PRs. Plan mode reads a fresh snapshot and reports a
 selected queue block before stack discovery, without writing another collapse
 plan for a failed or conflicting root's still-open carried child. Saved collapse
-proof remains unchanged, and failure policy still decides whether selection
-pauses or proceeds to a later eligible PR. Otherwise plan mode discovers stacks
+proof remains unchanged. Plan mode does not apply the blocked label or advance
+past that root; failure policy governs continuation after the label is applied
+by another step. Otherwise plan mode discovers stacks
 before recording eligible queued PRs as one candidate. The candidate base SHA
 comes from the live base branch head, not from any individual pull request's base
 metadata, so stale or ineligible open PRs cannot move the candidate off the target branch. Build
