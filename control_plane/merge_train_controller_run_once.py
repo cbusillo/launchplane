@@ -517,6 +517,7 @@ def execute_merge_train_controller_with_client(
                 },
             )
         raise
+    _expose_persisted_conflict_holds(result)
     run_once_result = MergeTrainControllerRunOnceResult(
         accepted_result=result,
         records=_records_for_result(result),
@@ -2139,6 +2140,16 @@ def _advance_active_candidate_record(
                         MergeTrainBatchHeldOutEntry(
                             pull_request_number=error.pull_request_number,
                             head_sha=error.head_sha,
+                            probe_base_sha=active_candidate_record.candidate.base_sha,
+                            conflicts_with_head_shas=tuple(
+                                entry.head_sha
+                                for entry in active_candidate_record.candidate.entries
+                                if entry.pull_request_number
+                                in _entries_ahead_of(
+                                    candidate=active_candidate_record.candidate,
+                                    pull_request_number=error.pull_request_number,
+                                )
+                            ),
                             conflicts_with=_entries_ahead_of(
                                 candidate=active_candidate_record.candidate,
                                 pull_request_number=error.pull_request_number,
@@ -2265,7 +2276,10 @@ def _reflow_stale_candidate_record(
         base_branch=request.base_branch,
     )
     candidate_snapshot = _without_held_out_pull_requests(
-        snapshot=snapshot, held_out=candidate_record.candidate.held_out
+        snapshot=snapshot,
+        held_out=_surviving_held_out_entries(
+            policy=policy, snapshot=snapshot, held_out=candidate_record.candidate.held_out
+        ),
     )
     stack_collapse_root = candidate_record.candidate.stack_collapse_root
     if stack_collapse_root is not None:
@@ -2668,7 +2682,9 @@ def _advance_without_candidate_record(
         assert snapshot is not None
         queue_snapshot = _without_held_out_pull_requests(
             snapshot=snapshot,
-            held_out=_surviving_held_out_entries(snapshot=snapshot, held_out=held_out),
+            held_out=_surviving_held_out_entries(
+                policy=policy, snapshot=snapshot, held_out=held_out
+            ),
         )
         queue_result = build_merge_train_dry_run_result(
             policy=policy,
@@ -3103,7 +3119,7 @@ def _advance_from_live_snapshot(
             repository=request.repository,
             base_branch=request.base_branch,
         )
-    held_out = _surviving_held_out_entries(snapshot=snapshot, held_out=held_out)
+    held_out = _surviving_held_out_entries(policy=policy, snapshot=snapshot, held_out=held_out)
     snapshot = _without_held_out_pull_requests(snapshot=snapshot, held_out=held_out)
     dry_run_result = build_merge_train_dry_run_result(
         policy=policy, snapshot=snapshot, batch_landing=lease.record.ordinary_job_binding is None
@@ -3389,7 +3405,7 @@ def try_reflow_failed_merge_train_candidate(
     except Exception:
         return None
     held_out = _surviving_held_out_entries(
-        snapshot=snapshot, held_out=active_candidate_record.candidate.held_out
+        policy=policy, snapshot=snapshot, held_out=active_candidate_record.candidate.held_out
     )
     snapshot = _without_held_out_pull_requests(snapshot=snapshot, held_out=held_out)
     dry_run_result = build_merge_train_dry_run_result(
@@ -3908,7 +3924,7 @@ def _probe_queue_entry_conflicts(
     report: dict[str, object] = {
         "status": "ran",
         "pull_request_numbers": probed_pull_request_numbers,
-        "held_out": [entry.model_dump(mode="json") for entry in conflicts],
+        "held_out": [_held_out_diagnostic(entry) for entry in conflicts],
     }
     if not conflicts:
         return replace(unchanged, report=report)
@@ -3940,7 +3956,7 @@ def _stop_failed_batch_after_conflict_probe(
 
     The failed candidate keeps its status and retry budget. Its new held-out
     entries keep later passes from probing the same conflict again, until the
-    held-out pull request's head changes.
+    hold's head or probed base/preceding lineage changes.
     """
     failed = active_candidate_record.candidate
     record_id = active_candidate_record.record_id
@@ -3986,17 +4002,56 @@ def _entries_ahead_of(
     return tuple(ahead)
 
 
+def _held_out_diagnostic(entry: MergeTrainBatchHeldOutEntry) -> dict[str, object]:
+    return entry.model_dump(
+        mode="json", include={"pull_request_number", "head_sha", "reason", "conflicts_with"}
+    )
+
+
+def _expose_persisted_conflict_holds(result: dict[str, object]) -> None:
+    candidate = result.get("candidate")
+    if not isinstance(candidate, dict) or not candidate.get("held_out"):
+        return
+    holds = tuple(
+        MergeTrainBatchHeldOutEntry.model_validate(entry) for entry in candidate["held_out"]
+    )
+    probe = result.get("conflict_probe")
+    if isinstance(probe, dict):
+        probe["held_out"] = [_held_out_diagnostic(entry) for entry in holds]
+    else:
+        result["conflict_probe"] = {
+            "status": "persisted",
+            "pull_request_numbers": [],
+            "held_out": [_held_out_diagnostic(entry) for entry in holds],
+        }
+
+
 def _surviving_held_out_entries(
     *,
+    policy: MergeTrainPolicy,
     snapshot: MergeTrainDryRunSnapshot,
     held_out: tuple[MergeTrainBatchHeldOutEntry, ...],
 ) -> tuple[MergeTrainBatchHeldOutEntry, ...]:
-    current = {
-        (pull_request.number, pull_request.head_sha) for pull_request in snapshot.pull_requests
-    }
-    return tuple(
-        entry for entry in held_out if (entry.pull_request_number, entry.head_sha) in current
-    )
+    if not held_out:
+        return ()
+    queue = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot).queue
+    holds = {entry.pull_request_number: entry for entry in held_out}
+    preceding: list[tuple[int, str]] = []
+    surviving: list[MergeTrainBatchHeldOutEntry] = []
+    for entry in queue:
+        if not entry.eligible:
+            continue
+        hold = holds.get(entry.number)
+        if (
+            hold is not None
+            and hold.head_sha == entry.head_sha
+            and hold.probe_base_sha == snapshot.base_sha
+            and tuple(zip(hold.conflicts_with, hold.conflicts_with_head_shas)) == tuple(preceding)
+        ):
+            surviving.append(hold)
+        else:
+            preceding.append((entry.number, entry.head_sha))
+    return tuple(surviving)
 
 
 def _without_held_out_pull_requests(
@@ -4004,12 +4059,7 @@ def _without_held_out_pull_requests(
     snapshot: MergeTrainDryRunSnapshot,
     held_out: tuple[MergeTrainBatchHeldOutEntry, ...],
 ) -> MergeTrainDryRunSnapshot:
-    """Leave out pull requests a candidate holds out, while their heads are unchanged.
-
-    A pull request that conflicted with the candidate built before it stays out
-    of replacement candidates, so the rest of the queue can land. A new head
-    brings it back.
-    """
+    """Remove the already-applicable holds from a planning snapshot."""
     held = {(entry.pull_request_number, entry.head_sha) for entry in held_out}
     if not held:
         return snapshot

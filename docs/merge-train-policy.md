@@ -634,10 +634,21 @@ pull request and head is recorded as `held_out` with reason `entry_conflict` and
 `conflicts_with`, the pull requests accepted ahead of it (empty when it does not
 merge onto the base). The controller result reports the probe as
 `conflict_probe`, and PR feedback tells each held-out pull request which pull
-requests it conflicts with. Later candidates carry the hold-out forward while
-its head is unchanged, so the rest of the queue lands. A new head brings it
-back into the queue; until then, its author resolves the conflict, typically
-after the others land. When the probe reduces a changed queue back to a failed
+requests it conflicts with. Each hold also records `probe_base_sha` and the
+ordered `conflicts_with_head_shas`. Later candidates carry it forward only while
+the base, held head, and accepted preceding PR/head sequence are unchanged. A
+changed base or preceding membership/head permits a fresh observation without
+requiring a speculative PR refresh. Legacy holds without probe lineage are
+re-observed once; their missing history is not reconstructed. Trailing queue
+additions do not invalidate a hold. An unchanged real conflict stays held and
+does not spend the failed-batch body-retry budget.
+
+Active candidate responses expose persisted holds through `conflict_probe` with
+`status: persisted` and an empty probed-PR list when this pass ran no probe.
+The public hold projection contains only PR number, head, reason, and preceding
+PR numbers, preserving the supported helper's strict shape. Store-only controller
+status includes the same bounded metadata in each candidate summary's `held_out`;
+it reports stored observations without claiming fresh provider evidence. When the probe reduces a changed queue back to a failed
 batch's membership, the batch stays stopped and keeps its retry budget; the
 failed candidate records the new hold-out, and feedback says the batch ahead is
 stopped, so later passes do not probe the same conflict again. A dry run writes

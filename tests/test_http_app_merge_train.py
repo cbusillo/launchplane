@@ -3096,6 +3096,8 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                     "head_sha": "head-2",
                     "reason": "entry_conflict",
                     "conflicts_with": [1],
+                    "probe_base_sha": results[0]["candidate"]["base_sha"],
+                    "conflicts_with_head_shas": ["head-1"],
                 }
             ],
         )
@@ -3253,7 +3255,17 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             ],
             [(2, [1])],
         )
-        self.assertEqual(results[0]["conflict_probe"]["held_out"], planned["held_out"])
+        self.assertEqual(
+            results[0]["conflict_probe"]["held_out"],
+            [
+                {
+                    key: value
+                    for key, value in entry.items()
+                    if key in {"pull_request_number", "head_sha", "reason", "conflicts_with"}
+                }
+                for entry in planned["held_out"]
+            ],
+        )
         self.assertEqual(probe_executor.ref_events[0][0], "prepare")
         self.assertEqual(probe_executor.ref_events[-1], ("delete", probe_executor.probe_ref))
         self.assertEqual(

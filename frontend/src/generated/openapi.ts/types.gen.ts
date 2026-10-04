@@ -1241,6 +1241,7 @@ export type MergeTrainControllerRecordSummary = {
     batch_id: string;
     blocked_count: number;
     candidate_sha: string;
+    held_out: Array<MergeTrainHeldOutSummary>;
     merged_count: number;
     planned_count: number;
     policy_key: string;
@@ -1341,6 +1342,13 @@ export type MergeTrainGitHubTokenSource = {
     env_var: string;
     github_app?: MergeTrainGitHubAppSource | null;
     runtime_context?: string;
+};
+
+export type MergeTrainHeldOutSummary = {
+    conflicts_with: Array<number>;
+    head_sha: string;
+    pull_request_number: number;
+    reason: 'entry_conflict';
 };
 
 export type MergeTrainIdentity = {

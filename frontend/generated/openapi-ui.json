@@ -14594,6 +14594,14 @@
             "title": "Candidate Sha",
             "type": "string"
           },
+          "held_out": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/MergeTrainHeldOutSummary"
+            },
+            "title": "Held Out",
+            "type": "array"
+          },
           "merged_count": {
             "default": 0,
             "title": "Merged Count",
@@ -14673,6 +14681,7 @@
           "batch_id",
           "blocked_count",
           "candidate_sha",
+          "held_out",
           "merged_count",
           "planned_count",
           "policy_key",
@@ -15170,6 +15179,40 @@
         "required": [
           "env_var"
         ]
+      },
+      "MergeTrainHeldOutSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "conflicts_with": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Conflicts With",
+            "type": "array"
+          },
+          "head_sha": {
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "pull_request_number": {
+            "title": "Pull Request Number",
+            "type": "integer"
+          },
+          "reason": {
+            "const": "entry_conflict",
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "conflicts_with",
+          "head_sha",
+          "pull_request_number",
+          "reason"
+        ],
+        "title": "MergeTrainHeldOutSummary",
+        "type": "object"
       },
       "MergeTrainIdentity": {
         "additionalProperties": false,
