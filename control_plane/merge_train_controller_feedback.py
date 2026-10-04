@@ -43,7 +43,9 @@ def build_feedback_payloads(
     if event == "skip":
         return []
 
-    pull_request_numbers = _pull_request_numbers(result)
+    pull_request_numbers = _pull_request_numbers(
+        result, controller_action=controller_action, phase=phase
+    )
     if not pull_request_numbers:
         return []
 
@@ -53,6 +55,7 @@ def build_feedback_payloads(
         event=event,
         result=result,
         controller_record_id=controller_record_id,
+        phase=phase,
     )
     payloads: list[dict[str, object]] = [
         {
@@ -114,6 +117,10 @@ def _controller_action(*, result: dict[str, Any], phase: str) -> str:
 def _batch_candidate_plan_action(result: dict[str, Any]) -> str:
     if _as_dict(result.get("stack_collapse_plan")):
         return "plan_stack_collapse"
+    if not _as_dict(result.get("candidate")):
+        next_action = _string(result.get("next_action"))
+        if next_action in {"block", "wait_for_checks", "update_branch", "stack_unsupported"}:
+            return next_action
     return "plan_candidate"
 
 
@@ -146,7 +153,12 @@ def _response_identity(*, result: dict[str, Any], phase: str) -> tuple[str, str]
                 secondary=dry_run_result,
                 secondary_name="candidate dry-run result",
             )
-        if _string(result.get("next_action")) == "stack_unsupported":
+        if _string(result.get("next_action")) in {
+            "block",
+            "wait_for_checks",
+            "update_branch",
+            "stack_unsupported",
+        }:
             return _container_identity(dry_run_result, "candidate dry-run result")
         raise ValueError("batch-candidate response missing candidate or stack collapse plan")
 
@@ -231,6 +243,7 @@ def _feedback_message(
     event: str,
     result: dict[str, Any],
     controller_record_id: str,
+    phase: str,
 ) -> str:
     if event == "completed":
         batch_pr = _as_dict(result.get("landing_plan")).get("candidate_pull_request_number")
@@ -241,6 +254,18 @@ def _feedback_message(
         return "Launchplane stopped using this train record because its stored evidence is stale."
     if event == "blocked":
         detail = _blocking_detail(result)
+        if (
+            phase == "batch-candidate"
+            and controller_action == "block"
+            and "candidate" not in result
+        ):
+            selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))
+            if selected.get("mergeable") == "conflicting":
+                detail = "pull request has merge conflicts"
+            elif selected.get("required_checks_status") == "fail" and (
+                selected.get("owner_review_required") is not True
+            ):
+                detail = "required checks failed"
         if detail:
             return f"Launchplane needs attention before the train can continue: {detail}"
         return "Launchplane needs attention before the train can continue."
@@ -325,15 +350,19 @@ def _held_out_messages(
     return messages
 
 
-def _pull_request_numbers(result: dict[str, Any]) -> list[int]:
-    if _string(result.get("controller_action")) in {"wait_for_checks", "block"} and (
-        "candidate" not in result
-    ):
+def _pull_request_numbers(
+    result: dict[str, Any], *, controller_action: str, phase: str
+) -> list[int]:
+    selected_actions = {"wait_for_checks", "block"}
+    if phase == "batch-candidate":
+        selected_actions.add("update_branch")
+    if controller_action in selected_actions and "candidate" not in result:
         selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))
         number = selected.get("number")
         # Client review waits are reported before a candidate exists, too.
         if (
-            "merge_train_batch_candidate_record_id" in result
+            phase == "batch-candidate"
+            or "merge_train_batch_candidate_record_id" in result
             or selected.get("owner_review_required") is True
         ) and (isinstance(number, int) and number > 0):
             return [number]
