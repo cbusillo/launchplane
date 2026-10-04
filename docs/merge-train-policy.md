@@ -639,12 +639,17 @@ ordered `conflicts_with_head_shas`. Later candidates carry it forward only while
 the base, held head, and accepted preceding PR/head sequence are unchanged. A
 changed base or preceding membership/head permits a fresh observation without
 requiring a speculative PR refresh. Legacy holds without probe lineage are
-re-observed once; their missing history is not reconstructed. Trailing queue
+re-observed once; their missing history is not reconstructed. On the first
+mutating pass, this may supersede and rebuild an in-flight candidate and close
+its service batch PR, so its CI runs once more. Trailing queue
 additions do not invalidate a hold. An unchanged real conflict stays held and
 does not spend the failed-batch body-retry budget.
 
 Active candidate responses expose persisted holds through `conflict_probe` with
 `status: persisted` and an empty probed-PR list when this pass ran no probe.
+When `status` is `ran` or `will_run`, `held_out` still includes earlier persisted
+observations; `pull_request_numbers` identifies only this pass's actual or
+planned probe. A diagnostic hold list alone is not proof of a fresh probe.
 The public hold projection contains only PR number, head, reason, and preceding
 PR numbers, preserving the supported helper's strict shape. Store-only controller
 status includes the same bounded metadata in each candidate summary's `held_out`;
