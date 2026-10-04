@@ -310,7 +310,7 @@ def _changed_policy_record(fixture: _HistoricalCompletionFixture) -> MergeTrainP
     changed_repository_policy = repository_policy.model_copy(
         update={
             "github_token": repository_policy.github_token.model_copy(
-                update={"env_var": "OTHER_GH_TOKEN"}
+                update={"runtime_context": "replacement_context"}
             )
         }
     )
@@ -1015,6 +1015,13 @@ class NativeHistoricalDispositionPostgresTests(unittest.TestCase):
 
 
 class HistoricalFollowupFixtureTests(unittest.TestCase):
+    def test_authority_change_fixture_builds_a_valid_replacement_policy(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _HistoricalCompletionFixture(Path(directory))
+            changed = _changed_policy_record(fixture)
+            changed.policy.require_supported_token_sources()
+            self.assertNotEqual(changed.policy_sha256, fixture.policy_record.policy_sha256)
+
     def test_followup_orders_after_the_successor_even_past_the_old_fixture_date(self) -> None:
         with TemporaryDirectory() as directory:
             fixture = _HistoricalCompletionFixture(Path(directory))

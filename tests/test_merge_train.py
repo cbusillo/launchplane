@@ -1218,7 +1218,7 @@ action = "{repository_policy.service_authz.action}"
 product = "{repository_policy.service_authz.product}"
 context = "{repository_policy.service_authz.context}"
 [policies.github_token]
-env_var = "{repository_policy.github_token.env_var}"
+runtime_context = "{repository_policy.github_token.runtime_context}"
 """
         )
     policy_file.write_text("\n\n".join(("schema_version = 1", *tables)), encoding="utf-8")
