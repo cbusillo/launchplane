@@ -2636,6 +2636,25 @@ def _advance_without_candidate_record(
         if pending_wait_result is None:
             pending_wait_result = waiting_result
     if pending_wait_result is not None:
+        assert snapshot is not None
+        queue_snapshot = _without_held_out_pull_requests(
+            snapshot=snapshot,
+            held_out=_surviving_held_out_entries(snapshot=snapshot, held_out=held_out),
+        )
+        queue_result = build_merge_train_dry_run_result(
+            policy=policy,
+            snapshot=queue_snapshot,
+            batch_landing=lease.record.ordinary_job_binding is None,
+        )
+        # Pending saved checks must not hide the ordinary queue's blocking reason.
+        if queue_result.intended_next_action == "block":
+            return {
+                "repository": request.repository,
+                "base_branch": request.base_branch,
+                "mode": "dry-run",
+                "controller_action": "block",
+                "dry_run_result": queue_result.model_dump(mode="json"),
+            }
         return pending_wait_result
 
     return _advance_from_live_snapshot(
