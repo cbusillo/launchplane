@@ -37354,6 +37354,11 @@ class PostgresRecordStore(HumanSessionStore):
             limit=2,
         )
 
+    def create_product_retirement_secret_audit_event(self, event: SecretAuditEvent) -> None:
+        with self._session_factory() as session:
+            session.add(self._secret_audit_event_row(event))
+            session.commit()
+
     def write_secret_audit_event(self, event: SecretAuditEvent) -> None:
         self._write_row(self._secret_audit_event_row(event))
 
