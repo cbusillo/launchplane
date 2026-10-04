@@ -21,7 +21,7 @@ from control_plane.merge_train import (
 from control_plane.merge_train_batch_candidate import (
     MergeTrainBatchCandidateRecordStore,
     MergeTrainStackCollapsePlanRecordStore as MergeTrainStackCollapsePlanRecordStore,
-    require_merge_train_stack_collapse_plan_record_store as require_merge_train_stack_collapse_plan_record_store,
+    require_merge_train_stack_collapse_plan_record_store as _require_stack_collapse_store,
 )
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
@@ -64,6 +64,12 @@ class MergeTrainStackCollapsePlanRecordNotFoundError(ValueError):
 
 class MergeTrainStackCollapseBatchCandidateStoreMissingError(RuntimeError):
     """Raised when admit mode lacks batch-candidate persistence."""
+
+
+def require_merge_train_stack_collapse_plan_record_store(
+    record_store: object,
+) -> MergeTrainStackCollapsePlanRecordStore:
+    return _require_stack_collapse_store(record_store)
 
 
 @dataclass(frozen=True)
