@@ -810,6 +810,8 @@ def _reconcile(
                 response_trace_id=response_trace_id,
                 lease_seconds=lease_seconds,
                 heartbeat_interval_seconds=heartbeat_interval_seconds,
+                # A retry's fresh checkpoint state cannot erase an earlier uncertain effect.
+                release_pre_effect_failures=not provider_effect_started,
             )
     if observation.outcome != "present":
         return DurableProviderOperationResult(

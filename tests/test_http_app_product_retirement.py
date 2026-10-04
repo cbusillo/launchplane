@@ -865,7 +865,15 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(record.outcome == "started" for record in records), 1)
 
     async def test_tracked_uncertain_completion_retry_preserves_conflict_guards(self) -> None:
-        for change in ("key", "request", "plan", "observation", "unknown", "unchanged"):
+        for change in (
+            "key",
+            "request",
+            "plan",
+            "observation",
+            "unknown",
+            "retry_observation",
+            "unchanged",
+        ):
             with self.subTest(change=change), TemporaryDirectory() as directory:
                 store = self._store(Path(directory))
                 app = self._app(
@@ -928,6 +936,8 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 ]
                 if change == "unchanged":
                     observations = [_observation(), _observation(), _absent_observation()]
+                elif change == "retry_observation":
+                    observations = [_observation(), TimeoutError("retry observation unavailable")]
                 with (
                     patch(
                         "control_plane.product_retirement.observe_tracked_dokploy_application",
@@ -963,6 +973,18 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                         "retiring",
                     )
                     delete.assert_not_called()
+                    held = store.read_idempotency_record(
+                        scope=idempotency_scope(
+                            LocalOperatorIdentity(
+                                subject="local-owner-agent", token_label="local-owner-write"
+                            )
+                        ),
+                        route_path="/v1/product-retirement",
+                        idempotency_key=self.headers["Idempotency-Key"],
+                    )
+                    self.assertIsNotNone(held)
+                    assert held is not None
+                    self.assertEqual(held.state, "reconcile_required")
                 store.close()
 
     async def test_provider_failure_persists_reconciliation_and_retiring_lifecycle(self) -> None:
