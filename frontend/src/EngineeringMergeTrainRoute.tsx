@@ -436,7 +436,7 @@ function ControllerStatus({
         <section className="engineering-latest-run">
           <ListChecks size={19} aria-hidden="true" />
           <div>
-            <span className="engineering-kicker">Latest ordered-queue run</span>
+            <span className="engineering-kicker">Stored ordered-queue run</span>
             <h2>{humanize(status.latest_run.status)}</h2>
             <p>
               {status.latest_run.selected_pr_number
@@ -447,6 +447,9 @@ function ControllerStatus({
           <code>{status.latest_run.run_id}</code>
           <time dateTime={status.latest_run.recorded_at}>
             {formatTime(status.latest_run.recorded_at)}
+            {status.latest_run_age_seconds != null
+              ? ` · ${formatAge(status.latest_run_age_seconds)} old`
+              : ""}
           </time>
         </section>
       ) : null}

@@ -346,6 +346,15 @@ def build_merge_train_controller_status_read_model(
         poll_interval_seconds=poll_interval_seconds,
         backoff_seconds=backoff_seconds,
     )
+    latest_run_age_seconds: int | None = None
+    if latest_run is not None:
+        try:
+            latest_run_age_seconds = _timestamp_age_seconds(
+                generated_at=generated_at, timestamp=latest_run.recorded_at
+            )
+        except ValueError:
+            # Imported Level 1 dry-run history may not contain a parseable date.
+            pass
     return MergeTrainControllerStatusReadModel(
         repository=repository,
         base_branch=base_branch,
@@ -355,10 +364,7 @@ def build_merge_train_controller_status_read_model(
         admission=admission,
         latest_run=latest_run,
         latest_run_source="level1" if latest_run is not None else None,
-        latest_run_age_seconds=_timestamp_age_seconds(
-            generated_at=generated_at,
-            timestamp=latest_run.recorded_at if latest_run is not None else "",
-        ),
+        latest_run_age_seconds=latest_run_age_seconds,
         latest_dry_run=_summarize_latest_dry_run(latest_run),
         controller_state=controller_state,
         controller_diagnostics=_controller_lease_diagnostics(

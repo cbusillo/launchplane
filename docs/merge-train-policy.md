@@ -1294,6 +1294,8 @@ that historical evidence, not the last controller pass or a current queue
 observation. Admission continues to use that Level 1 history for its existing
 poll/backoff rules; a newer idle Level 1 run also supersedes older controller
 records before current-policy filtering produces the action hint.
+If an imported dry-run record has an unparseable timestamp, its age is null;
+the stored history and existing scheduling decision remain visible.
 
 The response also includes the
 controller lease holder, active action and phase, lease and heartbeat age, reconciliation

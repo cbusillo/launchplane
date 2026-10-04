@@ -558,6 +558,20 @@ class MergeTrainAdmissionTests(unittest.TestCase):
         self.assertEqual(read_model.admission.controller_action, "build_candidate")
         self.assertEqual(read_model.controller_records[0].record_id, candidate_record.record_id)
 
+    def test_controller_status_preserves_undated_level1_dry_run_history(self) -> None:
+        run = _run_record(recorded_at="legacy-import-without-date")
+        read_model = build_merge_train_controller_status_read_model(
+            store=_RunHistoryStore(run),
+            repository=run.repository,
+            base_branch=run.base_branch,
+            generated_at="2026-10-04T09:10:59Z",
+        )
+
+        self.assertEqual(read_model.latest_run, run)
+        self.assertEqual(read_model.latest_run_source, "level1")
+        self.assertIsNone(read_model.latest_run_age_seconds)
+        self.assertTrue(read_model.admission.admitted)
+
     def test_controller_status_marks_stale_policy_records_without_action(self) -> None:
         candidate_record = _candidate_record(status="planned")
         store = _RunHistoryStore(None, candidate_records=(candidate_record,))
