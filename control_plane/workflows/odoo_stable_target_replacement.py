@@ -88,6 +88,10 @@ from control_plane.dokploy import post_deploy as dokploy_post_deploy
 from control_plane.dokploy.api import JsonObject, JsonValue
 
 
+# The checkpoint immediately before a replacement first writes to the provider.
+TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE = "target_replacement_raw_source"
+
+
 class OdooTargetReplacementStageError(click.ClickException):
     """A check or step outside the driver's recorded results failed.
 
@@ -1976,7 +1980,7 @@ def execute_odoo_stable_target_replacement_apply(
             }
         )
         if provider_effect_checkpoint is not None:
-            provider_effect_checkpoint("target_replacement_raw_source")
+            provider_effect_checkpoint(TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
         raw_compose_evidence = dokploy_compose.sync_dokploy_compose_raw_source(
             host=host,
             token=token,

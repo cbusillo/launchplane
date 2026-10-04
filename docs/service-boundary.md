@@ -1691,7 +1691,9 @@ grant the worker re-checks against the active policy.
 The queued release routes `POST /v1/odoo-prod-promotions` and
 `POST /v1/odoo-prod-rollbacks`, and their cancel routes, accept only a signed-in
 GitHub human whom the active policy names as administrator; every other caller
-gets `authorization_denied`, whatever rules it holds.
+gets `authorization_denied`, whatever rules it holds. Launchplane's worker also
+queues these operations, and the production backup, for a Client's accepted
+release under a `client_release_acceptance` grant; no route accepts one.
 
 Agent consumers use the same allow-list policy but are classified into a compact
 subject model before diagnostics or downstream intent contracts consume them:
@@ -4009,8 +4011,10 @@ is involved. A product without a Client returns `409 product_owner_not_set`
 `409 product_review_preview_unavailable`. Everyone else gets one closed
 `403 product_review_unavailable` that does not reveal whether the product or
 pull request exists. Repeating the latest identical decision for the same served
-preview reuses its record and retries pending feedback publication. A decision
-merges and deploys nothing. See [Client feedback delivery](owner-acceptance.md).
+preview reuses its record and retries pending feedback publication. A preview
+decision merges and deploys nothing. See [Client feedback delivery](owner-acceptance.md).
+A Client's release acceptance can start the gated promotion; see
+[release review](release-review.md#acceptance-starts-the-release).
 
 `POST /v1/product-review/feedback/retry` takes `{repository, pull_request,
 decision_id}` using the same Client browser mutation identity and CSRF boundary.

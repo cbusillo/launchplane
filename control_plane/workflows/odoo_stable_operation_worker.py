@@ -56,6 +56,7 @@ from control_plane.contracts.odoo_target_replacement_failures import (
     deploy_failure_description,
 )
 from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
+from control_plane.client_release import advance_client_releases, client_release_grant_allows
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationDeniedError,
     DurableOperationAuthorizationGuard,
@@ -92,6 +93,7 @@ from control_plane.workflows.odoo_prod_retained_volume_backup_import import (
 )
 from control_plane.workflows.odoo_stable_target_replacement import (
     OdooStableTargetReplacementStore,
+    TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE,
     OdooTargetReplacementStageError,
     execute_odoo_stable_target_replacement_apply,
 )
@@ -107,6 +109,9 @@ from control_plane.product_reconcile import (
 DEFAULT_ODOO_STABLE_WORKER_LEASE_SECONDS = 300
 DEFAULT_ODOO_STABLE_WORKER_HEARTBEAT_SECONDS = 60
 DEFAULT_ODOO_STABLE_WORKER_POLL_SECONDS = 10
+# How often the worker queues the next step of Client releases. Each queueing
+# re-reads the release from GitHub, so it is slower than the operation poll.
+CLIENT_RELEASE_ADVANCE_SECONDS = 30
 DEFAULT_ODOO_STABLE_WORKER_ERROR_BACKOFF_SECONDS = 30
 DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS = 3
 DEFAULT_ODOO_STABLE_WORKER_MAX_CONSECUTIVE_ERRORS = 5
@@ -859,6 +864,7 @@ def run_odoo_stable_operation_worker_loop(
     error_count = 0
     consecutive_errors = 0
     last_sweep_at: float | None = None
+    last_client_release_advance_at: float | None = None
     while not worker_stop_event.is_set():
         if max_iterations is not None and iterations >= max_iterations:
             break
@@ -873,6 +879,19 @@ def run_odoo_stable_operation_worker_loop(
                 )
             except Exception:
                 logging.exception("Product reconcile sweep failed.")
+        if (
+            last_client_release_advance_at is None
+            or monotonic() - last_client_release_advance_at >= CLIENT_RELEASE_ADVANCE_SECONDS
+        ):
+            # Queues the next step of each Client release; a second replica finds the
+            # same operation ids, so a race queues nothing twice.
+            last_client_release_advance_at = monotonic()
+            try:
+                advance_client_releases(
+                    store=record_store, control_plane_root=control_plane_root_path
+                )
+            except Exception:
+                logging.exception("Client release advance failed.")
         try:
             result = run_odoo_stable_operation_worker_once(
                 record_store=record_store,
@@ -1401,6 +1420,7 @@ def _run_release_operation(
     read_current: Callable[[], Any],
     complete: Callable[[Any], bool],
     policy_record_reader: Callable[[], LaunchplaneAuthzPolicyRecord],
+    client_release_grant_allows: Callable[[DurableOperationAuthorization], bool],
     boundary_effects: frozenset[str],
     run: Callable[[Callable[[str], None], Callable[[str], None]], Any],
     terminal: Callable[[Any, Any], Any],
@@ -1429,6 +1449,7 @@ def _run_release_operation(
     authorization_guard = DurableOperationAuthorizationGuard(
         authorization=operation.authorization,
         policy_record_reader=policy_record_reader,
+        client_release_grant_allows=client_release_grant_allows,
     )
 
     def checkpoint_phase(phase: str) -> None:
@@ -1548,7 +1569,18 @@ def _execute_prod_promotion_operation(
             record=record, lease_owner=lease_owner
         ),
         policy_record_reader=lambda: read_active_authz_policy_record(record_store),
-        boundary_effects=frozenset({ODOO_LOGICAL_BACKUP_EFFECT, ODOO_PROD_DEPLOY_EFFECT}),
+        client_release_grant_allows=lambda authorization: client_release_grant_allows(
+            record_store, authorization
+        ),
+        # Authority is read again just before the deploy first writes to the provider,
+        # so a hold or newer decision during plan preparation still stops it.
+        boundary_effects=frozenset(
+            {
+                ODOO_LOGICAL_BACKUP_EFFECT,
+                ODOO_PROD_DEPLOY_EFFECT,
+                TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE,
+            }
+        ),
         run=run,
         terminal=terminal,
     )
@@ -1624,6 +1656,9 @@ def _execute_prod_rollback_operation(
             record=record, lease_owner=lease_owner
         ),
         policy_record_reader=lambda: read_active_authz_policy_record(record_store),
+        client_release_grant_allows=lambda authorization: client_release_grant_allows(
+            record_store, authorization
+        ),
         boundary_effects=frozenset(),
         run=run,
         terminal=terminal,
