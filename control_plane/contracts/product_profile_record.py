@@ -752,14 +752,14 @@ def is_exclusive_product_context(
 def product_target_owner_products(
     profiles: Iterable[LaunchplaneProductProfileRecord], *, context: str, instance: str = ""
 ) -> frozenset[str]:
-    """Owners of an exact lane, or every current/historical claim on a context."""
+    """Owners of a trimmed lane, or every current/historical claim on a context."""
     if not instance:
         return product_context_owner_map(profiles).get(context.lower(), frozenset())
     return frozenset(
         profile.product
         for profile in profiles
         if any(
-            lane.context.lower() == context.lower() and lane.instance == instance
+            lane.context.strip().lower() == context.lower() and lane.instance.strip() == instance
             for lane in profile.lanes
         )
     )

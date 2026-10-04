@@ -24,6 +24,26 @@ from tests.test_testing_lane_hold import _payload as hold_payload
 
 
 class LaneProductConfigCommitOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    async def test_padded_stored_lanes_apply_and_fence_foreign_normalized_claims(self) -> None:
+        for route, payload, writer in (
+            ("odoo-addon-settings", addon_payload(), "write_odoo_instance_override_record"),
+            (
+                "integration-allowances",
+                allowances_payload(),
+                "compare_and_write_dokploy_target_record",
+            ),
+            ("testing-hold", hold_payload(), "compare_and_write_dokploy_target_record"),
+        ):
+            for padding in ({"context": " cm\t"}, {"instance": " testing\n"}):
+                await self._apply_route(
+                    route,
+                    payload,
+                    writer,
+                    caller="github_actions",
+                    padding=padding,
+                    scenarios=("unchanged", "shared_context", "duplicate_lane", "reassigned"),
+                )
+
     async def test_addon_settings_refuse_context_reassignment_at_commit(self) -> None:
         await self._apply_route(
             "odoo-addon-settings", addon_payload(), "write_odoo_instance_override_record"
@@ -75,12 +95,18 @@ class LaneProductConfigCommitOwnershipTests(unittest.IsolatedAsyncioTestCase):
         writer_name: str,
         *,
         caller: str = "local_operator",
+        padding: dict[str, str] | None = None,
+        scenarios: tuple[str, ...] = ("unchanged", "reassigned", "shared_context", "lost_instance"),
     ) -> None:
         for store_type in (FilesystemRecordStore, PostgresRecordStore):
-            for scenario in ("unchanged", "reassigned", "shared_context", "lost_instance"):
+            for scenario in scenarios:
                 with (
                     self.subTest(
-                        route=route, store=store_type.__name__, caller=caller, scenario=scenario
+                        route=route,
+                        store=store_type.__name__,
+                        caller=caller,
+                        scenario=scenario,
+                        padding=padding,
                     ),
                     TemporaryDirectory() as directory,
                 ):
@@ -97,6 +123,18 @@ class LaneProductConfigCommitOwnershipTests(unittest.IsolatedAsyncioTestCase):
                     profile = LaunchplaneProductProfileRecord.model_validate(
                         _odoo_profile_payload_with_prod_lane()
                     )
+                    if padding and scenario != "duplicate_lane":
+                        profile = LaunchplaneProductProfileRecord.model_validate(
+                            {
+                                **profile.model_dump(),
+                                "lanes": [
+                                    {**lane.model_dump(), **padding}
+                                    if lane.instance == "testing"
+                                    else lane.model_dump()
+                                    for lane in profile.lanes
+                                ],
+                            }
+                        )
                     store.write_product_profile_record(profile)
                     _seed_lane(store)
                     identity = _identity()
@@ -177,15 +215,20 @@ class LaneProductConfigCommitOwnershipTests(unittest.IsolatedAsyncioTestCase):
                                     }
                                 )
                             )
-                        if scenario in ("reassigned", "shared_context"):
+                        if scenario in ("reassigned", "shared_context", "duplicate_lane"):
                             store.write_product_profile_record(
                                 profile.model_copy(
                                     update={
                                         "product": "other-product",
                                         "lanes": tuple(
-                                            lane
+                                            lane.model_copy(update=padding)
+                                            if scenario == "duplicate_lane"
+                                            and padding
+                                            and lane.instance == "testing"
+                                            else lane
                                             for lane in profile.lanes
-                                            if scenario == "reassigned" or lane.instance == "prod"
+                                            if scenario in ("reassigned", "duplicate_lane")
+                                            or lane.instance == "prod"
                                         ),
                                     }
                                 )
@@ -203,7 +246,7 @@ class LaneProductConfigCommitOwnershipTests(unittest.IsolatedAsyncioTestCase):
                             payload=apply_payload,
                         )
                     writer.assert_called_once()
-                    refused = scenario in ("reassigned", "lost_instance") or (
+                    refused = scenario in ("reassigned", "lost_instance", "duplicate_lane") or (
                         caller == "local_operator" and scenario == "shared_context"
                     )
                     context_refused = caller == "local_operator" and scenario != "lost_instance"
@@ -228,6 +271,9 @@ class LaneProductConfigCommitOwnershipTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(store.list_odoo_instance_override_records(), ())
                     else:
                         self.assertTrue(response.json()["result"]["applied"])
+                        self.assertEqual(
+                            store.read_product_profile_record(profile.product), profile
+                        )
                     if isinstance(store, PostgresRecordStore):
                         self.assertEqual(store.list_product_reconcile_requests(), ())
                         store.close()
