@@ -15832,6 +15832,32 @@ def create_launchplane_fastapi_app(
             }
             if idempotency_key.strip():
                 try:
+                    replay_profile = (
+                        control_plane_product_config_service.resolve_product_config_profile(
+                            database_store,
+                            product=profile.product,
+                            context=lane.context.strip(),
+                            instance=lane.instance.strip(),
+                        )
+                    )
+                except control_plane_product_config.ProductConfigError as error:
+                    profile_error = (
+                        control_plane_product_config_service.product_config_service_error(error)
+                    )
+                    raise _launchplane_http_error(
+                        status_code=profile_error.status_code,
+                        trace_id=trace_id,
+                        code=profile_error.code,
+                        message=profile_error.message,
+                    ) from error
+                if replay_profile != profile:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="product_profile_conflict",
+                        message="The product configuration changed. Refresh and run a new dry-run.",
+                    )
+                try:
                     _, _, replay_response = await replay_apply_idempotency(
                         request=request,
                         record_store=database_store,
@@ -15928,11 +15954,7 @@ def create_launchplane_fastapi_app(
                     environment=lane.instance,
                 ),
                 idempotency_request_payload=idempotency_request_payload,
-                expected_product_profile=profile
-                if any(
-                    item.owner_submission_version_id for item in environment_request.managed_secrets
-                )
-                else None,
+                expected_product_profile=profile,
             )
         except ProductProfileConflictError as error:
             raise _launchplane_http_error(

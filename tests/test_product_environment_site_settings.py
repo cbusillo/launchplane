@@ -3,12 +3,14 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import BearerIdentityConfig
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from tests.http_app_test_support import (
     _AsgiResponse,
     _post_product_environment_config_apply,
@@ -153,6 +155,84 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
                 self.assertEqual(response.status_code, 400, response.text)
                 self.assertEqual(response.json()["error"]["code"], "runtime_setting_refused")
         self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
+
+    async def test_retirement_replay_refuses_a_foreign_duplicate_lane_claim(self) -> None:
+        change: dict[str, object] = {"retired_provider_keys": ["LEGACY_TUNING"]}
+        review = await self._submit({"mode": "dry-run", **change})
+        self.assertEqual(review.status_code, 202, review.text)
+        payload = {"mode": "apply", "confirmation": "APPLY example-site/testing", **change}
+        applied = await self._submit(payload, idempotency_key="retirement-ownership")
+        self.assertEqual(applied.status_code, 202, applied.text)
+        self.store.write_product_profile_record(
+            _profile().model_copy(update={"product": "other-site"})
+        )
+        before = self.store.list_runtime_environment_records()
+        with patch.object(self.store, "write_product_authority_bundle") as writer:
+            replay = await self._submit(payload, idempotency_key="retirement-ownership")
+        self.assertEqual(replay.status_code, 403, replay.text)
+        self.assertEqual(replay.json()["error"]["code"], "product_config_lane_not_owned")
+        writer.assert_not_called()
+        self.assertEqual(self.store.list_runtime_environment_records(), before)
+        self.assertEqual(self.store.list_secret_records(), ())
+
+    async def test_plain_settings_pin_the_profile_used_to_construct_the_request(self) -> None:
+        change: dict[str, object] = {"runtime_settings": {"SITE_BASE_URL": "https://site.invalid"}}
+        review = await self._submit({"mode": "dry-run", **change})
+        self.assertEqual(review.status_code, 202, review.text)
+        original_read = self.store.read_product_profile_record
+        for mode in ("dry-run", "apply"):
+            with self.subTest(mode=mode):
+                self.store.write_product_profile_record(_profile())
+                read_count = 0
+
+                def change_before_second_read(product: str) -> LaunchplaneProductProfileRecord:
+                    nonlocal read_count
+                    read_count += 1
+                    if read_count == 2:
+                        self.store.write_product_profile_record(_profile(production_use="live"))
+                    return original_read(product)
+
+                with (
+                    patch.object(
+                        self.store,
+                        "read_product_profile_record",
+                        side_effect=change_before_second_read,
+                    ),
+                    patch.object(self.store, "write_product_authority_bundle") as writer,
+                ):
+                    response = await self._submit(
+                        {"mode": mode, "confirmation": "APPLY example-site/testing", **change},
+                        idempotency_key=f"profile-snapshot-{mode}",
+                    )
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(response.json()["error"]["code"], "product_profile_conflict")
+                writer.assert_not_called()
+                self.assertEqual(
+                    self.store.list_runtime_environment_records(), (_runtime_record(),)
+                )
+                self.assertEqual(self.store.list_secret_records(), ())
+
+    async def test_plain_settings_profile_change_at_commit_refuses_atomically(self) -> None:
+        change: dict[str, object] = {"runtime_settings": {"SITE_BASE_URL": "https://site.invalid"}}
+        review = await self._submit({"mode": "dry-run", **change})
+        self.assertEqual(review.status_code, 202, review.text)
+        original_write = self.store.write_product_authority_bundle
+
+        def change_then_write(bundle: ProductAuthorityBundle) -> None:
+            self.store.write_product_profile_record(_profile(production_use="live"))
+            original_write(bundle)
+
+        with patch.object(
+            self.store, "write_product_authority_bundle", side_effect=change_then_write
+        ):
+            response = await self._submit(
+                {"mode": "apply", "confirmation": "APPLY example-site/testing", **change},
+                idempotency_key="profile-at-commit",
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], "product_profile_conflict")
+        self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
+        self.assertEqual(self.store.list_secret_records(), ())
 
     async def test_retirement_keeps_the_product_config_guards(self) -> None:
         declared = await self._submit({"mode": "dry-run", "retired_provider_keys": ["APP_THEME"]})
