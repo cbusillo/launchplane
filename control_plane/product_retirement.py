@@ -115,6 +115,8 @@ class ProductRetirementStore(Protocol):
 
     def write_secret_audit_event(self, event: SecretAuditEvent) -> object: ...
 
+    def list_secret_audit_events(self, *, secret_id: str) -> tuple[SecretAuditEvent, ...]: ...
+
     def list_preview_records(
         self,
         *,
@@ -900,10 +902,6 @@ class DokployProductRetirementAdapter:
                 strict=True,
             )
         )
-        if self._finalization_record is None and set(planned_runtime) != {
-            _runtime_ref(record) for record in current_runtime
-        }:
-            raise ProductRetirementBlockedError("Runtime authority is missing before finalization.")
         for runtime_record in current_runtime:
             reference = _runtime_ref(runtime_record)
             if planned_runtime.get(reference) != canonical_sha256(
@@ -1085,7 +1083,20 @@ class DokployProductRetirementAdapter:
                 detail="Launchplane disabled managed secret authority for product retirement.",
                 metadata={"plan_sha256": self._plan.plan_sha256},
             )
-            self._record_store.write_secret_audit_event(event)
+            existing = next(
+                (
+                    stored
+                    for stored in self._record_store.list_secret_audit_events(
+                        secret_id=record.secret_id
+                    )
+                    if stored.event_id == event.event_id
+                ),
+                None,
+            )
+            if existing is None:
+                self._record_store.write_secret_audit_event(event)
+            elif existing.model_copy(update={"recorded_at": event.recorded_at}) != event:
+                raise ProductRetirementBlockedError("Managed secret disable evidence changed.")
             self._disabled_secret_record_sha256.append(provider_identifier_sha256(record.secret_id))
             self._secret_disable_event_sha256.append(provider_identifier_sha256(event.event_id))
 

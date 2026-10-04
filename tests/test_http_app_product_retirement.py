@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -7,6 +8,7 @@ from unittest.mock import patch
 from fastapi import FastAPI
 from sqlalchemy.exc import OperationalError
 
+from control_plane.contracts.secret_record import SecretRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -963,6 +965,8 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
         for failure, change in (
             ("profile_write", "unchanged"),
             ("terminal_write", "unchanged"),
+            ("completion_write", "unchanged"),
+            ("legacy_runtime", "unchanged"),
             *(
                 ("profile_write", change)
                 for change in (
@@ -972,6 +976,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     "profile",
                     "target",
                     "runtime",
+                    "secret",
                     "unknown",
                     "present",
                     "missing_evidence",
@@ -980,6 +985,19 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(failure=failure, change=change), TemporaryDirectory() as directory:
                 store = self._store(Path(directory))
+                store.write_secret_record(
+                    SecretRecord(
+                        secret_id="retirement-secret",
+                        scope="context_instance",
+                        integration="fixture",
+                        name="fixture",
+                        context="example-site",
+                        instance="prod",
+                        current_version_id="v1",
+                        created_at=NOW,
+                        updated_at=NOW,
+                    )
+                )
                 app = self._app(
                     store, actions=("product_retirement.plan", "product_retirement.apply")
                 )
@@ -1019,6 +1037,8 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     )
 
                 def record_write(record: ProductRetirementRecord) -> object:
+                    if failure == "legacy_runtime" and record.mutation_evidence.finalization_at:
+                        return None
                     if failure == "terminal_write" and record.outcome == "already_absent":
                         raise ValueError("injected terminal evidence failure")
                     return original_record_write(record)
@@ -1030,6 +1050,20 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     ),
                     patch.object(store, "compare_and_write_product_profile_record", profile_write),
                     patch.object(store, "write_product_retirement_record", record_write),
+                    patch.object(
+                        store,
+                        "complete_mutation_reservation",
+                        side_effect=ValueError("injected completion failure")
+                        if failure == "completion_write"
+                        else store.complete_mutation_reservation,
+                    ),
+                    patch.object(
+                        store,
+                        "delete_provider_target_record",
+                        side_effect=ValueError("injected target deletion failure")
+                        if failure == "legacy_runtime"
+                        else store.delete_provider_target_record,
+                    ),
                 ):
                     failed = await _asgi_request(
                         app,
@@ -1039,10 +1073,30 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                         payload=payload,
                     )
                 self.assertEqual(failed.status_code, 409, failed.text)
-                with self.assertRaises(FileNotFoundError):
-                    store.read_provider_target_record(
-                        context_name="example-site", instance_name="prod"
+                if failure != "legacy_runtime":
+                    with self.assertRaises(FileNotFoundError):
+                        store.read_provider_target_record(
+                            context_name="example-site", instance_name="prod"
+                        )
+                events_before = store.list_secret_audit_events(secret_id="retirement-secret")
+                held_before = store.read_idempotency_record(
+                    scope=idempotency_scope(
+                        LocalOperatorIdentity(
+                            subject="local-owner-agent", token_label="local-owner-write"
+                        )
+                    ),
+                    route_path="/v1/product-retirement",
+                    idempotency_key=self.headers["Idempotency-Key"],
+                )
+                assert held_before is not None
+                recovery_time = (
+                    (
+                        datetime.fromisoformat(held_before.lease_expires_at.replace("Z", "+00:00"))
+                        + timedelta(seconds=1)
                     )
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                )
                 # A fresh app and store exercise recovery from durable evidence only.
                 store.close()
                 store = PostgresRecordStore(
@@ -1082,12 +1136,21 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                             updated_at=NOW,
                         )
                     )
+                if change == "secret":
+                    secret = store.list_secret_records(
+                        context_name="example-site", instance_name="prod"
+                    )[0]
+                    store.write_secret_record(
+                        secret.model_copy(update={"current_version_id": "v2"})
+                    )
                 records = store.list_product_retirement_records(product="example-site")
                 if change == "missing_evidence":
                     records = tuple(
                         record for record in records if not record.mutation_evidence.finalization_at
                     )
                 with (
+                    patch("control_plane.http_app.utc_now_timestamp", return_value=recovery_time),
+                    patch.object(store, "_database_mutation_timestamp", return_value=recovery_time),
                     patch.object(store, "list_product_retirement_records", return_value=records),
                     patch(
                         "control_plane.product_retirement.observe_tracked_dokploy_application",
@@ -1124,6 +1187,15 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                         store.read_product_profile_record("example-site").lifecycle_state, "retired"
                     )
                     delete.assert_not_called()
+                    self.assertEqual(
+                        store.list_secret_records(
+                            context_name="example-site", instance_name="prod"
+                        )[0].status,
+                        "disabled",
+                    )
+                    self.assertEqual(
+                        store.list_secret_audit_events(secret_id="retirement-secret"), events_before
+                    )
                 else:
                     self.assertEqual(retry.status_code, 409, retry.text)
                     self.assertEqual(replay.status_code, 409, replay.text)

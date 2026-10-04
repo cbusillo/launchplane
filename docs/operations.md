@@ -3639,11 +3639,12 @@ are removed or the profile becomes retired, using that checkpoint's exact profil
 and intended retired-profile digests. Recovery verifies provider absence again,
 checks remaining targets, runtime records and managed secrets against the reviewed
 plan, and preserves the held target fence on drift or unknown evidence. Recovery
-with missing checkpoint evidence stays unresolved; historical records are not
+after target removal or profile retirement requires checkpoint evidence; historical records are not
 sufficient to invent a completed finalization. Different keys, changed requests
 and changed plans retain the existing conflict behavior. No provider delete is
 needed when absence is verified. Original attempt history remains authoritative
 for earlier provider effects; retry phases describe the retry's checkpoints.
+Existing managed-secret disable audit events retain their original timestamps.
 
 Tracked retirement blocks active previews in the profile's preview context for
 both the short repository anchor written by preview dispatch/reconciliation and
