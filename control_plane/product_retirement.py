@@ -535,6 +535,7 @@ class DokployProductRetirementAdapter:
         self._started = False
         self._lifecycle_before_value: Literal["active", "retiring", "retired"] | None = None
         self._terminal_error_message = ""
+        self._finalization_record: ProductRetirementRecord | None = None
 
     def target_key(self) -> str:
         return f"provider-target:dokploy:application:{self._plan.provider_observation.target_id}"
@@ -585,45 +586,53 @@ class DokployProductRetirementAdapter:
     ) -> ProviderMutationOutcome:
         try:
             self._write_started_record(provider_operation_key)
-            if self._lifecycle_before_value == "retiring":
+            if self._lifecycle_before_value in {"retiring", "retired"}:
                 # Restore the existing retirement checkpoint before retry validation.
                 self._checkpoint(lease, "profile_retiring")
-            current_bound = bind_product_retirement_authority(
-                record_store=self._record_store,
-                request=self._request,
-            )
+            self._finalization_record = self._read_finalization_record(provider_operation_key)
             current_observation = observe_tracked_dokploy_application(
                 control_plane_root=self._control_plane_root,
                 target_id=self._plan.provider_observation.target_id,
                 observed_at=self._requested_at,
             )
-            if current_bound.profile.lifecycle_state == "active":
-                if authority_snapshot(current_bound) != self._plan.authority_snapshot:
+            if self._finalization_record is not None:
+                if current_observation.state != "absent":
                     raise ProductRetirementBlockedError(
-                        "Tracked retirement authority changed after planning."
+                        "Finalization recovery requires verified provider absence."
                     )
-                if current_observation.state == "present":
-                    if not _same_planned_observation(
+                self._validate_finalization_authority()
+            else:
+                current_bound = bind_product_retirement_authority(
+                    record_store=self._record_store,
+                    request=self._request,
+                )
+                if current_bound.profile.lifecycle_state == "active":
+                    if authority_snapshot(current_bound) != self._plan.authority_snapshot:
+                        raise ProductRetirementBlockedError(
+                            "Tracked retirement authority changed after planning."
+                        )
+                    if current_observation.state == "present":
+                        if not _same_planned_observation(
+                            planned=self._plan.provider_observation,
+                            current=current_observation,
+                        ):
+                            raise ProductRetirementBlockedError(
+                                "Provider observation changed after planning."
+                            )
+                        if not current_observation.retirable:
+                            raise ProductRetirementBlockedError(
+                                "Provider application is not idle and retirable."
+                            )
+                elif (
+                    not _observation_allows_reconciliation(
                         planned=self._plan.provider_observation,
                         current=current_observation,
-                    ):
-                        raise ProductRetirementBlockedError(
-                            "Provider observation changed after planning."
-                        )
-                    if not current_observation.retirable:
-                        raise ProductRetirementBlockedError(
-                            "Provider application is not idle and retirable."
-                        )
-            elif (
-                not _observation_allows_reconciliation(
-                    planned=self._plan.provider_observation,
-                    current=current_observation,
-                )
-                and current_observation.state != "absent"
-            ):
-                raise ProductRetirementBlockedError(
-                    "Provider observation changed during retirement reconciliation."
-                )
+                    )
+                    and current_observation.state != "absent"
+                ):
+                    raise ProductRetirementBlockedError(
+                        "Provider observation changed during retirement reconciliation."
+                    )
         except (
             FileNotFoundError,
             ProductRetirementBlockedError,
@@ -636,7 +645,7 @@ class DokployProductRetirementAdapter:
         self._ensure_retiring_profile()
         self._checkpoint(lease, "profile_retiring")
         if current_observation.state == "absent":
-            self._finalize_authority()
+            self._finalize_authority(provider_operation_key)
             terminal = self._write_terminal_record(
                 outcome="already_absent",
                 provider_operation_key=provider_operation_key,
@@ -703,7 +712,7 @@ class DokployProductRetirementAdapter:
                 ValueError("Dokploy application absence could not be verified after deletion.")
             )
         try:
-            self._finalize_authority()
+            self._finalize_authority(provider_operation_key)
         except (FileNotFoundError, ProductRetirementBlockedError, ValueError) as error:
             raise self._unknown_provider_error(error) from error
         terminal = self._write_terminal_record(
@@ -797,11 +806,86 @@ class DokployProductRetirementAdapter:
             )
         return replacement
 
-    def _finalize_authority(self) -> None:
+    def _read_finalization_record(
+        self, provider_operation_key: str
+    ) -> ProductRetirementRecord | None:
+        records = self._record_store.list_product_retirement_records(
+            product=self._request.product,
+            actor=self._identity.actor,
+            mode="apply",
+            idempotency_key=self._idempotency_key,
+        )
+        matching = tuple(
+            record
+            for record in records
+            if record.outcome == "started"
+            and record.mutation_evidence.finalization_profile_sha256
+            and record.mutation_evidence.provider_absence_verified
+            and record.mutation_evidence.provider_operation_key == provider_operation_key
+            and record.identity == self._identity
+            and record.plan_record_id == self._plan.record_id
+            and record.plan_sha256 == self._plan.plan_sha256
+            and record.continuity_sha256 == self._request.continuity_sha256
+            and record.authority_snapshot == self._plan.authority_snapshot
+        )
+        if len(matching) > 1:
+            raise ProductRetirementBlockedError("Ambiguous retirement finalization evidence.")
+        return matching[0] if matching else None
+
+    def _validate_finalization_authority(self) -> LaunchplaneProductProfileRecord:
+        assert self._finalization_record is not None
+        evidence = self._finalization_record.mutation_evidence
         profile = self._record_store.read_product_profile_record(self._request.product)
-        if profile.lifecycle_state == "retired":
-            return
-        if profile.lifecycle_state != "retiring":
+        expected = (
+            evidence.finalization_profile_sha256
+            if profile.lifecycle_state == "retiring"
+            else evidence.finalization_retired_profile_sha256
+            if profile.lifecycle_state == "retired"
+            else ""
+        )
+        if canonical_sha256(profile.model_dump(mode="json")) != expected:
+            raise ProductRetirementBlockedError("Product profile changed during finalization.")
+        if active_preview_ids(record_store=self._record_store, profile=profile):
+            raise ProductRetirementBlockedError("Active previews block finalization recovery.")
+        if any(
+            candidate.product != profile.product
+            and any(
+                lane.context.strip() == self._plan.context
+                and lane.instance.strip() == self._plan.instance
+                for lane in candidate.lanes
+            )
+            for candidate in self._record_store.list_product_profile_records()
+        ):
+            raise ProductRetirementBlockedError("Retirement route ownership changed.")
+        for reader, expected_digest in (
+            (
+                self._record_store.read_provider_target_record,
+                self._plan.authority_snapshot.provider_target_sha256,
+            ),
+            (
+                self._record_store.read_dokploy_target_record,
+                self._plan.authority_snapshot.dokploy_target_sha256,
+            ),
+            (
+                self._record_store.read_dokploy_target_id_record,
+                self._plan.authority_snapshot.dokploy_target_id_sha256,
+            ),
+        ):
+            try:
+                record = reader(context_name=self._plan.context, instance_name=self._plan.instance)
+            except FileNotFoundError:
+                continue
+            if canonical_sha256(record.model_dump(mode="json")) != expected_digest:
+                raise ProductRetirementBlockedError(
+                    "Tracked target authority changed during finalization."
+                )
+        return profile
+
+    def _finalize_authority(self, provider_operation_key: str) -> None:
+        profile = self._record_store.read_product_profile_record(self._request.product)
+        if self._finalization_record is not None:
+            profile = self._validate_finalization_authority()
+        if profile.lifecycle_state not in {"retiring", "retired"}:
             raise ProductRetirementBlockedError(
                 "Product retirement authority finalization requires retiring lifecycle state."
             )
@@ -816,6 +900,10 @@ class DokployProductRetirementAdapter:
                 strict=True,
             )
         )
+        if self._finalization_record is None and set(planned_runtime) != {
+            _runtime_ref(record) for record in current_runtime
+        }:
+            raise ProductRetirementBlockedError("Runtime authority is missing before finalization.")
         for runtime_record in current_runtime:
             reference = _runtime_ref(runtime_record)
             if planned_runtime.get(reference) != canonical_sha256(
@@ -833,6 +921,40 @@ class DokployProductRetirementAdapter:
             self._plan.authority_snapshot.secret_record_sha256,
         ):
             raise ProductRetirementBlockedError("Managed secret evidence changed after planning.")
+        if self._finalization_record is None:
+            # Persist the exact intermediate and intended terminal profile before any local deletion.
+            retired_profile = profile.model_copy(
+                update={
+                    "lifecycle_state": "retired",
+                    "preview": profile.preview.model_copy(update={"enabled": False}),
+                    "updated_at": self._requested_at,
+                    "source": "service:product-retirement",
+                }
+            )
+            checkpoint = self._build_terminal_record(
+                outcome="started",
+                provider_operation_key=provider_operation_key,
+                provider_absence_verified=True,
+            )
+            checkpoint = checkpoint.model_copy(
+                update={
+                    "record_id": f"{checkpoint.record_id}-finalization",
+                    "mutation_evidence": checkpoint.mutation_evidence.model_copy(
+                        update={
+                            "finalization_profile_sha256": canonical_sha256(
+                                profile.model_dump(mode="json")
+                            ),
+                            "finalization_retired_profile_sha256": canonical_sha256(
+                                retired_profile.model_dump(mode="json")
+                            ),
+                            "finalization_at": self._requested_at,
+                        }
+                    ),
+                }
+            )
+            self._record_store.write_product_retirement_record(checkpoint)
+            self._finalization_record = checkpoint
+            self._validate_finalization_authority()
         for runtime_record in current_runtime:
             event_id = (
                 f"product-retirement:{self._plan.plan_sha256}:"
@@ -860,11 +982,14 @@ class DokployProductRetirementAdapter:
             self._runtime_delete_event_ids.append(event_id)
         self._disable_managed_secrets(current_secrets)
         self._delete_target_authority()
+        if profile.lifecycle_state == "retired":
+            return
+        assert self._finalization_record is not None
         retired_profile = profile.model_copy(
             update={
                 "lifecycle_state": "retired",
                 "preview": profile.preview.model_copy(update={"enabled": False}),
-                "updated_at": self._requested_at,
+                "updated_at": self._finalization_record.mutation_evidence.finalization_at,
                 "source": "service:product-retirement",
             }
         )

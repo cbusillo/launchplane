@@ -951,7 +951,199 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(profile.lifecycle_state, "retired")
         self.assertNotIn(TARGET_ID, json.dumps(apply.json()))
-        self.assertEqual(sum(record.outcome == "started" for record in records), 1)
+        self.assertEqual(
+            sum(
+                record.outcome == "started" and not record.mutation_evidence.finalization_at
+                for record in records
+            ),
+            1,
+        )
+
+    async def test_tracked_partial_finalization_recovers_through_http(self) -> None:
+        for failure, change in (
+            ("profile_write", "unchanged"),
+            ("terminal_write", "unchanged"),
+            *(
+                ("profile_write", change)
+                for change in (
+                    "key",
+                    "request",
+                    "plan",
+                    "profile",
+                    "target",
+                    "runtime",
+                    "unknown",
+                    "present",
+                    "missing_evidence",
+                )
+            ),
+        ):
+            with self.subTest(failure=failure, change=change), TemporaryDirectory() as directory:
+                store = self._store(Path(directory))
+                app = self._app(
+                    store, actions=("product_retirement.plan", "product_retirement.apply")
+                )
+                with patch(
+                    "control_plane.product_retirement.observe_tracked_dokploy_application",
+                    return_value=_observation(),
+                ):
+                    plan = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=self.headers,
+                        payload=_plan_payload(),
+                    )
+                    other_plan = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers={**self.headers, "Idempotency-Key": "other-plan"},
+                        payload=_plan_payload(),
+                    )
+                self.assertEqual(plan.status_code, 202, plan.text)
+                payload = _apply_payload(plan.json())
+                original_profile_write = store.compare_and_write_product_profile_record
+                original_record_write = store.write_product_retirement_record
+
+                def profile_write(
+                    *,
+                    expected_record: LaunchplaneProductProfileRecord,
+                    replacement_record: LaunchplaneProductProfileRecord,
+                ) -> object:
+                    replacement = replacement_record
+                    if failure == "profile_write" and replacement.lifecycle_state == "retired":
+                        raise ValueError("injected final profile write failure")
+                    return original_profile_write(
+                        expected_record=expected_record, replacement_record=replacement_record
+                    )
+
+                def record_write(record: ProductRetirementRecord) -> object:
+                    if failure == "terminal_write" and record.outcome == "already_absent":
+                        raise ValueError("injected terminal evidence failure")
+                    return original_record_write(record)
+
+                with (
+                    patch(
+                        "control_plane.product_retirement.observe_tracked_dokploy_application",
+                        return_value=_absent_observation(),
+                    ),
+                    patch.object(store, "compare_and_write_product_profile_record", profile_write),
+                    patch.object(store, "write_product_retirement_record", record_write),
+                ):
+                    failed = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=self.headers,
+                        payload=payload,
+                    )
+                self.assertEqual(failed.status_code, 409, failed.text)
+                with self.assertRaises(FileNotFoundError):
+                    store.read_provider_target_record(
+                        context_name="example-site", instance_name="prod"
+                    )
+                # A fresh app and store exercise recovery from durable evidence only.
+                store.close()
+                store = PostgresRecordStore(
+                    database_url=f"sqlite+pysqlite:///{Path(directory) / 'launchplane.sqlite3'}"
+                )
+                app = self._app(
+                    store, actions=("product_retirement.plan", "product_retirement.apply")
+                )
+                headers = self.headers
+                if change == "key":
+                    headers = {**headers, "Idempotency-Key": "different-apply"}
+                elif change == "request":
+                    payload = {**payload, "reason": "different intent"}
+                elif change == "plan":
+                    payload = _apply_payload(other_plan.json())
+                elif change == "profile":
+                    profile = store.read_product_profile_record("example-site")
+                    store.write_product_profile_record(
+                        profile.model_copy(update={"source": "changed"})
+                    )
+                elif change == "target":
+                    store.write_dokploy_target_id_record(
+                        DokployTargetIdRecord(
+                            context="example-site",
+                            instance="prod",
+                            target_id="replacement",
+                            updated_at=NOW,
+                        )
+                    )
+                elif change == "runtime":
+                    store.write_runtime_environment_record(
+                        RuntimeEnvironmentRecord(
+                            scope="instance",
+                            context="example-site",
+                            instance="prod",
+                            env={"PORT": "4000"},
+                            updated_at=NOW,
+                        )
+                    )
+                records = store.list_product_retirement_records(product="example-site")
+                if change == "missing_evidence":
+                    records = tuple(
+                        record for record in records if not record.mutation_evidence.finalization_at
+                    )
+                with (
+                    patch.object(store, "list_product_retirement_records", return_value=records),
+                    patch(
+                        "control_plane.product_retirement.observe_tracked_dokploy_application",
+                        side_effect=TimeoutError("unavailable") if change == "unknown" else None,
+                        return_value=_observation()
+                        if change == "present"
+                        else _absent_observation(),
+                    ),
+                    patch(
+                        "control_plane.product_retirement.dokploy_api.delete_dokploy_application"
+                    ) as delete,
+                ):
+                    retry = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=headers,
+                        payload=payload,
+                    )
+                    replay = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=headers,
+                        payload=payload,
+                    )
+                if change == "unchanged":
+                    self.assertEqual(retry.status_code, 202, retry.text)
+                    self.assertEqual(replay.status_code, 202, replay.text)
+                    self.assertEqual(replay.json()["result"], retry.json()["result"])
+                    self.assertEqual(replay.json()["records"], retry.json()["records"])
+                    self.assertTrue(retry.json()["result"]["provider_absence_verified"])
+                    self.assertEqual(
+                        store.read_product_profile_record("example-site").lifecycle_state, "retired"
+                    )
+                    delete.assert_not_called()
+                else:
+                    self.assertEqual(retry.status_code, 409, retry.text)
+                    self.assertEqual(replay.status_code, 409, replay.text)
+                    self.assertEqual(
+                        store.read_product_profile_record("example-site").lifecycle_state,
+                        "retiring",
+                    )
+                    held = store.read_idempotency_record(
+                        scope=idempotency_scope(
+                            LocalOperatorIdentity(
+                                subject="local-owner-agent", token_label="local-owner-write"
+                            )
+                        ),
+                        route_path="/v1/product-retirement",
+                        idempotency_key=self.headers["Idempotency-Key"],
+                    )
+                    assert held is not None
+                    self.assertEqual(held.state, "reconcile_required")
+                    delete.assert_not_called()
+                store.close()
 
     async def test_tracked_uncertain_completion_retry_preserves_conflict_guards(self) -> None:
         for change in (
