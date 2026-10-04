@@ -1090,9 +1090,18 @@ Controller actions have these retry/stop semantics:
   Alternatively, pushing a new commit to the root makes the old proof
   inapplicable and resumes current-policy discovery with fresh head/readiness
   proof. Closing and reopening at the same checkpointed head keeps the policy
-  block. This unchanged-root disposition does not qualify recovery of a branch
-  merge whose checkpoint was never recorded, or no-repeat behavior after the
-  root moves; those paths retain their existing retirement semantics.
+  block. Uncheckpointed execution and moved roots retain their existing retirement
+  semantics. For controller execution, fresh current-policy discovery can recover their carried branch
+  effects: after current child readiness and exact parent-head checks, the GitHub
+  adapter compares the child commit with the immutable expected parent commit.
+  If that parent already contains the child, execution checkpoints that head
+  without issuing another branch merge. Otherwise it merges the current child
+  normally. Missing compare evidence refuses execution. The new collapse has its
+  own current-policy admission and child-head expectations, and landing reconciles
+  children still open in that fresh plan; retired proof never supplies admission
+  under the new policy. GitHub may already mark a carried child merged indirectly
+  and remove it from discovery. Current-policy root landing still proceeds, but
+  this path does not recover Launchplane's comment and label for that absent child.
   Requalifying carried proof under a different policy is not supported.
   A completed stack never revives its older planned progress.
 - `wait_for_root_checks`: The collapsed root PR's required checks are still
@@ -1288,6 +1297,21 @@ Admin views can read the broader stored controller state from the native
 FastAPI route
 `GET /v1/work-graph/merge-train/controller/status?repository=owner/name&base_branch=main`.
 That route returns the same admission decision plus the latest Level 1 run record,
+identified by `latest_run_source=level1`, with `latest_run_age_seconds` measured
+at the response's `generated_at`. Both fields are null when no Level 1 run
+exists. `latest_run` reads only `launchplane_merge_train_runs`, ordered by
+`recorded_at` descending and then `run_id` descending, independently of write
+order. Controller passes persist separate lease, candidate, and landing records;
+they do not write Level 1 run history. An older Level 1 run can therefore
+appear alongside newer controller activity. Its timestamp and age describe
+that historical evidence, not the last controller pass or a current queue
+observation. Admission continues to use that Level 1 history for its existing
+poll/backoff rules; a newer idle Level 1 run also supersedes older controller
+records before current-policy filtering produces the action hint.
+If an imported dry-run record has an unparseable timestamp, its age is null;
+the stored history and existing scheduling decision remain visible.
+
+The response also includes the
 controller lease holder, active action and phase, lease and heartbeat age, reconciliation
 state, and compact summaries for active batch candidates, landing plans, and
 stack collapse plans. When the latest run is dry-run evidence, the response also
@@ -1376,7 +1400,12 @@ waits, blocks, or completes. A pull request awaiting current-head Client review
 hears so even before any candidate exists. Controller-mode dry-runs do not
 deliver feedback comments. Manual-phase feedback binds repository and base-branch identity to the
 phase response's candidate, landing-plan, or stack-collapse-plan record and fails
-closed if another identity-bearing phase result disagrees.
+closed if another identity-bearing phase result disagrees. When batch-candidate
+planning returns a block, check wait, or branch-update decision without a record,
+feedback takes the repository and base branch from the dry-run result and reports
+that decision on its selected PR, without claiming a candidate was created or a
+label applied. Missing or partial identity still fails closed. Manual dry-runs
+render these payloads for inspection but do not deliver feedback comments.
 
 ## Scheduler rollout runbook
 
@@ -1409,7 +1438,7 @@ controller result whose mode is `dry-run`. Dry-run controller passes may render
 feedback payloads for inspection, but they must report zero delivered feedback
 comments and must not create or update Launchplane-managed PR comments. The
 Launchplane UI controller status panel or the controller-status route should show
-the same active records, stale-record reasons, latest run result, and next
+the same active records, stale-record reasons, historical Level 1 run result, and next
 controller action without requiring a GitHub read.
 
 Enable mutation only after the Director explicitly chooses to promote the dry-run
@@ -1463,5 +1492,8 @@ execution, ready waits and fresh live work can proceed with that blocking
 evidence attached. The affected PRs and refs remain excluded from discovery.
 No old-policy record authorizes a merge under a different policy. Checkpointed
 partial execution at an unchanged root stays visible and excluded from fresh
-replanning; changed-root and uncheckpointed-effect recovery are not qualified
-by that guarantee.
+replanning. Changed-root and uncheckpointed effects can be recovered through
+fresh current-policy controller discovery: current Git ancestry prevents another merge of
+an already-contained child, and the fresh collapse owns disposition of its
+remaining open children. A carried child GitHub already merged indirectly stays
+closed; this recovery does not restore its Launchplane landing annotations.

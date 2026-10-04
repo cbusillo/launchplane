@@ -1300,6 +1300,8 @@ export type MergeTrainControllerStatusReadModel = {
     generated_at: string;
     latest_dry_run: MergeTrainLatestDryRunSummary | null;
     latest_run: MergeTrainRunRecord | null;
+    latest_run_age_seconds: number | null;
+    latest_run_source: 'level1' | null;
     reconciliation_diagnostics: Array<MergeTrainReconciliationDiagnostic>;
     repository: string;
     schema_version: number;

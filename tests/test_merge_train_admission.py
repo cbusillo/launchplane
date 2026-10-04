@@ -532,12 +532,45 @@ class MergeTrainAdmissionTests(unittest.TestCase):
 
         self.assertEqual(read_model.admission.controller_action, "land_batch")
         self.assertEqual(read_model.latest_run, latest_run)
+        self.assertEqual(read_model.latest_run_source, "level1")
+        self.assertEqual(read_model.latest_run_age_seconds, 600)
         self.assertEqual(len(read_model.controller_records), 2)
         self.assertEqual(read_model.controller_records[0].record_type, "batch_landing_plan")
         self.assertEqual(read_model.controller_records[0].planned_count, 1)
         self.assertEqual(read_model.controller_records[0].merged_count, 1)
         self.assertEqual(read_model.controller_records[1].record_type, "batch_candidate")
         self.assertEqual(read_model.controller_records[1].pull_request_numbers, (42,))
+
+    def test_controller_status_without_level1_history_keeps_controller_evidence(self) -> None:
+        candidate_record = _candidate_record(status="planned")
+        read_model = build_merge_train_controller_status_read_model(
+            store=_RunHistoryStore(None, candidate_records=(candidate_record,)),
+            repository=candidate_record.candidate.repository,
+            base_branch=candidate_record.candidate.base_branch,
+            generated_at=candidate_record.updated_at,
+            current_policy_key=candidate_record.candidate.policy_key,
+            current_policy_sha256=candidate_record.candidate.policy_sha256,
+        )
+
+        self.assertIsNone(read_model.latest_run)
+        self.assertIsNone(read_model.latest_run_source)
+        self.assertIsNone(read_model.latest_run_age_seconds)
+        self.assertEqual(read_model.admission.controller_action, "build_candidate")
+        self.assertEqual(read_model.controller_records[0].record_id, candidate_record.record_id)
+
+    def test_controller_status_preserves_undated_level1_dry_run_history(self) -> None:
+        run = _run_record(recorded_at="legacy-import-without-date")
+        read_model = build_merge_train_controller_status_read_model(
+            store=_RunHistoryStore(run),
+            repository=run.repository,
+            base_branch=run.base_branch,
+            generated_at="2026-10-04T09:10:59Z",
+        )
+
+        self.assertEqual(read_model.latest_run, run)
+        self.assertEqual(read_model.latest_run_source, "level1")
+        self.assertIsNone(read_model.latest_run_age_seconds)
+        self.assertTrue(read_model.admission.admitted)
 
     def test_controller_status_marks_stale_policy_records_without_action(self) -> None:
         candidate_record = _candidate_record(status="planned")

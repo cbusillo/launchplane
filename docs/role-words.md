@@ -58,7 +58,7 @@ them as code and describes their meaning in these words.
 | `docs/owner-acceptance.md`, `docs/owner-control-channel.md`, `docs/operator-experience.md`, `docs/agent-operator-contract.md`, `docs/product-owner-policy.md` | doc file names; their content uses these words |
 | `## Owner test notes`, `Nothing for the owner to test`, `.github/actions/owner-test-notes` | older spellings of the `## Client test notes` section and its `Nothing for the Client to test` marker, still read; the action keeps its path because product repositories pin it |
 | `launchplane/owner-review` status context, `<!-- launchplane:owner-review -->` comment marker, `owner-review` label | names GitHub and product repositories match on; the text around them says Client |
-| release-record issue heading `## Owner checklist`; checklist text `Operator review is required.` | kept: retry recovery matches the issue body exactly, and the checklist text is part of `checklist_digest` |
+| checklist text `Operator review is required.` | kept: the checklist text is part of `checklist_digest` |
 
 `scripts/validate_role_words.py` fails when the old role words return in
 tracked Markdown prose or in text the frontend shows people.

@@ -305,6 +305,75 @@ class MergeTrainControllerFeedbackTests(TestCase):
                 self.assertEqual("cbusillo/example", payloads[0]["repository"])
                 self.assertEqual(f"{mode}_candidate", payloads[0]["controller_action"])
 
+    def test_manual_plan_reports_selected_queue_decision_without_a_record(self) -> None:
+        snapshot = _FakeExpandedMergeTrainSnapshotReader(
+            transport=object()
+        ).read_merge_train_snapshot(repository="cbusillo/sellyouroutboard", base_branch="main")
+        selected = snapshot.pull_requests[1]
+        cases = (
+            ({"required_checks_status": "pending"}, "wait_for_checks", "waiting"),
+            (
+                {"required_checks_status": "pass", "branch_update_required": True},
+                "update_branch",
+                "blocked",
+            ),
+            (
+                {"required_checks_status": "pending", "owner_review_required": True},
+                "wait_for_checks",
+                "waiting",
+            ),
+            ({"required_checks_status": "fail", "owner_review_required": True}, "block", "blocked"),
+        )
+        for update, action, event in cases:
+            with self.subTest(update=update):
+                dry_run = build_merge_train_dry_run_result(
+                    policy=build_test_merge_train_policy(),
+                    snapshot=snapshot.model_copy(
+                        update={"pull_requests": (selected.model_copy(update=update),)}
+                    ),
+                    batch_landing=True,
+                )
+                self.assertEqual(dry_run.intended_next_action, action)
+                payloads = feedback.build_feedback_payloads(
+                    response={
+                        "result": {
+                            "mode": "plan",
+                            "next_action": dry_run.intended_next_action,
+                            "dry_run_result": dry_run.model_dump(mode="json"),
+                        },
+                        "records": {},
+                    },
+                    phase="batch-candidate",
+                )
+                self.assertEqual(len(payloads), 1)
+                payload = payloads[0]
+                self.assertEqual(payload["pull_request_number"], selected.number)
+                self.assertEqual(payload["repository"], dry_run.repository)
+                self.assertEqual(payload["base_branch"], dry_run.base_branch)
+                self.assertEqual(payload["controller_action"], action)
+                self.assertEqual(payload["event"], event)
+                self.assertEqual(payload["controller_record_id"], "")
+                message = cast(str, payload["message"])
+                if update.get("owner_review_required"):
+                    self.assertIn("review", message)
+                    self.assertNotIn(dry_run.blocked_label, message)
+                elif action == "update_branch":
+                    self.assertIn("Refresh", message)
+
+    def test_manual_queue_decision_requires_complete_dry_run_identity(self) -> None:
+        for identity in ({}, {"repository": "cbusillo/example"}, {"base_branch": "main"}):
+            with self.subTest(identity=identity), self.assertRaises(ValueError):
+                feedback.build_feedback_payloads(
+                    response={
+                        "result": {
+                            "mode": "plan",
+                            "next_action": "wait_for_checks",
+                            "dry_run_result": {**identity, "selected_pr": {"number": 7}},
+                        }
+                    },
+                    phase="batch-candidate",
+                )
+
     def test_build_feedback_payloads_infers_stack_plan_action(self) -> None:
         response: dict[str, Any] = {
             "result": {

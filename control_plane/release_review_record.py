@@ -16,10 +16,14 @@ def _literal(value: str) -> str:
     return f"{fence}\n{value.replace('@', '@\u200b')}\n{fence}"
 
 
+def release_decision_marker(record_id: str) -> str:
+    return f"<!-- launchplane:release-decision:{record_id} -->"
+
+
 def release_decision_issue_body(decision: ReleaseReviewDecisionRecord) -> str:
     checklist = decision.checklist
     lines = [
-        f"<!-- launchplane:release-decision:{decision.record_id} -->",
+        release_decision_marker(decision.record_id),
         "# Release decision",
         f"Decision: **{decision.decision.replace('_', ' ')}**",
         f"Recorded by `{decision.actor_github_login}` (GitHub ID `{decision.actor_github_id}`)",
@@ -38,7 +42,7 @@ def release_decision_issue_body(decision: ReleaseReviewDecisionRecord) -> str:
             f"Checklist digest: {decision.checklist_digest}"
         ),
         "",
-        "## Owner checklist",
+        "## Client checklist",
     ]
     for item in checklist.items:
         lines.extend(
@@ -47,7 +51,7 @@ def release_decision_issue_body(decision: ReleaseReviewDecisionRecord) -> str:
                 _literal(item.title),
                 item.url,
                 "Accepted in preview." if item.already_reviewed else "Not accepted in preview.",
-                _literal(item.owner_test_notes or "Owner test notes are missing."),
+                _literal(item.owner_test_notes or "Client test notes are missing."),
             ]
         )
     if not checklist.items:
@@ -76,6 +80,7 @@ def publish_release_decision(
     if profile.product != decision.product or profile.repository != decision.checklist.repository:
         raise ValueError("The release record must belong to the product repository.")
     body = release_decision_issue_body(decision)
+    marker = release_decision_marker(decision.record_id)
     lane = next(lane for lane in profile.lanes if lane.instance == "testing")
     token = resolve_launchplane_github_token(
         control_plane_root=control_plane_root, context_name=lane.context
@@ -89,6 +94,8 @@ def publish_release_decision(
     issue_number = None
     # A retry reuses the saved decision ID. Do not duplicate an issue when the
     # first POST succeeded but its response or the following DB write was lost.
+    # Match the record marker on the first line, not the whole body, so a
+    # record written before a wording change is still recovered.
     for page in range(1, 11):
         issues = github_api_request(
             path=f"{path}?state=all&sort=created&direction=desc&per_page=100&page={page}",
@@ -104,7 +111,12 @@ def publish_release_decision(
             if isinstance(created_at, str):
                 created_time = datetime.fromisoformat(created_at).astimezone(UTC)
                 reached_older_issue |= created_time < decision_time
-            if "pull_request" in issue or issue.get("body") != body:
+            issue_body = issue.get("body")
+            if (
+                "pull_request" in issue
+                or not isinstance(issue_body, str)
+                or issue_body.splitlines()[:1] != [marker]
+            ):
                 continue
             number = issue.get("number")
             if not isinstance(number, int) or number < 1:

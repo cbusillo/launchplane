@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Callable, Literal, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingEntry
@@ -169,8 +169,19 @@ class MergeTrainControllerStatusReadModel(BaseModel):
     current_policy_key: str = ""
     current_policy_sha256: str = ""
     admission: MergeTrainAdmissionDecision
-    latest_run: MergeTrainRunRecord | None = None
-    latest_dry_run: MergeTrainLatestDryRunSummary | None = None
+    latest_run: MergeTrainRunRecord | None = Field(
+        default=None,
+        description="Latest stored Level 1 ordered-queue run; not the latest controller pass.",
+    )
+    latest_run_source: Literal["level1"] | None = Field(
+        default=None, description="History source for latest_run; null when no run exists."
+    )
+    latest_run_age_seconds: int | None = Field(
+        default=None, ge=0, description="Age of the Level 1 run at generated_at."
+    )
+    latest_dry_run: MergeTrainLatestDryRunSummary | None = Field(
+        default=None, description="Queue evidence from latest_run, when it was a Level 1 dry run."
+    )
     controller_state: MergeTrainControllerStateRecord | None = None
     controller_diagnostics: MergeTrainControllerLeaseDiagnostics | None = None
     controller_records: tuple[MergeTrainControllerRecordSummary, ...]
@@ -335,6 +346,15 @@ def build_merge_train_controller_status_read_model(
         poll_interval_seconds=poll_interval_seconds,
         backoff_seconds=backoff_seconds,
     )
+    latest_run_age_seconds: int | None = None
+    if latest_run is not None:
+        try:
+            latest_run_age_seconds = _timestamp_age_seconds(
+                generated_at=generated_at, timestamp=latest_run.recorded_at
+            )
+        except ValueError:
+            # Imported Level 1 dry-run history may not contain a parseable date.
+            pass
     return MergeTrainControllerStatusReadModel(
         repository=repository,
         base_branch=base_branch,
@@ -343,6 +363,8 @@ def build_merge_train_controller_status_read_model(
         current_policy_sha256=current_policy_sha256,
         admission=admission,
         latest_run=latest_run,
+        latest_run_source="level1" if latest_run is not None else None,
+        latest_run_age_seconds=latest_run_age_seconds,
         latest_dry_run=_summarize_latest_dry_run(latest_run),
         controller_state=controller_state,
         controller_diagnostics=_controller_lease_diagnostics(

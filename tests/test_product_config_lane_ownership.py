@@ -1,8 +1,14 @@
 import os
 import unittest
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import ClassVar
 from unittest.mock import patch
+
+from fastapi import FastAPI
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.storage.product_authority_bundle import (
@@ -22,6 +28,52 @@ from tests.support.stores import _sqlite_database_url
 
 
 class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    _apps: ClassVar[dict[str, FastAPI]]
+    _record_store: ClassVar[ContextVar[PostgresRecordStore]]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls._apps = {}
+        cls._record_store = ContextVar("product_config_test_store")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._apps.clear()
+        super().tearDownClass()
+
+    @classmethod
+    @contextmanager
+    def _app_for_store(cls, store: PostgresRecordStore, *, product: str) -> Iterator[FastAPI]:
+        # Reuse route registration, never records: each scenario binds its own
+        # SQLite store, including calls made in the application's worker threads.
+        token = cls._record_store.set(store)
+        try:
+            if product not in cls._apps:
+                policy = LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "every/verireel",
+                                "workflow_refs": [
+                                    "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                                ],
+                                "event_names": ["pull_request"],
+                                "products": [product],
+                                "actions": ["product_config.plan", "product_config.apply"],
+                            }
+                        ]
+                    }
+                )
+                cls._apps[product] = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    record_store_factory=lambda: cls._record_store.get(),
+                )
+            yield cls._apps[product]
+        finally:
+            cls._record_store.reset(token)
+
     async def test_authorized_product_cannot_plan_or_write_another_lane(self) -> None:
         for driver in ("generic-web", "odoo"):
             for mode in ("dry-run", "apply"):
@@ -162,26 +214,6 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
                         }
                     )
                 store.write_product_profile_record(other)
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": [product],
-                            "actions": ["product_config.plan", "product_config.apply"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                record_store_factory=lambda: store,
-            )
             payload: dict[str, object] = {
                 "mode": mode,
                 "product": product,
@@ -199,9 +231,9 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
 
             def change_then_write(bundle: ProductAuthorityBundle) -> None:
                 if add_foreign_claim_on_commit:
-                    other = store.read_product_profile_record("other-site")
+                    foreign_profile = store.read_product_profile_record("other-site")
                     store.write_product_profile_record(
-                        other.model_copy(
+                        foreign_profile.model_copy(
                             update={
                                 "lanes": (
                                     profile.lanes[0].model_copy(
@@ -218,10 +250,15 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
                     store.write_product_profile_record(profile.model_copy(update={"lanes": ()}))
                 original_write(bundle)
 
-            with patch.dict(
-                os.environ,
-                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
-                clear=True,
+            with (
+                self._app_for_store(store, product=product) as app,
+                patch.dict(
+                    os.environ,
+                    {
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"
+                    },
+                    clear=True,
+                ),
             ):
                 with patch.object(
                     store,
