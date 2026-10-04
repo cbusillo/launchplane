@@ -511,6 +511,14 @@ names remain unambiguous; the server resolves that pair against the stored
 profile rather than trusting it as target authority. The browser does not send a
 raw context picker or checked-in product defaults.
 
+Every form request stays bound to the profile used to construct it through
+planning and commit. Conflicting profile snapshots refuse the request before
+configuration writes and require a fresh dry-run. Completed retries, including provider-key retirements
+and Client-supplied credentials, check current exclusive lane ownership before
+replaying a receipt; ambiguous ownership returns `product_config_lane_not_owned`
+without writing configuration. A replay still works after later retirements or
+replacement of a supplied credential when lane ownership remains unchanged.
+
 Runtime-setting and managed-secret forms remain separate. Both require a reason
 and a dry-run. Apply requires the exact server-advertised confirmation, the
 matching normalized payload, and a stable idempotency key. The confirmation

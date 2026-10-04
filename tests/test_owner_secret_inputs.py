@@ -413,3 +413,23 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stale_plan.status_code, 409)
         self.assertIn("Refresh", stale_plan.json()["error"]["message"])
         self.assertNotIn("mail-secret-value", planned.text + applied.text + stale_plan.text)
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"product": "other-site"})
+        )
+        runtime_before = self.store.list_runtime_environment_records()
+        secrets_before = self.store.list_secret_records()
+        bindings_before = self.store.list_secret_bindings()
+        with patch.object(self.store, "write_product_authority_bundle") as writer:
+            refused_replay = await self.post(
+                {**payload, "mode": "apply", "confirmation": "APPLY example-site/testing"},
+                human=operator,
+                path=_CONFIG,
+                key="apply-mail-submission",
+            )
+        self.assertEqual(refused_replay.status_code, 403, refused_replay.text)
+        self.assertEqual(refused_replay.json()["error"]["code"], "product_config_lane_not_owned")
+        writer.assert_not_called()
+        self.assertEqual(self.store.list_runtime_environment_records(), runtime_before)
+        self.assertEqual(self.store.list_secret_records(), secrets_before)
+        self.assertEqual(self.store.list_secret_bindings(), bindings_before)
+        self.assertNotIn("mail-secret-value", refused_replay.text)
