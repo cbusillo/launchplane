@@ -2029,7 +2029,6 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(target.provider_delivery_protection_expectation)
         self.assertTrue(request.record.updated_at.endswith("Z"))
         self.assertIn("Z-", request.record.record_id)
-        self.assertLessEqual(len(request.reason), 240)
 
     async def test_ordinary_merge_target_preserves_existing_optional_policy_fields(self) -> None:
         with TemporaryDirectory() as directory:

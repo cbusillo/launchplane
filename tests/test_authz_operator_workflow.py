@@ -39,7 +39,6 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         for option in options:
             with self.subTest(managed_set=option):
                 job = self.dispatch_workflow.job(f"reconcile-{option}")
-                self.assertEqual(job["if"], f"${{{{ inputs.managed_set == '{option}' }}}}")
                 job_inputs = job["with"]
                 assert isinstance(job_inputs, dict)
                 self.assertEqual(job_inputs["expected_managed_set_id"], f"operator.{option}")

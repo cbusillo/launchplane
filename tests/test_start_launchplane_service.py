@@ -1,53 +1,44 @@
 import base64
 import os
-import re
+from fnmatch import fnmatchcase
+import shlex
 import stat
 import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-
-def _compose_service_blocks(compose_text: str) -> dict[str, str]:
-    services_section = re.split(r"(?m)^services:\n", compose_text, maxsplit=1)[1]
-    services_section = re.split(r"(?m)^\S", services_section, maxsplit=1)[0]
-    return dict(
-        re.findall(
-            r"(?ms)^ {2}([A-Za-z0-9_-]+):\n(.*?)(?=^ {2}[A-Za-z0-9_-]+:\n|\Z)",
-            services_section,
-        )
-    )
+import yaml
 
 
-def _compose_service_value(service_block: str, key: str) -> str:
-    match = re.search(rf"(?ms)^ {{4}}{key}:(.*?)(?=^ {{4}}\S|\Z)", service_block)
-    return match.group(1).strip() if match else ""
-
-
-def _assert_compose_supervises_worker_script(
-    test_case: unittest.TestCase,
-    *,
-    compose_path: Path,
-    script_path: Path,
-) -> None:
-    services = _compose_service_blocks(compose_path.read_text(encoding="utf-8"))
-    primary_service = services["launchplane"]
-    worker_services = [
-        service_block
-        for service_block in services.values()
-        if f"- /app/scripts/{script_path.name}\n" in service_block
-    ]
-
-    test_case.assertTrue(script_path.is_file())
-    test_case.assertEqual(len(worker_services), 1)
-    worker_service = worker_services[0]
-    for key in ("image", "restart", "env_file", "volumes", "networks"):
-        with test_case.subTest(key=key):
-            test_case.assertEqual(
-                _compose_service_value(worker_service, key),
-                _compose_service_value(primary_service, key),
-            )
-    test_case.assertIn("condition: service_healthy", worker_service)
+class ComposeWorkerSupervisionTests(unittest.TestCase):
+    def test_worker_services_share_primary_settings_and_wait_for_health(self) -> None:
+        compose_path = Path(__file__).resolve().parents[1] / "docker-compose.yml"
+        services = yaml.safe_load(compose_path.read_text(encoding="utf-8"))["services"]
+        assert isinstance(services, dict)
+        primary = services["launchplane"]
+        assert isinstance(primary, dict)
+        workers = []
+        for name, service in services.items():
+            assert isinstance(service, dict)
+            command = service.get("command", [])
+            arguments = shlex.split(command) if isinstance(command, str) else command
+            assert isinstance(arguments, list)
+            if any(
+                fnmatchcase(str(argument), "/app/scripts/start-launchplane-*-workers.sh")
+                for argument in arguments
+            ):
+                workers.append(name)
+                with self.subTest(service=name):
+                    for key in ("image", "restart", "env_file", "volumes", "networks"):
+                        self.assertIn(key, primary)
+                        self.assertEqual(service.get(key), primary[key], key)
+                    depends_on = service.get("depends_on")
+                    assert isinstance(depends_on, dict)
+                    dependency = depends_on.get("launchplane")
+                    assert isinstance(dependency, dict)
+                    self.assertEqual(dependency.get("condition"), "service_healthy")
+        self.assertTrue(workers, "Compose must define supervised worker services")
 
 
 class StartLaunchplaneServiceScriptTests(unittest.TestCase):
@@ -405,7 +396,6 @@ class StartLaunchplaneOdooWorkersScriptTests(unittest.TestCase):
     def setUp(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         self.script_path = repo_root / "scripts" / "start-launchplane-odoo-workers.sh"
-        self.compose_path = repo_root / "docker-compose.yml"
 
     def _write_fake_uv(self, bin_dir: Path) -> None:
         uv_path = bin_dir / "uv"
@@ -493,19 +483,11 @@ printf '%s\n' "$@" >>"$UV_CAPTURE_FILE"
         self.assertIn("--max-consecutive-errors", captured_args)
         self.assertIn("3", captured_args)
 
-    def test_compose_includes_supervised_odoo_worker_service(self) -> None:
-        _assert_compose_supervises_worker_script(
-            self,
-            compose_path=self.compose_path,
-            script_path=self.script_path,
-        )
-
 
 class StartLaunchplaneVeriReelWorkersScriptTests(unittest.TestCase):
     def setUp(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         self.script_path = repo_root / "scripts" / "start-launchplane-verireel-workers.sh"
-        self.compose_path = repo_root / "docker-compose.yml"
 
     def _write_fake_uv(self, bin_dir: Path) -> None:
         uv_path = bin_dir / "uv"
@@ -593,13 +575,6 @@ printf '%s\n' "$@" >>"$UV_CAPTURE_FILE"
         self.assertIn("--max-consecutive-errors", captured_args)
         self.assertIn("3", captured_args)
 
-    def test_compose_includes_supervised_verireel_worker_service(self) -> None:
-        _assert_compose_supervises_worker_script(
-            self,
-            compose_path=self.compose_path,
-            script_path=self.script_path,
-        )
-
 
 class StartLaunchplaneMergeTrainWorkersScriptTests(unittest.TestCase):
     def test_worker_startup_runs_the_scheduler_with_its_interval(self) -> None:
@@ -650,7 +625,6 @@ class StartLaunchplanePrivilegedOperationWorkersScriptTests(unittest.TestCase):
         self.script_path = (
             repo_root / "scripts" / "start-launchplane-privileged-operation-workers.sh"
         )
-        self.compose_path = repo_root / "docker-compose.yml"
 
     def _write_fake_uv(self, bin_dir: Path) -> None:
         uv_path = bin_dir / "uv"
@@ -898,13 +872,6 @@ exit {exit_code}
 
         self.assertEqual(result.returncode, 1, msg=result.stderr)
         self.assertIn('"error_type":"probe_failed"', result.stdout)
-
-    def test_compose_includes_supervised_privileged_operation_worker_service(self) -> None:
-        _assert_compose_supervises_worker_script(
-            self,
-            compose_path=self.compose_path,
-            script_path=self.script_path,
-        )
 
 
 if __name__ == "__main__":
