@@ -1,10 +1,12 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 import unittest
 from unittest.mock import patch
 
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.merge_train import MergeTrainDryRunSnapshot
+from control_plane.merge_train_controller_feedback import build_feedback_payloads
 from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.http_app_test_support import _post_merge_train_batch_candidate_run_once
@@ -90,3 +92,16 @@ class BatchPlanOrderingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(store.list_merge_train_stack_collapse_plan_records(), before)
             self.assertFalse(store.list_merge_train_batch_candidate_records())
             self.assertFalse(transport.requests)
+            feedback = build_feedback_payloads(response=payload, phase="batch-candidate")
+            self.assertEqual(
+                [(entry["pull_request_number"], entry["event"]) for entry in feedback],
+                [(selected["number"], "blocked")],
+            )
+            self.assertEqual(feedback[0]["repository"], saved.plan.repository)
+            self.assertEqual(feedback[0]["base_branch"], saved.plan.base_branch)
+            self.assertEqual(feedback[0]["controller_action"], "block")
+            self.assertEqual(feedback[0]["controller_record_id"], "")
+            self.assertIn(
+                "checks failed" if checks == "fail" else "merge conflicts",
+                cast(str, feedback[0]["message"]),
+            )

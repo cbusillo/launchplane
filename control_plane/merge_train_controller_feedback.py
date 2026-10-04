@@ -43,7 +43,9 @@ def build_feedback_payloads(
     if event == "skip":
         return []
 
-    pull_request_numbers = _pull_request_numbers(result)
+    pull_request_numbers = _pull_request_numbers(
+        result, controller_action=controller_action, phase=phase
+    )
     if not pull_request_numbers:
         return []
 
@@ -114,6 +116,10 @@ def _controller_action(*, result: dict[str, Any], phase: str) -> str:
 def _batch_candidate_plan_action(result: dict[str, Any]) -> str:
     if _as_dict(result.get("stack_collapse_plan")):
         return "plan_stack_collapse"
+    if not _as_dict(result.get("candidate")):
+        next_action = _string(result.get("next_action"))
+        if next_action in {"block", "wait_for_checks", "update_branch", "stack_unsupported"}:
+            return next_action
     return "plan_candidate"
 
 
@@ -146,7 +152,12 @@ def _response_identity(*, result: dict[str, Any], phase: str) -> tuple[str, str]
                 secondary=dry_run_result,
                 secondary_name="candidate dry-run result",
             )
-        if _string(result.get("next_action")) == "stack_unsupported":
+        if _string(result.get("next_action")) in {
+            "block",
+            "wait_for_checks",
+            "update_branch",
+            "stack_unsupported",
+        }:
             return _container_identity(dry_run_result, "candidate dry-run result")
         raise ValueError("batch-candidate response missing candidate or stack collapse plan")
 
@@ -325,15 +336,19 @@ def _held_out_messages(
     return messages
 
 
-def _pull_request_numbers(result: dict[str, Any]) -> list[int]:
-    if _string(result.get("controller_action")) in {"wait_for_checks", "block"} and (
-        "candidate" not in result
-    ):
+def _pull_request_numbers(
+    result: dict[str, Any], *, controller_action: str, phase: str
+) -> list[int]:
+    selected_actions = {"wait_for_checks", "block"}
+    if phase == "batch-candidate":
+        selected_actions.add("update_branch")
+    if controller_action in selected_actions and "candidate" not in result:
         selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))
         number = selected.get("number")
         # Client review waits are reported before a candidate exists, too.
         if (
-            "merge_train_batch_candidate_record_id" in result
+            phase == "batch-candidate"
+            or "merge_train_batch_candidate_record_id" in result
             or selected.get("owner_review_required") is True
         ) and (isinstance(number, int) and number > 0):
             return [number]
