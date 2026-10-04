@@ -1694,12 +1694,11 @@ provider message or rollback health exception is embedded in the detail.
   with exact expected-current records, one canonical authority digest,
   PostgreSQL idempotency, and atomic target/policy revision writes. The bounded
   response omits provider destination values.
-- The legacy runtime migration route reads one exact DB-backed instance runtime
-  record, requires both snapshot and independent-backup modes, copies only
-  non-secret Proxmox target facts into revision-one typed records, and binds the
-  runtime record's exact `updated_at`. It does not remove or alter the legacy
-  gate; provider execution and final runtime-key retirement remain downstream
-  work.
+- New attempts on the legacy runtime migration route refuse without reading
+  environment values or creating authority. Historical idempotent replies remain
+  replayable. Use reviewed typed target/policy input through the apply route;
+  snapshot and independent-backup requirements remain mandatory. Live runtime-key
+  removal and product proof remain separate #2309 operations.
 
 ## Backup Gate Record
 
@@ -1745,8 +1744,9 @@ provider message or rollback health exception is embedded in the detail.
   `verireel_prod_backup_gate_operations` for file-backed local state. The HTTP
   route writes a pending backup-gate record plus a typed operation record; the
   supervised `verireel-workers` process claims the operation, heartbeats its
-  lease, runs the delegated backup worker, writes the terminal backup-gate
-  evidence, and completes the operation record. Expired operations retry only
+  lease, executes shared captures from typed bindings, writes terminal backup-gate
+  evidence, and completes the operation record. Legacy requests without a typed
+  binding receive failed records without invoking the delegated host worker. Expired operations retry only
   before the external backup side-effect boundary; once the phase reaches
   `backup_gate`, lease expiry fails closed for admin review.
   A pending operation can be cancelled through the deployed service. The

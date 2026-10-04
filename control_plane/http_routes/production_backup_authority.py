@@ -244,7 +244,7 @@ def register_production_backup_authority_write_routes(
         methods=["POST"],
         response_model=ProductionBackupAuthorityWriteResponse,
         operation_id="migrate_legacy_production_backup_authority",
-        summary="Dry-run or apply an exact legacy runtime backup migration",
+        summary="Refuse new legacy runtime backup migrations; use typed authority apply",
         responses={
             status_code: {"model": dependencies.error_response_model}
             for status_code in (400, 401, 403, 409, 503)

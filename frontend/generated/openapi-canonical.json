@@ -79879,7 +79879,7 @@
             "description": "Service Unavailable"
           }
         },
-        "summary": "Dry-run or apply an exact legacy runtime backup migration"
+        "summary": "Refuse new legacy runtime backup migrations; use typed authority apply"
       }
     },
     "/v1/production-backup-gates": {
