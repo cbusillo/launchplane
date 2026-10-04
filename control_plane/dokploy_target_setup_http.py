@@ -514,16 +514,29 @@ def execute_dokploy_target_setup(
         else []
     )
     if apply_changes and request.operation == "create-compose" and request.runtime_port:
-        for domain in request.domains:
-            route_domain_ids.append(
-                dokploy_compose.ensure_compose_web_domain_route(
-                    host=host,
-                    token=token,
-                    compose_id=result.target_id_record.target_id,
-                    domain_host=domain,
-                    runtime_port=request.runtime_port,
+        pending_domain = ""
+        try:
+            for domain in request.domains:
+                pending_domain = domain
+                route_domain_ids.append(
+                    dokploy_compose.ensure_compose_web_domain_route(
+                        host=host,
+                        token=token,
+                        compose_id=result.target_id_record.target_id,
+                        domain_host=domain,
+                        runtime_port=request.runtime_port,
+                    )
                 )
-            )
+        except Exception as error:
+            # Compose creation and its records already completed, even if the route
+            # failure is preflight-only. A new create would duplicate that effect.
+            raise DokployComposeDomainPartialError(
+                request=request,
+                compose_id=result.target_id_record.target_id,
+                completed_domain_ids=route_domain_ids,
+                pending_domain=pending_domain,
+                stage="route-create",
+            ) from error
     return {
         "mode": request.mode,
         "operation": request.operation,
@@ -637,7 +650,7 @@ def _execute_dokploy_compose_domain_reconcile(
                     update={
                         "domains": merged_domains,
                         "updated_at": utc_now_timestamp(),
-                        "source_label": ("service:dokploy-targets:setup:reconcile-compose-domain"),
+                        "source_label": "service:dokploy-targets:setup:reconcile-compose-domain",
                     }
                 )
                 record_store.write_dokploy_target_record(target_record)

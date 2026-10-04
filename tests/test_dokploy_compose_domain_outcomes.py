@@ -10,6 +10,11 @@ from unittest.mock import patch
 import click
 
 from control_plane.dokploy.api import DokployRequestFailed, JsonValue
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.workflows.dokploy_target_adoption import (
+    DokployComposeTargetCreatePlan,
+    DokployComposeTargetCreateResult,
+)
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.auth import _StubVerifier, _identity
@@ -107,7 +112,7 @@ class ComposeDomainOutcomeTests(unittest.TestCase):
             self.reads += 1
             if self.reads == self.fail_read_at:
                 raise self.failure
-            return cast(JsonValue, [dict(route) for route in self.routes])
+            return [dict(route) for route in self.routes]
         self.assertEqual(kwargs["method"], "POST")
         payload = kwargs["payload"]
         domain_id = payload.get("domainId", "domain-created")
@@ -137,7 +142,7 @@ class ComposeDomainOutcomeTests(unittest.TestCase):
             "instance": "testing",
             "domains": ["first.synthetic.invalid", "second.synthetic.invalid"],
         }
-        if operation == "reconcile-compose-domain":
+        if operation in {"reconcile-compose-domain", "create-compose"}:
             payload["runtime_port"] = 9000
         if mode == "apply":
             payload.update(
@@ -171,6 +176,46 @@ class ComposeDomainOutcomeTests(unittest.TestCase):
         )
         self.assertEqual(persisted, self.before)
         return cast(dict[str, Any], recovery)
+
+    def test_created_compose_route_failure_preserves_target_for_recovery(self) -> None:
+        target_id_record = self.store.read_dokploy_target_id_record(
+            context_name="synthetic-context", instance_name="testing"
+        )
+        created = DokployComposeTargetCreateResult(
+            applied=True,
+            plan=DokployComposeTargetCreatePlan(project={}, environment={}, compose={}),
+            target_record=self.before,
+            target_id_record=target_id_record,
+            provider_target_record=ProviderTargetRecord.from_dokploy_records(
+                target_record=self.before, target_id_record=target_id_record
+            ),
+        )
+        # The creation workflow returns only after creation and record adoption;
+        # existing workflow tests cover that boundary. Fault the following route loop.
+        for failure_kind in ("second-write", "first-preflight"):
+            with self.subTest(failure_kind=failure_kind):
+                self.writes = []
+                self.reads = 0
+                self.fail_at = 2 if failure_kind == "second-write" else None
+                self.fail_read_at = 1 if failure_kind == "first-preflight" else None
+                with patch(
+                    "control_plane.dokploy_target_setup_http.create_dokploy_compose_target",
+                    return_value=created,
+                ) as create_compose:
+                    status, payload = self.invoke(
+                        "create-compose",
+                        target_name="synthetic-compose",
+                        server_id="server-synthetic",
+                    )
+                recovery = self.assert_partial(
+                    status,
+                    payload,
+                    completed=["domain-first"] if failure_kind == "second-write" else [],
+                    stage="route-create",
+                )
+                self.assertEqual(recovery["operation"], "create-compose")
+                create_compose.assert_called_once()
+                self.assertEqual(len(self.writes), 2 if failure_kind == "second-write" else 0)
 
     def test_reconcile_second_write_failure_preserves_partial_evidence(self) -> None:
         self.fail_at = 2

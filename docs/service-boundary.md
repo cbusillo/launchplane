@@ -2456,25 +2456,28 @@ records are written, recover by re-running the workflow with `operation=adopt`
 and the created provider target id, not by creating a second target for the same
 lane.
 
-A failed reconcile/prune route attempt, or a tracked-record write failure after
-route attempts, returns HTTP 502 `dokploy_domain_partial_outcome`, rather than
+A failed reconcile/prune route attempt, a tracked-record write failure after
+route attempts, or a failed domain step after `create-compose` creation/adoption, returns HTTP 502 `dokploy_domain_partial_outcome`, rather than
 HTTP 400 `invalid_dokploy_target_setup`. The response's existing string-valued
 `records.domain_recovery` entry contains JSON with operation, context, instance,
 compose id, `completed_domain_ids` (calls whose responses succeeded),
 `pending_domain` (host for reconcile, domain id for prune; empty at record write),
-`stage` (`route-reconcile`, `route-prune`, or `record-write`), and `outcome: unknown`.
+`stage` (`route-create`, `route-reconcile`, `route-prune`, or `record-write`), and `outcome: unknown`.
 The failing call may already have changed the provider, including when no earlier
 call completed. Provider exception text and credentials are excluded. Inspect
 provider routes and tracked records before a new apply; neither automatic replay
 nor rollback is performed. A failure before a route attempt (envelope, tracked
 target, or prune inventory validation) retains its ordinary validation error.
-A reconcile preflight lookup/validation failure before any route write remains
+During apply, a reconcile preflight lookup/validation failure before any route write remains
 distinct (400), retaining a provider HTTP status when known without free-text
 provider detail; the same failure after a completed route is partial (502).
 Reconcile refuses malformed non-list inventory instead of assuming no existing
 routes. Keep the dry-run artifact to recover prior route settings if a later
 apply is partial; the recovery response is progress evidence, not a rollback
 snapshot.
+After `create-compose`, even a first route preflight failure is partial because
+the compose and its records already exist. Recover using that tracked compose id
+and the existing domain reconcile operation; do not create another compose.
 Successful idempotency responses remain unchanged; an uncertain response is not
 stored as a successful apply.
 
