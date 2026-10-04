@@ -54,9 +54,11 @@ adapters may target an open-source or hosted forge without moving Launchplane's
 delivery authority back into the forge.
 
 Each product profile names its Client. That person reviews product previews
-and the release checklist in Launchplane. These decisions grant no operational
-authority and do not enter machine merge readiness. Production promotion checks
-the separate release approval and backup evidence. See `docs/release-review.md`.
+and the release checklist in Launchplane. These decisions do not enter machine
+merge readiness. The Client's release acceptance is the one decision that starts
+anything: for a product an admin has not held, it starts the gated production
+promotion, which still checks release approval and backup evidence. See
+`docs/release-review.md`.
 
 Launchplane does not become a Git host, general issue or project-planning
 system, engineering work queue, CI runner, package registry, generic provider

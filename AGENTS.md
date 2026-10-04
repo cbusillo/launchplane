@@ -44,8 +44,9 @@ Treat this file as the launch checklist for each engineering session in
   product repositories describe the retired call-in path; do not extend it. See
   `docs/event-driven-deploys.md` and `docs/artifact-provenance.md`.
 - `docs/owner-acceptance.md` and `docs/release-review.md` describe current
-  Client review and the release checklist. Client decisions grant no
-  operational power.
+  Client review and the release checklist. The Client's release acceptance
+  starts the gated promotion when an admin has not held the product's releases;
+  Client decisions grant no other operational power.
 - Keep Launchplane merge/delivery provider-neutral. GitHub is the current source-
   control adapter and Dokploy is the current application deployment provider.
 

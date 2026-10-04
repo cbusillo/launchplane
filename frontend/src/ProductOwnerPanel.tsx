@@ -280,6 +280,7 @@ export function ProductOwnerPanel({
     </section>
     <ProductProfileFieldPanel key={`${product}:image`} product={product} fixtureMode={fixtureMode} field="image" />
     <ProductProfileFieldPanel key={`${product}:production`} product={product} fixtureMode={fixtureMode} field="production" />
+    <ProductProfileFieldPanel key={`${product}:release`} product={product} fixtureMode={fixtureMode} field="release" />
     </>
   );
 }
@@ -305,7 +306,15 @@ function useProductOwnerOperation(scope: string, product: string, fixtureMode: D
 }
 
 
-type ProfileField = "image" | "production";
+type ProfileField = "image" | "production" | "release";
+type ProductionUse = "unknown" | "prelaunch" | "live";
+type ReleaseOnAcceptance = "held" | "promote" | "promote_with_rollback_drill";
+const PROFILE_FIELD_TITLES: Record<ProfileField, string> = {
+  image: "Image repository", production: "Production use", release: "Releases on acceptance",
+};
+const PROFILE_FIELD_PREFIXES: Record<ProfileField, string> = {
+  image: "image_repository", production: "production_use", release: "release_on_acceptance",
+};
 type ProfileFieldRequest = ApplyProductImageRepositoryData["body"] | ApplyProductProductionUseData["body"];
 interface ProfileFieldPlan {
   before: string;
@@ -317,10 +326,10 @@ interface ProfileFieldPlan {
 
 function profileFieldPlan(response: AcceptedEvidenceResponse, field: ProfileField): ProfileFieldPlan {
   const result = response.result;
-  const prefix = field === "image" ? "image_repository" : "production_use";
+  const prefix = PROFILE_FIELD_PREFIXES[field];
   if (!result || typeof result[`${prefix}_before`] !== "string" ||
       typeof result[`${prefix}_after`] !== "string" || typeof result.changed !== "boolean" ||
-      (field === "production" && typeof result.plan_sha256 !== "string")) {
+      (field !== "image" && typeof result.plan_sha256 !== "string")) {
     throw new Error("Launchplane returned a dry run this page cannot read.");
   }
   return {
@@ -355,7 +364,9 @@ function recoverProfileFieldDraft(storageKey: string): ReviewedProfileField | nu
 function ProductProfileFieldPanel({ product, fixtureMode, field }: {
   product: string; fixtureMode: DevFixtureMode; field: ProfileField;
 }) {
-  const title = field === "image" ? "Image repository" : "Production use";
+  const title = PROFILE_FIELD_TITLES[field];
+  // The release switch shares the production-use route, which also takes the classification.
+  const [productionUse, setProductionUse] = useState<ProductionUse>("unknown");
   const storageKey = `launchplane:product-profile-draft:${product}:${field}`;
   const [reviewed, setReviewed] = useState<ReviewedProfileField | null>(() => recoverProfileFieldDraft(storageKey));
   const [current, setCurrent] = useState<string | null>(null);
@@ -368,9 +379,16 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
   async function readValue(signal?: AbortSignal): Promise<{ value: string; suggested: string }> {
     if (fixtureMode) {
       const fixtures = await loadDevFixtures();
+      setProductionUse(fixtures.productProfileFieldForFixture(fixtureMode, product, "production").value as ProductionUse);
       return fixtures.productProfileFieldForFixture(fixtureMode, product, field);
     }
     const { profile } = await readProductProfile(product, signal);
+    setProductionUse(profile.production_use);
+    if (field === "release") {
+      // A held product's profile omits the switch.
+      const release = profile.release_on_acceptance ?? "held";
+      return { value: release, suggested: release };
+    }
     return { value: field === "image" ? profile.image.repository : profile.production_use,
       suggested: field === "image" ? `ghcr.io/${profile.repository.trim().toLowerCase()}` : profile.production_use };
   }
@@ -428,14 +446,18 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
     if (!applyOperation.reset()) { setError("Retry the uncertain Apply with its existing operation key."); return; }
     const payload: ProfileFieldRequest = field === "image"
       ? { mode: "dry-run", image_repository: value.trim(), reason: reason.trim() }
-      : { mode: "dry-run", production_use: value as "unknown" | "prelaunch" | "live", reason: reason.trim() };
+      : field === "release"
+        ? { mode: "dry-run", production_use: productionUse, release_on_acceptance: value as ReleaseOnAcceptance, reason: reason.trim() }
+        : { mode: "dry-run", production_use: value as ProductionUse, reason: reason.trim() };
     const response = await previewOperation.run(payload);
     if (!response) return;
     try {
       const plan = profileFieldPlan(response, field);
       const request: ProfileFieldRequest = field === "image"
         ? { mode: "apply", image_repository: plan.after, expected_image_repository: plan.before, reason: reason.trim() }
-        : { mode: "apply", production_use: plan.after as "unknown" | "prelaunch" | "live", reviewed_plan_sha256: plan.digest, reason: reason.trim() };
+        : field === "release"
+          ? { mode: "apply", production_use: productionUse, release_on_acceptance: plan.after as ReleaseOnAcceptance, reviewed_plan_sha256: plan.digest, reason: reason.trim() }
+          : { mode: "apply", production_use: plan.after as ProductionUse, reviewed_plan_sha256: plan.digest, reason: reason.trim() };
       setReviewed({ plan, key: draftKey, request });
     } catch (failure) { setError(failure instanceof Error ? failure.message : "Unreadable dry run."); }
   }
@@ -473,12 +495,17 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
         <p className="eyebrow">Client settings</p><h2 id={`product-${field}-title`}>{title}</h2>
         <p>{field === "image"
           ? "Change where this product publishes new images. Recorded rollback artifacts remain available."
-          : "Prelaunch exempts this product from release review. Unknown and live require review."}</p>
+          : field === "release"
+            ? "Held: the Client's acceptance only records a decision. Promote: the Client's acceptance starts the gated production release (Odoo products). With rollback drill: the next accepted release also rolls back once and promotes again."
+            : "Prelaunch exempts this product from release review. Unknown and live require review."}</p>
       </div></header>
       <p>Current: {current === null ? "Reading profile…" : current || "Not set"}</p>
       <fieldset disabled={locked || current === null} aria-label={`Change ${title.toLowerCase()}`}>
         <div className="product-config-field"><label htmlFor={`product-${field}-value`}>{title}</label>
           {field === "image" ? <input id={`product-${field}-value`} type="text" value={value} onChange={(event) => setValue(event.target.value)} spellCheck={false} autoCapitalize="none" />
+            : field === "release" ? <select id={`product-${field}-value`} value={value} onChange={(event) => setValue(event.target.value)}>
+              <option value="held">Held</option><option value="promote">Promote</option><option value="promote_with_rollback_drill">Promote with rollback drill</option>
+            </select>
             : <select id={`product-${field}-value`} value={value} onChange={(event) => setValue(event.target.value)}>
               <option value="unknown">Unknown</option><option value="prelaunch">Prelaunch</option><option value="live">Live</option>
             </select>}

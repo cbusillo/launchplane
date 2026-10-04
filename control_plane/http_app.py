@@ -13369,6 +13369,7 @@ def create_launchplane_fastapi_app(
                 replacement_profile = control_plane_product_production_use_setting.updated_product_production_use_profile(
                     profile=profile,
                     production_use=plan.production_use_after,
+                    release_on_acceptance=plan.release_on_acceptance_after,
                     updated_at=utc_now_timestamp(),
                 )
             except ValueError as error:
