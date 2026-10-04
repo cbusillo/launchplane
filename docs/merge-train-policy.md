@@ -193,7 +193,11 @@ GitHub HTTP failures retain a bounded request description in
 branch, token, body or query values. Unknown routes use `/{unknown_route}`.
 HTTP 429 and HTTP 403 with `retry-after` or `x-ratelimit-remaining: 0` use
 `retryable:github_rate_limited`; a valid numeric `x-ratelimit-reset` is recorded
-as `reset_at` (Unix seconds). Other refusals stay admin-required. This diagnosis
+as `reset_at` (Unix seconds for GitHub's primary quota window). A valid numeric
+`retry-after` is recorded separately as `retry_after_seconds`; secondary limits
+can have a different retry delay from the primary reset time. Neither field
+schedules an automatic retry. Refusals without these rate-limit headers remain
+admin-required, even when a provider body might describe a secondary limit. This diagnosis
 does not retry a write in place: the next controller pass re-observes the stored
 phase through the existing reconciliation path.
 

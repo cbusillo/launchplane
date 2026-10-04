@@ -82,7 +82,8 @@ class MergeTrainGitHubFailureTests(unittest.TestCase):
                 detail = _controller_exception_reconciliation_detail(error)
                 self.assertEqual(
                     detail,
-                    f"{classification}; request:GET /repos/{{owner}}/{{repo}}/pulls/{{number}} HTTP {status}",
+                    f"{classification}; request:GET /repos/{{owner}}/{{repo}}/pulls/{{number}} HTTP {status}"
+                    + ("; retry_after_seconds:60" if "Retry-After" in headers else ""),
                 )
                 for private in (
                     "private-owner",
@@ -110,6 +111,23 @@ class MergeTrainGitHubFailureTests(unittest.TestCase):
             _controller_exception_reconciliation_detail(error).startswith("operator_required:")
         )
         self.assertNotIn("reset_at:", _controller_exception_reconciliation_detail(error))
+
+    def test_chained_quota_failure_keeps_primary_reset_and_secondary_delay_separate(self) -> None:
+        for retry_after in ("60", "secret-token", "9" * 200):
+            with self.subTest(retry_after=retry_after):
+                original = _failed_request(
+                    403, {"Retry-After": retry_after, "X-RateLimit-Reset": "1791090000"}
+                )
+                wrapped = MergeTrainGitHubError("Historical proof unavailable", status_code=503)
+                wrapped.__cause__ = original
+                detail = _controller_exception_reconciliation_detail(wrapped)
+                self.assertTrue(detail.startswith("retryable:github_rate_limited;"))
+                self.assertIn("reset_at:1791090000", detail)
+                if retry_after == "60":
+                    self.assertIn("retry_after_seconds:60", detail)
+                else:
+                    self.assertNotIn("retry_after_seconds:", detail)
+                    self.assertNotIn(retry_after, detail)
 
     def test_routes_discard_dynamic_segments_and_unknown_routes(self) -> None:
         cases = (

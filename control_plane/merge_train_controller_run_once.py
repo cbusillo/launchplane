@@ -4021,11 +4021,21 @@ def _controller_exception_reconciliation_detail(error: Exception) -> str:
             "merge_blocked": "operator_required:pull_request_merge_blocked",
         }.get(error.refusal_diagnosis, "operator_required:github_merge_rejected") + suffix
     if isinstance(error, MergeTrainGitHubError):
-        if error.rate_limited:
+        quota_error = error
+        if isinstance(error.__cause__, MergeTrainGitHubError) and error.__cause__.rate_limited:
+            quota_error = error.__cause__
+        if quota_error.rate_limited:
             reset = (
-                f"; reset_at:{error.rate_limit_reset}" if error.rate_limit_reset is not None else ""
+                f"; reset_at:{quota_error.rate_limit_reset}"
+                if quota_error.rate_limit_reset is not None
+                else ""
             )
-            return "retryable:github_rate_limited" + suffix + reset
+            retry_after = (
+                f"; retry_after_seconds:{quota_error.retry_after_seconds}"
+                if quota_error.retry_after_seconds is not None
+                else ""
+            )
+            return "retryable:github_rate_limited" + suffix + reset + retry_after
         if error.status_code is None or error.status_code >= 500:
             return "retryable:github_request_failed" + suffix
         return "operator_required:github_request_rejected" + suffix
