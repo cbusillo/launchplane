@@ -301,7 +301,10 @@ class FastApiMergeTrainReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["admission"]["reason_code"], "no_prior_run")
 
     async def test_controller_status_reads_stored_dry_run(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch("control_plane.http_app.resolve_merge_train_github_token") as resolve_token,
+        ):
             state_dir = Path(temporary_directory_name) / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
             _seed_merge_train_policy(state_dir)
@@ -324,9 +327,18 @@ class FastApiMergeTrainReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(controller_status["repository"], "cbusillo/sellyouroutboard")
         self.assertEqual(controller_status["base_branch"], "main")
         self.assertEqual(controller_status["latest_run"]["run_id"], run_record.run_id)
+        self.assertEqual(controller_status["latest_run_source"], "level1")
+        expected_age = int(
+            (
+                datetime.fromisoformat(controller_status["generated_at"])
+                - datetime.fromisoformat(run_record.recorded_at)
+            ).total_seconds()
+        )
+        self.assertEqual(controller_status["latest_run_age_seconds"], expected_age)
         self.assertEqual(controller_status["latest_dry_run"]["queue_count"], 1)
         self.assertEqual(controller_status["latest_dry_run"]["selected_pr_number"], 1)
         self.assertEqual(controller_status["reconciliation_diagnostics"], [])
+        resolve_token.assert_not_called()
 
     async def test_controller_status_exposes_safe_http_failure_after_restart(self) -> None:
         from control_plane.merge_train_controller_run_once import (

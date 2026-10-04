@@ -1283,6 +1283,18 @@ Admin views can read the broader stored controller state from the native
 FastAPI route
 `GET /v1/work-graph/merge-train/controller/status?repository=owner/name&base_branch=main`.
 That route returns the same admission decision plus the latest Level 1 run record,
+identified by `latest_run_source=level1`, with `latest_run_age_seconds` measured
+at the response's `generated_at`. Both fields are null when no Level 1 run
+exists. `latest_run` reads only `launchplane_merge_train_runs`, ordered by
+`recorded_at` descending and then `run_id` descending, independently of write
+order. Controller passes persist separate lease, candidate, and landing records;
+they do not write Level 1 run history. A September Level 1 run can therefore
+appear alongside October controller activity. Its timestamp and age describe
+that historical evidence, not the last controller pass or a current queue
+observation. Admission continues to use that Level 1 history for its existing
+poll/backoff rules and current-policy controller records for its action hint.
+
+The response also includes the
 controller lease holder, active action and phase, lease and heartbeat age, reconciliation
 state, and compact summaries for active batch candidates, landing plans, and
 stack collapse plans. When the latest run is dry-run evidence, the response also
@@ -1404,7 +1416,7 @@ controller result whose mode is `dry-run`. Dry-run controller passes may render
 feedback payloads for inspection, but they must report zero delivered feedback
 comments and must not create or update Launchplane-managed PR comments. The
 Launchplane UI controller status panel or the controller-status route should show
-the same active records, stale-record reasons, latest run result, and next
+the same active records, stale-record reasons, historical Level 1 run result, and next
 controller action without requiring a GitHub read.
 
 Enable mutation only after the Director explicitly chooses to promote the dry-run

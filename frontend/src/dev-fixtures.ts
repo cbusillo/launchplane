@@ -1848,6 +1848,8 @@ export function mergeTrainStatusForFixture(
         ],
         selected_pr_number: 418,
       },
+      latest_run_source: "level1",
+      latest_run_age_seconds: 0,
       latest_run: {
         base_branch: baseBranch,
         dry_run_result: {},
