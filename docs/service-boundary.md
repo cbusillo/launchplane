@@ -2435,14 +2435,37 @@ requests keep the `Idempotency-Key` replay/conflict contract; dry-runs remain
 repeatable and are not stored as idempotency responses. The manual
 `Dokploy Target Setup` workflow is the supported shared and production caller;
 product repos must not store live target IDs or provider fixtures as setup
-authority. Runtime port is accepted only for `create-compose` domain
-reconciliation with at least one domain. Domain pruning is restricted to tracked
+authority. Runtime port is accepted for `create-compose` and `reconcile-compose-domain`
+with at least one domain. Reconcile targets the tracked compose and rewrites the
+first exact matching-host provider route to service `web`, paths `/`, HTTPS, and
+the requested port (or creates a route if none matches). Its dry-run reads live
+provider routes and returns `setup.existing_routes`: matching host/domain id,
+path, internal path, service name, port and HTTPS, with `selected_for_rewrite`
+identifying that first match. Duplicate matches remain visible; missing provider
+fields remain null. Unrelated route fields are excluded. This is a point-in-time
+preview, not a reservation against later provider changes. Domain pruning is restricted to tracked
 compose targets and explicit domain hosts; dry-run reports matched provider
 domain ids, while apply deletes only those matching ids and updates the tracked
 target domain list. If a provider create succeeds but the service fails before
 records are written, recover by re-running the workflow with `operation=adopt`
 and the created provider target id, not by creating a second target for the same
 lane.
+
+A failed reconcile/prune route attempt, or a tracked-record write failure after
+route attempts, returns HTTP 502 `dokploy_domain_partial_outcome`, rather than
+HTTP 400 `invalid_dokploy_target_setup`. The response's existing string-valued
+`records.domain_recovery` entry contains JSON with operation, context, instance,
+compose id, `completed_domain_ids` (calls whose responses succeeded),
+`pending_domain` (host for reconcile, domain id for prune; empty at record write),
+`stage` (`route-reconcile`, `route-prune`, or `record-write`), and `outcome: unknown`.
+The failing call may already have changed the provider, including when no earlier
+call completed. Provider exception text and credentials are excluded. Inspect
+provider routes and tracked records before a new apply; neither automatic replay
+nor rollback is performed. A failure before a route attempt (envelope, tracked
+target, or prune inventory validation) retains its ordinary validation error.
+A provider read failure inside the reconcile attempt is conservatively uncertain.
+Successful idempotency responses remain unchanged; an uncertain response is not
+stored as a successful apply.
 
 The same route exposes the narrow `repair-domain-authority` operation for
 application and compose targets. It reads the current target, target-id, and

@@ -157,6 +157,47 @@ class DokployTargetSetupEnvelope(BaseModel):
         return self
 
 
+class DokployComposeDomainPartialError(RuntimeError):
+    """A route operation was attempted; provider and tracked state need reconciliation."""
+
+    def __init__(
+        self,
+        *,
+        request: DokployTargetSetupEnvelope,
+        compose_id: str,
+        completed_domain_ids: list[str],
+        pending_domain: str,
+        stage: str,
+    ) -> None:
+        super().__init__(
+            "Compose domain setup outcome is uncertain; inspect provider routes and tracked "
+            "records before retrying."
+        )
+        self.recovery: dict[str, object] = {
+            "operation": request.operation,
+            "context": request.context,
+            "instance": request.instance,
+            "compose_id": compose_id,
+            "completed_domain_ids": list(completed_domain_ids),
+            "pending_domain": pending_domain,
+            "stage": stage,
+            "outcome": "unknown",
+        }
+
+
+class DokployComposeDomainRoutePreview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    host: str
+    domain_id: str | None = None
+    path: str | None = None
+    internal_path: str | None = None
+    service_name: str | None = None
+    port: int | None = None
+    https: bool | None = None
+    selected_for_rewrite: bool
+
+
 class DokployComposeDomainReconcileResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -166,6 +207,7 @@ class DokployComposeDomainReconcileResult(BaseModel):
     domains: tuple[str, ...]
     runtime_port: int
     route_domain_ids: tuple[str, ...] = ()
+    existing_routes: tuple[DokployComposeDomainRoutePreview, ...] = ()
     warnings: tuple[str, ...] = ()
 
 
@@ -535,27 +577,66 @@ def _execute_dokploy_compose_domain_reconcile(
         raise ValueError("Dokploy compose domain reconciliation requires runtime_port.")
     requested_domains = tuple(dict.fromkeys(request.domains))
     route_domain_ids: list[str] = []
-    if apply_changes:
-        for domain in requested_domains:
-            route_domain_ids.append(
-                dokploy_compose.ensure_compose_web_domain_route(
-                    host=host,
-                    token=token,
-                    compose_id=target_id_record.target_id,
-                    domain_host=domain,
-                    runtime_port=runtime_port,
+    existing_routes: list[DokployComposeDomainRoutePreview] = []
+    if not apply_changes:
+        provider_domains = fetch_dokploy_compose_domains_for_target_setup(
+            host=host, token=token, compose_id=target_id_record.target_id
+        )
+        selected_hosts: set[str] = set()
+        for route in provider_domains:
+            route_host = str(route.get("host") or "").strip()
+            if route_host not in requested_domains:
+                continue
+            existing_routes.append(
+                DokployComposeDomainRoutePreview.model_validate(
+                    {
+                        "host": route_host,
+                        "domain_id": route.get("domainId"),
+                        "path": route.get("path"),
+                        "internal_path": route.get("internalPath"),
+                        "service_name": route.get("serviceName"),
+                        "port": route.get("port"),
+                        "https": route.get("https"),
+                        "selected_for_rewrite": route_host not in selected_hosts,
+                    }
                 )
             )
-        merged_domains = tuple(dict.fromkeys((*target_record.domains, *requested_domains)))
-        if merged_domains != target_record.domains:
-            target_record = target_record.model_copy(
-                update={
-                    "domains": merged_domains,
-                    "updated_at": utc_now_timestamp(),
-                    "source_label": ("service:dokploy-targets:setup:reconcile-compose-domain"),
-                }
-            )
-            record_store.write_dokploy_target_record(target_record)
+            selected_hosts.add(route_host)
+    if apply_changes:
+        pending_domain = ""
+        stage = "route-reconcile"
+        try:
+            for domain in requested_domains:
+                pending_domain = domain
+                route_domain_ids.append(
+                    dokploy_compose.ensure_compose_web_domain_route(
+                        host=host,
+                        token=token,
+                        compose_id=target_id_record.target_id,
+                        domain_host=domain,
+                        runtime_port=runtime_port,
+                    )
+                )
+            stage = "record-write"
+            pending_domain = ""
+            merged_domains = tuple(dict.fromkeys((*target_record.domains, *requested_domains)))
+            if merged_domains != target_record.domains:
+                target_record = target_record.model_copy(
+                    update={
+                        "domains": merged_domains,
+                        "updated_at": utc_now_timestamp(),
+                        "source_label": ("service:dokploy-targets:setup:reconcile-compose-domain"),
+                    }
+                )
+                record_store.write_dokploy_target_record(target_record)
+        except Exception as error:
+            raise DokployComposeDomainPartialError(
+                request=request,
+                compose_id=target_id_record.target_id,
+                completed_domain_ids=route_domain_ids,
+                pending_domain=pending_domain,
+                stage=stage,
+            ) from error
     return DokployComposeDomainReconcileResult(
         applied=apply_changes,
         target_record=target_record,
@@ -563,6 +644,7 @@ def _execute_dokploy_compose_domain_reconcile(
         domains=requested_domains,
         runtime_port=runtime_port,
         route_domain_ids=tuple(route_domain_ids),
+        existing_routes=tuple(existing_routes),
         warnings=()
         if apply_changes
         else ("dry run only; Dokploy compose domain routes were not reconciled",),
@@ -626,21 +708,37 @@ def _execute_dokploy_compose_domain_prune(
     )
     deleted_domain_ids: list[str] = []
     if apply_changes:
-        for domain_id in matched_domain_ids:
-            delete_dokploy_domain_for_target_setup(host=host, token=token, domain_id=domain_id)
-            deleted_domain_ids.append(domain_id)
-        remaining_domains = tuple(
-            domain for domain in target_record.domains if domain not in requested_domains
-        )
-        if remaining_domains != target_record.domains:
-            target_record = target_record.model_copy(
-                update={
-                    "domains": remaining_domains,
-                    "updated_at": utc_now_timestamp(),
-                    "source_label": "service:dokploy-targets:setup:prune-compose-domain",
-                }
+        pending_domain = ""
+        stage = "route-prune"
+        try:
+            for domain_id in matched_domain_ids:
+                pending_domain = domain_id
+                delete_dokploy_domain_for_target_setup(host=host, token=token, domain_id=domain_id)
+                deleted_domain_ids.append(domain_id)
+            stage = "record-write"
+            pending_domain = ""
+            remaining_domains = tuple(
+                domain for domain in target_record.domains if domain not in requested_domains
             )
-            record_store.write_dokploy_target_record(target_record)
+            if remaining_domains != target_record.domains:
+                target_record = target_record.model_copy(
+                    update={
+                        "domains": remaining_domains,
+                        "updated_at": utc_now_timestamp(),
+                        "source_label": "service:dokploy-targets:setup:prune-compose-domain",
+                    }
+                )
+                record_store.write_dokploy_target_record(target_record)
+        except Exception as error:
+            if not matched_domain_ids:
+                raise
+            raise DokployComposeDomainPartialError(
+                request=request,
+                compose_id=target_id_record.target_id,
+                completed_domain_ids=deleted_domain_ids,
+                pending_domain=pending_domain,
+                stage=stage,
+            ) from error
 
     warnings: list[str] = []
     if not apply_changes:
