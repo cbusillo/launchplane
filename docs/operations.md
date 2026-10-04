@@ -3633,6 +3633,21 @@ runtime/target authority, preserves secret and deletion evidence, disables
 preview configuration, and marks the profile `retired`. Do not delete the
 profile.
 
+Tracked retirement persists a finalization checkpoint after provider absence and
+before removing local authority. One immutable checkpoint belongs to each
+provider operation, so overlapping expired-lease retries reuse matching evidence.
+A same-key retry can resume after target records
+are removed or the profile becomes retired, using that checkpoint's exact profile
+and intended retired-profile digests. Recovery verifies provider absence again,
+checks remaining targets, runtime records and managed secrets against the reviewed
+plan, and preserves the held target fence on drift or unknown evidence. Recovery
+after target removal or profile retirement requires checkpoint evidence; historical records are not
+sufficient to invent a completed finalization. Different keys, changed requests
+and changed plans retain the existing conflict behavior. No provider delete is
+needed when absence is verified. Original attempt history remains authoritative
+for earlier provider effects; retry phases describe the retry's checkpoints.
+Existing managed-secret disable audit events retain their original timestamps.
+
 Tracked retirement blocks active previews in the profile's preview context for
 both the short repository anchor written by preview dispatch/reconciliation and
 historical full `owner/repo` anchors, compared without case sensitivity. Pending,
