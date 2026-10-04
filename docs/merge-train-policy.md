@@ -85,8 +85,17 @@ administration surface.
 
 A repository policy names one GitHub credential source:
 
-- `github_token.env_var` reads the named Launchplane service bootstrap variable
-  for existing policies.
+Stored historical policies retain `github_token.env_var` and their original
+digests for readback. New policy validation and imports reject a nonempty
+`env_var`; token resolution never reads the named environment variable.
+
+The `Merge Train Policy Import` workflow requires explicit `github_app_id`,
+`github_repository_id`, and `private_key_context` inputs and builds an App
+policy. These inputs identify an existing managed binding; the workflow does
+not create a key, credential, or access grant. Full-policy revisions can also
+use the service's managed-policy import path.
+
+Supported sources are:
 - `github_token.runtime_context` resolves `LAUNCHPLANE_GITHUB_TOKEN` through the
   named DB-backed runtime context, including global shared values and global
   secret bindings that the runtime-context contract intentionally includes.
@@ -727,7 +736,7 @@ product = "launchplane"
 context = "launchplane"
 
 [policies.github_token]
-env_var = "GH_TOKEN"
+runtime_context = "example_context"
 
 [policies.scheduler]
 enabled = true
@@ -758,7 +767,7 @@ product = "launchplane"
 context = "launchplane"
 
 [policies.github_token]
-env_var = "GH_TOKEN"
+runtime_context = "example_context"
 ```
 
 ## Admin Changes
