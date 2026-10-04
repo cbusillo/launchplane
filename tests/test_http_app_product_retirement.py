@@ -936,6 +936,8 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 ]
                 if change == "unchanged":
                     observations = [_observation(), _observation(), _absent_observation()]
+                elif change == "key":
+                    observations = [_observation(), _absent_observation()]
                 elif change == "retry_observation":
                     observations = [
                         _observation(),
@@ -947,7 +949,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     patch(
                         "control_plane.product_retirement.observe_tracked_dokploy_application",
                         side_effect=observations,
-                    ),
+                    ) as observe,
                     patch(
                         "control_plane.product_retirement.dokploy_source.read_dokploy_config",
                         return_value=("https://provider.invalid", "test"),
@@ -994,6 +996,8 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                         "retiring",
                     )
                     delete.assert_not_called()
+                    if change in {"key", "request", "plan"}:
+                        observe.assert_not_called()
                     held = store.read_idempotency_record(
                         scope=idempotency_scope(
                             LocalOperatorIdentity(
