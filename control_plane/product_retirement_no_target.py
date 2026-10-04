@@ -175,6 +175,13 @@ def observe_no_target_absence(
     applications = dokploy_api.search_dokploy_applications(host=host, token=token)
     scope = _absence_scope(bound)
     domains = cast(list[str], scope["domains"])
+    # Dokploy cleanAppName trims, replaces literal spaces, and lowercases.
+    # buildAppName appends a random suffix; punctuation is preserved.
+    application_name = bound.dokploy_target.target_name.strip().replace(" ", "-").lower()
+    preview_prefix = str(scope["preview_prefix"]).strip().replace(" ", "-").lower()
+    # Launchplane preview creation supplies product-preview_slug as appName,
+    # independently of the display-name prefix. A shared product base is ambiguous.
+    product_name = bound.profile.product.strip().replace(" ", "-").lower()
     for application in applications:
         target_id = str(application.get("applicationId") or application.get("id") or "").strip()
         if not target_id:
@@ -185,6 +192,7 @@ def observe_no_target_absence(
         )
         name = str(payload.get("name") or "").strip()
         app_name = str(payload.get("appName") or "").strip()
+        normalized_app_name = app_name.lower()
         if not name or str(payload.get("applicationId") or payload.get("id") or "") != target_id:
             raise ProductRetirementBlockedError(
                 "Provider inventory application evidence is incomplete."
@@ -210,6 +218,11 @@ def observe_no_target_absence(
             or app_name == bound.dokploy_target.target_name
             or app_name.startswith(bound.dokploy_target.target_name + "-")
             or app_name.startswith(str(scope["preview_prefix"]))
+            or normalized_app_name == application_name
+            or normalized_app_name.startswith(application_name + "-")
+            or normalized_app_name.startswith(preview_prefix)
+            or normalized_app_name == product_name
+            or normalized_app_name.startswith(product_name + "-")
             # A bare repository without reliable owner evidence is a potential match.
             or any(repository in value or value == repository_name for value in repository_values)
             or image == image_repository
