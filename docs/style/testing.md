@@ -20,6 +20,11 @@ title: Testing Style
   timestamps from that persisted record. A distant future date only delays the
   failure; ordering assertions should also hold after that date passes.
 - Test fail-closed behavior explicitly.
+- Lease-renewal success fixtures should synchronize on committed background
+  heartbeats and control the database clock. A short wall-clock sleep cannot
+  distinguish a renewal defect from thread starvation or SQLite write-lock
+  contention under parallel execution. Retain separate expired/stolen-lease
+  refusal coverage with the real storage implementation.
 - Keep fixtures small and inline unless they are reused heavily.
 - When a full suite is justified, the local entrypoint is
   `uv run --extra dev launchplane ci unittest-shard local`.

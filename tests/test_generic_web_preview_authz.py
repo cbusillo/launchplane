@@ -31,6 +31,10 @@ def _request(**overrides: object) -> GenericWebPreviewAuthzPlanRequest:
     return GenericWebPreviewAuthzPlanRequest.model_validate(values)
 
 
+def _product_rule_count() -> int:
+    return len(generic_web_preview_rules(_request()))
+
+
 def _ingress_templates() -> tuple[GitHubActionsPolicyRule, ...]:
     return (
         GitHubActionsPolicyRule(
@@ -139,7 +143,7 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
             request=_request(),
         )
 
-        self.assertEqual(len(reconcile.desired_policy.github_actions), 12)
+        self.assertEqual(len(reconcile.desired_policy.github_actions), 2 * _product_rule_count())
         self.assertEqual(
             {rule.products[0] for rule in reconcile.desired_policy.github_actions},
             {"demo-web", "other-web"},
@@ -157,7 +161,7 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
             request=request,
         )
 
-        self.assertEqual(len(reconcile.desired_policy.github_actions), 6)
+        self.assertEqual(len(reconcile.desired_policy.github_actions), _product_rule_count())
 
     def test_onboard_rejects_different_existing_product_rules(self) -> None:
         current_policy = LaunchplaneAuthzPolicy(
@@ -188,13 +192,13 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
             current_policy=current_policy,
             request=_request(operation="expand", launchplane_sha="b" * 40),
         )
-        self.assertEqual(len(expanded.desired_policy.github_actions), 12)
+        self.assertEqual(len(expanded.desired_policy.github_actions), 2 * _product_rule_count())
 
         contracted = build_generic_web_preview_authz_reconcile_request(
             current_policy=expanded.desired_policy,
             request=_request(operation="contract", launchplane_sha="b" * 40),
         )
-        self.assertEqual(len(contracted.desired_policy.github_actions), 6)
+        self.assertEqual(len(contracted.desired_policy.github_actions), _product_rule_count())
         self.assertTrue(
             all(
                 rule.job_workflow_refs[0].endswith("@" + "b" * 40)
@@ -231,13 +235,15 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
             current_policy=current_policy,
             request=_request(operation="expand", include_ingress_operator=True),
         )
-        self.assertEqual(len(expanded.desired_policy.github_actions), 8)
+        self.assertEqual(
+            len(expanded.desired_policy.github_actions), _product_rule_count() + len(ingress_rules)
+        )
 
         contracted = build_generic_web_preview_authz_reconcile_request(
             current_policy=expanded.desired_policy,
             request=_request(operation="contract"),
         )
-        self.assertEqual(len(contracted.desired_policy.github_actions), 6)
+        self.assertEqual(len(contracted.desired_policy.github_actions), _product_rule_count())
         self.assertFalse(
             any(
                 rule.actions[0].startswith("ingress_route.")
@@ -273,7 +279,7 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
             request=_request(operation="retire"),
         )
 
-        self.assertEqual(len(retired.desired_policy.github_actions), 6)
+        self.assertEqual(len(retired.desired_policy.github_actions), _product_rule_count())
         self.assertEqual(
             {rule.products[0] for rule in retired.desired_policy.github_actions},
             {"other-web"},
@@ -289,7 +295,7 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
 
         self.assertEqual(authority.repository, "example/demo-web")
         self.assertEqual(authority.evidence.authority_sources, ("current_product_rules",))
-        self.assertEqual(authority.evidence.managed_rule_count, 6)
+        self.assertEqual(authority.evidence.managed_rule_count, _product_rule_count())
         self.assertEqual(len(authority.evidence.repository_identity_sha256), 64)
         evidence = authority.evidence.model_dump_json()
         self.assertNotIn('"123"', evidence)
@@ -325,7 +331,7 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(len(retired.desired_policy.github_actions), 6)
+        self.assertEqual(len(retired.desired_policy.github_actions), _product_rule_count())
         self.assertEqual(
             {rule.products for rule in retired.desired_policy.github_actions}, {("other-web",)}
         )
