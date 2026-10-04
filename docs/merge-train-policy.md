@@ -1027,7 +1027,7 @@ Controller actions have these retry/stop semantics:
   so a pending root cannot mask another saved root that is ready for admission.
   When no saved root is ready and no saved execution can resume, the newest
   applicable pending wait is reported, unless ordinary whole-queue selection
-  reports a blocking PR. In that case the controller reports the queue block
+  reports a blocking PR after excluding surviving held-out entries. In that case the controller reports the queue block
   rather than an unrelated saved root's pending checks.
   A root that returns at its collapsed head
   can resume its retired wait when its visible children still have the stored
