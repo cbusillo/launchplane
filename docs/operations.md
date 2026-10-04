@@ -3654,7 +3654,8 @@ sufficient to invent a completed finalization. Different keys, changed requests
 and changed plans retain the existing conflict behavior. No provider delete is
 needed when absence is verified. Original attempt history remains authoritative
 for earlier provider effects; retry phases describe the retry's checkpoints.
-Existing managed-secret disable audit events retain their original timestamps.
+Matched managed-secret disable audit evidence retains its original timestamp
+when read before writing or adopted after an INSERT conflict.
 If overlapping attempts collide while inserting the deterministic disable event,
 the loser reads it back and accepts only matching secret, actor, event type,
 detail and reviewed-plan metadata; only the request timestamp may differ.
