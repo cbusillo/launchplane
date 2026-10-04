@@ -647,7 +647,10 @@ class DokployProductRetirementAdapter:
         self._ensure_retiring_profile()
         self._checkpoint(lease, "profile_retiring")
         if current_observation.state == "absent":
-            self._finalize_authority(provider_operation_key)
+            try:
+                self._finalize_authority(provider_operation_key)
+            except (FileNotFoundError, ProductRetirementBlockedError, ValueError) as error:
+                raise self._unknown_provider_error(error) from error
             terminal = self._write_terminal_record(
                 outcome="already_absent",
                 provider_operation_key=provider_operation_key,
@@ -936,7 +939,7 @@ class DokployProductRetirementAdapter:
             )
             checkpoint = checkpoint.model_copy(
                 update={
-                    "record_id": f"{checkpoint.record_id}-finalization",
+                    "record_id": f"product-retirement-finalization-{canonical_sha256(provider_operation_key)}",
                     "mutation_evidence": checkpoint.mutation_evidence.model_copy(
                         update={
                             "finalization_profile_sha256": canonical_sha256(
@@ -950,8 +953,16 @@ class DokployProductRetirementAdapter:
                     ),
                 }
             )
-            self._record_store.write_product_retirement_record(checkpoint)
-            self._finalization_record = checkpoint
+            try:
+                self._record_store.write_product_retirement_record(checkpoint)
+            except ValueError:
+                # A concurrent same-operation attempt may have sealed the checkpoint first.
+                existing = self._read_finalization_record(provider_operation_key)
+                if existing is None:
+                    raise
+                self._finalization_record = existing
+            else:
+                self._finalization_record = checkpoint
             self._validate_finalization_authority()
         for runtime_record in current_runtime:
             event_id = (

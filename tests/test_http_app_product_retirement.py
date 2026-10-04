@@ -1,4 +1,6 @@
+import asyncio
 import json
+from threading import Event, Lock
 from datetime import datetime, timedelta
 import unittest
 from pathlib import Path
@@ -966,6 +968,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             ("profile_write", "unchanged"),
             ("terminal_write", "unchanged"),
             ("completion_write", "unchanged"),
+            ("partial_target", "unchanged"),
             ("legacy_runtime", "unchanged"),
             *(
                 ("profile_write", change)
@@ -1056,6 +1059,13 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                         side_effect=ValueError("injected completion failure")
                         if failure == "completion_write"
                         else store.complete_mutation_reservation,
+                    ),
+                    patch.object(
+                        store,
+                        "delete_dokploy_target_id_record",
+                        side_effect=ValueError("injected partial target cleanup failure")
+                        if failure == "partial_target"
+                        else store.delete_dokploy_target_id_record,
                     ),
                     patch.object(
                         store,
@@ -1216,6 +1226,126 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(held.state, "reconcile_required")
                     delete.assert_not_called()
                 store.close()
+
+    async def test_tracked_concurrent_expiry_seals_one_finalization_checkpoint(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(Path(directory))
+            app = self._app(store, actions=("product_retirement.plan", "product_retirement.apply"))
+            with patch(
+                "control_plane.product_retirement.observe_tracked_dokploy_application",
+                return_value=_observation(),
+            ):
+                plan = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/product-retirement",
+                    headers=self.headers,
+                    payload=_plan_payload(),
+                )
+            self.assertEqual(plan.status_code, 202, plan.text)
+            payload = _apply_payload(plan.json())
+            entered, released, lock = Event(), Event(), Lock()
+            checkpoint_count = 0
+            original_record_write = store.write_product_retirement_record
+            original_profile_write = store.compare_and_write_product_profile_record
+            original_clock = store._database_mutation_timestamp
+            clock_value: list[str | None] = [None]
+
+            def record_write(record: ProductRetirementRecord) -> None:
+                nonlocal checkpoint_count
+                if record.mutation_evidence.finalization_at:
+                    with lock:
+                        checkpoint_count += 1
+                        number = checkpoint_count
+                    if number == 1:
+                        entered.set()
+                        if not released.wait(20):
+                            raise TimeoutError("fixture checkpoint wait timed out")
+                original_record_write(record)
+
+            def profile_write(
+                *,
+                expected_record: LaunchplaneProductProfileRecord,
+                replacement_record: LaunchplaneProductProfileRecord,
+            ) -> object:
+                if replacement_record.lifecycle_state == "retired":
+                    raise ValueError("injected final profile failure")
+                return original_profile_write(
+                    expected_record=expected_record, replacement_record=replacement_record
+                )
+
+            with (
+                patch(
+                    "control_plane.product_retirement.observe_tracked_dokploy_application",
+                    return_value=_absent_observation(),
+                ),
+                patch.object(store, "write_product_retirement_record", side_effect=record_write),
+                patch.object(
+                    store, "compare_and_write_product_profile_record", side_effect=profile_write
+                ),
+                patch.object(
+                    store,
+                    "_database_mutation_timestamp",
+                    side_effect=lambda session: clock_value[0] or original_clock(session),
+                ),
+            ):
+                first_task = asyncio.create_task(
+                    _asgi_request(
+                        app, "POST", "/v1/product-retirement", headers=self.headers, payload=payload
+                    )
+                )
+                try:
+                    self.assertTrue(
+                        await asyncio.to_thread(entered.wait, 10), "first checkpoint not reached"
+                    )
+                    held = store.read_idempotency_record(
+                        scope=idempotency_scope(
+                            LocalOperatorIdentity(
+                                subject="local-owner-agent", token_label="local-owner-write"
+                            )
+                        ),
+                        route_path="/v1/product-retirement",
+                        idempotency_key=self.headers["Idempotency-Key"],
+                    )
+                    assert held is not None
+                    clock_value[0] = (
+                        (
+                            datetime.fromisoformat(held.lease_expires_at.replace("Z", "+00:00"))
+                            + timedelta(seconds=1)
+                        )
+                        .isoformat()
+                        .replace("+00:00", "Z")
+                    )
+                    second = await _asgi_request(
+                        app, "POST", "/v1/product-retirement", headers=self.headers, payload=payload
+                    )
+                    self.assertEqual(second.status_code, 409, second.text)
+                finally:
+                    released.set()
+                    first = await first_task
+                self.assertEqual(first.status_code, 409, first.text)
+            checkpoints = tuple(
+                record
+                for record in store.list_product_retirement_records(product="example-site")
+                if record.mutation_evidence.finalization_at
+            )
+            self.assertEqual(len(checkpoints), 1)
+            with (
+                patch(
+                    "control_plane.product_retirement.observe_tracked_dokploy_application",
+                    return_value=_absent_observation(),
+                ),
+                patch(
+                    "control_plane.product_retirement.dokploy_api.delete_dokploy_application"
+                ) as delete,
+            ):
+                retry = await _asgi_request(
+                    app, "POST", "/v1/product-retirement", headers=self.headers, payload=payload
+                )
+            self.assertEqual(retry.status_code, 202, retry.text)
+            self.assertTrue(retry.json()["result"]["provider_absence_verified"])
+            delete.assert_not_called()
+            store.close()
 
     async def test_tracked_uncertain_completion_retry_preserves_conflict_guards(self) -> None:
         for change in (
