@@ -39,6 +39,8 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
         reopen: bool = False,
         held_mid_execution: bool = False,
         active_replacement: bool = False,
+        closed_child: bool = False,
+        moved_child: bool = False,
     ) -> None:
         probes: list[int] = []
         merges: list[int] = []
@@ -80,7 +82,11 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                                                 if number == 13
                                                 else "feature/new-leaf-10"
                                             ),
-                                            "head_sha": "partial-middle-head"
+                                            "head_sha": (
+                                                "moved-child-head"
+                                                if moved_child
+                                                else "partial-middle-head"
+                                            )
                                             if number == 12
                                             else ("head-leaf" if number == 13 else "new-leaf-head"),
                                             "base_ref": "feature/root-10"
@@ -93,7 +99,11 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                                             "required_checks_status": "pass",
                                         }
                                     )
-                                    for number in ((12, 13, 14) if active_replacement else (12, 13))
+                                    for number in (
+                                        (13,)
+                                        if closed_child
+                                        else ((12, 13, 14) if active_replacement else (12, 13))
+                                    )
                                 )
                                 if reopen
                                 else ()
@@ -117,6 +127,21 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                 snapshot = Reader(transport=self.transport).read_merge_train_snapshot(
                     repository=repository, base_branch="main"
                 )
+                if closed_child and pull_request_number == 12:
+                    child = (
+                        _FakeCollapsedRootStackedMergeTrainSnapshotReader(transport=self.transport)
+                        .read_merge_train_snapshot(repository=repository, base_branch="main")
+                        .pull_requests[1]
+                    )
+                    return child.model_copy(
+                        update={
+                            "number": 12,
+                            "state": "closed",
+                            "head_sha": "partial-middle-head",
+                            "head_ref": "feature/child-10",
+                            "base_ref": "feature/root-10",
+                        }
+                    )
                 pr = next(pr for pr in snapshot.pull_requests if pr.number == pull_request_number)
                 return (
                     pr.model_copy(update={"is_draft": True})
@@ -228,7 +253,7 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                                 if held_mid_execution
                                 else "execute_stack_collapse"
                             )
-                            if reopen and index == 1
+                            if reopen and index == 1 and not (closed_child or moved_child)
                             else "wait_for_root_checks",
                         )
                     if held_mid_execution and index == 1:
@@ -296,8 +321,13 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                             replacement_record_id = replacement.record_id
                         before = store.list_merge_train_stack_collapse_plan_records()
             if reopen:
-                self.assertEqual(merges, [12] if mutate and not held_mid_execution else [])
-                if not mutate:
+                self.assertEqual(
+                    merges,
+                    [12]
+                    if mutate and not (held_mid_execution or closed_child or moved_child)
+                    else [],
+                )
+                if not mutate or closed_child or moved_child:
                     self.assertEqual(store.list_merge_train_stack_collapse_plan_records(), before)
                 return
             if waiting or not mutate or reason == "snapshot_lag":
@@ -358,6 +388,21 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
             reopen=True,
             active_replacement=True,
         )
+
+    async def test_closed_or_moved_pending_child_keeps_returned_execution_retired(self) -> None:
+        for closed_child, moved_child in ((True, False), (False, True)):
+            for mutate in (False, True):
+                with self.subTest(
+                    closed_child=closed_child, moved_child=moved_child, mutate=mutate
+                ):
+                    await self._obsolete_case(
+                        reason="root_missing_from_open_snapshot",
+                        mutate=mutate,
+                        status="collapsing",
+                        reopen=True,
+                        closed_child=closed_child,
+                        moved_child=moved_child,
+                    )
 
     async def test_obsolete_wait_preserves_current_policy_validation(self) -> None:
         for mutate in (False, True):

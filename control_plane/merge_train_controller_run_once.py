@@ -2605,6 +2605,11 @@ def _advance_without_candidate_record(
                 for number, head_sha in _stack_collapse_current_head_shas(record.plan).items()
                 if number in observed_heads
             )
+            and all(
+                mutation.child_pull_request_number in observed_heads
+                for mutation in record.plan.mutations
+                if mutation.status != "mutated"
+            )
         )
     # Resume saved execution before reporting an unrelated root's pending checks.
     # Select progress per collapse first so completed histories cannot revive plans.

@@ -1014,9 +1014,11 @@ Controller actions have these retry/stop semantics:
   supersedes all of that obsolete execution's active progress, retaining history
   and a retirement reason; dry runs leave records unchanged. A retired execution
   may resume only when it has no active replacement, its policy is current, and
-  its root and visible children return at their checkpointed heads. Latest
-  completed history cannot revive older execution; carried mutations remain
-  checkpointed and are not merged again.
+  its root and visible children return at their checkpointed heads, and every
+  child with a pending mutation is present and ready. Latest completed history
+  cannot revive older execution. During that same-policy resumption, carried
+  mutations remain checkpointed and are not merged again; this does not qualify
+  recovery after a policy change.
   A completed stack never revives its older planned progress.
 - `wait_for_root_checks`: The collapsed root PR's required checks are still
   running. Stop and poll later; do not call phase endpoints. When no saved
