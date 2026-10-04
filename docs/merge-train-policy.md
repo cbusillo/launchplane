@@ -1091,7 +1091,7 @@ Controller actions have these retry/stop semantics:
   inapplicable and resumes current-policy discovery with fresh head/readiness
   proof. Closing and reopening at the same checkpointed head keeps the policy
   block. Uncheckpointed execution and moved roots retain their existing retirement
-  semantics. Fresh current-policy discovery can recover their carried branch
+  semantics. For controller execution, fresh current-policy discovery can recover their carried branch
   effects: after current child readiness and exact parent-head checks, the GitHub
   adapter compares the child commit with the immutable expected parent commit.
   If that parent already contains the child, execution checkpoints that head
@@ -1470,5 +1470,5 @@ evidence attached. The affected PRs and refs remain excluded from discovery.
 No old-policy record authorizes a merge under a different policy. Checkpointed
 partial execution at an unchanged root stays visible and excluded from fresh
 replanning. Changed-root and uncheckpointed effects can be recovered through
-fresh current-policy discovery: current Git ancestry prevents another merge of
+fresh current-policy controller discovery: current Git ancestry prevents another merge of
 an already-contained child, and the fresh collapse owns its landing disposition.
