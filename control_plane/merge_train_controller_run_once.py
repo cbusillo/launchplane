@@ -2782,6 +2782,40 @@ def _advance_waiting_stack_collapse_record(
     }, snapshot
 
 
+def _retire_obsolete_stack_collapse_execution(
+    *,
+    request: MergeTrainControllerRunOnceEnvelope,
+    stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
+    record: MergeTrainStackCollapsePlanRecord,
+    reason: str,
+    trace_id: str,
+    lease: MergeTrainControllerLeaseContext,
+) -> None:
+    if not request.mutate:
+        return
+    records = stack_collapse_store.list_merge_train_stack_collapse_plan_records(
+        repository=request.repository, base_branch=request.base_branch, status="active"
+    )
+    # Retire all older progress first, so interruption cannot revive this plan.
+    for progress in sorted(records, key=lambda item: item.record_id == record.record_id):
+        if progress.plan.collapse_id != record.plan.collapse_id:
+            continue
+        lease.checkpoint(
+            active_action=MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
+            active_phase="supersede_inapplicable_collapse",
+            active_record_id=progress.record_id,
+            active_pull_request_number=record.plan.root_pull_request_number,
+        )
+        stack_collapse_store.write_merge_train_stack_collapse_plan_record(
+            progress.model_copy(
+                update={
+                    "status": "superseded",
+                    "source": f"{progress.source}; retired:{reason}:{trace_id}",
+                }
+            )
+        )
+
+
 def _advance_planned_stack_collapse_record(
     *,
     request: MergeTrainControllerRunOnceEnvelope,
@@ -2795,12 +2829,22 @@ def _advance_planned_stack_collapse_record(
     recorded_at: str,
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object] | None:
-    # An obsolete policy plan cannot authorize execution, but must not mask
-    # another stack's recovery under the current policy. Preserve its history.
+    def retire(reason: str) -> None:
+        _retire_obsolete_stack_collapse_execution(
+            request=request,
+            stack_collapse_store=stack_collapse_store,
+            record=planned_collapse_record,
+            reason=reason,
+            trace_id=trace_id,
+            lease=lease,
+        )
+
+    # Obsolete execution steps aside while its complete history stays available.
     if (
         planned_collapse_record.plan.policy_key != repository_policy.policy_key
         or planned_collapse_record.plan.policy_sha256 != policy_sha256
     ):
+        retire("policy_changed")
         return None
     snapshot = github_client.read_merge_train_snapshot(
         repository=request.repository,
@@ -2815,6 +2859,7 @@ def _advance_planned_stack_collapse_record(
         None,
     )
     if root_pull_request is None:
+        retire("root_missing_from_open_snapshot")
         return None
     current_head_shas = {
         entry.pull_request_number: entry.head_sha for entry in planned_collapse_record.plan.entries
@@ -2841,10 +2886,10 @@ def _advance_planned_stack_collapse_record(
                 parent_pull_request_number=root_mutation.parent_pull_request_number,
             )
         except MergeTrainGitHubStaleHeadError:
-            # The real client rejects unrelated pushes rather than returning
-            # an empty probe. Leave this plan unapplied and consider other stacks.
+            retire("root_moved")
             return None
         if observed_root_sha != root_pull_request.head_sha:
+            retire("root_moved")
             return None
     # A root or child that is no longer ready falls through to live discovery, which
     # reports why. A child missing from the open snapshot may already be merged, so the

@@ -103,38 +103,22 @@ def decide_merge_train_controller_record_action(
                 candidate_record_id=passed_candidate_record.record_id,
             )
 
-    waiting_collapse_record = latest_merge_train_stack_collapse_plan_record(
-        stack_collapse_plan_records,
-        plan_status="waiting_for_root_checks",
+    # This is record-only evidence; run-once validates current policy and heads.
+    record_actions: tuple[tuple[str, MergeTrainControllerAction], ...] = (
+        ("collapsing", "execute_stack_collapse"),
+        ("planned", "execute_stack_collapse"),
+        ("waiting_for_root_checks", "wait_for_root_checks"),
     )
-    if waiting_collapse_record is not None:
-        return MergeTrainControllerDecision(
-            action="wait_for_root_checks",
-            reason="collapsed stack root still needs mergeability checks",
-            stack_collapse_plan_record_id=waiting_collapse_record.record_id,
+    for status, action in record_actions:
+        record = latest_merge_train_stack_collapse_plan_record(
+            stack_collapse_plan_records, plan_status=status
         )
-
-    collapsing_record = latest_merge_train_stack_collapse_plan_record(
-        stack_collapse_plan_records,
-        plan_status="collapsing",
-    )
-    if collapsing_record is not None:
-        return MergeTrainControllerDecision(
-            action="execute_stack_collapse",
-            reason="stack collapse plan has durable in-progress mutations to resume",
-            stack_collapse_plan_record_id=collapsing_record.record_id,
-        )
-
-    planned_collapse_record = latest_merge_train_stack_collapse_plan_record(
-        stack_collapse_plan_records,
-        plan_status="planned",
-    )
-    if planned_collapse_record is not None:
-        return MergeTrainControllerDecision(
-            action="execute_stack_collapse",
-            reason="stack collapse plan is ready to execute",
-            stack_collapse_plan_record_id=planned_collapse_record.record_id,
-        )
+        if record is not None:
+            return MergeTrainControllerDecision(
+                action=action,
+                reason=f"saved collapse record is {status}; live policy and readiness not evaluated",
+                stack_collapse_plan_record_id=record.record_id,
+            )
 
     return MergeTrainControllerDecision(
         action="idle",
@@ -217,12 +201,22 @@ def latest_merge_train_stack_collapse_plan_record(
     *,
     plan_status: str,
 ) -> MergeTrainStackCollapsePlanRecord | None:
-    latest_record = latest_merge_train_stack_collapse_progress_record(records)
-    if latest_record is None:
-        return None
-    if latest_record.plan.status != plan_status:
-        return None
-    return latest_record
+    collapse_ids = {record.plan.collapse_id for record in records if record.status == "active"}
+    latest_records = tuple(
+        progress
+        for collapse_id in collapse_ids
+        if (
+            progress := latest_merge_train_stack_collapse_progress_record(
+                tuple(record for record in records if record.plan.collapse_id == collapse_id)
+            )
+        )
+        is not None
+        and progress.status == "active"
+        and progress.plan.status == plan_status
+    )
+    return max(
+        latest_records, key=lambda record: (record.updated_at, record.record_id), default=None
+    )
 
 
 def latest_merge_train_batch_candidate_progress_record(
