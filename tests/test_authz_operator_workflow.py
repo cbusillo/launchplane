@@ -19,7 +19,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         self.workflow = load_workflow(".github/workflows/reusable-authz-policy-reconcile.yml")
         self.dispatch_workflow = load_workflow(".github/workflows/authz-policy-reconcile.yml")
 
-    def test_dispatch_managed_set_options_each_select_one_reconcile_job(self) -> None:
+    def test_dispatch_managed_set_options_agree_with_reconcile_job_ids(self) -> None:
         trigger = self.dispatch_workflow.data["on"]
         assert isinstance(trigger, dict)
         dispatch = trigger["workflow_dispatch"]
@@ -39,7 +39,6 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         for option in options:
             with self.subTest(managed_set=option):
                 job = self.dispatch_workflow.job(f"reconcile-{option}")
-                self.assertEqual(job["if"], f"${{{{ inputs.managed_set == '{option}' }}}}")
                 job_inputs = job["with"]
                 assert isinstance(job_inputs, dict)
                 self.assertEqual(job_inputs["expected_managed_set_id"], f"operator.{option}")

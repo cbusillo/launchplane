@@ -301,6 +301,11 @@ jobs:
           cache-from: >-
             type=gha,scope=launchplane-ci
 
+      - name: Verify runtime worker clients
+        run: |
+          docker run --rm --entrypoint ssh "$LAUNCHPLANE_CI_IMAGE_TAG" -V
+          docker run --rm --entrypoint gh "$LAUNCHPLANE_CI_IMAGE_TAG" --version
+
       - name: Qualify ordinary worker Compose lifecycle
         run: bash scripts/qualify-ordinary-agent-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG"
 
@@ -384,6 +389,11 @@ jobs:
           no-cache-filters: runtime
           cache-from: >-
             type=gha,scope=launchplane-ci
+
+      - name: Verify runtime worker clients
+        run: |
+          docker run --rm --entrypoint ssh "$LAUNCHPLANE_CI_IMAGE_TAG" -V
+          docker run --rm --entrypoint gh "$LAUNCHPLANE_CI_IMAGE_TAG" --version
 
       - name: Qualify ordinary worker Compose lifecycle
         run: bash scripts/qualify-ordinary-agent-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG"

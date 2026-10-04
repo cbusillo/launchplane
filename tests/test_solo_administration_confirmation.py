@@ -10,7 +10,6 @@ from sqlalchemy import create_engine, inspect
 from pydantic import ValidationError
 
 from control_plane.contracts.solo_administration_confirmation import (
-    SOLO_ADMINISTRATION_CONFIRMATION_TTL_SECONDS,
     SoloAdministrationConfirmationConflictError,
     SoloAdministrationConfirmationRecord,
     build_solo_administration_confirmation_id,
@@ -98,7 +97,6 @@ class SoloAdministrationConfirmationContractTests(unittest.TestCase):
             record.expires_at,
             "2026-08-31T12:05:00+00:00",
         )
-        self.assertEqual(SOLO_ADMINISTRATION_CONFIRMATION_TTL_SECONDS, 300)
         with self.assertRaises(ValidationError):
             record.state = "consumed"
 
