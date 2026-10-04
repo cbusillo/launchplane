@@ -129,16 +129,16 @@ def main(argv):
         return 0
     if program[:1] == ["/bin/bash"]:
         return 0
-    if program[:1] == ["printenv"]:
+    if program[:2] == ["sh", "-c"] and "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64" in program[2]:
+        log("read overrides payload")
+        if "FAKE_PAYLOAD_READ_EXIT" in os.environ:
+            print("partial-payload", end="")
+            return int(os.environ["FAKE_PAYLOAD_READ_EXIT"])
         # The container's own environment comes from the compose .env file.
-        container_environment = {}
+        container_environment = {"PATH": os.environ["PATH"]}
         if "FAKE_CONTAINER_PAYLOAD" in os.environ:
-            container_environment[program[1]] = os.environ["FAKE_CONTAINER_PAYLOAD"]
-        value = {**container_environment, **exec_environment}.get(program[1])
-        if value is None:
-            return 1
-        print(value)
-        return 0
+            container_environment["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"] = os.environ["FAKE_CONTAINER_PAYLOAD"]
+        return subprocess.run(program, env={**container_environment, **exec_environment}).returncode
     if program[:2] == ["sh", "-c"] and program[-1].endswith("integration_readback_passed"):
         if os.environ.get("FAKE_PASS_WRITE_FAILURE") == "1":
             log("write readback-passed failed")
@@ -573,6 +573,37 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.assertFalse(
             self._held_web_starts(overrides_payload="payload-a", database_name="other_db")
         )
+
+    def test_unset_or_empty_payload_releases_web_after_a_pass(self) -> None:
+        for environment in ({}, {"FAKE_CONTAINER_PAYLOAD": ""}):
+            with self.subTest(environment=environment):
+                run = self._run(
+                    _render_restore_script(), FAKE_ODOO_DB=_fake_database(), **environment
+                )
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn("write readback-passed", run.docker_log)
+                self.assertIn("odoo_restore_completed=true", run.stdout.splitlines())
+                self.assertTrue(self._held_web_starts(overrides_payload=""))
+
+    def test_failed_payload_read_keeps_web_held_and_restore_unsuccessful(self) -> None:
+        for exit_status in ("1", "125"):
+            with self.subTest(exit_status=exit_status):
+                # An earlier pass must also be cleared before the failed read.
+                (self.root / "readback-passed").write_text("previous-pass")
+                run = self._run(
+                    _render_restore_script(),
+                    FAKE_CONTAINER_PAYLOAD="payload-a",
+                    FAKE_PAYLOAD_READ_EXIT=exit_status,
+                    FAKE_ODOO_DB=_fake_database(),
+                )
+                self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertTrue(run.readback_ran, run.docker_log)
+                self.assertNotIn("write readback-passed", run.docker_log)
+                self.assertNotIn("integration_readback_passed_recorded=true", run.stdout)
+                self.assertNotIn("odoo_restore_completed=true", run.stdout)
+                self.assertFalse(run.web_restarted, run.docker_log)
+                self.assertFalse(self._held_web_starts(overrides_payload=""))
+                self.assertFalse(self._held_web_starts(overrides_payload="payload-a"))
 
     def test_new_preview_bootstraps_its_missing_database_then_releases_web(self) -> None:
         run = self._run(
