@@ -1553,6 +1553,25 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     store.read_product_profile_record("example-site").lifecycle_state, "retiring"
                 )
+                held_after_refusal = store.read_idempotency_record(
+                    scope=idempotency_scope(
+                        LocalOperatorIdentity(
+                            subject="local-owner-agent", token_label="local-owner-write"
+                        )
+                    ),
+                    route_path="/v1/product-retirement",
+                    idempotency_key=self.headers["Idempotency-Key"],
+                )
+                assert held_after_refusal is not None
+                self.assertEqual(held_after_refusal.state, "reconcile_required")
+                different_key = await request(
+                    app,
+                    "POST",
+                    "/v1/product-retirement",
+                    headers={**self.headers, "Idempotency-Key": "after-mismatch"},
+                    payload=payload,
+                )
+                self.assertEqual(different_key.status_code, 409, different_key.text)
                 # Fixture repair restores the original evidence before proving recovery.
                 store.write_secret_audit_event(original_audit)
                 winner_audit = (original_audit,)
@@ -1698,8 +1717,15 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                         app, "POST", "/v1/product-retirement", headers=self.headers, payload=payload
                     )
                     self.assertEqual(retry.status_code, 202, retry.text)
+                    audit_events = store.list_secret_audit_events(secret_id="race-secret")
+                    self.assertEqual(len(audit_events), 1)
+                    recovered = store.read_product_retirement_record(
+                        retry.json()["records"]["product_retirement_record_id"]
+                    )
+                    self.assertEqual(audit_events[0].actor, recovered.identity.actor)
+                    self.assertEqual(audit_events[0].recorded_at, recovered.requested_at)
                     self.assertEqual(
-                        len(store.list_secret_audit_events(secret_id="race-secret")), 1
+                        audit_events[0].metadata, {"plan_sha256": recovered.plan_sha256}
                     )
                     delete.assert_not_called()
             finally:

@@ -3654,9 +3654,12 @@ sufficient to invent a completed finalization. Different keys, changed requests
 and changed plans retain the existing conflict behavior. No provider delete is
 needed when absence is verified. Original attempt history remains authoritative
 for earlier provider effects; retry phases describe the retry's checkpoints.
-Tracked retirement writes managed-secret disable audit evidence through an
-insert-only storage path on PostgreSQL, SQLite and filesystem storage. A stale
-absent read cannot overwrite a committed event, including its original timestamp.
+The tracked retirement HTTP route requires database storage. It writes
+managed-secret disable audit evidence through an insert-only path on PostgreSQL
+and SQLite. A stale absent read cannot overwrite a committed event, including
+its original timestamp. The filesystem store exposes the same insert-only create
+operation for local storage use; its concurrency proof covers that operation,
+not HTTP retirement or crash durability.
 If overlapping attempts collide while inserting the deterministic disable event,
 the loser reads it back and accepts only matching secret, actor, event type,
 detail and reviewed-plan metadata; only the request timestamp may differ.
