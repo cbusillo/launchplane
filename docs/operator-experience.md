@@ -513,7 +513,10 @@ raw context picker or checked-in product defaults.
 
 Every form request stays bound to the profile used to construct it through
 planning and commit. Conflicting profile snapshots refuse the request before
-configuration writes and require a fresh dry-run. Completed retries, including provider-key retirements
+configuration writes and require a fresh dry-run. Provider-key retirement validates
+declared application keys against the same profile snapshot checked by the request;
+a concurrent declaration edit cannot change that dry-run's key protection. Apply
+still checks the profile atomically before writing. Completed retries, including provider-key retirements
 and Client-supplied credentials, check current exclusive lane ownership before
 replaying a receipt; ambiguous ownership returns `product_config_lane_not_owned`
 without writing configuration. A replay still works after later retirements or
