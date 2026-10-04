@@ -2469,7 +2469,8 @@ provider routes and tracked records before a new apply; neither automatic replay
 nor rollback is performed. A failure before a route attempt (envelope, tracked
 target, or prune inventory validation) retains its ordinary validation error.
 A reconcile preflight lookup/validation failure before any route write remains
-distinct (400); the same failure after a completed route is partial (502).
+distinct (400), retaining a provider HTTP status when known without free-text
+provider detail; the same failure after a completed route is partial (502).
 Reconcile refuses malformed non-list inventory instead of assuming no existing
 routes. Keep the dry-run artifact to recover prior route settings if a later
 apply is partial; the recovery response is progress evidence, not a rollback

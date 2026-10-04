@@ -551,9 +551,10 @@ def ensure_compose_web_domain_route(
             query={"composeId": normalized_compose_id},
         )
     except Exception as error:
-        raise DokployComposeDomainRoutePreflightError(
-            "Compose domain route lookup failed before the route write."
-        ) from error
+        message = "Compose domain route lookup failed before the route write."
+        if isinstance(error, api.DokployRequestFailed) and error.status_code is not None:
+            message += f" Provider HTTP status: {error.status_code}."
+        raise DokployComposeDomainRoutePreflightError(message) from error
     if not isinstance(raw_domains, list):
         raise DokployComposeDomainRoutePreflightError(
             "Compose domain route lookup returned an invalid response."

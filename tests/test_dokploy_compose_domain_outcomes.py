@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import click
 
-from control_plane.dokploy.api import JsonValue
+from control_plane.dokploy.api import DokployRequestFailed, JsonValue
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.auth import _StubVerifier, _identity
@@ -237,6 +237,21 @@ class ComposeDomainOutcomeTests(unittest.TestCase):
         status, payload = self.invoke("reconcile-compose-domain")
         self.assertEqual(status, 400)
         self.assertEqual(payload["error"]["code"], "invalid_dokploy_target_setup")
+        self.assertNotIn("private-token", json.dumps(payload))
+        self.assertEqual(self.writes, [])
+
+    def test_lookup_failure_keeps_provider_status_without_free_text(self) -> None:
+        self.fail_read_at = 1
+        self.failure = DokployRequestFailed(
+            method="GET",
+            path="/api/domain.byComposeId",
+            status_code=503,
+            detail="private-provider-error private-token",
+        )
+        status, payload = self.invoke("reconcile-compose-domain")
+        self.assertEqual(status, 400)
+        self.assertIn("503", payload["error"]["message"])
+        self.assertNotIn("private-provider-error", json.dumps(payload))
         self.assertNotIn("private-token", json.dumps(payload))
         self.assertEqual(self.writes, [])
 
