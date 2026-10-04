@@ -13,7 +13,10 @@ from control_plane.merge_train_github import (
     MergeTrainGitHubError,
     MergeTrainGitHubMergeRejectedError,
     UrllibMergeTrainGitHubTransport,
+    _classic_conversation_rule,
+    _conversation_resolution_rule,
     _required_branch_checks,
+    _ruleset_conversation_rule,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 
@@ -40,6 +43,90 @@ def _failed_request(
 
 
 class MergeTrainGitHubFailureTests(unittest.TestCase):
+    def test_conversation_policy_quota_interrupts_preserve_retryable_evidence(self) -> None:
+        for reader, method, path in (
+            (_classic_conversation_rule, "POST", "/graphql"),
+            (
+                _ruleset_conversation_rule,
+                "GET",
+                "/repos/private-owner/private-repo/rules/branches/private-branch?page=2",
+            ),
+        ):
+            for status, headers in (
+                (403, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1791090000"}),
+                (403, {"Retry-After": "60"}),
+                (429, {}),
+            ):
+                with self.subTest(reader=reader.__name__, status=status, headers=headers):
+                    original = _failed_request(status, headers, method=method, path=path)
+                    transport = UrllibMergeTrainGitHubTransport(token="secret-token")
+                    with patch.object(transport, "request", side_effect=original):
+                        with self.assertRaises(MergeTrainGitHubError) as caught:
+                            reader(
+                                transport=transport,
+                                repository_path="private-owner/private-repo",
+                                base_branch="private-branch",
+                            )
+                    self.assertIs(caught.exception, original)
+                    detail = _controller_exception_reconciliation_detail(caught.exception)
+                    self.assertTrue(detail.startswith("retryable:github_rate_limited;"), detail)
+                    self.assertIn(original.request_description or "missing request", detail)
+                    if "X-RateLimit-Reset" in headers:
+                        self.assertIn("reset_at:1791090000", detail)
+                    if "Retry-After" in headers:
+                        self.assertIn("retry_after_seconds:60", detail)
+                    for private in (
+                        "private-owner",
+                        "private-repo",
+                        "private-branch",
+                        "secret",
+                        "?",
+                    ):
+                        self.assertNotIn(private, detail)
+
+    def test_conversation_policy_refusals_and_malformed_reads_remain_unreadable(self) -> None:
+        responses: tuple[object, ...] = (
+            _failed_request(403, {}),
+            _failed_request(404, {}),
+            _failed_request(422, {"X-RateLimit-Remaining": "0"}),
+            {"errors": [{"message": "Resource not accessible by integration"}]},
+            {"data": {"repository": {"ref": {"refUpdateRule": {}}}}},
+            [{"type": "pull_request", "parameters": None}],
+        )
+        for reader in (_classic_conversation_rule, _ruleset_conversation_rule):
+            for response in responses:
+                with self.subTest(reader=reader.__name__, response=response):
+                    transport = UrllibMergeTrainGitHubTransport(token="secret-token")
+                    request_result = (
+                        {"side_effect": response}
+                        if isinstance(response, MergeTrainGitHubError)
+                        else {"return_value": response}
+                    )
+                    with patch.object(transport, "request", **request_result):
+                        self.assertEqual(
+                            reader(
+                                transport=transport,
+                                repository_path="example/repo",
+                                base_branch="main",
+                            ),
+                            "unreadable",
+                        )
+
+    def test_conversation_policy_aggregate_cannot_return_admission_evidence_after_quota(
+        self,
+    ) -> None:
+        quota = _failed_request(429, {})
+        transport = UrllibMergeTrainGitHubTransport(token="secret-token")
+        classic_not_required = {"data": {"repository": {"ref": {"refUpdateRule": None}}}}
+        for responses in ([quota, []], [classic_not_required, quota]):
+            with self.subTest(responses=responses):
+                with patch.object(transport, "request", side_effect=responses):
+                    with self.assertRaises(MergeTrainGitHubError) as caught:
+                        _conversation_resolution_rule(
+                            transport=transport, repository_path="example/repo", base_branch="main"
+                        )
+                self.assertIs(caught.exception, quota)
+
     def test_protected_branch_read_preserves_rate_limit_classification(self) -> None:
         for headers, classification in (
             (

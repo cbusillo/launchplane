@@ -3398,7 +3398,9 @@ def _classic_conversation_rule(
             variables={"ref": f"refs/heads/{base_branch}"},
         )
         ref = _json_object(repository.get("ref"), "GitHub GraphQL base ref")
-    except MergeTrainGitHubError:
+    except MergeTrainGitHubError as error:
+        if error.rate_limited:
+            raise
         return "unreadable"
     rule = ref.get("refUpdateRule")
     if rule is None:
@@ -3421,7 +3423,9 @@ def _ruleset_conversation_rule(
                 path=f"/repos/{repository_path}/rules/branches/{encoded_branch}"
                 f"?per_page=100&page={page}",
             )
-        except MergeTrainGitHubError:
+        except MergeTrainGitHubError as error:
+            if error.rate_limited:
+                raise
             return "unreadable"
         if not isinstance(rules, list):
             return "unreadable"
