@@ -14946,7 +14946,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "Queue evidence from latest_run, when it was a Level 1 dry run."
           },
           "latest_run": {
             "anyOf": [
@@ -14956,7 +14957,34 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "Latest stored Level 1 ordered-queue run; not the latest controller pass."
+          },
+          "latest_run_age_seconds": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Age of the Level 1 run at generated_at.",
+            "title": "Latest Run Age Seconds"
+          },
+          "latest_run_source": {
+            "anyOf": [
+              {
+                "const": "level1",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "History source for latest_run; null when no run exists.",
+            "title": "Latest Run Source"
           },
           "reconciliation_diagnostics": {
             "default": [],
@@ -14987,6 +15015,8 @@
           "generated_at",
           "latest_dry_run",
           "latest_run",
+          "latest_run_age_seconds",
+          "latest_run_source",
           "reconciliation_diagnostics",
           "repository",
           "schema_version"
