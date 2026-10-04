@@ -4009,15 +4009,26 @@ def _controller_result_reconciliation_detail(
 
 
 def _controller_exception_reconciliation_detail(error: Exception) -> str:
+    description = ""
+    if isinstance(error, MergeTrainGitHubError):
+        description = error.request_description
+        if isinstance(error.__cause__, MergeTrainGitHubError) and not description:
+            description = error.__cause__.request_description
+    suffix = f"; request:{description}" if description else ""
     if isinstance(error, MergeTrainGitHubMergeRejectedError):
         return {
             "head_behind_base": "operator_required:pull_request_head_behind_base",
             "merge_blocked": "operator_required:pull_request_merge_blocked",
-        }.get(error.refusal_diagnosis, "operator_required:github_merge_rejected")
+        }.get(error.refusal_diagnosis, "operator_required:github_merge_rejected") + suffix
     if isinstance(error, MergeTrainGitHubError):
+        if error.rate_limited:
+            reset = (
+                f"; reset_at:{error.rate_limit_reset}" if error.rate_limit_reset is not None else ""
+            )
+            return "retryable:github_rate_limited" + suffix + reset
         if error.status_code is None or error.status_code >= 500:
-            return "retryable:github_request_failed"
-        return "operator_required:github_request_rejected"
+            return "retryable:github_request_failed" + suffix
+        return "operator_required:github_request_rejected" + suffix
     if isinstance(error, (MergeTrainControllerRequestError, ValueError)):
         return "operator_required:invalid_controller_state"
     return f"operator_required:unexpected:{type(error).__name__}"
