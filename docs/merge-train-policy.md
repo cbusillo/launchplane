@@ -188,6 +188,19 @@ and re-observes provider state; no out-of-band record edit is required or
 supported. Read-only controller calls report either state without acquiring or
 mutating the lease record.
 
+GitHub HTTP failures retain a bounded request description in
+`reconciliation_detail`: method, route template and status, without repository,
+branch, token, body or query values. Unknown routes use `/{unknown_route}`.
+HTTP 429 and HTTP 403 with `retry-after` or `x-ratelimit-remaining: 0` use
+`retryable:github_rate_limited`; a valid numeric `x-ratelimit-reset` is recorded
+as `reset_at` (Unix seconds for GitHub's primary quota window). A valid numeric
+`retry-after` is recorded separately as `retry_after_seconds`; secondary limits
+can have a different retry delay from the primary reset time. Neither field
+schedules an automatic retry. Refusals without these rate-limit headers remain
+admin-required, even when a provider body might describe a secondary limit. This diagnosis
+does not retry a write in place: the next controller pass re-observes the stored
+phase through the existing reconciliation path.
+
 If an approved policy change invalidates an unlanded native batch, the controller
 can retire its old landing plan after fresh GitHub reads prove every PR is still
 open at its recorded head/tree. An unresolved attempt also requires the original
