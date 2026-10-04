@@ -2596,17 +2596,14 @@ def _advance_without_candidate_record(
                             }
                         )
                     )
-        waiting_records = tuple(
+        latest_waiting_records = tuple(
             record
-            for record in waiting_records
+            for record in latest_waiting_records
             if record.plan.collapse_id not in retired_collapse_ids
         )
-    waiting_collapse_record = latest_merge_train_stack_collapse_progress_record(waiting_records)
-    if (
-        waiting_collapse_record is not None
-        and waiting_collapse_record.plan.status != "waiting_for_root_checks"
-    ):
-        waiting_collapse_record = None
+    waiting_collapse_record = latest_merge_train_stack_collapse_progress_record(
+        latest_waiting_records
+    )
     if waiting_collapse_record is not None:
         waiting_result, snapshot = _advance_waiting_stack_collapse_record(
             github_client=github_client,
