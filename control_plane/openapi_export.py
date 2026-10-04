@@ -55,24 +55,6 @@ class _DeterministicGitHubOAuthLoginClient:
         )
 
 
-def _deterministic_webhook_handler(
-    _raw_body: bytes,
-    _signature_header: str,
-    _event_name: str,
-    _delivery_id: str,
-    _record_store: object,
-    _state_dir: Path,
-    _trigger_label: str,
-) -> tuple[int, dict[str, object]]:
-    return (
-        202,
-        {
-            "status": "accepted",
-            "trace_id": "launchplane_req_00000000000000000000000000000000",
-        },
-    )
-
-
 def _build_export_app() -> FastAPI:
     human_session_manager = HumanSessionManager(
         config=GitHubOAuthConfig(
@@ -103,7 +85,6 @@ def _build_export_app() -> FastAPI:
         ),
         human_session_manager=human_session_manager,
         github_oauth_client=_DeterministicGitHubOAuthLoginClient(),
-        every_code_github_webhook_handler=_deterministic_webhook_handler,
     )
 
 
