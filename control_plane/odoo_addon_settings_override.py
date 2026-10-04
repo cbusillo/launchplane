@@ -18,6 +18,7 @@ from typing import Literal, Protocol
 import click
 from pydantic import BaseModel, ConfigDict, StrictBool, model_validator
 
+from control_plane.storage.product_authority_bundle import LaneProductConfigWriteRequirements
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.odoo_instance_override_record import (
     OdooAddonSettingOverride,
@@ -85,7 +86,13 @@ class OdooAddonSettingsStore(Protocol):
         self, *, context_name: str, instance_name: str
     ) -> OdooInstanceOverrideRecord: ...
 
-    def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> object: ...
+    def write_odoo_instance_override_record(
+        self,
+        record: OdooInstanceOverrideRecord,
+        *,
+        required_context_owner: tuple[str, str] | None = None,
+        required_product_config_target: tuple[str, str, str] | None = None,
+    ) -> object: ...
 
     def read_dokploy_target_record(
         self, *, context_name: str, instance_name: str
@@ -606,6 +613,8 @@ def apply_odoo_addon_settings_plan(
     *,
     record_store: OdooAddonSettingsStore,
     request: OdooAddonSettingsApplyRequest,
+    required_context_owner: tuple[str, str] | None = None,
+    required_product_config_target: tuple[str, str, str] | None = None,
 ) -> OdooAddonSettingsPlan:
     """Re-plan against current authority, require the reviewed digest, write, read back."""
 
@@ -619,7 +628,15 @@ def apply_odoo_addon_settings_plan(
     applied = False
     if plan.changed:
         record_store.write_odoo_instance_override_record(
-            replacement.model_copy(update={"updated_at": _utc_now_timestamp()})
+            replacement.model_copy(update={"updated_at": _utc_now_timestamp()}),
+            **(
+                LaneProductConfigWriteRequirements(
+                    required_context_owner=required_context_owner,
+                    required_product_config_target=required_product_config_target,
+                )
+                if required_context_owner is not None or required_product_config_target is not None
+                else LaneProductConfigWriteRequirements()
+            ),
         )
         applied = True
     stored = _read_existing_record(
