@@ -43,6 +43,14 @@ function ownerDraftKey(login: string, clear: boolean, reason: string): string {
   return JSON.stringify([productOwnerDraftKey(login, clear), reason.trim()]);
 }
 
+function preserveProfileDraft(storageKey: string, reviewed: object): boolean {
+  try {
+    const draft = JSON.stringify(reviewed);
+    sessionStorage.setItem(storageKey, draft);
+    return sessionStorage.getItem(storageKey) === draft;
+  } catch { return false; }
+}
+
 function recoverOwnerDraft(storageKey: string, scope: string): ReviewedOwnerDraft | null {
   try {
     if (!recoverBrowserOperationState(scope).requiresIdempotencyContinuity) {
@@ -177,11 +185,7 @@ export function ProductOwnerPanel({
       setLocalError("The draft changed after the preview. Preview the change again.");
       return;
     }
-    try {
-      const draft = JSON.stringify({ plan, ...plannedDraft });
-      sessionStorage.setItem(storageKey, draft);
-      if (sessionStorage.getItem(storageKey) !== draft) throw new Error("Draft read-back differs.");
-    } catch {
+    if (!preserveProfileDraft(storageKey, { plan, ...plannedDraft })) {
       setLocalError("The reviewed request could not be saved in this tab. Nothing was sent. Restore session storage and retry Save.");
       return;
     }
@@ -532,11 +536,7 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
   async function apply() {
     if (!reviewed || !matches) return;
     setError(""); setNotice("");
-    try {
-      const draft = JSON.stringify(reviewed);
-      sessionStorage.setItem(storageKey, draft);
-      if (sessionStorage.getItem(storageKey) !== draft) throw new Error("Draft read-back differs.");
-    } catch {
+    if (!preserveProfileDraft(storageKey, reviewed)) {
       setError("The reviewed request could not be saved in this tab. Nothing was sent. Restore session storage and retry Apply, or open this product in a new tab and dry-run again.");
       return;
     }

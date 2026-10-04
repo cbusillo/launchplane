@@ -133,7 +133,7 @@ for (const interruption of ["lost", "lost-reload", "reload-submitting", "navigat
   });
 }
 
-for (const recovery of ["same-tab", "reload", "clear-reload", "navigation", "reload-submitting"] as const) {
+for (const recovery of ["same-tab", "reload", "clear-reload", "navigation", "reload-submitting", "legacy-no-draft"] as const) {
 test(`Client-login uncertain Apply recovers after ${recovery} with the same request and key`, async ({ page }, testInfo) => {
   await mockProduct(page);
   const applies: Array<{ body: Record<string, unknown>; key: string }> = [];
@@ -157,11 +157,23 @@ test(`Client-login uncertain Apply recovers after ${recovery} with the same requ
   await panel.getByRole("button", { name: "Save", exact: true }).click();
   if (recovery === "reload-submitting") await expect.poll(() => applies.length).toBe(1);
   else await expect(panel.getByRole("button", { name: "Retry save", exact: true })).toBeEnabled();
+  if (recovery === "legacy-no-draft") {
+    // Existing tabs from before reviewed-draft persistence retain only the operation key.
+    await page.evaluate(() => sessionStorage.removeItem("launchplane:product-profile-draft:atlas-commerce:owner"));
+  }
   if (recovery === "navigation") {
     await page.getByRole("link", { name: "Product Ops", exact: true }).click();
     await expect(panel).toHaveCount(0);
     await page.locator(".product-directory-row").filter({ hasText: "Atlas Commerce" }).click();
   } else if (recovery !== "same-tab") await page.reload();
+  if (recovery === "legacy-no-draft") {
+    await expect(panel.getByRole("alert")).toContainText("reviewed request is unavailable");
+    await expect(panel.getByRole("button", { name: "Retry save", exact: true })).toBeDisabled();
+    await expect(panel.getByLabel("GitHub login")).toBeDisabled();
+    await expect(panel.getByRole("button", { name: "Preview change", exact: true })).toBeDisabled();
+    expect(applies).toHaveLength(1);
+    return;
+  }
   await expect(panel.getByRole("button", { name: "Retry save", exact: true })).toBeEnabled();
   await expect(panel.getByLabel("GitHub login")).toBeDisabled();
   await expect(panel.getByLabel("Change reason")).toBeDisabled();
