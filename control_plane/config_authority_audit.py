@@ -2390,6 +2390,8 @@ def _yaml_context_for_indent(
 
 
 def _yaml_candidate_key(context_stack: Sequence[tuple[int, str]], key: str) -> str:
+    if key == "group" and context_stack and context_stack[-1][1] == "runs-on":
+        return "runs-on.group"
     if key == "labels" and context_stack and context_stack[-1][1] == "runs-on":
         return "runs-on"
     if key == "default":
@@ -2711,7 +2713,7 @@ def _candidate_is_interesting(*, path: str, key: str, value: object) -> bool:
     if key_text in WORKFLOW_RUNTIME_AUTHORITY_KEYS:
         return True
     if normalized.startswith(".github/workflows/") and (
-        key_text == "RUNS_ON"
+        key_text in {"RUNS_ON", "RUNS_ON_GROUP"}
         or _is_workflow_input_default_key(key)
         or _is_launchplane_service_route_path(key=key, value=value)
         or _is_workflow_mechanic_key_value(key=key, value=value)
@@ -3063,7 +3065,7 @@ def _allow_reason(
         normalized.startswith(".github/workflows/")
         and not _is_workflow_runtime_authority_key(key)
         and not _is_workflow_operator_input_key(key)
-        and key_text != "RUNS_ON"
+        and key_text not in {"RUNS_ON", "RUNS_ON_GROUP"}
         and not _is_route_path_key(key)
         and not _is_workflow_payload_field_key(key)
         and not _is_workflow_context_reference_restricted_key(key)
@@ -3342,6 +3344,8 @@ def _is_workflow_mechanic_key_value(*, key: str, value: object) -> bool:
         )
     if key_text == "ID_TOKEN" and value_text == "write":
         return True
+    if key_text == "RUNS_ON_GROUP":
+        return _is_github_direct_input_reference(value)
     if key_text == "GROUP" and "${{ inputs." in value_text and "${{ vars." not in value_text:
         return True
     if key_text == "PATH" and re.fullmatch(r"[A-Za-z0-9_.-]+\.json", value_text):

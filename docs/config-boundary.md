@@ -306,7 +306,12 @@ Mapping-form jobs with nested `runs-on.labels` use the same label classification
 including scalar, flow-list, and block-sequence forms. Inline runner mappings
 remain findings because the line scanner does not parse their members.
 Reusable-workflow `runs_on` inputs retain their serialized JSON-selector contract,
-including `'["self-hosted"]'`. The `product-repo` profile also
+including `'["self-hosted"]'`. Block mapping job
+`runs-on.group` retains its runner context: literal custom groups and arbitrary
+repository-variable groups remain findings. Direct input references such as
+`${{ inputs.runner_group }}` remain supported; literal fallbacks and
+concatenations remain findings. Inline mapping selectors remain fail-closed.
+The `product-repo` profile also
 rejects test fixtures that carry Launchplane lifecycle authority such as authz,
 runtime-environment, provider target, target-id, managed-secret, route-batch, or
 topology material. Product repos should use this changed-file gate to reject
