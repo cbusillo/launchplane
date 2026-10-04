@@ -129,16 +129,16 @@ def main(argv):
         return 0
     if program[:1] == ["/bin/bash"]:
         return 0
-    if program[:1] == ["printenv"]:
+    if program[:2] == ["sh", "-c"] and "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64" in program[2]:
+        log("read overrides payload")
+        if "FAKE_PAYLOAD_READ_EXIT" in os.environ:
+            print("partial-payload", end="")
+            return int(os.environ["FAKE_PAYLOAD_READ_EXIT"])
         # The container's own environment comes from the compose .env file.
-        container_environment = {}
+        container_environment = {"PATH": os.environ["PATH"]}
         if "FAKE_CONTAINER_PAYLOAD" in os.environ:
-            container_environment[program[1]] = os.environ["FAKE_CONTAINER_PAYLOAD"]
-        value = {**container_environment, **exec_environment}.get(program[1])
-        if value is None:
-            return 1
-        print(value)
-        return 0
+            container_environment["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"] = os.environ["FAKE_CONTAINER_PAYLOAD"]
+        return subprocess.run(program, env={**container_environment, **exec_environment}).returncode
     if program[:2] == ["sh", "-c"] and program[-1].endswith("integration_readback_passed"):
         if os.environ.get("FAKE_PASS_WRITE_FAILURE") == "1":
             log("write readback-passed failed")
@@ -157,6 +157,8 @@ def main(argv):
     if program[:2] == ["python3", "-u"]:
         log("exec workflow")
         log("workflow arguments " + " ".join(program[3:]))
+        kept_key = "ODOO_RESTORE_KEPT_INTEGRATIONS"
+        log("workflow kept integrations " + exec_environment.get(kept_key, "<unset>"))
         print(os.environ.get("FAKE_WORKFLOW_OUTPUT", "workflow ran"))
         return int(os.environ.get("FAKE_WORKFLOW_EXIT", "0"))
     if program[:2] == ["python3", "-"]:
@@ -380,6 +382,8 @@ def _render_post_deploy_script(
     *,
     run_destructive_restore: bool = False,
     bootstrap_missing_database: bool = False,
+    instance: str = "testing",
+    workflow_environment_overrides: dict[str, str] | None = None,
 ) -> str:
     schedule_payloads: list[dict[str, object]] = []
 
@@ -389,7 +393,7 @@ def _render_post_deploy_script(
 
     target_definition = control_plane_dokploy.DokployTargetDefinition(
         context="example",
-        instance="testing",
+        instance=instance,
         target_id="compose-123",
         target_name="example-testing",
         policies=policies or _policies(),
@@ -452,6 +456,7 @@ def _render_post_deploy_script(
             env_file=None,
             run_destructive_restore=run_destructive_restore,
             bootstrap_missing_database=bootstrap_missing_database,
+            workflow_environment_overrides=workflow_environment_overrides,
         )
     if len(schedule_payloads) != 1:
         raise AssertionError(f"expected one schedule upsert, got {len(schedule_payloads)}")
@@ -501,6 +506,67 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         )
         docker_log = tuple(log_path.read_text().splitlines()) if log_path.exists() else ()
         return ScriptRun(completed.returncode, completed.stdout, completed.stderr, docker_log)
+
+    def test_restore_runner_keeps_only_real_account_allowances(self) -> None:
+        policies = DokployTargetPolicies(
+            integration_allowances=(
+                DokployTargetIntegrationAllowance(
+                    integration="repairshopr", kind="pre_live", reason="Working instance."
+                ),
+                DokployTargetIntegrationAllowance(
+                    integration="fishbowl",
+                    kind="read_only_source",
+                    reason="Import source.",
+                    evidence="Read-only grant verified.",
+                ),
+                DokployTargetIntegrationAllowance(
+                    integration="cm_data", kind="pre_live", reason="Working instance."
+                ),
+                DokployTargetIntegrationAllowance(
+                    integration="shopify", kind="dev_store", reason="Development store."
+                ),
+            )
+        )
+        for instance, expected in (
+            ("testing", "cm_data,fishbowl,repairshopr"),
+            ("dev", "cm_data,fishbowl,repairshopr"),
+            ("prod", ""),
+            ("production", ""),
+            ("preview", ""),
+            ("pr-42", ""),
+        ):
+            with self.subTest(instance=instance):
+                run = self._run(
+                    _render_post_deploy_script(
+                        policies,
+                        run_destructive_restore=True,
+                        instance=instance,
+                        workflow_environment_overrides={
+                            "ODOO_RESTORE_KEPT_INTEGRATIONS": "payment"
+                        },
+                    )
+                )
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn("workflow kept integrations " + expected, run.docker_log)
+
+    def test_restore_without_real_account_allowances_keeps_nothing(self) -> None:
+        for policies in (_policies(), _policies(allowed=("shopify",))):
+            with self.subTest(policies=policies):
+                run = self._run(_render_restore_script(policies))
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn("workflow kept integrations ", run.docker_log)
+
+    def test_maintenance_does_not_send_restore_allowances(self) -> None:
+        policies = DokployTargetPolicies(
+            integration_allowances=(
+                DokployTargetIntegrationAllowance(
+                    integration="fishbowl", kind="pre_live", reason="Working instance."
+                ),
+            )
+        )
+        run = self._run(_render_post_deploy_script(policies))
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("workflow kept integrations <unset>", run.docker_log)
 
     def assert_refused_and_web_stopped(self, run: ScriptRun, *entries: str) -> None:
         self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
@@ -573,6 +639,37 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.assertFalse(
             self._held_web_starts(overrides_payload="payload-a", database_name="other_db")
         )
+
+    def test_unset_or_empty_payload_releases_web_after_a_pass(self) -> None:
+        for environment in ({}, {"FAKE_CONTAINER_PAYLOAD": ""}):
+            with self.subTest(environment=environment):
+                run = self._run(
+                    _render_restore_script(), FAKE_ODOO_DB=_fake_database(), **environment
+                )
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn("write readback-passed", run.docker_log)
+                self.assertIn("odoo_restore_completed=true", run.stdout.splitlines())
+                self.assertTrue(self._held_web_starts(overrides_payload=""))
+
+    def test_failed_payload_read_keeps_web_held_and_restore_unsuccessful(self) -> None:
+        for exit_status in ("1", "125"):
+            with self.subTest(exit_status=exit_status):
+                # An earlier pass must also be cleared before the failed read.
+                (self.root / "readback-passed").write_text("previous-pass")
+                run = self._run(
+                    _render_restore_script(),
+                    FAKE_CONTAINER_PAYLOAD="payload-a",
+                    FAKE_PAYLOAD_READ_EXIT=exit_status,
+                    FAKE_ODOO_DB=_fake_database(),
+                )
+                self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertTrue(run.readback_ran, run.docker_log)
+                self.assertNotIn("write readback-passed", run.docker_log)
+                self.assertNotIn("integration_readback_passed_recorded=true", run.stdout)
+                self.assertNotIn("odoo_restore_completed=true", run.stdout)
+                self.assertFalse(run.web_restarted, run.docker_log)
+                self.assertFalse(self._held_web_starts(overrides_payload=""))
+                self.assertFalse(self._held_web_starts(overrides_payload="payload-a"))
 
     def test_new_preview_bootstraps_its_missing_database_then_releases_web(self) -> None:
         run = self._run(

@@ -16,6 +16,9 @@ title: Testing Style
 - Verification code must not depend on working-tree state; read live state
   only on the path that acts on it.
 - Prefer deterministic file-system tests using `TemporaryDirectory`.
+- When a fixture follows a record written with the current clock, derive its
+  timestamps from that persisted record. A distant future date only delays the
+  failure; ordering assertions should also hold after that date passes.
 - Test fail-closed behavior explicitly.
 - Keep fixtures small and inline unless they are reused heavily.
 - When a full suite is justified, the local entrypoint is
@@ -97,6 +100,16 @@ and `aggregate --plan-file` checks coverage against that same plan. Self-hosted
 runners can discover different targets, so shards that each planned for
 themselves could overlap or miss tests (#2618). Without `--plan-file`, `run` and
 `aggregate` still discover and plan locally.
+
+CI also runs daily against the default branch. Scheduled runs always execute
+fresh checks, including Python dependency audits, image scans and PostgreSQL
+tests; they never reuse an earlier successful tree. The `ci-gate` summary lists
+each job's result and the Actions run remains failed when a gate fails.
+Inspect scheduled runs in Actions to diagnose calendar-driven failures before
+an unrelated pull request encounters them. Email notification delivery depends
+on the schedule actor and that account's settings; delivery to the Director is
+not guaranteed. Reporting uses the existing read-only workflow token; it does
+not create issues or dependency updates.
 
 For pushes to `main` and `launchplane/train/**`, the `verified-tree` job can
 reuse a completed, successful GitHub Actions `ci-gate` on the exact pushed

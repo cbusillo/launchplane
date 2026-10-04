@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from typing import Any, Literal, Protocol, cast, runtime_checkable
@@ -14,6 +14,7 @@ import os
 import smtplib
 import socket
 import ssl
+import time
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -121,6 +122,10 @@ DEPLOY_FENCE_PROVIDER = "launchplane"
 DEPLOY_FENCE_CHECK_NAME = "launchplane-deploy-fence"
 # Long enough for a same-key retry or a recovery already underway to settle.
 DEPLOY_FENCE_RECONCILE_GRACE = timedelta(minutes=15)
+# A deploy records its new runtime identity when its own rollout check passes,
+# and the public route can still answer from the previous container for a few
+# seconds. A mismatch is probed once more after this delay before it counts.
+RUNTIME_IDENTITY_CONFIRMATION_DELAY_SECONDS = 30
 
 
 PublicIngressRouteBindingSourceKind = Literal["operator", "backfill", "service"]
@@ -523,7 +528,8 @@ def _health_check_monitor_target(
         ),
         expected_runtime_identity=_expected_runtime_identity(
             record_store=record_store,
-            lane=lane,
+            context_name=lane.context,
+            instance_name=lane.instance,
         ),
         require_runtime_identity=check.require_runtime_identity,
         recovery_observation_threshold=check.recovery_observation_threshold,
@@ -626,6 +632,8 @@ def run_public_ingress_monitor_once(
     private_http_get: HttpGet | None = None,
     tls_get: TlsGet | None = None,
     notification_drivers: PublicIngressNotificationDrivers | None = None,
+    runtime_identity_confirmation_delay_seconds: float = 0,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> PublicIngressMonitorResult:
     observed_at = checked_at.strip() or utc_now_timestamp()
     public_get = http_get or fetch_public_ingress_url
@@ -644,14 +652,38 @@ def run_public_ingress_monitor_once(
     reminder_states: list[PublicIngressIncidentReminderStateRecord] = []
     delivery_attempts: list[PublicIngressNotificationAttemptRecord] = []
     authority_changed_count = 0
-    for target in targets:
-        record = check_public_ingress_target(
+
+    def probe(target: PublicIngressMonitorTarget) -> PublicIngressObservationRecord:
+        return check_public_ingress_target(
             target=target,
             checked_at=observed_at,
             timeout_seconds=timeout_seconds,
             http_get=(private_get if target.check_kind == "private_http" else public_get),
             tls_get=tls_probe,
         )
+
+    probed = [(target, probe(target)) for target in targets]
+    unconfirmed = [
+        index
+        for index, (_target, record) in enumerate(probed)
+        if record.failure_code == "wrong_runtime_identity"
+    ]
+    if unconfirmed:
+        # One wait per run, however many lanes are mid-deploy.
+        if runtime_identity_confirmation_delay_seconds > 0:
+            sleep(runtime_identity_confirmation_delay_seconds)
+        for index in unconfirmed:
+            target = probed[index][0]
+            target = replace(
+                target,
+                expected_runtime_identity=_expected_runtime_identity(
+                    record_store=record_store,
+                    context_name=target.context,
+                    instance_name=target.instance,
+                ),
+            )
+            probed[index] = (target, probe(target))
+    for target, record in probed:
         stored_transition = _store_monitor_observation(
             record_store=record_store,
             record=record,
@@ -2494,15 +2526,15 @@ def _profile_uses_generic_web(profile: LaunchplaneProductProfileRecord) -> bool:
 
 
 def _expected_runtime_identity(
-    *, record_store: object, lane: ProductLaneProfile
+    *, record_store: object, context_name: str, instance_name: str
 ) -> RuntimeIdentity | None:
     read_lane_summary = getattr(record_store, "read_lane_summary", None)
     if not callable(read_lane_summary):
         return None
     try:
         lane_summary = read_lane_summary(
-            context_name=lane.context,
-            instance_name=lane.instance,
+            context_name=context_name,
+            instance_name=instance_name,
         )
     except (FileNotFoundError, KeyError):
         return None

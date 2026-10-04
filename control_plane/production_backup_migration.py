@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -8,10 +7,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.production_backup_authority import (
     ProductionBackupPolicyRecord,
     ProductionBackupTargetRecord,
-    ProductionFastSnapshotPolicy,
-    ProductionIndependentBackupPolicy,
-    ProxmoxGuestBackupDestinationReference,
-    ProxmoxStorageBackupDestinationReference,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.production_backup_authority import (
@@ -109,132 +104,7 @@ def build_legacy_production_backup_authority_envelope(
     record_store: LegacyProductionBackupMigrationStore,
     request: LegacyProductionBackupMigrationRequest,
 ) -> ProductionBackupAuthorityWriteEnvelope:
-    existing_targets = tuple(
-        record
-        for target_id in (request.source_target_id, request.destination_target_id)
-        for record in record_store.list_production_backup_target_records(target_id=target_id)
+    raise ValueError(
+        "Legacy runtime-environment backup migration is unavailable; submit reviewed typed "
+        "targets and policy through /v1/production-backup-authority/apply."
     )
-    existing_policies = record_store.list_production_backup_policy_records(
-        product=request.product,
-        context_name=request.context,
-        instance_name=request.instance,
-        promotion_action=request.promotion_action,
-    )
-    if existing_targets or existing_policies:
-        raise ValueError(
-            "legacy production backup migration requires absent typed target and policy streams"
-        )
-    runtime_records = record_store.list_runtime_environment_records(
-        scope="instance",
-        context_name=request.context,
-        instance_name=request.instance,
-    )
-    exact_records = tuple(
-        record
-        for record in runtime_records
-        if record.scope == "instance"
-        and record.context == request.context
-        and record.instance == request.instance
-    )
-    if len(exact_records) != 1:
-        raise ValueError(
-            "legacy production backup migration requires exactly one exact instance runtime-environment record"
-        )
-    runtime_record = exact_records[0]
-    if runtime_record.updated_at != request.runtime_environment_updated_at:
-        raise ValueError("legacy production backup migration runtime-environment revision changed")
-    env = runtime_record.env
-    host = _required_runtime_value(env, "VERIREEL_PROD_PROXMOX_HOST")
-    username = _required_runtime_value(env, "VERIREEL_PROD_PROXMOX_USER")
-    guest_id = _required_runtime_value(env, "VERIREEL_PROD_CT_ID")
-    storage_id = _required_runtime_value(env, "VERIREEL_PROD_BACKUP_STORAGE")
-    snapshot_prefix = _required_runtime_value(env, "VERIREEL_PROD_SNAPSHOT_PREFIX")
-    retention_count = _non_negative_runtime_int(env, "VERIREEL_PROD_SNAPSHOT_KEEP")
-    backup_modes = _legacy_backup_modes(_required_runtime_value(env, "VERIREEL_PROD_BACKUP_MODE"))
-    if backup_modes != {"snapshot", "vzdump"}:
-        raise ValueError(
-            "legacy production backup migration requires both snapshot and independent backup modes"
-        )
-    targets = (
-        ProductionBackupTargetRecord(
-            target_id=request.source_target_id,
-            target_revision=1,
-            destination=ProxmoxGuestBackupDestinationReference(
-                host=host,
-                username=username,
-                guest_kind="lxc",
-                guest_id=guest_id,
-            ),
-            effective_at=request.effective_at,
-            review_after=request.review_after,
-            source=request.source,
-            reason=request.reason,
-        ),
-        ProductionBackupTargetRecord(
-            target_id=request.destination_target_id,
-            target_revision=1,
-            destination=ProxmoxStorageBackupDestinationReference(
-                host=host,
-                username=username,
-                storage_id=storage_id,
-            ),
-            effective_at=request.effective_at,
-            review_after=request.review_after,
-            source=request.source,
-            reason=request.reason,
-        ),
-    )
-    policy = ProductionBackupPolicyRecord(
-        product=request.product,
-        context=request.context,
-        instance=request.instance,
-        promotion_action=request.promotion_action,
-        policy_revision=1,
-        fast_snapshot=ProductionFastSnapshotPolicy(
-            source_target_id=request.source_target_id,
-            snapshot_prefix=snapshot_prefix,
-            retention_count=retention_count,
-            max_evidence_age_seconds=request.snapshot_max_evidence_age_seconds,
-        ),
-        independent_backup=ProductionIndependentBackupPolicy(
-            source_target_id=request.source_target_id,
-            destination_target_id=request.destination_target_id,
-            max_evidence_age_seconds=request.independent_backup_max_evidence_age_seconds,
-        ),
-        effective_at=request.effective_at,
-        review_after=request.review_after,
-        source=request.source,
-        reason=request.reason,
-    )
-    return ProductionBackupAuthorityWriteEnvelope(
-        mode=request.mode,
-        targets=targets,
-        policy=policy,
-        reviewed_authority_digest=request.reviewed_authority_digest,
-    )
-
-
-def _required_runtime_value(env: Mapping[str, object], key: str) -> str:
-    value = str(env.get(key, "")).strip()
-    if not value:
-        raise ValueError(f"legacy production backup migration requires runtime key {key}")
-    return value
-
-
-def _non_negative_runtime_int(env: Mapping[str, object], key: str) -> int:
-    value = _required_runtime_value(env, key)
-    if value.startswith("-") or not value.lstrip("+").isdigit():
-        raise ValueError(f"legacy production backup migration requires non-negative {key}")
-    return int(value)
-
-
-def _legacy_backup_modes(raw_value: str) -> set[str]:
-    tokens = {
-        token.strip().lower() for token in raw_value.replace(":", ",").split(",") if token.strip()
-    }
-    if "both" in tokens:
-        tokens.remove("both")
-        tokens.update({"snapshot", "vzdump"})
-    if "none" in tokens or tokens.difference({"snapshot", "vzdump"}):
-        raise ValueError("legacy production backup migration has unsupported backup mode")
-    return tokens

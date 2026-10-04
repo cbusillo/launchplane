@@ -100,6 +100,41 @@ class ProductProductionUseHttpTests(unittest.IsolatedAsyncioTestCase):
             stored.model_dump(exclude=unchanged), _profile().model_dump(exclude=unchanged)
         )
 
+    async def test_admin_switches_release_on_acceptance_and_holds_it_again(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = _store(Path(temporary_directory_name))
+            app = _app(store)
+            for index, mode in enumerate(("promote_with_rollback_drill", "held")):
+                request: dict[str, object] = {
+                    "production_use": _OLD,
+                    "release_on_acceptance": mode,
+                    "reason": "Start releases when the Client accepts.",
+                }
+                dry = await _post(app, request)
+                self.assertEqual(dry.json()["result"]["release_on_acceptance_after"], mode)
+                applied = await _post(
+                    app,
+                    {
+                        **request,
+                        "mode": "apply",
+                        "reviewed_plan_sha256": dry.json()["result"]["plan_sha256"],
+                    },
+                    idempotency_key=f"release-on-acceptance-{index}",
+                )
+                self.assertEqual(applied.status_code, 202, applied.text)
+                self.assertEqual(
+                    store.read_product_profile_record(_PRODUCT).release_on_acceptance, mode
+                )
+            stored = store.read_product_profile_record(_PRODUCT)
+            store.close()
+
+        # Held again, the profile serializes as it did before the switch existed.
+        unchanged = {"updated_at", "source"}
+        self.assertEqual(
+            stored.model_dump(mode="json", exclude=unchanged),
+            _profile().model_dump(mode="json", exclude=unchanged),
+        )
+
     async def test_unknown_classification_is_refused(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = _store(Path(temporary_directory_name))

@@ -94,6 +94,7 @@ class MergeTrainScheduledTargetResult:
     records: dict[str, str] = field(default_factory=dict)
     feedback_delivered: int = 0
     feedback_failed: int = 0
+    continue_pass: bool = False
 
 
 def run_merge_train_scheduler_pass(
@@ -125,13 +126,25 @@ def run_merge_train_scheduler_pass(
             if current_policy is None:
                 continue
             repository_policy = current_policy
-            result = _run_scheduled_target(
-                record_store=record_store,
-                control_plane_root=control_plane_root,
-                policy_record=policy_record,
-                repository_policy=repository_policy,
-                now=now,
-            )
+            # Reacquire the normal lease and reread policy/admission at every
+            # action. Bound work so one busy train cannot starve other targets.
+            for _ in range(16):
+                result = _run_scheduled_target(
+                    record_store=record_store,
+                    control_plane_root=control_plane_root,
+                    policy_record=policy_record,
+                    repository_policy=repository_policy,
+                    now=now,
+                )
+                results.append(result)
+                if not result.continue_pass or should_stop():
+                    break
+                policy_record = resolve_merge_train_policy_record(record_store)
+                current_policy = _current_scheduled_policy(policy_record, listed_policy)
+                if current_policy is None:
+                    break
+                repository_policy = current_policy
+            continue
         except MergeTrainControllerLeaseHeldError:
             # A manual run or another worker holds this train; the next pass retries.
             result = _target_result(
@@ -159,6 +172,7 @@ def run_merge_train_scheduler_loop(
     max_passes: int | None = None,
     pass_callback: Callable[[tuple[MergeTrainScheduledTargetResult, ...]], None] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    wait_for_event: Callable[[float, Event], None] | None = None,
 ) -> int:
     if interval_seconds < 1:
         raise ValueError("Merge train scheduler interval_seconds must be positive.")
@@ -184,7 +198,11 @@ def run_merge_train_scheduler_loop(
             break
         # Start passes on the interval; a long landing only shortens the wait.
         elapsed = monotonic() - started_at
-        scheduler_stop_event.wait(timeout=max(0.0, interval_seconds - elapsed))
+        timeout = max(0.0, interval_seconds - elapsed)
+        if wait_for_event is None:
+            scheduler_stop_event.wait(timeout=timeout)
+        else:
+            wait_for_event(timeout, scheduler_stop_event)
     return passes
 
 
@@ -364,7 +382,31 @@ def _run_controller(
         records=controller_result.records,
         feedback_delivered=delivered,
         feedback_failed=failed,
+        continue_pass=request.mutate
+        and _controller_can_continue(controller_result.accepted_result),
     )
+
+
+def _controller_can_continue(result: dict[str, object]) -> bool:
+    if result.get("error"):
+        return False
+    action = result.get("controller_action")
+    if action in {
+        "plan_candidate",
+        "admit_collapsed_root",
+        "plan_landing",
+        "plan_stack_collapse",
+        "retire_stale_landing",
+    }:
+        return True
+    candidate = result.get("candidate")
+    if action == "build_candidate" and isinstance(candidate, dict):
+        return candidate.get("status") in {"ready_for_checks", "passed"}
+    if action == "observe_candidate" and isinstance(candidate, dict):
+        return candidate.get("status") == "passed"
+    # Branch updates, stack collapse and candidate publication start CI. Blocks,
+    # waits, reconciliation and landing outcomes end this bounded pass.
+    return False
 
 
 def _deliver_controller_feedback(
@@ -411,6 +453,7 @@ def _target_result(
     records: dict[str, str] | None = None,
     feedback_delivered: int = 0,
     feedback_failed: int = 0,
+    continue_pass: bool = False,
 ) -> MergeTrainScheduledTargetResult:
     return MergeTrainScheduledTargetResult(
         repository=repository_policy.repository,
@@ -423,4 +466,5 @@ def _target_result(
         records=dict(records or {}),
         feedback_delivered=feedback_delivered,
         feedback_failed=feedback_failed,
+        continue_pass=continue_pass,
     )

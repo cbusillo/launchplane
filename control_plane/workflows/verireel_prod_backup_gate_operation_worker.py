@@ -15,6 +15,7 @@ from control_plane.contracts.verireel_prod_backup_gate import (
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
 )
+from control_plane.client_release import client_release_grant_allows
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationDeniedError,
     DurableOperationAuthorizationGuard,
@@ -366,6 +367,10 @@ def _execute_operation(
     authorization_guard = DurableOperationAuthorizationGuard(
         authorization=operation.authorization,
         policy_record_reader=lambda: read_active_authz_policy_record(record_store),
+        # A Client's accepted release queues the backup before its promotion.
+        client_release_grant_allows=lambda authorization: client_release_grant_allows(
+            record_store, authorization
+        ),
     )
     running_operation = operation
     try:
