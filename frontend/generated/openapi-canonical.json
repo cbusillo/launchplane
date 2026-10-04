@@ -15921,6 +15921,14 @@
             "title": "Candidate Sha",
             "type": "string"
           },
+          "held_out": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/MergeTrainHeldOutSummary"
+            },
+            "title": "Held Out",
+            "type": "array"
+          },
           "merged_count": {
             "default": 0,
             "title": "Merged Count",
@@ -16445,6 +16453,39 @@
           }
         },
         "title": "MergeTrainGitHubTokenSource",
+        "type": "object"
+      },
+      "MergeTrainHeldOutSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "conflicts_with": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Conflicts With",
+            "type": "array"
+          },
+          "head_sha": {
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "pull_request_number": {
+            "title": "Pull Request Number",
+            "type": "integer"
+          },
+          "reason": {
+            "const": "entry_conflict",
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pull_request_number",
+          "head_sha",
+          "reason"
+        ],
+        "title": "MergeTrainHeldOutSummary",
         "type": "object"
       },
       "MergeTrainHistoricalCompletionEntryEvidence": {

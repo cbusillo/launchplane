@@ -723,6 +723,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         if checkpoint is not None:
             checkpoint(None)
         merged_pull_request_numbers: list[int] = []
+        merged_head_shas: list[str] = []
         held_out: list[MergeTrainBatchHeldOutEntry] = []
         probe_sha = base_sha
         try:
@@ -751,10 +752,13 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                             pull_request_number=queue_entry.number,
                             head_sha=queue_entry.head_sha,
                             conflicts_with=tuple(merged_pull_request_numbers),
+                            probe_base_sha=base_sha,
+                            conflicts_with_head_shas=tuple(merged_head_shas),
                         )
                     )
                     continue
                 merged_pull_request_numbers.append(queue_entry.number)
+                merged_head_shas.append(queue_entry.head_sha)
                 probe_sha = merge_outcome.result_sha or probe_sha
         finally:
             try:

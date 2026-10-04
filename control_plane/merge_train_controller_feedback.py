@@ -283,9 +283,13 @@ def _held_out_messages(
     """
     probed: set[object] | None = None
     if stopped:
+        probe = _as_dict(result.get("conflict_probe"))
         probed = {
             _as_dict(entry).get("pull_request_number")
-            for entry in _as_list(_as_dict(result.get("conflict_probe")).get("held_out"))
+            for entry in _as_list(probe.get("held_out"))
+            if probe.get("status") == "ran"
+            and _as_dict(entry).get("pull_request_number")
+            in _as_list(probe.get("pull_request_numbers"))
         }
     queue_state = (
         "The failed batch ahead of it stays stopped until someone resolves it."
