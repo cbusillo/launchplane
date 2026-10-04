@@ -1008,7 +1008,9 @@ Controller actions have these retry/stop semantics:
   eligible interrupted execution before planned execution and all saved root
   waits. An inapplicable saved execution steps aside for another eligible
   saved stack. Plans under an obsolete policy are left unapplied, and an
-  unrelated root push makes that saved plan step aside. A mutating pass
+  unrelated root push or a root leaving the open snapshot makes that saved
+  plan step aside. Contradictory snapshot/ref evidence leaves execution
+  recoverable for a later pass. A mutating pass
   supersedes all of that obsolete execution's active progress, retaining history
   and a retirement reason; dry runs leave records unchanged.
   A completed stack never revives its older planned progress.

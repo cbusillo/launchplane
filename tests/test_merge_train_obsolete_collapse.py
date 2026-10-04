@@ -4,6 +4,9 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
+from control_plane.contracts.merge_train_stack_collapse import (
+    build_merge_train_stack_collapse_plan_record,
+)
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train_github import MergeTrainGitHubStaleHeadError
@@ -42,7 +45,9 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                     update={
                         "number": 11,
                         "head_ref": "feature/root-10",
-                        "head_sha": "unrelated-push" if reason == "root_moved" else root.head_sha,
+                        "head_sha": "unrelated-push"
+                        if reason in {"root_moved", "snapshot_lag"}
+                        else root.head_sha,
                     }
                 )
                 return snapshot.model_copy(
@@ -50,7 +55,7 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                         "pull_requests": (
                             root.model_copy(update={"required_checks_status": "pending"}),
                             child,
-                            other_root,
+                            *((other_root,) if reason != "root_missing_from_open_snapshot" else ()),
                         )
                     }
                 )
@@ -58,6 +63,8 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
         class Client(_FakeMergeTrainGitHubClient):
             def find_stack_child_merge_commit(self, **kwargs: Any) -> str:
                 probes.append(kwargs["parent_pull_request_number"])
+                if reason == "snapshot_lag":
+                    return ""
                 raise MergeTrainGitHubStaleHeadError(
                     "Parent moved outside stored plan", status_code=409
                 )
@@ -84,6 +91,44 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                 status="waiting_for_root_checks" if waiting else status,
                 newer=True,
             )
+            if status == "collapsing" and not waiting:
+                plan = obsolete.plan.model_dump(mode="json")
+                middle = plan["entries"][1]
+                plan["entries"].append(
+                    {
+                        **middle,
+                        "position": 3,
+                        "pull_request_number": 13,
+                        "head_ref": "feature/leaf-10",
+                        "head_sha": "head-leaf",
+                        "base_ref": middle["head_ref"],
+                        "base_sha": middle["head_sha"],
+                    }
+                )
+                root_mutation = {
+                    **plan["mutations"][0],
+                    "status": "planned",
+                    "merge_commit_sha": "",
+                }
+                plan["mutations"] = [
+                    {
+                        **root_mutation,
+                        "child_pull_request_number": 13,
+                        "parent_pull_request_number": 12,
+                        "parent_head_ref": middle["head_ref"],
+                        "expected_parent_head_sha": middle["head_sha"],
+                        "child_head_sha": "head-leaf",
+                        "status": "mutated",
+                        "merge_commit_sha": "partial-middle-head",
+                    },
+                    root_mutation,
+                ]
+                plan["child_dispositions"] = []
+                obsolete = build_merge_train_stack_collapse_plan_record(
+                    plan=obsolete.plan.model_validate(plan),
+                    source=obsolete.source,
+                    updated_at=obsolete.updated_at,
+                )
             if reason == "policy_changed":
                 obsolete = obsolete.model_copy(
                     update={"plan": obsolete.plan.model_copy(update={"policy_sha256": "0" * 64})}
@@ -121,7 +166,7 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(
                             response.json()["result"]["controller_action"], "wait_for_root_checks"
                         )
-            if waiting or not mutate:
+            if waiting or not mutate or reason == "snapshot_lag":
                 self.assertEqual(store.list_merge_train_stack_collapse_plan_records(), before)
             else:
                 active = store.list_merge_train_stack_collapse_plan_records(status="active")
@@ -134,15 +179,22 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(reason, saved.source)
             self.assertFalse(store.list_merge_train_batch_candidate_records())
             self.assertEqual(
-                probes, ([11] if mutate else [11, 11]) if reason == "root_moved" else []
+                probes,
+                [11, 11]
+                if reason == "snapshot_lag"
+                else (([11] if mutate else [11, 11]) if reason == "root_moved" else []),
             )
 
     async def test_obsolete_execution_is_retired_without_repeated_probes(self) -> None:
-        for reason in ("root_moved", "policy_changed"):
+        for reason in ("root_moved", "policy_changed", "root_missing_from_open_snapshot"):
             for mutate in (False, True):
                 with self.subTest(reason=reason, mutate=mutate):
                     for status in ("planned", "collapsing"):
                         await self._obsolete_case(reason=reason, mutate=mutate, status=status)
+
+    async def test_contradictory_snapshot_and_probe_leave_execution_recoverable(self) -> None:
+        for mutate in (False, True):
+            await self._obsolete_case(reason="snapshot_lag", mutate=mutate, status="collapsing")
 
     async def test_obsolete_wait_preserves_current_policy_validation(self) -> None:
         for mutate in (False, True):

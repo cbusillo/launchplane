@@ -2889,7 +2889,8 @@ def _advance_planned_stack_collapse_record(
             retire("root_moved")
             return None
         if observed_root_sha != root_pull_request.head_sha:
-            retire("root_moved")
+            # A ref probe and PR snapshot can disagree while GitHub converges.
+            # Only a confirmed stale-head refusal above proves obsolescence.
             return None
     # A root or child that is no longer ready falls through to live discovery, which
     # reports why. A child missing from the open snapshot may already be merged, so the
