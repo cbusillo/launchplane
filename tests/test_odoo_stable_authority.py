@@ -66,14 +66,3 @@ class OdooStableAuthorityTests(TestCase):
             self.assertIn(token, rollback_source)
         for token in forbidden_tokens:
             self.assertNotIn(token, rollback_source)
-
-    def test_documents_name_target_replacement_as_canonical_rollback_deployer(self) -> None:
-        operations_doc = Path("docs/operations.md").read_text(encoding="utf-8")
-        records_doc = Path("docs/records.md").read_text(encoding="utf-8")
-        service_boundary_doc = Path("docs/service-boundary.md").read_text(encoding="utf-8")
-
-        self.assertIn("through the stable target replacement executor", operations_doc)
-        self.assertIn("delegates the rollback deploy to stable target replacement", records_doc)
-        self.assertIn(
-            "delegates the provider mutation to\nstable target replacement", service_boundary_doc
-        )

@@ -3722,12 +3722,12 @@ Launchplane Authorization**, backed by managed set
 `operator.product-retirement` and secret
 `LAUNCHPLANE_AUTHZ_PRODUCT_RETIREMENT_MANAGED_SET_JSON`. The dispatch wrapper
 is pinned to an immutable reusable worker. Authorization must bind both the
-caller `workflow_ref` and the exact immutable `job_workflow_ref`:
-
-```text
-workflow_ref=cbusillo/launchplane/.github/workflows/product-retirement.yml@refs/heads/main
-job_workflow_ref=cbusillo/launchplane/.github/workflows/reusable-product-retirement.yml@c922d5f1a0bf3ab17a829196042a96ba89d7b693
-```
+caller `workflow_ref` and the exact immutable `job_workflow_ref`. Derive the
+caller from [the dispatch wrapper](../.github/workflows/product-retirement.yml)
+on the default branch, and copy the worker reference from its `retire` job
+`uses:` value. The caller format is
+`<owner>/<repository>/<wrapper path>@refs/heads/<default branch>`. The wrapper
+is the source of the current worker revision.
 
 This describes an existing transitional authorization path, not approval to
 create or expand it. New grants and managed-set changes are a stop boundary;
@@ -3738,7 +3738,8 @@ see [Who Can Do What](authorization-authority.md#who-can-do-what).
 Phase one provides **Reusable Detached Application Retirement** as a
 `workflow_call`-only worker. Phase two adds the thin
 **Detached Application Retirement** `workflow_dispatch` wrapper, pinned to the
-exact merged worker SHA below. The wrapper only defines the manual inputs,
+exact merged worker SHA in its `retire` job `uses:` value. The wrapper only
+defines the manual inputs,
 forwards them unchanged, and grants `contents: read` plus `id-token: write`; it
 does not define a runner, environment, steps, or concurrency. Both phases are
 merged; configuring the live authz grant is still a stop boundary (see below).
@@ -3746,12 +3747,12 @@ The worker uses the protected
 `launchplane-authz-admin` environment, OIDC, target-digest concurrency, exact
 input validation, and redacted evidence.
 
-The protected identity pair a grant would bind is:
-
-```text
-workflow_ref=cbusillo/launchplane/.github/workflows/detached-application-retirement.yml@refs/heads/main
-job_workflow_ref=cbusillo/launchplane/.github/workflows/reusable-detached-application-retirement.yml@11d53d2840a6f1898785d7c8f1553c202caa3fbf
-```
+A grant would bind the caller `workflow_ref` from
+[the dispatch wrapper](../.github/workflows/detached-application-retirement.yml)
+on the default branch and the exact immutable `job_workflow_ref` from its
+`retire` job `uses:` value. Copy the worker reference from the wrapper rather
+than a separate documentation pin. The caller format is
+`<owner>/<repository>/<wrapper path>@refs/heads/<default branch>`.
 
 The future admin sequence is plan then apply. Inputs are exact Dokploy
 project/environment/application names, the candidate target SHA-256, a sorted
