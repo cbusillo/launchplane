@@ -8,7 +8,7 @@ from control_plane.contracts.merge_train_stack_collapse import (
     build_merge_train_stack_collapse_plan_record,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.merge_train import MergeTrainDryRunSnapshot
+from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
 from control_plane.merge_train_github import MergeTrainGitHubStaleHeadError
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.merge_train_controller import (
@@ -29,9 +29,17 @@ from tests.test_merge_train_saved_collapse_ordering import _other_stack
 
 class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
     async def _obsolete_case(
-        self, *, reason: str, mutate: bool, waiting: bool = False, status: str = "planned"
+        self,
+        *,
+        reason: str,
+        mutate: bool,
+        waiting: bool = False,
+        status: str = "planned",
+        reopen: bool = False,
     ) -> None:
         probes: list[int] = []
+        merges: list[int] = []
+        root_visible = reason != "root_missing_from_open_snapshot"
 
         class Reader(_FakeCollapsedRootStackedMergeTrainSnapshotReader):
             def read_merge_train_snapshot(
@@ -47,7 +55,7 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                         "head_ref": "feature/root-10",
                         "head_sha": "unrelated-push"
                         if reason in {"root_moved", "snapshot_lag"}
-                        else root.head_sha,
+                        else ("head-root" if reopen else root.head_sha),
                     }
                 )
                 return snapshot.model_copy(
@@ -55,7 +63,29 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                         "pull_requests": (
                             root.model_copy(update={"required_checks_status": "pending"}),
                             child,
-                            *((other_root,) if reason != "root_missing_from_open_snapshot" else ()),
+                            *((other_root,) if root_visible else ()),
+                            *(
+                                tuple(
+                                    child.model_copy(
+                                        update={
+                                            "number": number,
+                                            "head_ref": "feature/child-10"
+                                            if number == 12
+                                            else "feature/leaf-10",
+                                            "head_sha": "partial-middle-head"
+                                            if number == 12
+                                            else "head-leaf",
+                                            "base_ref": "feature/root-10"
+                                            if number == 12
+                                            else "feature/child-10",
+                                            "required_checks_status": "pass",
+                                        }
+                                    )
+                                    for number in (12, 13)
+                                )
+                                if reopen
+                                else ()
+                            ),
                         )
                     }
                 )
@@ -63,13 +93,24 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
         class Client(_FakeMergeTrainGitHubClient):
             def find_stack_child_merge_commit(self, **kwargs: Any) -> str:
                 probes.append(kwargs["parent_pull_request_number"])
-                if reason == "snapshot_lag":
+                if reason == "snapshot_lag" or reopen:
                     return ""
                 raise MergeTrainGitHubStaleHeadError(
                     "Parent moved outside stored plan", status_code=409
                 )
 
+            def read_pull_request_snapshot(
+                self, *, repository: str, pull_request_number: int
+            ) -> MergeTrainPullRequestSnapshot:
+                snapshot = Reader(transport=self.transport).read_merge_train_snapshot(
+                    repository=repository, base_branch="main"
+                )
+                return next(pr for pr in snapshot.pull_requests if pr.number == pull_request_number)
+
             def merge_stack_child_into_parent(self, **kwargs: Any) -> str:
+                if reopen and kwargs["child_pull_request_number"] == 12:
+                    merges.append(12)
+                    return super().merge_stack_child_into_parent(**kwargs)
                 raise AssertionError("obsolete plan must not merge a child")
 
         with (
@@ -149,14 +190,14 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                     "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient", Client
                 ),
             ):
-                for _ in range(2):
+                for index in range(2):
                     response = await _post_merge_train_controller_run_once(
                         app,
                         {
                             "schema_version": 1,
                             "repository": original.plan.repository,
                             "base_branch": "main",
-                            "mutate": mutate,
+                            "mutate": True if reopen and index == 0 else mutate,
                         },
                     )
                     if waiting:
@@ -164,8 +205,19 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                     else:
                         self.assertEqual(response.status_code, 202, response.text)
                         self.assertEqual(
-                            response.json()["result"]["controller_action"], "wait_for_root_checks"
+                            response.json()["result"]["controller_action"],
+                            "execute_stack_collapse"
+                            if reopen and index == 1
+                            else "wait_for_root_checks",
                         )
+                    if reopen and index == 0:
+                        root_visible = True
+                        before = store.list_merge_train_stack_collapse_plan_records()
+            if reopen:
+                self.assertEqual(merges, [12] if mutate else [])
+                if not mutate:
+                    self.assertEqual(store.list_merge_train_stack_collapse_plan_records(), before)
+                return
             if waiting or not mutate or reason == "snapshot_lag":
                 self.assertEqual(store.list_merge_train_stack_collapse_plan_records(), before)
             else:
@@ -188,13 +240,24 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
     async def test_obsolete_execution_is_retired_without_repeated_probes(self) -> None:
         for reason in ("root_moved", "policy_changed", "root_missing_from_open_snapshot"):
             for mutate in (False, True):
-                with self.subTest(reason=reason, mutate=mutate):
-                    for status in ("planned", "collapsing"):
+                for status in ("planned", "collapsing"):
+                    with self.subTest(reason=reason, mutate=mutate, status=status):
                         await self._obsolete_case(reason=reason, mutate=mutate, status=status)
 
     async def test_contradictory_snapshot_and_probe_leave_execution_recoverable(self) -> None:
         for mutate in (False, True):
-            await self._obsolete_case(reason="snapshot_lag", mutate=mutate, status="collapsing")
+            with self.subTest(mutate=mutate):
+                await self._obsolete_case(reason="snapshot_lag", mutate=mutate, status="collapsing")
+
+    async def test_reopened_root_resumes_retired_partial_execution(self) -> None:
+        for mutate in (False, True):
+            with self.subTest(mutate=mutate):
+                await self._obsolete_case(
+                    reason="root_missing_from_open_snapshot",
+                    mutate=mutate,
+                    status="collapsing",
+                    reopen=True,
+                )
 
     async def test_obsolete_wait_preserves_current_policy_validation(self) -> None:
         for mutate in (False, True):
@@ -223,3 +286,22 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(decision.action, "execute_stack_collapse")
                 self.assertEqual(decision.stack_collapse_plan_record_id, execution.record_id)
                 self.assertIn("record", decision.reason)
+
+    def test_landing_projection_does_not_attach_an_unrelated_wait(self) -> None:
+        from tests.test_merge_train_controller import (
+            _candidate_record,
+            _landing_plan_record,
+            _stack_collapse_record,
+        )
+
+        candidate = _candidate_record(status="passed", candidate_sha="candidate-sha")
+        landing = _landing_plan_record(candidate=candidate.candidate)
+        waiting = _stack_collapse_record(status="waiting_for_root_checks")
+        unrelated = _other_stack(waiting, offset=10, status="waiting_for_root_checks", newer=True)
+        decision = decide_merge_train_controller_record_action(
+            candidate_records=(candidate,),
+            landing_plan_records=(landing,),
+            stack_collapse_plan_records=(waiting, unrelated),
+        )
+        self.assertEqual(decision.action, "land_batch")
+        self.assertEqual(decision.stack_collapse_plan_record_id, waiting.record_id)

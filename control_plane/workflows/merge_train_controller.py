@@ -47,7 +47,15 @@ def decide_merge_train_controller_record_action(
     active_landing_record = latest_merge_train_batch_landing_plan_record(landing_plan_records)
     if active_landing_record is not None:
         waiting_collapse_record = latest_merge_train_stack_collapse_plan_record(
-            stack_collapse_plan_records,
+            tuple(
+                record
+                for record in stack_collapse_plan_records
+                if record.plan.root_pull_request_number
+                in {
+                    entry.pull_request_number
+                    for entry in active_landing_record.landing_plan.entries
+                }
+            ),
             plan_status="waiting_for_root_checks",
         )
         return MergeTrainControllerDecision(
