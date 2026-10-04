@@ -5,9 +5,13 @@ from datetime import datetime, timedelta
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 from unittest.mock import patch
 
 from fastapi import FastAPI
+from sqlalchemy import event
+from sqlalchemy.engine import Connection, ExceptionContext
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import OperationalError
 
 from control_plane.contracts.secret_record import SecretRecord
@@ -48,6 +52,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _asgi_request, _local_operator_bearer_config
 from tests.support.auth import _StubVerifier, _identity
 from tests.support.profiles import _generic_site_profile_payload
+from tests.support.http import request
 
 
 NOW = "2026-08-11T02:00:00Z"
@@ -1226,6 +1231,196 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(held.state, "reconcile_required")
                     delete.assert_not_called()
                 store.close()
+
+    async def test_tracked_checkpoint_insert_race_recovers_through_http(self) -> None:
+        with TemporaryDirectory() as directory:
+            await self._assert_tracked_checkpoint_insert_race(
+                f"sqlite+pysqlite:///{Path(directory) / 'launchplane.sqlite3'}"
+            )
+
+    async def _assert_tracked_checkpoint_insert_race(self, database_url: str) -> None:
+        store = self._store(Path("."), database_url=database_url)
+        self.addCleanup(store.close)
+        app = self._app(store, actions=("product_retirement.plan", "product_retirement.apply"))
+        with patch(
+            "control_plane.product_retirement.observe_tracked_dokploy_application",
+            return_value=_observation(),
+        ):
+            plan = await request(
+                app, "POST", "/v1/product-retirement", headers=self.headers, payload=_plan_payload()
+            )
+        self.assertEqual(plan.status_code, 202, plan.text)
+        payload = _apply_payload(plan.json())
+        entered, released, lock = Event(), Event(), Lock()
+        insert_count = 0
+        insert_errors: list[IntegrityError] = []
+
+        def before_insert(
+            connection: Connection,
+            cursor: Any,
+            statement: str,
+            parameters: Any,
+            context: Any,
+            executemany: bool,
+        ) -> None:
+            nonlocal insert_count
+            if not statement.startswith("INSERT INTO launchplane_product_retirements"):
+                return
+            if "product-retirement-finalization-" not in str(parameters):
+                return
+            # Both sessions have already read the checkpoint as absent. Pause the
+            # first actual INSERT until the second HTTP attempt has committed it.
+            with lock:
+                insert_count += 1
+                number = insert_count
+            if number == 1:
+                entered.set()
+                if not released.wait(30):
+                    raise TimeoutError("checkpoint INSERT synchronization timed out")
+
+        def insert_error(context: ExceptionContext) -> None:
+            error = context.sqlalchemy_exception
+            if isinstance(error, IntegrityError) and "product-retirement-finalization-" in str(
+                context.parameters
+            ):
+                insert_errors.append(error)
+
+        original_profile_write = store.compare_and_write_product_profile_record
+        original_clock = store._database_mutation_timestamp
+        clock_value: list[str | None] = [None]
+
+        def profile_write(
+            *,
+            expected_record: LaunchplaneProductProfileRecord,
+            replacement_record: LaunchplaneProductProfileRecord,
+        ) -> object:
+            if replacement_record.lifecycle_state == "retired":
+                raise ValueError("injected final profile failure")
+            return original_profile_write(
+                expected_record=expected_record, replacement_record=replacement_record
+            )
+
+        event.listen(store._engine, "before_cursor_execute", before_insert)
+        event.listen(store._engine, "handle_error", insert_error)
+        try:
+            with (
+                patch(
+                    "control_plane.product_retirement.observe_tracked_dokploy_application",
+                    return_value=_absent_observation(),
+                ),
+                patch.object(store, "compare_and_write_product_profile_record", profile_write),
+                patch.object(
+                    store,
+                    "_database_mutation_timestamp",
+                    side_effect=lambda session: clock_value[0] or original_clock(session),
+                ),
+                patch(
+                    "control_plane.product_retirement.dokploy_api.delete_dokploy_application"
+                ) as delete,
+            ):
+                first_task = asyncio.create_task(
+                    request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=self.headers,
+                        payload=payload,
+                        capture_server_error_response=True,
+                    )
+                )
+                try:
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 10))
+                    held = store.read_idempotency_record(
+                        scope=idempotency_scope(
+                            LocalOperatorIdentity(
+                                subject="local-owner-agent", token_label="local-owner-write"
+                            )
+                        ),
+                        route_path="/v1/product-retirement",
+                        idempotency_key=self.headers["Idempotency-Key"],
+                    )
+                    assert held is not None
+                    clock_value[0] = (
+                        (
+                            datetime.fromisoformat(held.lease_expires_at.replace("Z", "+00:00"))
+                            + timedelta(seconds=1)
+                        )
+                        .isoformat()
+                        .replace("+00:00", "Z")
+                    )
+                    second = await request(
+                        app, "POST", "/v1/product-retirement", headers=self.headers, payload=payload
+                    )
+                    self.assertEqual(second.status_code, 409, second.text)
+                finally:
+                    released.set()
+                    first = await first_task
+                delete.assert_not_called()
+        finally:
+            event.remove(store._engine, "before_cursor_execute", before_insert)
+            event.remove(store._engine, "handle_error", insert_error)
+        self.assertEqual(insert_count, 2)
+        self.assertEqual(len(insert_errors), 1)
+        records = store.list_product_retirement_records(product="example-site")
+        checkpoints = tuple(
+            record for record in records if record.mutation_evidence.finalization_at
+        )
+        self.assertEqual(len(checkpoints), 1)
+        held = store.read_idempotency_record(
+            scope=idempotency_scope(
+                LocalOperatorIdentity(subject="local-owner-agent", token_label="local-owner-write")
+            ),
+            route_path="/v1/product-retirement",
+            idempotency_key=self.headers["Idempotency-Key"],
+        )
+        assert held is not None
+        self.assertEqual(held.state, "reconcile_required")
+        with (
+            patch(
+                "control_plane.product_retirement.observe_tracked_dokploy_application",
+                return_value=_absent_observation(),
+            ),
+            patch(
+                "control_plane.product_retirement.dokploy_api.delete_dokploy_application"
+            ) as delete,
+        ):
+            for headers, changed_payload in (
+                ({**self.headers, "Idempotency-Key": "different-apply"}, payload),
+                (self.headers, {**payload, "reason": "changed intent"}),
+            ):
+                refused = await request(
+                    app, "POST", "/v1/product-retirement", headers=headers, payload=changed_payload
+                )
+                self.assertEqual(refused.status_code, 409, refused.text)
+                self.assertEqual(
+                    store.read_product_profile_record("example-site").lifecycle_state, "retiring"
+                )
+            retry = await request(
+                app, "POST", "/v1/product-retirement", headers=self.headers, payload=payload
+            )
+            replay = await request(
+                app, "POST", "/v1/product-retirement", headers=self.headers, payload=payload
+            )
+            delete.assert_not_called()
+        self.assertEqual(retry.status_code, 202, retry.text)
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertEqual(retry.json()["records"], replay.json()["records"])
+        self.assertTrue(retry.json()["result"]["provider_absence_verified"])
+        self.assertEqual(
+            store.read_product_retirement_record(checkpoints[0].record_id), checkpoints[0]
+        )
+        self.assertEqual(
+            store.read_product_profile_record("example-site").lifecycle_state, "retired"
+        )
+        self.assertEqual(first.status_code, 409, first.text)
+        self.assertEqual(first.json()["error"]["code"], "mutation_reconciliation_required")
+        self.assertTrue(
+            any(
+                record.trace_id == first.json()["trace_id"]
+                and record.outcome == "reconcile_required"
+                for record in records
+            )
+        )
 
     async def test_tracked_concurrent_expiry_seals_one_finalization_checkpoint(self) -> None:
         with TemporaryDirectory() as directory:

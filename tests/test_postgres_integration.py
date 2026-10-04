@@ -926,6 +926,16 @@ def _owner_acceptance_system_event(
     )
 
 
+class RealPostgresTrackedRetirementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_checkpoint_insert_race_recovers_through_http(self) -> None:
+        with _head_postgres_database() as url:
+            fixture = retirement_tests.ProductRetirementHttpTests()
+            try:
+                await fixture._assert_tracked_checkpoint_insert_race(url)
+            finally:
+                fixture.doCleanups()
+
+
 class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_target_retirement_commits_and_replays_on_postgres(self) -> None:
         with _head_postgres_database() as url:

@@ -3636,6 +3636,10 @@ profile.
 Tracked retirement persists a finalization checkpoint after provider absence and
 before removing local authority. One immutable checkpoint belongs to each
 provider operation, so overlapping expired-lease retries reuse matching evidence.
+This includes a database insert race: the losing attempt reads back the sealed
+checkpoint and adopts it only when its operation, reviewed plan, request, identity
+and authority match. Unconfirmed checkpoint conflicts retain reconciliation
+evidence and the target fence.
 A same-key retry can resume after target records
 are removed or the profile becomes retired, using that checkpoint's exact profile
 and intended retired-profile digests. Recovery verifies provider absence again,
