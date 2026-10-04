@@ -1391,7 +1391,12 @@ waits, blocks, or completes. A pull request awaiting current-head Client review
 hears so even before any candidate exists. Controller-mode dry-runs do not
 deliver feedback comments. Manual-phase feedback binds repository and base-branch identity to the
 phase response's candidate, landing-plan, or stack-collapse-plan record and fails
-closed if another identity-bearing phase result disagrees.
+closed if another identity-bearing phase result disagrees. When batch-candidate
+planning returns a block, check wait, or branch-update decision without a record,
+feedback takes the repository and base branch from the dry-run result and reports
+that decision on its selected PR, without claiming a candidate was created or a
+label applied. Missing or partial identity still fails closed. Manual dry-runs
+render these payloads for inspection but do not deliver feedback comments.
 
 ## Scheduler rollout runbook
 
