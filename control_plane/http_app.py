@@ -7712,7 +7712,7 @@ def create_launchplane_fastapi_app(
                 status_code=403,
                 trace_id=trace_id,
                 code="local_operator_lane_scope_required",
-                message="Product context ownership changed before the lane write committed.",
+                message="The context must belong to the named product only.",
             ) from error
         except control_plane_odoo_addon_settings.OdooAddonSettingsRefusal as error:
             raise _launchplane_http_error(
@@ -8009,7 +8009,7 @@ def create_launchplane_fastapi_app(
                 status_code=403,
                 trace_id=trace_id,
                 code="local_operator_lane_scope_required",
-                message="Product context ownership changed before the lane write committed.",
+                message="The context must belong to the named product only.",
             ) from error
         except control_plane_integration_allowances.IntegrationAllowancesRefusal as error:
             raise _launchplane_http_error(
@@ -8224,7 +8224,7 @@ def create_launchplane_fastapi_app(
                 status_code=403,
                 trace_id=trace_id,
                 code="local_operator_lane_scope_required",
-                message="Product context ownership changed before the lane write committed.",
+                message="The context must belong to the named product only.",
             ) from error
         except control_plane_testing_lane_hold.TestingHoldRefusal as error:
             raise _launchplane_http_error(
