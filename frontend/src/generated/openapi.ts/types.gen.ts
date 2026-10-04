@@ -313,6 +313,20 @@ export type ChangeImpactCoverage = {
     unmatched_path_samples: Array<string>;
 };
 
+export type ClientReleaseRunView = {
+    decision_record_id: string;
+    rollback_drill: boolean;
+    state: 'waiting' | 'running' | 'passed' | 'stopped';
+    steps: Array<ClientReleaseStepView>;
+};
+
+export type ClientReleaseStepView = {
+    kind: 'backup' | 'promote' | 'rollback';
+    operation_id: string;
+    status: 'not_started' | 'pending' | 'running' | 'reconciliation_required' | 'pass' | 'fail' | 'cancelled';
+    step: string;
+};
+
 export type DataProvenance = {
     detail: string;
     freshness_status: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
@@ -850,6 +864,7 @@ export type LaunchplaneProductProfileRecord = {
     product: string;
     production_use: 'unknown' | 'prelaunch' | 'live';
     promotion_workflow: ProductPromotionWorkflowProfile;
+    release_on_acceptance: 'held' | 'promote' | 'promote_with_rollback_drill';
     repository: string;
     repository_id: string;
     repository_owner_id: string;
@@ -1226,6 +1241,7 @@ export type MergeTrainControllerRecordSummary = {
     batch_id: string;
     blocked_count: number;
     candidate_sha: string;
+    held_out: Array<MergeTrainHeldOutSummary>;
     merged_count: number;
     planned_count: number;
     policy_key: string;
@@ -1326,6 +1342,13 @@ export type MergeTrainGitHubTokenSource = {
     env_var: string;
     github_app?: MergeTrainGitHubAppSource | null;
     runtime_context?: string;
+};
+
+export type MergeTrainHeldOutSummary = {
+    conflicts_with: Array<number>;
+    head_sha: string;
+    pull_request_number: number;
+    reason: 'entry_conflict';
 };
 
 export type MergeTrainIdentity = {
@@ -1529,6 +1552,7 @@ export type OdooProdPromotionRunEnvelope = {
 export type OdooProdPromotionRunRequest = {
     backup_timeout_seconds?: number | null;
     context: string;
+    expected_artifact_id?: string;
     from_instance?: string;
     health_timeout_seconds?: number | null;
     infrastructure_backup_record_id?: string;
@@ -3831,6 +3855,7 @@ export type ReleaseReviewDecisionRecord = {
     reason: string;
     record_id: string;
     release_issue_url: string;
+    release_start: '' | 'promote' | 'promote_with_rollback_drill';
 };
 
 export type ReleaseReviewItem = {
@@ -3846,8 +3871,11 @@ export type ReleaseReviewItem = {
 export type ReleaseReviewResponse = {
     can_override: boolean;
     display_name: string;
+    live_site_url: string;
     owner_github_login: string;
     product: string;
+    release_on_acceptance: 'held' | 'promote' | 'promote_with_rollback_drill';
+    release_run: ClientReleaseRunView | null;
     review: ReleaseReviewStatus;
     trace_id: string;
     viewer_is_owner: boolean;
@@ -5890,6 +5918,7 @@ export type ApplyProductProductionUseData = {
         mode?: 'dry-run' | 'apply';
         production_use: 'unknown' | 'prelaunch' | 'live';
         reason: string;
+        release_on_acceptance?: 'held' | 'promote' | 'promote_with_rollback_drill' | null;
         reviewed_plan_sha256?: string;
         schema_version?: 1;
     };

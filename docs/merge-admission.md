@@ -28,6 +28,13 @@ and the expected effect SHA. It re-reads the active merge-train policy record
 and GitHub queue for every entry rather than treating request-start policy or
 stored candidate order as live evidence.
 
+Before building that live queue, admission excludes the candidate's conflict
+hold-outs only while both the PR number and head match the recorded hold-out,
+as planning does. An unchanged held-out PR that sorts ahead of a planned entry
+does not invalidate the landing. A changed head returns to the queue and is
+subject to the existing lineage check; new or changed entries ahead of the plan
+still refuse admission with `landing_lineage_changed`.
+
 Only `ready` Level 2 evidence plus `exact` or `recorded_rolling` structural
 evidence may produce an admission. The guarded caller binds the expected lease
 holder from its acquired controller authority before each fresh controller-state

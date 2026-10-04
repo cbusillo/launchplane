@@ -261,11 +261,31 @@ class ProductRetirementMutationEvidence(BaseModel):
     deleted_authority_refs: tuple[str, ...] = ()
     disabled_secret_record_sha256: tuple[str, ...] = ()
     secret_disable_event_sha256: tuple[str, ...] = ()
+    finalization_profile_sha256: str = ""
+    finalization_retired_profile_sha256: str = ""
+    finalization_at: str = ""
     lifecycle_before: Literal["", "active", "retiring", "retired"] = ""
     lifecycle_after: Literal["", "active", "retiring", "retired"] = ""
     closed_preview_ids: tuple[str, ...] = ()
     error_code: str = ""
     error_message: str = Field(default="", max_length=MAX_PRODUCT_RETIREMENT_ERROR_MESSAGE_LENGTH)
+
+    @model_validator(mode="after")
+    def _validate_finalization_evidence(self) -> "ProductRetirementMutationEvidence":
+        if any(
+            (
+                self.finalization_profile_sha256,
+                self.finalization_retired_profile_sha256,
+                self.finalization_at,
+            )
+        ):
+            _require_sha256(self.finalization_profile_sha256, "finalization_profile_sha256")
+            _require_sha256(
+                self.finalization_retired_profile_sha256, "finalization_retired_profile_sha256"
+            )
+            if not self.finalization_at.strip() or not self.provider_absence_verified:
+                raise ValueError("Finalization evidence requires timestamp and provider absence.")
+        return self
 
 
 class ProductRetirementRecord(BaseModel):

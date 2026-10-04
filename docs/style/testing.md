@@ -16,7 +16,15 @@ title: Testing Style
 - Verification code must not depend on working-tree state; read live state
   only on the path that acts on it.
 - Prefer deterministic file-system tests using `TemporaryDirectory`.
+- When a fixture follows a record written with the current clock, derive its
+  timestamps from that persisted record. A distant future date only delays the
+  failure; ordering assertions should also hold after that date passes.
 - Test fail-closed behavior explicitly.
+- Lease-renewal success fixtures should synchronize on committed background
+  heartbeats and control the database clock. A short wall-clock sleep cannot
+  distinguish a renewal defect from thread starvation or SQLite write-lock
+  contention under parallel execution. Retain separate expired/stolen-lease
+  refusal coverage with the real storage implementation.
 - Keep fixtures small and inline unless they are reused heavily.
 - When a full suite is justified, the local entrypoint is
   `uv run --extra dev launchplane ci unittest-shard local`.
@@ -93,10 +101,24 @@ of truth.
 
 CI plans once. The `test_timing_snapshot` job writes `plan.json` next to the
 frozen timings. Each shard runs its slice with `unittest-shard run --plan-file`,
-and `aggregate --plan-file` checks coverage against that same plan. Self-hosted
-runners can discover different targets, so shards that each planned for
-themselves could overlap or miss tests (#2618). Without `--plan-file`, `run` and
-`aggregate` still discover and plan locally.
+and `aggregate --plan-file` checks coverage against that same plan. Every job
+creates fresh temporary directories for snapshot and shard-result artifacts.
+Downloading into a reused directory leaves files absent from the artifact in
+place: residual `history.json` changed target splitting on some self-hosted
+runners, so shards that planned for themselves overlapped or missed tests
+(#2618). Fresh directories also prevent a failed shard from uploading an earlier
+result and keep aggregate inputs limited to the downloaded artifacts. Without
+`--plan-file`, `run` and `aggregate` still discover and plan locally.
+
+CI also runs daily against the default branch. Scheduled runs always execute
+fresh checks, including Python dependency audits, image scans and PostgreSQL
+tests; they never reuse an earlier successful tree. The `ci-gate` summary lists
+each job's result and the Actions run remains failed when a gate fails.
+Inspect scheduled runs in Actions to diagnose calendar-driven failures before
+an unrelated pull request encounters them. Email notification delivery depends
+on the schedule actor and that account's settings; delivery to the Director is
+not guaranteed. Reporting uses the existing read-only workflow token; it does
+not create issues or dependency updates.
 
 For pushes to `main` and `launchplane/train/**`, the `verified-tree` job can
 reuse a completed, successful GitHub Actions `ci-gate` on the exact pushed
@@ -150,6 +172,24 @@ PostgreSQL service.
 Do not add tests that merely restate a copied value or mirror the implementation.
 No local command replaces CI's runner isolation, artifact retention, or required
 status checks.
+
+Python dependency audits and runtime-image vulnerability scans run on every
+CI path. They block changes to dependency manifests, lockfiles, image recipes
+or the scan workflow; otherwise their outcome is reported in the job summary
+and failed scans raise warning annotations with details in the scan logs.
+Python inputs are `pyproject.toml`, `uv.lock` and requirements files. Image
+inputs also include Dockerfiles, `.dockerignore` and frontend dependency
+manifests. Application-source edits alone do not make an inherited advisory
+block an unrelated fix. Lint, types, image builds and Compose qualification
+remain blocking. Fork PRs use the same classification on hosted runners.
+
+Classification uses the PR diff from its base, a main push from its previous
+commit, and a train candidate from main. Renames include both old and new paths.
+Schedules and missing diff evidence retain absolute blocking audits, and a
+failed classification job fails `ci-gate`. Tree reuse still applies to push
+events. Daily fresh CI is supplied separately by PR #2893; this reporting
+change must land after or with that schedule so newly discovered advisories
+have a blocking signal independent of unrelated pull requests.
 
 The container-build CI jobs also run
 `bash scripts/qualify-ordinary-agent-compose.sh <built-test-image>`. This

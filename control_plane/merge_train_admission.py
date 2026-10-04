@@ -73,6 +73,15 @@ class MergeTrainControllerRecords(BaseModel):
     stack_collapse_plan_records: tuple[MergeTrainStackCollapsePlanRecord, ...]
 
 
+class MergeTrainHeldOutSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pull_request_number: int
+    head_sha: str
+    reason: Literal["entry_conflict"]
+    conflicts_with: tuple[int, ...] = ()
+
+
 class MergeTrainControllerRecordSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -87,6 +96,7 @@ class MergeTrainControllerRecordSummary(BaseModel):
     batch_id: str = ""
     pull_request_numbers: tuple[int, ...] = ()
     candidate_sha: str = ""
+    held_out: tuple[MergeTrainHeldOutSummary, ...] = ()
     required_checks_status: str = ""
     planned_count: int = 0
     merged_count: int = 0
@@ -858,6 +868,15 @@ def _candidate_summary(
         stale_reason=stale_reason,
         batch_id=candidate.batch_id,
         pull_request_numbers=tuple(entry.pull_request_number for entry in candidate.entries),
+        held_out=tuple(
+            MergeTrainHeldOutSummary(
+                pull_request_number=entry.pull_request_number,
+                head_sha=entry.head_sha,
+                reason=entry.reason,
+                conflicts_with=entry.conflicts_with,
+            )
+            for entry in candidate.held_out
+        ),
         candidate_sha=candidate.candidate_sha,
         required_checks_status=candidate.required_checks_status,
     )

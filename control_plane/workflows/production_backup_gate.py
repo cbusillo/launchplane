@@ -81,6 +81,10 @@ def resolve_production_backup_binding(
     )
 
 
+def production_backup_gate_operation_id(operation_key: str) -> str:
+    return "production-backup-gate-" + hashlib.sha256(operation_key.encode()).hexdigest()[:32]
+
+
 def enqueue_production_backup_gate(
     *,
     record_store: PostgresRecordStore,
@@ -89,9 +93,7 @@ def enqueue_production_backup_gate(
     operation_key: str,
 ) -> VeriReelProdBackupGateOperationRecord:
     fingerprint = hashlib.sha256(request.model_dump_json().encode()).hexdigest()
-    operation_id = (
-        "production-backup-gate-" + hashlib.sha256(operation_key.encode()).hexdigest()[:32]
-    )
+    operation_id = production_backup_gate_operation_id(operation_key)
     try:
         existing = record_store.read_verireel_prod_backup_gate_operation_record(operation_id)
     except FileNotFoundError:

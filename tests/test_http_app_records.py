@@ -21,6 +21,7 @@ from control_plane.service_human_auth import (
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.public_ingress_monitor import (
+    RUNTIME_IDENTITY_CONFIRMATION_DELAY_SECONDS,
     PublicIngressMonitorResult,
     public_ingress_managed_secret_resolver,
 )
@@ -1139,6 +1140,10 @@ class FastApiPublicIngressMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["result"]["target_count"], 1)
         run_monitor.assert_called_once()
         self.assertIsNone(run_monitor.call_args.kwargs["notification_drivers"])
+        self.assertEqual(
+            run_monitor.call_args.kwargs["runtime_identity_confirmation_delay_seconds"],
+            RUNTIME_IDENTITY_CONFIRMATION_DELAY_SECONDS,
+        )
 
     async def test_public_ingress_monitor_wires_notification_drivers(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

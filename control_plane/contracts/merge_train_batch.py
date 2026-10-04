@@ -61,7 +61,7 @@ class MergeTrainBatchEntry(BaseModel):
 
 
 class MergeTrainBatchHeldOutEntry(BaseModel):
-    """A queued pull request left out of candidates while its head is unchanged."""
+    """A conflict observation bound to the base and accepted preceding heads."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -70,12 +70,21 @@ class MergeTrainBatchHeldOutEntry(BaseModel):
     reason: Literal["entry_conflict"] = "entry_conflict"
     # Queued pull requests merged ahead of it; empty when it conflicts with the base.
     conflicts_with: tuple[int, ...] = ()
+    probe_base_sha: str = ""
+    conflicts_with_head_shas: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _validate_held_out_entry(self) -> "MergeTrainBatchHeldOutEntry":
         self.head_sha = _normalize_required_value(
             self.head_sha, "merge train held-out entry requires head_sha"
         )
+        self.probe_base_sha = self.probe_base_sha.strip()
+        if self.probe_base_sha and len(self.conflicts_with) != len(self.conflicts_with_head_shas):
+            raise ValueError("conflict probe lineage requires every preceding head")
+        if self.conflicts_with_head_shas and not self.probe_base_sha:
+            raise ValueError("conflict probe lineage requires its base")
+        if any(not head.strip() for head in self.conflicts_with_head_shas):
+            raise ValueError("conflict probe lineage requires nonempty preceding heads")
         return self
 
 

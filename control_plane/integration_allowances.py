@@ -19,6 +19,7 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from control_plane.storage.product_authority_bundle import LaneProductConfigWriteRequirements
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetIntegrationAllowance,
     DokployTargetRecord,
@@ -96,6 +97,8 @@ class IntegrationAllowancesStore(Protocol):
         *,
         expected_record: DokployTargetRecord,
         replacement_record: DokployTargetRecord,
+        required_context_owner: tuple[str, str] | None = None,
+        required_product_config_target: tuple[str, str, str] | None = None,
     ) -> DokployTargetRecord: ...
 
 
@@ -395,6 +398,8 @@ def apply_integration_allowances_plan(
     record_store: IntegrationAllowancesStore,
     request: IntegrationAllowancesApplyRequest,
     actor: str,
+    required_context_owner: tuple[str, str] | None = None,
+    required_product_config_target: tuple[str, str, str] | None = None,
 ) -> IntegrationAllowancesPlan:
     """Re-plan against the current record, require the reviewed digest, write, read back."""
 
@@ -433,6 +438,15 @@ def apply_integration_allowances_plan(
                         "updated_at": utc_now_timestamp(),
                         "source_label": INTEGRATION_ALLOWANCES_SOURCE_LABEL,
                     }
+                ),
+                **(
+                    LaneProductConfigWriteRequirements(
+                        required_context_owner=required_context_owner,
+                        required_product_config_target=required_product_config_target,
+                    )
+                    if required_context_owner is not None
+                    or required_product_config_target is not None
+                    else LaneProductConfigWriteRequirements()
                 ),
             )
         except DokployTargetRecordChanged as error:

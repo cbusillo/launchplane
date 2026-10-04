@@ -34,13 +34,16 @@ from control_plane.contracts.owner_control_shadow_verifier import (
 from control_plane.contracts.owner_control_enrollment_provenance import (
     OwnerControlEnrollmentProvenanceRecord,
     OwnerControlHostPrincipalClaim,
+    _PUBLISHED_SYNTHETIC_PUBLIC_KEY_SHA256,
 )
 from control_plane.contracts.privileged_operation import (
     ManagedSecretReencryptionPlanInput,
     privileged_operation_request_digest,
 )
 from control_plane.owner_control_contract import (
+    OWNER_CONTROL_CONTRACT_SCHEMA_VERSION,
     OwnerControlContractError,
+    _OWNER_CONTROL_SIGNATURE_DECLARATION_SCHEMA_VERSION,
     _PRESERVED_V4_DESCRIPTOR_IDS,
     _preserve_v2_descriptor_enums,
     _preserve_v4_descriptor_enums,
@@ -263,13 +266,18 @@ class OwnerControlArtifactTests(unittest.TestCase):
         if expected_message := vector.get("error_message_contains"):
             self.assertIn(expected_message, errors[0]["msg"])
 
-    def test_v6_contract_pins_prior_contracts_and_preserves_existing_payloads(self) -> None:
+    def test_contract_pins_prior_contracts_and_preserves_existing_payloads(self) -> None:
         artifact = build_owner_control_contract()
         compatibility = artifact["compatibility"]
 
-        self.assertEqual(artifact["schema_version"], 6)
-        self.assertEqual(compatibility["container_schema_version"], 6)
-        self.assertEqual(compatibility["previous_container_schema_version"], 5)
+        self.assertEqual(artifact["schema_version"], OWNER_CONTROL_CONTRACT_SCHEMA_VERSION)
+        self.assertEqual(
+            compatibility["container_schema_version"], OWNER_CONTROL_CONTRACT_SCHEMA_VERSION
+        )
+        self.assertEqual(
+            compatibility["previous_container_schema_version"],
+            OWNER_CONTROL_CONTRACT_SCHEMA_VERSION - 1,
+        )
         self.assertEqual(
             compatibility["change_kind"], "additive-descriptor-wire-schema-and-vectors"
         )
@@ -277,7 +285,10 @@ class OwnerControlArtifactTests(unittest.TestCase):
         self.assertEqual(compatibility["wire_model_schema_versions"], [1])
         self.assertEqual(compatibility["shadow_verifier_schema_versions"], [1])
         self.assertEqual(compatibility["enrollment_provenance_schema_versions"], [1])
-        self.assertEqual(artifact["signature_declaration"]["contract_schema_version"], 2)
+        self.assertEqual(
+            artifact["signature_declaration"]["contract_schema_version"],
+            _OWNER_CONTROL_SIGNATURE_DECLARATION_SCHEMA_VERSION,
+        )
         for section, expected_sha256 in compatibility["preserved_v2_section_sha256"].items():
             with self.subTest(section=section):
                 self.assertEqual(canonical_json_sha256(artifact[section]), expected_sha256)
@@ -352,8 +363,12 @@ class OwnerControlArtifactTests(unittest.TestCase):
     def test_provenance_vectors_are_exhaustive_inert_and_canonical(self) -> None:
         artifact = build_owner_control_contract()
         vectors = artifact["provenance_vectors"]
+        claim_fields = OwnerControlHostPrincipalClaim.model_fields
+        combination_count = 1
+        for field in ("principal_separation", "key_custody", "gesture_source"):
+            combination_count *= len(get_args(claim_fields[field].annotation))
 
-        self.assertEqual(len(vectors), 18)
+        self.assertEqual(len(vectors), combination_count)
         combinations: set[tuple[str, str, str]] = set()
         for vector in vectors:
             claim = OwnerControlHostPrincipalClaim.model_validate(vector["claim"]["payload"])
@@ -373,7 +388,7 @@ class OwnerControlArtifactTests(unittest.TestCase):
             self.assertEqual(vector["result"]["server_observed_corroboration"], "none")
             self.assertEqual(vector["result"]["authority_state"], "inert")
             self.assertFalse(vector["result"]["authorizes_execution"])
-        self.assertEqual(len(combinations), 18)
+        self.assertEqual(len(combinations), combination_count)
 
     def test_negative_provenance_vectors_fail_closed(self) -> None:
         artifact = build_owner_control_contract()
@@ -394,7 +409,11 @@ class OwnerControlArtifactTests(unittest.TestCase):
             else:
                 self.assertEqual(vector["rule"], "missing-enrollment-provenance-is-rejected")
                 self.assertEqual(vector["result"], "reject")
-        self.assertEqual(len(synthetic_key_vectors), 3)
+        self.assertEqual(
+            {vector["owner_public_key_sha256"] for vector in synthetic_key_vectors},
+            _PUBLISHED_SYNTHETIC_PUBLIC_KEY_SHA256,
+        )
+        self.assertEqual(len(synthetic_key_vectors), len(_PUBLISHED_SYNTHETIC_PUBLIC_KEY_SHA256))
 
     def test_existing_approval_and_challenge_vectors_remain_byte_compatible(self) -> None:
         vector = next(

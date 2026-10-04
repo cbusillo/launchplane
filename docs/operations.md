@@ -256,21 +256,20 @@ reviewed digest also binds the exact active source and destination target
 record IDs and digests resolved during dry-run, including policy-only updates
 that do not write new target revisions.
 
-The legacy migration route is
-`POST /v1/production-backup-authority/legacy-runtime-migration`. It requires an
-exact product/context/instance/action, admin-chosen stable target IDs, the
-source runtime record's exact `updated_at`, review timestamps, evidence-age
-limits, source, and reason. Dry-run reads only the exact DB-backed instance
-runtime record and requires both snapshot and `vzdump` modes. Apply requires the
-reviewed digest and idempotency key. The migration copies only non-secret host,
-user, guest, storage, prefix, and retention facts into typed records; SSH key
-and known-host material are never copied or returned.
+The compatibility route
+`POST /v1/production-backup-authority/legacy-runtime-migration` refuses new
+migration attempts without reading runtime-environment backup values or writing
+targets and policies. Submit explicit reviewed typed records through
+`POST /v1/production-backup-authority/apply` instead. Historical idempotent
+responses remain replayable; they do not create new authority. A new attempt
+returns the compatibility error `legacy_backup_migration_conflict` (409); this
+is a permanent refusal, so retrying it cannot migrate authority.
 
-Do not remove the legacy VeriReel runtime keys after this migration. The current
-worker continues to use them until the provider-neutral execution slice and
-promotion-enforcement slice are merged and verified. This migration establishes
-typed authority without weakening the live backup gate or claiming provider
-execution has moved.
+Legacy VeriReel backup dispatch and worker commands also refuse without host
+effects. Capture through `POST /v1/production-backup-gates` after typed policy
+onboarding. Both snapshot and independent backup remain mandatory. Removing
+obsolete live runtime keys, onboarding production policy and proving a real
+promotion remain separate guarded operations under #2309.
 
 ## Mutation Reservation Recovery
 
@@ -1523,6 +1522,14 @@ or monitor passes therefore re-plan against current state instead of overwriting
 admin state, opening a second incident, or losing evidence. Any supported
 non-monitor incident-state mutation must increment `state_version`.
 
+A deploy records its new runtime identity once its own rollout check passes,
+and the public route can still answer from the previous container for a few
+seconds. So a `wrong_runtime_identity` probe is confirmed before it counts: the
+scheduled run waits once (30 seconds, however many lanes mismatched), reads
+each lane's expected identity again, and probes it again. Only the
+confirming probe is stored. A mismatch that persists opens or updates the
+incident as before; a handover that settles records a pass.
+
 Notification policies carry a reminder interval from 15 minutes through seven
 days; the generic migrated/default interval is six hours. Each incident/policy
 pair stores its material-event anchor, current reminder window, last reminder,
@@ -2595,6 +2602,13 @@ context only, and `context_instance` has both context and instance.
     its idempotency receipt finds the lane already holding the requested
     allowances and reports `changed: false` with a read-back, instead of
     `stale`.
+- An upstream restore passes `ODOO_RESTORE_KEPT_INTEGRATIONS` to the data-workflow
+  runner from the lane's `pre_live` and `read_only_source` allowances. These
+  integrations keep their restored settings through devkit's credential clearing.
+  `dev_store` is excluded: the restored production values are cleared before the
+  lane's development account is applied. Production and previews receive an
+  empty list, as does a lane without eligible allowances. This input is passed
+  in the restore schedule script, rather than persisted in the target environment.
 - The integration read-back enforces the allowances. The deploy, restore, stable
   bootstrap and target replacement data-workflow schedules run it with web
   stopped, before web starts again, on every Odoo lane that is not production,
@@ -2628,7 +2642,10 @@ context only, and `context_instance` has both context and instance.
     The schedule removes `/volumes/data/.launchplane_integration_readback_passed`
     before its workflow and writes their SHA-256 there only when the workflow
     completed (so it applied the payload) and the read-back then passed. A failed
-    workflow leaves web waiting even when the database reads clean. So a provider
+    workflow leaves web waiting even when the database reads clean. An unset or
+    empty optional payload is supported, but a failed Docker exec reading it
+    fails the schedule. Recovery must successfully read the payload before it
+    can write a pass or start web. So a provider
     deploy that runs before the schedule (a ship deploy, a
     changed target environment, target replacement, a preview refresh) or any
     restart after a refusal leaves web waiting instead of serving. A backup
@@ -3604,13 +3621,40 @@ key, the reviewed record ID/digest, and the exact confirmation shown by the
 workflow input contract.
 
 An apply that returns reconciliation-required must be retried with the same
-idempotency key after the provider can be observed. A `retiring` profile is an
+idempotency key and reviewed request after the provider can be observed. The HTTP
+endpoint delegates replay to the durable runner, which observes uncertain tracked
+completion before retrying. Changed requests or reviewed plans and different
+keys cannot take over the held operation; unavailable or changed provider
+evidence leaves it reconciliation-required. A `retiring` profile is an
 intentional fail-closed state: deploys, monitoring, previews, onboarding,
 discovery, and work-graph automation must leave it untouched while the durable
 operation reconciles. Completion verifies provider absence, removes mutable
 runtime/target authority, preserves secret and deletion evidence, disables
 preview configuration, and marks the profile `retired`. Do not delete the
 profile.
+
+Tracked retirement persists a finalization checkpoint after provider absence and
+before removing local authority. One immutable checkpoint belongs to each
+provider operation, so overlapping expired-lease retries reuse matching evidence.
+This includes a database insert race: the losing attempt reads back the sealed
+checkpoint and adopts it only when its operation, reviewed plan, request, identity
+and authority match. It then uses the current validated profile and managed-secret
+records, preserving a concurrent winner's completed state and disable timestamps.
+Refreshed secrets must still match the reviewed snapshot; rotation or addition
+during the insert race refuses cleanup of that changed authority.
+Unconfirmed checkpoint conflicts retain reconciliation
+evidence and the target fence.
+A same-key retry can resume after target records
+are removed or the profile becomes retired, using that checkpoint's exact profile
+and intended retired-profile digests. Recovery verifies provider absence again,
+checks remaining targets, runtime records and managed secrets against the reviewed
+plan, and preserves the held target fence on drift or unknown evidence. Recovery
+after target removal or profile retirement requires checkpoint evidence; historical records are not
+sufficient to invent a completed finalization. Different keys, changed requests
+and changed plans retain the existing conflict behavior. No provider delete is
+needed when absence is verified. Original attempt history remains authoritative
+for earlier provider effects; retry phases describe the retry's checkpoints.
+Existing managed-secret disable audit events retain their original timestamps.
 
 Tracked retirement blocks active previews in the profile's preview context for
 both the short repository anchor written by preview dispatch/reconciliation and
@@ -3634,6 +3678,24 @@ generation evidence. A complete Dokploy application enumeration and fresh
 application/domain reads must show no stable name, preview prefix, repository,
 image repository, or known domain belonging to the product. Missing, malformed,
 unauthorized or incomplete provider evidence blocks planning and apply.
+
+The proof also checks normalized `appName` bases for stable and preview names:
+trim, replace each literal space with a hyphen, and lowercase, preserving dots,
+underscores and repeated spaces as repeated hyphens. Dokploy's
+[`cleanAppName` / `buildAppName` source](https://github.com/Dokploy/dokploy/blob/48504fde4eb210056f7d9f80406f9692a1a7ea8a/packages/server/src/db/schema/utils.ts)
+defines this transformation and adds a random suffix to supplied bases;
+[`updateApplication`](https://github.com/Dokploy/dokploy/blob/48504fde4eb210056f7d9f80406f9692a1a7ea8a/packages/server/src/services/application.ts)
+preserves `appName` when the display name changes. An exact normalized stable
+base or its hyphen-delimited extension, or a normalized preview prefix, blocks
+absence even with unrelated repository, image and domain evidence. Launchplane
+preview creation supplies `{product}-{preview_slug}` as `appName` independently
+of the display-name prefix, so the proof also checks the normalized product base
+and its hyphen-delimited extensions. Provider `appName` comparisons ignore case
+conservatively for historical names. Shared-base
+ambiguity refuses retirement; resolve the provider/configuration identity before
+retrying. There is no override. This is not general punctuation-removing
+slugification; current Dokploy create validation also rejects spaces in supplied
+`appName` values, so this proof conservatively covers historical normalized names.
 
 The plan binds the profile, configuration and stale preview records. Apply
 repeats the provider proof, rechecks those records under database locks, refuses
@@ -3660,12 +3722,12 @@ Launchplane Authorization**, backed by managed set
 `operator.product-retirement` and secret
 `LAUNCHPLANE_AUTHZ_PRODUCT_RETIREMENT_MANAGED_SET_JSON`. The dispatch wrapper
 is pinned to an immutable reusable worker. Authorization must bind both the
-caller `workflow_ref` and the exact immutable `job_workflow_ref`:
-
-```text
-workflow_ref=cbusillo/launchplane/.github/workflows/product-retirement.yml@refs/heads/main
-job_workflow_ref=cbusillo/launchplane/.github/workflows/reusable-product-retirement.yml@c922d5f1a0bf3ab17a829196042a96ba89d7b693
-```
+caller `workflow_ref` and the exact immutable `job_workflow_ref`. Derive the
+caller from [the dispatch wrapper](../.github/workflows/product-retirement.yml)
+on the default branch, and copy the worker reference from its `retire` job
+`uses:` value. The caller format is
+`<owner>/<repository>/<wrapper path>@refs/heads/<default branch>`. The wrapper
+is the source of the current worker revision.
 
 This describes an existing transitional authorization path, not approval to
 create or expand it. New grants and managed-set changes are a stop boundary;
@@ -3676,7 +3738,8 @@ see [Who Can Do What](authorization-authority.md#who-can-do-what).
 Phase one provides **Reusable Detached Application Retirement** as a
 `workflow_call`-only worker. Phase two adds the thin
 **Detached Application Retirement** `workflow_dispatch` wrapper, pinned to the
-exact merged worker SHA below. The wrapper only defines the manual inputs,
+exact merged worker SHA in its `retire` job `uses:` value. The wrapper only
+defines the manual inputs,
 forwards them unchanged, and grants `contents: read` plus `id-token: write`; it
 does not define a runner, environment, steps, or concurrency. Both phases are
 merged; configuring the live authz grant is still a stop boundary (see below).
@@ -3684,12 +3747,12 @@ The worker uses the protected
 `launchplane-authz-admin` environment, OIDC, target-digest concurrency, exact
 input validation, and redacted evidence.
 
-The protected identity pair a grant would bind is:
-
-```text
-workflow_ref=cbusillo/launchplane/.github/workflows/detached-application-retirement.yml@refs/heads/main
-job_workflow_ref=cbusillo/launchplane/.github/workflows/reusable-detached-application-retirement.yml@11d53d2840a6f1898785d7c8f1553c202caa3fbf
-```
+A grant would bind the caller `workflow_ref` from
+[the dispatch wrapper](../.github/workflows/detached-application-retirement.yml)
+on the default branch and the exact immutable `job_workflow_ref` from its
+`retire` job `uses:` value. Copy the worker reference from the wrapper rather
+than a separate documentation pin. The caller format is
+`<owner>/<repository>/<wrapper path>@refs/heads/<default branch>`.
 
 The future admin sequence is plan then apply. Inputs are exact Dokploy
 project/environment/application names, the candidate target SHA-256, a sorted

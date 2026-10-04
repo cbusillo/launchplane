@@ -5,11 +5,11 @@ from email.message import Message
 import io
 import json
 import os
-import time
 import unittest
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event, current_thread, main_thread
 from typing import Literal, cast
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -97,6 +97,7 @@ from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsResult,
     OdooPreviewDokployDryRunPlan,
 )
+from control_plane.workflows import odoo_stable_operation_worker
 from control_plane.workflows.odoo_stable_operation_worker import (
     OdooStableOperationWorkerResult,
     OdooStableOperationWorkerStore,
@@ -2039,25 +2040,81 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
         self.github.add_run(50, PR_HEAD, event="pull_request")
         self.request("preview", 5)
         claims: list[object] = []
+        started_at = datetime(2026, 10, 3, tzinfo=timezone.utc)
+        observed_at = started_at
+        advance = Event()
+        renewed = Event()
+        finished = Event()
+        refresh_started = Event()
+        renewals: list[bool] = []
+        lease_expiries: list[str] = []
+        failures: list[str] = []
+        renew_lease = self.store.renew_product_reconcile_lease
+
+        def renew(target_key: str, lease_owner: str, lease_seconds: int, *, now: str = "") -> bool:
+            background = current_thread() is not main_thread() and refresh_started.is_set()
+            if background and len(renewals) < 2 and not finished.is_set():
+                if not advance.wait(30):
+                    raise TimeoutError("The fixture did not advance the lease clock.")
+                advance.clear()
+            result = renew_lease(target_key, lease_owner, lease_seconds, now=now)
+            if background:
+                renewals.append(result)
+                renewed.set()
+            return result
 
         def outlast_the_lease() -> None:
-            # Another worker tries to claim the PR while the refresh outlasts the lease.
-            time.sleep(3)
-            claims.append(self.store.claim_next_product_reconcile_request("worker-b", 2))
+            nonlocal observed_at
+            refresh_started.set()
+            try:
+                # Advance only after the real heartbeat commits its previous renewal.
+                # Scheduler pressure cannot silently consume this fixture's lease.
+                for elapsed in (1, 2):
+                    observed_at = started_at + timedelta(seconds=elapsed)
+                    renewed.clear()
+                    advance.set()
+                    if not renewed.wait(30):
+                        failures.append("The background heartbeat did not renew.")
+                        return
+                    lease_expiries.append(
+                        self.store.read_product_reconcile_request("site:preview:5").lease_expires_at
+                    )
+                observed_at = started_at + timedelta(seconds=3)
+                claims.append(self.store.claim_next_product_reconcile_request("worker-b", 2))
+            finally:
+                finished.set()
+                advance.set()
 
         self.driver.during_refresh = outlast_the_lease
-        completed = run_product_reconcile_once(
-            record_store=self.store,
-            lease_owner="worker-a",
-            lease_seconds=2,
-            transport_factory=lambda _store, _profile: self.github,
-            control_plane_root=self.root,
-            preview_hooks=self.provider.hooks(),
-            feedback_token=lambda _store, _profile: "feedback-token",
-            public_origin=lambda: self.public_origin,
-        )
+        with (
+            patch.object(
+                self.store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: observed_at.isoformat().replace("+00:00", "Z"),
+            ),
+            patch.object(self.store, "renew_product_reconcile_lease", side_effect=renew),
+        ):
+            completed = run_product_reconcile_once(
+                record_store=self.store,
+                lease_owner="worker-a",
+                lease_seconds=2,
+                transport_factory=lambda _store, _profile: self.github,
+                control_plane_root=self.root,
+                preview_hooks=self.provider.hooks(),
+                feedback_token=lambda _store, _profile: "feedback-token",
+                public_origin=lambda: self.public_origin,
+            )
 
         assert completed is not None
+        self.assertEqual(failures, [])
+        self.assertTrue(renewals and all(renewals))
+        self.assertEqual(
+            lease_expiries,
+            [
+                (started_at + timedelta(seconds=elapsed)).isoformat().replace("+00:00", "Z")
+                for elapsed in (3, 4)
+            ],
+        )
         self.assertEqual((completed.state, completed.last_error), ("done", ""))
         self.assertEqual(claims, [None])
 
@@ -2882,8 +2939,16 @@ class ProductReconcileWorkerTests(ProductReconcileTestCase):
         )
 
         self.assertEqual(result.status, "idle")
+        operation_claims = {
+            name
+            for member in vars(odoo_stable_operation_worker).values()
+            if isinstance(member, type)
+            for name in vars(member)
+            if name.startswith("claim_next_") and name != "claim_next_product_reconcile_request"
+        }
+        self.assertTrue(operation_claims)
         self.assertEqual(store.claims[-1], "claim_next_product_reconcile_request")
-        self.assertEqual(len(store.claims), 7)
+        self.assertCountEqual(store.claims[:-1], operation_claims)
 
     def test_worker_reports_a_reconcile_it_ran(self) -> None:
         self.request()

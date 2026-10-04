@@ -188,6 +188,19 @@ and re-observes provider state; no out-of-band record edit is required or
 supported. Read-only controller calls report either state without acquiring or
 mutating the lease record.
 
+GitHub HTTP failures retain a bounded request description in
+`reconciliation_detail`: method, route template and status, without repository,
+branch, token, body or query values. Unknown routes use `/{unknown_route}`.
+HTTP 429 and HTTP 403 with `retry-after` or `x-ratelimit-remaining: 0` use
+`retryable:github_rate_limited`; a valid numeric `x-ratelimit-reset` is recorded
+as `reset_at` (Unix seconds for GitHub's primary quota window). A valid numeric
+`retry-after` is recorded separately as `retry_after_seconds`; secondary limits
+can have a different retry delay from the primary reset time. Neither field
+schedules an automatic retry. Refusals without these rate-limit headers remain
+admin-required, even when a provider body might describe a secondary limit. This diagnosis
+does not retry a write in place: the next controller pass re-observes the stored
+phase through the existing reconciliation path.
+
 If an approved policy change invalidates an unlanded native batch, the controller
 can retire its old landing plan after fresh GitHub reads prove every PR is still
 open at its recorded head/tree. An unresolved attempt also requires the original
@@ -621,10 +634,26 @@ pull request and head is recorded as `held_out` with reason `entry_conflict` and
 `conflicts_with`, the pull requests accepted ahead of it (empty when it does not
 merge onto the base). The controller result reports the probe as
 `conflict_probe`, and PR feedback tells each held-out pull request which pull
-requests it conflicts with. Later candidates carry the hold-out forward while
-its head is unchanged, so the rest of the queue lands. A new head brings it
-back into the queue; until then, its author resolves the conflict, typically
-after the others land. When the probe reduces a changed queue back to a failed
+requests it conflicts with. Each hold also records `probe_base_sha` and the
+ordered `conflicts_with_head_shas`. Later candidates carry it forward only while
+the base, held head, and accepted preceding PR/head sequence are unchanged. A
+changed base or preceding membership/head permits a fresh observation without
+requiring a speculative PR refresh. Legacy holds without probe lineage are
+re-observed once; their missing history is not reconstructed. On the first
+mutating pass, this may supersede and rebuild an in-flight candidate and close
+its service batch PR, so its CI runs once more. Trailing queue
+additions do not invalidate a hold. An unchanged real conflict stays held and
+does not spend the failed-batch body-retry budget.
+
+Active candidate responses expose persisted holds through `conflict_probe` with
+`status: persisted` and an empty probed-PR list when this pass ran no probe.
+When `status` is `ran` or `will_run`, `held_out` still includes earlier persisted
+observations; `pull_request_numbers` identifies only this pass's actual or
+planned probe. A diagnostic hold list alone is not proof of a fresh probe.
+The public hold projection contains only PR number, head, reason, and preceding
+PR numbers, preserving the supported helper's strict shape. Store-only controller
+status includes the same bounded metadata in each candidate summary's `held_out`;
+it reports stored observations without claiming fresh provider evidence. When the probe reduces a changed queue back to a failed
 batch's membership, the batch stays stopped and keeps its retry budget; the
 failed candidate records the new hold-out, and feedback says the batch ahead is
 stopped, so later passes do not probe the same conflict again. A dry run writes
@@ -652,7 +681,14 @@ public reasons. A thread opened by code scanning tells the author to fix the
 code rather than resolve the thread.
 The other entries plan and land without it, and resolving the thread brings it
 back. An unreadable rule is not taken as absent: unresolved threads still make
-the entry ineligible, and the reason says the rule could not be read. A planned
+the entry ineligible, and the reason says the rule could not be read. Quota-limited
+classic or ruleset reads interrupt the snapshot instead of becoming unreadable
+policy: the controller retains the safe request and retry metadata as
+`retryable:github_rate_limited`, and admission waits for a fresh read.
+GraphQL body errors containing only `RATE_LIMITED` entries also interrupt the
+read with that diagnosis and the fixed `POST /graphql` request description.
+Refusals, mixed GraphQL errors and malformed policy responses keep the unreadable-rule
+behavior. A planned
 entry that gains a thread before landing blocks admission with
 `pull_request_conversations_unresolved`. The batch PR is checked the same way
 after its checks pass and before any admission; an unresolved thread there,
@@ -1003,18 +1039,82 @@ Controller actions have these retry/stop semantics:
   is next. Dry-run may report. Mutate once, then call again.
 - `execute_stack_collapse`: A stored planned or partially `collapsing` plan
   should be applied or resumed. Mutate once, then call again. Stop if the
-  resulting plan is `blocked` or `stale`.
+  resulting plan is `blocked` or `stale`. Saved execution is selected from
+  each collapse's latest progress across the full active history, with
+  eligible interrupted execution before planned execution and all saved root
+  waits. An inapplicable saved execution steps aside for another eligible
+  saved stack. Plans under an obsolete policy are left unapplied, and an
+  unrelated root push or a root leaving the open snapshot makes that saved
+  plan step aside. Contradictory snapshot/ref evidence leaves execution
+  recoverable for a later pass. A mutating pass
+  supersedes all of a moved or missing root's active progress, retaining history
+  and a retirement reason; dry runs leave records unchanged. A retired execution
+  may resume only when it has no active replacement, its policy is current, and
+  its root and visible children return at their checkpointed heads, and every
+  child with a pending mutation is present and ready. Latest completed history
+  cannot revive older execution. During that same-policy resumption, carried
+  mutations remain checkpointed and are not merged again. Obsolete-policy
+  execution with checkpointed branch merges and an unchanged open root remains
+  unapplied. Passes selecting saved work or live discovery without a usable
+  candidate or landing report it through run-once's `details`, with code
+  `merge_train_stack_collapse_policy_changed`, a representative `record_id`, and
+  per-root `entries`; it is not retired merely because its policy
+  changed. Plans with no checkpointed branch merges, and moved or missing
+  roots, retain their existing retirement/step-aside path. An independently
+  valid saved collapse sharing no PR or branch ref
+  with that stack may proceed, with the obsolete evidence attached to its
+  response. Live discovery excludes the blocked stack's PR numbers and branch
+  refs, including dependent base refs, so fresh unrelated current-policy work
+  can also proceed without replanning carried children. Independent pending
+  waits retain their normal behavior. If nothing else can be selected, run-once
+  reports `block` with `merge_train_stack_collapse_policy_changed`.
+  The same exclusion is applied during active and failed candidate reflow, so
+  later passes neither churn the independent candidate nor add an obsolete
+  root to a replacement batch.
+  The maintained helper preserves the representative code/record and entry
+  count through its existing details projection; the HTTP response contains
+  the full per-root entries. Active candidate and landing phases need not
+  repeat that inventory. Previously retired obsolete progress is also
+  reported when its checkpointed root returns, unless newer progress from
+  another collapse exists for that root. That includes active, retired and
+  completed histories, whether or not the newer progress can resume.
+  Only each collapse's latest progress is used;
+  completed history cannot revive older execution. The existing supported
+  resumption requires the original policy digest to be current again and all
+  current head/readiness checks to pass; it merges only remaining children.
+  Alternatively, pushing a new commit to the root makes the old proof
+  inapplicable and resumes current-policy discovery with fresh head/readiness
+  proof. Closing and reopening at the same checkpointed head keeps the policy
+  block. This unchanged-root disposition does not qualify recovery of a branch
+  merge whose checkpoint was never recorded, or no-repeat behavior after the
+  root moves; those paths retain their existing retirement semantics.
+  Requalifying carried proof under a different policy is not supported.
+  A completed stack never revives its older planned progress.
 - `wait_for_root_checks`: The collapsed root PR's required checks are still
-  running. Stop and poll later; do not call phase endpoints. Any other state
-  of the collapsed root is answered from the whole queue, the same as for any
-  queued pull request: a root behind its base refreshes for a direct landing
+  running. Stop and poll later; do not call phase endpoints. When no saved
+  execution or applicable saved wait supplies an action, the controller answers
+  from the whole queue, the same as for any queued pull request: a root behind its base refreshes for a direct landing
   or keeps its head when joining a multi-PR merge batch, a root
   with failed checks or conflicts reports `block`, and a root that left the
   queue lets the other ready pull requests proceed. A refreshed root still
   disposes of its stack's children when it lands. A mutating pass retires all
   progress records of an inapplicable wait when the root head changes or the
   root leaves the open snapshot, recording the reason in the record source.
-  Dry runs leave records unchanged. A root that returns at its collapsed head
+  Dry runs leave records unchanged. A waiting root remains selectable from its
+  latest waiting progress even after an independent
+  stack completes; a completed stack cannot hide another stack's saved wait.
+  All applicable saved waits are considered before reporting pending checks,
+  so a pending root cannot mask another saved root that is ready for admission.
+  When no saved root is ready and no saved execution can resume, the newest
+  applicable pending wait is reported, unless ordinary whole-queue selection
+  reports a blocking PR after excluding surviving held-out entries. In that case the controller reports the queue block
+  rather than an unrelated saved root's pending checks.
+  Ordinary live discovery also reports the selected queue block before planning
+  a new stack collapse. A failed or conflicting collapsed root with a still-open
+  carried child therefore reports its current blocking evidence without planning
+  another collapse or repeating the carried merge. Existing failure policy still
+  decides whether the queue pauses or selects a later eligible pull request.
+  A root that returns at its collapsed head
   can resume its retired wait when its visible children still have the stored
   heads. A root waiting on checks or ready for admission then skips another
   collapse; other states continue through ordinary queue handling. Retirement preserves the collapse history:
@@ -1345,3 +1445,18 @@ Live worker reads build the same `MergeTrainDryRunSnapshot` contract from
 GitHub pull requests for the policy repository/base branch. The reader only uses
 GET requests, preserves unknown mergeability or check evidence as `unknown` or
 `pending`, and fails closed when required pull request fields are missing.
+
+The controller record-action status is advisory evidence from saved records. It
+selects each collapse's latest progress, then interrupted execution, planned
+execution, and saved waits, in that order. It does not read GitHub readiness or
+validate live applicability; run-once makes that decision. A waiting collapse
+still requires the exact current policy digest. A policy change during that
+wait is refused rather than admitting the old collapse under a new policy.
+Run-once reports obsolete saved waits and execution in its details rather
+than aborting the whole pass with HTTP 400. Disjoint current-policy saved
+execution, ready waits and fresh live work can proceed with that blocking
+evidence attached. The affected PRs and refs remain excluded from discovery.
+No old-policy record authorizes a merge under a different policy. Checkpointed
+partial execution at an unchanged root stays visible and excluded from fresh
+replanning; changed-root and uncheckpointed-effect recovery are not qualified
+by that guarantee.

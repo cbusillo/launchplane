@@ -823,6 +823,7 @@ from control_plane.storage.postgres import (
 )
 from control_plane.workflows.product_onboarding import plan_product_onboarding_authority_bundle
 from control_plane.workflows.public_ingress_monitor import (
+    RUNTIME_IDENTITY_CONFIRMATION_DELAY_SECONDS,
     PublicIngressMonitorStore,
     public_ingress_notification_drivers,
     run_public_ingress_monitor_once,
@@ -888,9 +889,6 @@ from control_plane.work_graph_service import (
     build_work_graph_rank_result,
 )
 
-EveryCodeGitHubWebhookHandler = Callable[
-    [bytes, str, str, str, object, FilePath, str], tuple[int, dict[str, object]]
-]
 TrustedMaintenanceGitHubWebhookHandler = Callable[
     [bytes, str, str, str, object, FilePath, str], tuple[int, dict[str, object]]
 ]
@@ -936,7 +934,6 @@ _VERIREEL_PROD_BACKUP_GATE_OPERATION_CANCEL_ROUTE = (
 
 
 _BEARER_CHALLENGE_HEADER = {"WWW-Authenticate": 'Bearer realm="Launchplane API"'}
-_EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
 _PRODUCT_CONFIG_APPLY_ROUTE = "/v1/product-config/apply"
 _PRODUCT_ENVIRONMENT_CONFIG_APPLY_ROUTE = (
     "/v1/products/{product}/environments/{environment}/config/apply"
@@ -1003,12 +1000,6 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
         route: ("Evidence ingress", _EVIDENCE_INGRESS_MAX_BODY_BYTES, True, False)
         for route in _EVIDENCE_INGRESS_ROUTES
     },
-    _EVERY_CODE_GITHUB_WEBHOOK_ROUTE: (
-        "GitHub webhook",
-        _GITHUB_WEBHOOK_MAX_BODY_BYTES,
-        False,
-        True,
-    ),
     TRUSTED_MAINTENANCE_WEBHOOK_ROUTE: (
         "Trusted-maintenance GitHub webhook",
         _GITHUB_WEBHOOK_MAX_BODY_BYTES,
@@ -4041,7 +4032,6 @@ def create_launchplane_fastapi_app(
     preview_pr_feedback_discord_sender: Callable[
         [str, dict[str, object]], object
     ] = post_discord_webhook,
-    every_code_github_webhook_handler: EveryCodeGitHubWebhookHandler | None = None,
     trusted_maintenance_github_webhook_handler: (
         TrustedMaintenanceGitHubWebhookHandler | None
     ) = None,
@@ -4936,32 +4926,6 @@ def create_launchplane_fastapi_app(
                 code="engineering_review_worker_identity_unavailable",
                 message="Engineering review worker identity is not configured.",
             ) from error
-
-    async def handle_every_code_github_webhook(
-        request: Request,
-        x_github_event: Annotated[str, Header(alias="X-GitHub-Event")] = "",
-        x_github_delivery: Annotated[str, Header(alias="X-GitHub-Delivery")] = "",
-        x_hub_signature_256: Annotated[str, Header(alias="X-Hub-Signature-256")] = "",
-        record_store: object = Depends(get_record_store),
-    ) -> JSONResponse:
-        trace_id = next_trace_id()
-        if every_code_github_webhook_handler is None:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=f"No Launchplane route for {_EVERY_CODE_GITHUB_WEBHOOK_ROUTE}.",
-            )
-        status_code, payload = every_code_github_webhook_handler(
-            await request.body(),
-            x_github_event,
-            x_github_delivery,
-            x_hub_signature_256,
-            record_store,
-            resolved_control_plane_root,
-            trace_id,
-        )
-        return JSONResponse(status_code=status_code, content=payload)
 
     async def handle_trusted_maintenance_github_webhook(
         request: Request,
@@ -7699,8 +7663,33 @@ def create_launchplane_fastapi_app(
             return replay_response
         try:
             applied_plan = control_plane_odoo_addon_settings.apply_odoo_addon_settings_plan(
-                record_store=typed_store, request=settings_request
+                record_store=typed_store,
+                request=settings_request,
+                required_context_owner=(
+                    (settings_request.product, settings_request.context)
+                    if isinstance(identity, LocalOperatorIdentity)
+                    else None
+                ),
+                required_product_config_target=(
+                    settings_request.product,
+                    settings_request.context,
+                    settings_request.instance,
+                ),
             )
+        except ProductProfileConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="product_profile_conflict",
+                message="Product lane ownership changed. Refresh and run a new dry-run.",
+            ) from error
+        except ProductContextOwnershipError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="local_operator_lane_scope_required",
+                message="The context must belong to the named product only.",
+            ) from error
         except control_plane_odoo_addon_settings.OdooAddonSettingsRefusal as error:
             raise _launchplane_http_error(
                 status_code=409,
@@ -7982,8 +7971,34 @@ def create_launchplane_fastapi_app(
             return replay_response
         try:
             applied_plan = control_plane_integration_allowances.apply_integration_allowances_plan(
-                record_store=typed_store, request=allowances_request, actor=actor
+                record_store=typed_store,
+                request=allowances_request,
+                actor=actor,
+                required_context_owner=(
+                    (allowances_request.product, allowances_request.context)
+                    if isinstance(identity, LocalOperatorIdentity)
+                    else None
+                ),
+                required_product_config_target=(
+                    allowances_request.product,
+                    allowances_request.context,
+                    allowances_request.instance,
+                ),
             )
+        except ProductProfileConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="product_profile_conflict",
+                message="Product lane ownership changed. Refresh and run a new dry-run.",
+            ) from error
+        except ProductContextOwnershipError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="local_operator_lane_scope_required",
+                message="The context must belong to the named product only.",
+            ) from error
         except control_plane_integration_allowances.IntegrationAllowancesRefusal as error:
             raise _launchplane_http_error(
                 status_code=409,
@@ -8183,8 +8198,34 @@ def create_launchplane_fastapi_app(
             return replay_response
         try:
             applied_plan = control_plane_testing_lane_hold.apply_testing_hold_plan(
-                record_store=typed_store, request=hold_request, actor=actor
+                record_store=typed_store,
+                request=hold_request,
+                actor=actor,
+                required_context_owner=(
+                    (hold_request.product, hold_request.context)
+                    if isinstance(identity, LocalOperatorIdentity)
+                    else None
+                ),
+                required_product_config_target=(
+                    hold_request.product,
+                    hold_request.context,
+                    hold_request.instance,
+                ),
             )
+        except ProductProfileConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="product_profile_conflict",
+                message="Product lane ownership changed. Refresh and run a new dry-run.",
+            ) from error
+        except ProductContextOwnershipError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="local_operator_lane_scope_required",
+                message="The context must belong to the named product only.",
+            ) from error
         except control_plane_testing_lane_hold.TestingHoldRefusal as error:
             raise _launchplane_http_error(
                 status_code=409,
@@ -13368,6 +13409,7 @@ def create_launchplane_fastapi_app(
                 replacement_profile = control_plane_product_production_use_setting.updated_product_production_use_profile(
                     profile=profile,
                     production_use=plan.production_use_after,
+                    release_on_acceptance=plan.release_on_acceptance_after,
                     updated_at=utc_now_timestamp(),
                 )
             except ValueError as error:
@@ -21646,8 +21688,8 @@ def create_launchplane_fastapi_app(
             route_path=_PRODUCT_RETIREMENT_ROUTE,
             idempotency_key=normalized_key,
             trace_id=trace_id,
-            # The durable runner owns no-target replay and uncertain-commit reconciliation.
-            check_replay=not retirement_request.no_target,
+            # The durable runner owns replay and uncertain-completion reconciliation.
+            check_replay=False,
             request_payload=retirement_request.model_dump(
                 mode="json", exclude={"no_target"} if not retirement_request.no_target else set()
             ),
@@ -24307,7 +24349,9 @@ def create_launchplane_fastapi_app(
             ) from error
 
         recorded_at = utc_now_timestamp()
-        monitor_result = run_public_ingress_monitor_once(
+        # The confirmation wait must not hold the event loop.
+        monitor_result = await run_in_threadpool(
+            run_public_ingress_monitor_once,
             record_store=monitor_store,
             checked_at=recorded_at,
             timeout_seconds=monitor_request.timeout_seconds,
@@ -24316,6 +24360,9 @@ def create_launchplane_fastapi_app(
                 public_ingress_notification_drivers(record_store=record_store)
                 if monitor_request.notify
                 else None
+            ),
+            runtime_identity_confirmation_delay_seconds=(
+                RUNTIME_IDENTITY_CONFIRMATION_DELAY_SECONDS
             ),
         )
         result = monitor_result.model_dump(mode="json")
@@ -26212,21 +26259,6 @@ def create_launchplane_fastapi_app(
         409: {"model": LaunchplaneErrorResponse},
         503: {"model": LaunchplaneErrorResponse},
     }
-    app.add_api_route(
-        _EVERY_CODE_GITHUB_WEBHOOK_ROUTE,
-        handle_every_code_github_webhook,
-        methods=["POST"],
-        status_code=202,
-        operation_id="handle_every_code_github_webhook",
-        summary="Handle Every Code GitHub webhook",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            413: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
     app.add_api_route(
         TRUSTED_MAINTENANCE_WEBHOOK_ROUTE,
         handle_trusted_maintenance_github_webhook,

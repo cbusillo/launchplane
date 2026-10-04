@@ -674,10 +674,12 @@ The set deliberately leaves out:
 
 - `product_profile.write`. It also lets the holder override release review,
   and a production release needs the Client's acceptance. The Director sets the
-  Client, image repository, and `production_use` in the Client panel under
-  `product_profile.write`. Both controls dry-run and read back the profile; the
+  Client, image repository, `production_use`, and whether the Client's acceptance
+  starts the release (`release_on_acceptance`) in the Client panel under
+  `product_profile.write`. Each control dry-runs and reads back the profile; the
   panel keeps the reviewed request frozen for Apply. Image Apply checks the
-  starting repository; production-use Apply verifies the full reviewed plan digest.
+  starting repository; production-use and release Apply verify the full reviewed
+  plan digest.
 - `product_onboarding.apply`. It is checked on product `launchplane` with no
   product or lane scope, so it would reach every product. Adding the lane record
   stays with Launchplane's own onboarding workflow.
@@ -688,11 +690,26 @@ The set deliberately leaves out:
   context, creates only that lane's compose in a new provider project and
   environment, and can't adopt, re-point, replace or prune a target.
 
+Secondary Odoo addon settings, integration allowances, and testing-hold writes
+carry the named product's exact `(product, context, instance)` lane into storage
+for every supported caller. Storage rechecks lane ownership under the same
+lock and transaction as product-profile writes. Losing or duplicating the exact
+lane returns `product_profile_conflict` (409), leaving the lane record unchanged.
+`local_operator` callers also retain the exclusive-context requirement below:
+that check runs first and returns `local_operator_lane_scope_required` (403)
+when the context stops belonging to the named product alone. Privileged callers
+can still write a uniquely owned instance in a
+context shared by products using different instances. Dry-runs and unchanged
+applies perform no lane record write and retain their existing behavior.
+
 Product config applies from a `local_operators` caller, which is how this set
 is used, also refuse (`local_operator_lane_scope_required`) a context that is
 not the named product's alone, and a context- or global-scoped secret written
 through an instance request: those would change what another product or
-another lane, such as production, resolves. Backup authority applies from a
+another lane, such as production, resolves. Secondary lane writes also carry
+this exclusive-context requirement into the commit-time check described above.
+Dry-runs and unchanged applies do not write and retain their existing behavior.
+Backup authority applies from a
 `local_operators` caller likewise refuse a submitted target revision the
 submitted policy doesn't use, or one another product's active backup policy
 uses; backup targets are global records, so revising one would change another

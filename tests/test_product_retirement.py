@@ -15,6 +15,7 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.preview_record import PreviewRecord, PreviewState
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_retirement import (
+    MAX_PRODUCT_RETIREMENT_ERROR_MESSAGE_LENGTH,
     ProductRetirementIdentity,
     ProductRetirementProviderObservation,
     ProductRetirementRecord,
@@ -162,6 +163,13 @@ class _Store:
         record_id = str(getattr(record, "record_id"))
         self.records[record_id] = record
         return None
+
+    def list_product_retirement_records(self, **_: object) -> tuple[ProductRetirementRecord, ...]:
+        return tuple(
+            record
+            for record in self.records.values()
+            if isinstance(record, ProductRetirementRecord)
+        )
 
 
 def _request(*, mode: str = "plan", **overrides: object) -> ProductRetirementRequest:
@@ -603,10 +611,13 @@ class ProductRetirementTests(unittest.TestCase):
         terminal = adapter.terminal_record(
             outcome="reconcile_required",
             provider_operation_key="provider-operation:test",
-            error_message=f"TOKEN=secret {'x' * 1100}",
+            error_message=f"TOKEN=secret {'x' * (MAX_PRODUCT_RETIREMENT_ERROR_MESSAGE_LENGTH + 100)}",
         )
 
-        self.assertEqual(len(terminal.mutation_evidence.error_message), 1000)
+        self.assertEqual(
+            len(terminal.mutation_evidence.error_message),
+            MAX_PRODUCT_RETIREMENT_ERROR_MESSAGE_LENGTH,
+        )
         self.assertNotIn("secret", terminal.mutation_evidence.error_message)
         self.assertIn("TOKEN=[redacted]", terminal.mutation_evidence.error_message)
 

@@ -5972,6 +5972,22 @@
                     "title": "Reason",
                     "type": "string"
                   },
+                  "release_on_acceptance": {
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "held",
+                          "promote",
+                          "promote_with_rollback_drill"
+                        ],
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Release On Acceptance"
+                  },
                   "reviewed_plan_sha256": {
                     "default": "",
                     "title": "Reviewed Plan Sha256",
@@ -8693,6 +8709,88 @@
           "unmatched_path_samples"
         ],
         "title": "ChangeImpactCoverage",
+        "type": "object"
+      },
+      "ClientReleaseRunView": {
+        "additionalProperties": false,
+        "description": "What a Client's accepted release has done so far, derived from its operations.",
+        "properties": {
+          "decision_record_id": {
+            "title": "Decision Record Id",
+            "type": "string"
+          },
+          "rollback_drill": {
+            "title": "Rollback Drill",
+            "type": "boolean"
+          },
+          "state": {
+            "enum": [
+              "waiting",
+              "running",
+              "passed",
+              "stopped"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/ClientReleaseStepView"
+            },
+            "title": "Steps",
+            "type": "array"
+          }
+        },
+        "required": [
+          "decision_record_id",
+          "rollback_drill",
+          "state",
+          "steps"
+        ],
+        "title": "ClientReleaseRunView",
+        "type": "object"
+      },
+      "ClientReleaseStepView": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "backup",
+              "promote",
+              "rollback"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "not_started",
+              "pending",
+              "running",
+              "reconciliation_required",
+              "pass",
+              "fail",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "step": {
+            "title": "Step",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "operation_id",
+          "status",
+          "step"
+        ],
+        "title": "ClientReleaseStepView",
         "type": "object"
       },
       "DataProvenance": {
@@ -11867,6 +11965,16 @@
           "promotion_workflow": {
             "$ref": "#/components/schemas/ProductPromotionWorkflowProfile"
           },
+          "release_on_acceptance": {
+            "default": "held",
+            "enum": [
+              "held",
+              "promote",
+              "promote_with_rollback_drill"
+            ],
+            "title": "Release On Acceptance",
+            "type": "string"
+          },
           "repository": {
             "title": "Repository",
             "type": "string"
@@ -11918,6 +12026,7 @@
           "product",
           "production_use",
           "promotion_workflow",
+          "release_on_acceptance",
           "repository",
           "repository_id",
           "repository_owner_id",
@@ -14485,6 +14594,14 @@
             "title": "Candidate Sha",
             "type": "string"
           },
+          "held_out": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/MergeTrainHeldOutSummary"
+            },
+            "title": "Held Out",
+            "type": "array"
+          },
           "merged_count": {
             "default": 0,
             "title": "Merged Count",
@@ -14564,6 +14681,7 @@
           "batch_id",
           "blocked_count",
           "candidate_sha",
+          "held_out",
           "merged_count",
           "planned_count",
           "policy_key",
@@ -15061,6 +15179,40 @@
         "required": [
           "env_var"
         ]
+      },
+      "MergeTrainHeldOutSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "conflicts_with": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Conflicts With",
+            "type": "array"
+          },
+          "head_sha": {
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "pull_request_number": {
+            "title": "Pull Request Number",
+            "type": "integer"
+          },
+          "reason": {
+            "const": "entry_conflict",
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "conflicts_with",
+          "head_sha",
+          "pull_request_number",
+          "reason"
+        ],
+        "title": "MergeTrainHeldOutSummary",
+        "type": "object"
       },
       "MergeTrainIdentity": {
         "additionalProperties": false,
@@ -16176,6 +16328,11 @@
           },
           "context": {
             "title": "Context",
+            "type": "string"
+          },
+          "expected_artifact_id": {
+            "default": "",
+            "title": "Expected Artifact Id",
             "type": "string"
           },
           "from_instance": {
@@ -29923,6 +30080,16 @@
             "default": "",
             "title": "Release Issue Url",
             "type": "string"
+          },
+          "release_start": {
+            "default": "",
+            "enum": [
+              "",
+              "promote",
+              "promote_with_rollback_drill"
+            ],
+            "title": "Release Start",
+            "type": "string"
           }
         },
         "required": [
@@ -29935,7 +30102,8 @@
           "product",
           "reason",
           "record_id",
-          "release_issue_url"
+          "release_issue_url",
+          "release_start"
         ],
         "title": "ReleaseReviewDecisionRecord",
         "type": "object"
@@ -29999,6 +30167,11 @@
             "title": "Display Name",
             "type": "string"
           },
+          "live_site_url": {
+            "default": "",
+            "title": "Live Site Url",
+            "type": "string"
+          },
           "owner_github_login": {
             "title": "Owner Github Login",
             "type": "string"
@@ -30006,6 +30179,26 @@
           "product": {
             "title": "Product",
             "type": "string"
+          },
+          "release_on_acceptance": {
+            "default": "held",
+            "enum": [
+              "held",
+              "promote",
+              "promote_with_rollback_drill"
+            ],
+            "title": "Release On Acceptance",
+            "type": "string"
+          },
+          "release_run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ClientReleaseRunView"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "review": {
             "$ref": "#/components/schemas/ReleaseReviewStatus"
@@ -30022,8 +30215,11 @@
         "required": [
           "can_override",
           "display_name",
+          "live_site_url",
           "owner_github_login",
           "product",
+          "release_on_acceptance",
+          "release_run",
           "review",
           "trace_id",
           "viewer_is_owner"

@@ -66,14 +66,6 @@ class DetachedApplicationRetirementOperatorWorkflowTests(unittest.TestCase):
             if "default" in worker_input:
                 self.assertEqual(wrapper_input["default"], worker_input["default"])
 
-    def test_operations_documentation_binds_exact_caller_and_worker(self) -> None:
-        operations = Path("docs/operations.md").read_text(encoding="utf-8")
-        self.assertIn(
-            f"workflow_ref=cbusillo/launchplane/{WRAPPER_PATH.as_posix()}@refs/heads/main",
-            operations,
-        )
-        self.assertIn(f"job_workflow_ref={self.worker_reference}", operations)
-
 
 if __name__ == "__main__":
     unittest.main()

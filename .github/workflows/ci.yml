@@ -7,6 +7,8 @@ name: CI
       - main
       - "launchplane/train/**"
   pull_request:
+  schedule:
+    - cron: "17 9 * * *"
 
 permissions:
   contents: read
@@ -20,6 +22,59 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'push' || (startsWith(github.ref, 'refs/heads/launchplane/train/') && !github.event.created && !github.event.forced) }}
 
 jobs:
+  audit_policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      python_gate: ${{ steps.policy.outputs.python_gate }}
+      image_gate: ${{ steps.policy.outputs.image_gate }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Classify audit inputs
+        id: policy
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          python_gate=true
+          image_gate=true
+          # Schedules and unprovable diffs retain absolute gates.
+          if [ "${EVENT_NAME}" = "pull_request" ] || [ "${EVENT_NAME}" = "push" ]; then
+            comparison_base="${BASE_SHA}"
+            if [[ "${REF}" == refs/heads/launchplane/train/* ]]; then
+              comparison_base=origin/main
+            fi
+            if [ -n "${comparison_base}" ] && \
+              git cat-file -e "${comparison_base}^{commit}" 2>/dev/null && \
+              diff_base="$(git merge-base "${comparison_base}" HEAD)"; then
+              changed_paths="${RUNNER_TEMP}/audit-changed-paths"
+              git diff --name-only --no-renames -z "${diff_base}" HEAD > "${changed_paths}"
+              python_gate=false
+              image_gate=false
+              while IFS= read -r -d '' path; do
+                case "${path}" in
+                  pyproject.toml|uv.lock|requirements*.txt|requirements*.in|.github/workflows/ci.yml)
+                    python_gate=true
+                    image_gate=true
+                    ;;
+                  Dockerfile|Dockerfile.*|.dockerignore|frontend/package.json|frontend/pnpm-lock.yaml|frontend/pnpm-workspace.yaml)
+                    image_gate=true
+                    ;;
+                esac
+              done < "${changed_paths}"
+            fi
+          fi
+          {
+            echo "python_gate=${python_gate}"
+            echo "image_gate=${image_gate}"
+          } >> "${GITHUB_OUTPUT}"
+
   verified_tree:
     # Train base pushes can reuse the same commit's successful main CI. Main
     # also reuses an up-to-date PR tree; new candidate combinations run full CI.
@@ -93,7 +148,7 @@ jobs:
           echo "verified=${verified}" >> "${GITHUB_OUTPUT}"
 
   static_checks:
-    needs: verified_tree
+    needs: [verified_tree, audit_policy]
     if: >-
       needs.verified_tree.outputs.verified != 'true' &&
       (github.event_name != 'pull_request' ||
@@ -127,13 +182,28 @@ jobs:
         run: uv run --extra dev mypy control_plane tests
 
       - name: Audit Python dependencies
+        id: python_audit
+        continue-on-error: ${{ needs.audit_policy.outputs.python_gate == 'false' }}
         run: |
           # PyJWT is only used for GitHub OIDC RS256 verification; this
           # disputed advisory has no fixed release and concerns app-chosen
           # weak symmetric keys.
           uv run --with pip-audit pip-audit --ignore-vuln PYSEC-2025-183
 
+      - name: Report Python audit outcome
+        if: always()
+        env:
+          AUDIT_OUTCOME: ${{ steps.python_audit.outcome }}
+          AUDIT_GATE: ${{ needs.audit_policy.outputs.python_gate }}
+        run: |
+          set -euo pipefail
+          echo "Python dependency audit: ${AUDIT_OUTCOME}; blocking=${AUDIT_GATE}. See the audit step for findings." >> "${GITHUB_STEP_SUMMARY}"
+          if [ "${AUDIT_OUTCOME}" = "failure" ]; then
+            echo '::warning title=Python dependency audit failed::Findings or scanner errors are in the audit step; dependency-input changes retain a blocking gate.'
+          fi
+
   static_checks_fork:
+    needs: audit_policy
     if: >-
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name != github.repository
@@ -162,14 +232,28 @@ jobs:
         run: uv run --extra dev mypy control_plane tests
 
       - name: Audit Python dependencies
+        id: python_audit
+        continue-on-error: ${{ needs.audit_policy.outputs.python_gate == 'false' }}
         run: |
           # PyJWT is only used for GitHub OIDC RS256 verification; this
           # disputed advisory has no fixed release and concerns app-chosen
           # weak symmetric keys.
           uv run --with pip-audit pip-audit --ignore-vuln PYSEC-2025-183
 
+      - name: Report Python audit outcome
+        if: always()
+        env:
+          AUDIT_OUTCOME: ${{ steps.python_audit.outcome }}
+          AUDIT_GATE: ${{ needs.audit_policy.outputs.python_gate }}
+        run: |
+          set -euo pipefail
+          echo "Python dependency audit: ${AUDIT_OUTCOME}; blocking=${AUDIT_GATE}. See the audit step for findings." >> "${GITHUB_STEP_SUMMARY}"
+          if [ "${AUDIT_OUTCOME}" = "failure" ]; then
+            echo '::warning title=Python dependency audit failed::Findings or scanner errors are in the audit step; dependency-input changes retain a blocking gate.'
+          fi
+
   container_scan:
-    needs: verified_tree
+    needs: [verified_tree, audit_policy]
     if: >-
       needs.verified_tree.outputs.verified != 'true' &&
       (github.event_name != 'pull_request' ||
@@ -217,6 +301,11 @@ jobs:
           cache-from: >-
             type=gha,scope=launchplane-ci
 
+      - name: Verify runtime worker clients
+        run: |
+          docker run --rm --entrypoint ssh "$LAUNCHPLANE_CI_IMAGE_TAG" -V
+          docker run --rm --entrypoint gh "$LAUNCHPLANE_CI_IMAGE_TAG" --version
+
       - name: Qualify ordinary worker Compose lifecycle
         run: bash scripts/qualify-ordinary-agent-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG"
 
@@ -229,6 +318,8 @@ jobs:
             ${{ runner.os }}-trivy-
 
       - name: Scan runtime image
+        id: image_audit
+        continue-on-error: ${{ needs.audit_policy.outputs.image_gate == 'false' }}
         env:
           LAUNCHPLANE_TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
         run: |
@@ -244,11 +335,25 @@ jobs:
             --exit-code 1 \
             "$LAUNCHPLANE_CI_IMAGE_TAG"
 
+
+      - name: Report image audit outcome
+        if: always()
+        env:
+          AUDIT_OUTCOME: ${{ steps.image_audit.outcome }}
+          AUDIT_GATE: ${{ needs.audit_policy.outputs.image_gate }}
+        run: |
+          set -euo pipefail
+          echo "Runtime image scan: ${AUDIT_OUTCOME}; blocking=${AUDIT_GATE}. See the audit step for findings." >> "${GITHUB_STEP_SUMMARY}"
+          if [ "${AUDIT_OUTCOME}" = "failure" ]; then
+            echo '::warning title=Runtime image scan failed::Findings or scanner errors are in the audit step; image-input changes retain a blocking gate.'
+          fi
+
       - name: Remove scanned runtime image
         if: always()
         run: docker image rm "$LAUNCHPLANE_CI_IMAGE_TAG" || true
 
   container_scan_fork:
+    needs: audit_policy
     if: >-
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name != github.repository
@@ -285,6 +390,11 @@ jobs:
           cache-from: >-
             type=gha,scope=launchplane-ci
 
+      - name: Verify runtime worker clients
+        run: |
+          docker run --rm --entrypoint ssh "$LAUNCHPLANE_CI_IMAGE_TAG" -V
+          docker run --rm --entrypoint gh "$LAUNCHPLANE_CI_IMAGE_TAG" --version
+
       - name: Qualify ordinary worker Compose lifecycle
         run: bash scripts/qualify-ordinary-agent-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG"
 
@@ -297,6 +407,8 @@ jobs:
             ${{ runner.os }}-trivy-
 
       - name: Scan runtime image
+        id: image_audit
+        continue-on-error: ${{ needs.audit_policy.outputs.image_gate == 'false' }}
         env:
           LAUNCHPLANE_TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
         run: |
@@ -311,6 +423,19 @@ jobs:
             --severity HIGH,CRITICAL \
             --exit-code 1 \
             "$LAUNCHPLANE_CI_IMAGE_TAG"
+
+
+      - name: Report image audit outcome
+        if: always()
+        env:
+          AUDIT_OUTCOME: ${{ steps.image_audit.outcome }}
+          AUDIT_GATE: ${{ needs.audit_policy.outputs.image_gate }}
+        run: |
+          set -euo pipefail
+          echo "Runtime image scan: ${AUDIT_OUTCOME}; blocking=${AUDIT_GATE}. See the audit step for findings." >> "${GITHUB_STEP_SUMMARY}"
+          if [ "${AUDIT_OUTCOME}" = "failure" ]; then
+            echo '::warning title=Runtime image scan failed::Findings or scanner errors are in the audit step; image-input changes retain a blocking gate.'
+          fi
 
       - name: Remove scanned runtime image
         if: always()
@@ -514,20 +639,20 @@ jobs:
       - name: Freeze unittest timing snapshot
         run: |
           set -euo pipefail
-          snapshot_directory="${RUNNER_TEMP}/unittest-timing-snapshot"
-          mkdir -p "${snapshot_directory}"
+          snapshot_directory="$(mktemp -d "${RUNNER_TEMP}/unittest-timing-snapshot.XXXXXX")"
+          printf 'UNITTEST_TIMING_SNAPSHOT_DIR=%s\n' "${snapshot_directory}" >> "${GITHUB_ENV}"
           if [ -f "${UNITTEST_TIMINGS_CACHE}" ]; then
             cp "${UNITTEST_TIMINGS_CACHE}" "${snapshot_directory}/history.json"
           fi
           printf '%s:%s\n' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" \
             > "${snapshot_directory}/snapshot-id"
 
-      # Plan once here. Shards on different runners can discover different
-      # targets, so each shard runs its slice of this one plan (#2618).
+      # Plan once and use fresh artifact directories. Residual timing history
+      # in a reused runner directory changed target splitting (#2618).
       - name: Plan unittest shards
         run: |
           set -euo pipefail
-          snapshot_directory="${RUNNER_TEMP}/unittest-timing-snapshot"
+          snapshot_directory="${UNITTEST_TIMING_SNAPSHOT_DIR}"
           uv run --extra dev launchplane ci unittest-shard plan \
             --shard-count "${UNITTEST_SHARD_COUNT}" \
             --timings-file "${snapshot_directory}/history.json" \
@@ -540,7 +665,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: unittest-timing-snapshot
-          path: ${{ runner.temp }}/unittest-timing-snapshot
+          path: ${{ env.UNITTEST_TIMING_SNAPSHOT_DIR }}
           if-no-files-found: error
           overwrite: true
           retention-days: 30
@@ -578,27 +703,35 @@ jobs:
       - name: Install Python
         run: uv python install 3.13
 
+      - name: Prepare unittest artifact directories
+        run: |
+          set -euo pipefail
+          snapshot_directory="$(mktemp -d "${RUNNER_TEMP}/unittest-timing-snapshot.XXXXXX")"
+          results_directory="$(mktemp -d "${RUNNER_TEMP}/unittest-timings.XXXXXX")"
+          printf 'UNITTEST_TIMING_SNAPSHOT_DIR=%s\n' "${snapshot_directory}" >> "${GITHUB_ENV}"
+          printf 'UNITTEST_TIMINGS_RESULTS_DIR=%s\n' "${results_directory}" >> "${GITHUB_ENV}"
+
       - name: Download unittest timing snapshot
         # v7 downloads one named artifact; the following v8 step needs merge-multiple.
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: unittest-timing-snapshot
-          path: ${{ runner.temp }}/unittest-timing-snapshot
+          path: ${{ env.UNITTEST_TIMING_SNAPSHOT_DIR }}
 
       - name: Run unit test shard
         run: >-
           uv run --extra dev launchplane ci unittest-shard run
           --shard-count "${UNITTEST_SHARD_COUNT}"
           --shard-index ${{ matrix.shard_index }}
-          --plan-file "${RUNNER_TEMP}/unittest-timing-snapshot/plan.json"
-          --timings-output "${RUNNER_TEMP}/unittest-timings/shard-${{ matrix.shard_index }}.json"
+          --plan-file "${UNITTEST_TIMING_SNAPSHOT_DIR}/plan.json"
+          --timings-output "${UNITTEST_TIMINGS_RESULTS_DIR}/shard-${{ matrix.shard_index }}.json"
 
       - name: Upload unittest timings
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: unittest-timings-${{ matrix.shard_index }}
-          path: ${{ runner.temp }}/unittest-timings/shard-${{ matrix.shard_index }}.json
+          path: ${{ env.UNITTEST_TIMINGS_RESULTS_DIR }}/shard-${{ matrix.shard_index }}.json
           if-no-files-found: error
           overwrite: true
           retention-days: 30
@@ -643,25 +776,33 @@ jobs:
             exit 1
           fi
 
+      - name: Prepare unittest artifact directories
+        run: |
+          set -euo pipefail
+          snapshot_directory="$(mktemp -d "${RUNNER_TEMP}/unittest-timing-snapshot.XXXXXX")"
+          results_directory="$(mktemp -d "${RUNNER_TEMP}/unittest-timings.XXXXXX")"
+          printf 'UNITTEST_TIMING_SNAPSHOT_DIR=%s\n' "${snapshot_directory}" >> "${GITHUB_ENV}"
+          printf 'UNITTEST_TIMINGS_RESULTS_DIR=%s\n' "${results_directory}" >> "${GITHUB_ENV}"
+
       - name: Download unittest timing snapshot
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: unittest-timing-snapshot
-          path: ${{ runner.temp }}/unittest-timing-snapshot
+          path: ${{ env.UNITTEST_TIMING_SNAPSHOT_DIR }}
 
       - name: Download unittest timings
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: unittest-timings-*
-          path: ${{ runner.temp }}/unittest-timings
+          path: ${{ env.UNITTEST_TIMINGS_RESULTS_DIR }}
           merge-multiple: true
 
       - name: Aggregate unittest timings
         run: >-
           uv run --extra dev launchplane ci unittest-shard aggregate
           --shard-count "${UNITTEST_SHARD_COUNT}"
-          --results-dir "${RUNNER_TEMP}/unittest-timings"
-          --plan-file "${RUNNER_TEMP}/unittest-timing-snapshot/plan.json"
+          --results-dir "${UNITTEST_TIMINGS_RESULTS_DIR}"
+          --plan-file "${UNITTEST_TIMING_SNAPSHOT_DIR}/plan.json"
           --timings-output "${UNITTEST_TIMINGS_CACHE}"
 
       - name: Save unittest timings
@@ -747,6 +888,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs:
+      - audit_policy
       - verified_tree
       - static_checks
       - static_checks_fork
@@ -760,7 +902,8 @@ jobs:
       - postgres_integration
     if: >-
       always() &&
-      (github.event_name == 'pull_request' || github.event_name == 'push')
+      (github.event_name == 'pull_request' || github.event_name == 'push' ||
+      github.event_name == 'schedule')
     permissions:
       actions: read
       contents: read
@@ -784,6 +927,26 @@ jobs:
             echo "${message}"
           fi
 
+      - name: Report scheduled main CI
+        if: always() && github.event_name == 'schedule'
+        env:
+          CI_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          {
+            echo '## Scheduled main CI'
+            echo
+            echo "Commit: ${GITHUB_SHA}"
+            echo
+            echo '| Job | Result |'
+            echo '| --- | --- |'
+            jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"' <<<"${CI_RESULTS}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if jq -e 'any(.[]; .result == "failure" or .result == "cancelled")' \
+            <<<"${CI_RESULTS}" >/dev/null; then
+            echo '::warning title=Scheduled main CI failed::Review this run for time-driven dependency, image or test failures.'
+          fi
+
       - name: Require successful CI path
         env:
           BASE_REPOSITORY: ${{ github.repository }}
@@ -799,9 +962,14 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
           TEST_FORK_RESULT: ${{ needs.test_fork.result }}
           POSTGRES_INTEGRATION_RESULT: ${{ needs.postgres_integration.result }}
+          AUDIT_POLICY_RESULT: ${{ needs.audit_policy.result }}
           VERIFIED_TREE: ${{ needs.verified_tree.outputs.verified }}
         run: |
           set -euo pipefail
+          if [ "${AUDIT_POLICY_RESULT}" != "success" ]; then
+            echo "audit_policy concluded with: ${AUDIT_POLICY_RESULT}" >&2
+            exit 1
+          fi
           if [ "${VERIFIED_TREE}" = "true" ]; then
             echo "This exact commit or up-to-date pull request tree already passed ci-gate."
             exit 0
