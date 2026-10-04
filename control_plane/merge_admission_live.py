@@ -245,6 +245,21 @@ class LiveMergeAdmissionEvaluator:
                 repository=landing_plan.repository,
                 base_branch=landing_plan.base_branch,
             )
+            # Use the same conflict hold-outs as planning, bound to the exact
+            # PR and head. A changed head returns to the live queue.
+            held_out = {
+                (held.pull_request_number, held.head_sha)
+                for held in candidate_record.candidate.held_out
+            }
+            snapshot = snapshot.model_copy(
+                update={
+                    "pull_requests": tuple(
+                        pull_request
+                        for pull_request in snapshot.pull_requests
+                        if (pull_request.number, pull_request.head_sha) not in held_out
+                    )
+                }
+            )
             live_queue = build_merge_train_dry_run_result(
                 policy=policy_record.policy,
                 snapshot=snapshot,
