@@ -36536,6 +36536,7 @@ class PostgresRecordStore(HumanSessionStore):
         expected_record: DokployTargetRecord,
         replacement_record: DokployTargetRecord,
         required_context_owner: tuple[str, str] | None = None,
+        required_product_config_target: tuple[str, str, str] | None = None,
     ) -> DokployTargetRecord:
         if (expected_record.context, expected_record.instance) != (
             replacement_record.context,
@@ -36553,11 +36554,14 @@ class PostgresRecordStore(HumanSessionStore):
         if not self.database_url.startswith("sqlite"):
             statement = statement.with_for_update()
         with self._session_factory() as session:
-            if required_context_owner is not None:
+            if required_context_owner is not None or required_product_config_target is not None:
                 self._begin_serialized_write(session)
                 self._lock_product_authority_bundle_write(session)
                 require_bundle_context_owner(
-                    ProductAuthorityBundle(required_context_owner=required_context_owner),
+                    ProductAuthorityBundle(
+                        required_context_owner=required_context_owner,
+                        required_product_config_target=required_product_config_target,
+                    ),
                     (
                         self._read_product_profile_payload(row.payload)
                         for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
@@ -37135,6 +37139,7 @@ class PostgresRecordStore(HumanSessionStore):
         record: OdooInstanceOverrideRecord,
         *,
         required_context_owner: tuple[str, str] | None = None,
+        required_product_config_target: tuple[str, str, str] | None = None,
     ) -> None:
         row = LaunchplaneOdooInstanceOverrideRow(
             context=record.context,
@@ -37142,14 +37147,17 @@ class PostgresRecordStore(HumanSessionStore):
             updated_at=record.updated_at,
             payload=self._payload_dict(record),
         )
-        if required_context_owner is None:
+        if required_context_owner is None and required_product_config_target is None:
             self._write_row(row)
             return
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
             require_bundle_context_owner(
-                ProductAuthorityBundle(required_context_owner=required_context_owner),
+                ProductAuthorityBundle(
+                    required_context_owner=required_context_owner,
+                    required_product_config_target=required_product_config_target,
+                ),
                 (
                     self._read_product_profile_payload(row.payload)
                     for row in session.scalars(select(LaunchplaneProductProfileRow)).all()

@@ -7707,7 +7707,19 @@ def create_launchplane_fastapi_app(
                     if isinstance(identity, LocalOperatorIdentity)
                     else None
                 ),
+                required_product_config_target=(
+                    settings_request.product,
+                    settings_request.context,
+                    settings_request.instance,
+                ),
             )
+        except ProductProfileConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="product_profile_conflict",
+                message="Product lane ownership changed. Refresh and run a new dry-run.",
+            ) from error
         except ProductContextOwnershipError as error:
             raise _launchplane_http_error(
                 status_code=403,
@@ -8004,7 +8016,19 @@ def create_launchplane_fastapi_app(
                     if isinstance(identity, LocalOperatorIdentity)
                     else None
                 ),
+                required_product_config_target=(
+                    allowances_request.product,
+                    allowances_request.context,
+                    allowances_request.instance,
+                ),
             )
+        except ProductProfileConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="product_profile_conflict",
+                message="Product lane ownership changed. Refresh and run a new dry-run.",
+            ) from error
         except ProductContextOwnershipError as error:
             raise _launchplane_http_error(
                 status_code=403,
@@ -8219,7 +8243,19 @@ def create_launchplane_fastapi_app(
                     if isinstance(identity, LocalOperatorIdentity)
                     else None
                 ),
+                required_product_config_target=(
+                    hold_request.product,
+                    hold_request.context,
+                    hold_request.instance,
+                ),
             )
+        except ProductProfileConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="product_profile_conflict",
+                message="Product lane ownership changed. Refresh and run a new dry-run.",
+            ) from error
         except ProductContextOwnershipError as error:
             raise _launchplane_http_error(
                 status_code=403,

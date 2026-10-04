@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 import json
-from typing import Protocol
+from typing import Protocol, TypedDict
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -28,6 +28,11 @@ from control_plane.contracts.secret_record import (
     SecretRecord,
     SecretVersion,
 )
+
+
+class LaneProductConfigWriteRequirements(TypedDict, total=False):
+    required_context_owner: tuple[str, str] | None
+    required_product_config_target: tuple[str, str, str] | None
 
 
 class RuntimeEnvironmentDelete(BaseModel):

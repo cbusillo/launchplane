@@ -1176,8 +1176,16 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             )
 
     def test_lane_writers_wait_for_context_reassignment_and_refuse_it(self) -> None:
-        for writer_kind in ("target", "override"):
-            with self.subTest(writer=writer_kind), _store_for_fresh_head_database() as store:
+        for writer_kind, guard in (
+            ("target", "context"),
+            ("override", "context"),
+            ("target", "lane"),
+            ("override", "lane"),
+        ):
+            with (
+                self.subTest(writer=writer_kind, guard=guard),
+                _store_for_fresh_head_database() as store,
+            ):
                 profile = _product_profile().model_copy(
                     update={
                         "lanes": (ProductLaneProfile(context="example-site", instance="testing"),)
@@ -1198,22 +1206,30 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     original_lock(session)
 
                 def write_lane() -> None:
+                    requirements: dict[str, Any] = (
+                        {"required_context_owner": (profile.product, context)}
+                        if guard == "context"
+                        else {
+                            "required_product_config_target": (profile.product, context, "testing")
+                        }
+                    )
                     if writer_kind == "target":
                         store.compare_and_write_dokploy_target_record(
                             expected_record=target,
                             replacement_record=target.model_copy(
                                 update={"source_label": "guarded-write"}
                             ),
-                            required_context_owner=(profile.product, context),
+                            **requirements,
                         )
                     else:
-                        store.write_odoo_instance_override_record(
-                            override, required_context_owner=(profile.product, context)
-                        )
+                        store.write_odoo_instance_override_record(override, **requirements)
 
                 # Hold the profile lock on another connection until reassignment commits.
                 with store._session_factory() as owner_session:
                     original_lock(owner_session)
+                    owner_session.merge(
+                        store._product_profile_row(profile.model_copy(update={"lanes": ()}))
+                    )
                     owner_session.merge(
                         store._product_profile_row(
                             profile.model_copy(update={"product": "foreign-product"})
@@ -1232,7 +1248,11 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                             self.assertFalse(future.done())
                         finally:
                             owner_session.commit()
-                        with self.assertRaises(ProductContextOwnershipError):
+                        with self.assertRaises(
+                            ProductContextOwnershipError
+                            if guard == "context"
+                            else ProductProfileConflictError
+                        ):
                             future.result(timeout=10)
                 self.assertEqual(
                     store.read_dokploy_target_record(context_name=context, instance_name="testing"),
