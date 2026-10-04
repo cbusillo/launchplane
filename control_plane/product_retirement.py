@@ -114,7 +114,7 @@ class ProductRetirementStore(Protocol):
 
     def write_secret_binding(self, binding: SecretBinding) -> object: ...
 
-    def write_secret_audit_event(self, event: SecretAuditEvent) -> object: ...
+    def create_product_retirement_secret_audit_event(self, event: SecretAuditEvent) -> object: ...
 
     def list_secret_audit_events(self, *, secret_id: str) -> tuple[SecretAuditEvent, ...]: ...
 
@@ -1127,7 +1127,7 @@ class DokployProductRetirementAdapter:
         existing = read_existing()
         if existing is None:
             try:
-                self._record_store.write_secret_audit_event(event)
+                self._record_store.create_product_retirement_secret_audit_event(event)
             except (ValueError, IntegrityError) as error:
                 existing = read_existing()
                 if existing is None:

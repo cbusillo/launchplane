@@ -14,7 +14,7 @@ from sqlalchemy.engine import Connection, ExceptionContext
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import OperationalError
 
-from control_plane.contracts.secret_record import SecretRecord
+from control_plane.contracts.secret_record import SecretRecord, SecretAuditEvent
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -1257,6 +1257,20 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     audit_drift=audit_drift,
                 )
 
+    async def test_tracked_secret_audit_late_writer_preserves_evidence_through_http(self) -> None:
+        for profile_failure, audit_drift in ((True, False), (False, False), (True, True)):
+            with (
+                self.subTest(profile_failure=profile_failure, audit_drift=audit_drift),
+                TemporaryDirectory() as directory,
+            ):
+                await self._assert_tracked_checkpoint_insert_race(
+                    f"sqlite+pysqlite:///{Path(directory) / 'launchplane.sqlite3'}",
+                    profile_failure=profile_failure,
+                    secret_audit_race=True,
+                    audit_drift=audit_drift,
+                    late_audit_writer=True,
+                )
+
     async def _assert_tracked_checkpoint_insert_race(
         self,
         database_url: str,
@@ -1265,6 +1279,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
         secret_drift: bool = False,
         secret_audit_race: bool = False,
         audit_drift: bool = False,
+        late_audit_writer: bool = False,
     ) -> None:
         store = self._store(Path("."), database_url=database_url)
         try:
@@ -1274,6 +1289,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 secret_drift=secret_drift,
                 secret_audit_race=secret_audit_race,
                 audit_drift=audit_drift,
+                late_audit_writer=late_audit_writer,
             )
         finally:
             store.close()
@@ -1286,6 +1302,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
         secret_drift: bool,
         secret_audit_race: bool,
         audit_drift: bool,
+        late_audit_writer: bool,
     ) -> None:
         store.write_secret_record(
             SecretRecord(
@@ -1341,7 +1358,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             with lock:
                 insert_count += 1
                 number = insert_count
-            if number == 1:
+            if number == 1 and not late_audit_writer:
                 entered.set()
                 if not released.wait(30):
                     raise TimeoutError("retirement INSERT synchronization timed out")
@@ -1350,6 +1367,24 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             error = context.sqlalchemy_exception
             if isinstance(error, IntegrityError) and insert_marker in str(context.parameters):
                 insert_errors.append(error)
+
+        original_audit_read = store.list_secret_audit_events
+        audit_read_paused = False
+
+        def audit_read(*, secret_id: str) -> tuple[SecretAuditEvent, ...]:
+            nonlocal audit_read_paused
+            events = original_audit_read(secret_id=secret_id)
+            with lock:
+                pause = late_audit_writer and not events and not audit_read_paused
+                if pause:
+                    audit_read_paused = True
+            # Return a stale absent read only after the overlapping attempt has
+            # committed. The real writer then sees the winner's existing row.
+            if pause:
+                entered.set()
+                if not released.wait(30):
+                    raise TimeoutError("retirement audit read synchronization timed out")
+            return events
 
         original_profile_write = store.compare_and_write_product_profile_record
         original_clock = store._database_mutation_timestamp
@@ -1375,6 +1410,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     return_value=_absent_observation(),
                 ),
                 patch.object(store, "compare_and_write_product_profile_record", profile_write),
+                patch.object(store, "list_secret_audit_events", audit_read),
                 patch.object(
                     store,
                     "_database_mutation_timestamp",
@@ -1437,6 +1473,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                         store.write_secret_audit_event(
                             original_audit.model_copy(update={"actor": "local-operator:changed"})
                         )
+                    committed_audit = store.list_secret_audit_events(secret_id="race-secret")
                     winner_secret = store.list_secret_records(
                         context_name="example-site", instance_name="prod"
                     )[0]
@@ -1455,6 +1492,10 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
         finally:
             event.remove(store._engine, "before_cursor_execute", before_insert)
             event.remove(store._engine, "handle_error", insert_error)
+        if secret_audit_race:
+            self.assertEqual(
+                store.list_secret_audit_events(secret_id="race-secret"), committed_audit
+            )
         self.assertEqual(insert_count, 2)
         self.assertEqual(len(insert_errors), 1)
         records = store.list_product_retirement_records(product="example-site")
@@ -1512,6 +1553,25 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     store.read_product_profile_record("example-site").lifecycle_state, "retiring"
                 )
+                held_after_refusal = store.read_idempotency_record(
+                    scope=idempotency_scope(
+                        LocalOperatorIdentity(
+                            subject="local-owner-agent", token_label="local-owner-write"
+                        )
+                    ),
+                    route_path="/v1/product-retirement",
+                    idempotency_key=self.headers["Idempotency-Key"],
+                )
+                assert held_after_refusal is not None
+                self.assertEqual(held_after_refusal.state, "reconcile_required")
+                different_key = await request(
+                    app,
+                    "POST",
+                    "/v1/product-retirement",
+                    headers={**self.headers, "Idempotency-Key": "after-mismatch"},
+                    payload=payload,
+                )
+                self.assertEqual(different_key.status_code, 409, different_key.text)
                 # Fixture repair restores the original evidence before proving recovery.
                 store.write_secret_audit_event(original_audit)
                 winner_audit = (original_audit,)
@@ -1604,7 +1664,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     with patch.object(
                         store,
-                        "write_secret_audit_event",
+                        "create_product_retirement_secret_audit_event",
                         side_effect=IntegrityError(
                             "fixture insert", {}, RuntimeError("unconfirmed")
                         ),
@@ -1657,8 +1717,15 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                         app, "POST", "/v1/product-retirement", headers=self.headers, payload=payload
                     )
                     self.assertEqual(retry.status_code, 202, retry.text)
+                    audit_events = store.list_secret_audit_events(secret_id="race-secret")
+                    self.assertEqual(len(audit_events), 1)
+                    recovered = store.read_product_retirement_record(
+                        retry.json()["records"]["product_retirement_record_id"]
+                    )
+                    self.assertEqual(audit_events[0].actor, recovered.identity.actor)
+                    self.assertEqual(audit_events[0].recorded_at, recovered.requested_at)
                     self.assertEqual(
-                        len(store.list_secret_audit_events(secret_id="race-secret")), 1
+                        audit_events[0].metadata, {"plan_sha256": recovered.plan_sha256}
                     )
                     delete.assert_not_called()
             finally:
