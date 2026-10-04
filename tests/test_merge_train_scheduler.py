@@ -106,6 +106,125 @@ class MergeTrainSchedulerPassTests(TestCase):
 
         self.assertEqual(self._run(), ())
 
+    def test_one_pass_advances_planning_and_passed_checks_to_landing(self) -> None:
+        feedback = patch.object(
+            merge_train_scheduler, "_deliver_controller_feedback", return_value=(0, 0)
+        )
+        feedback.start()
+        self.addCleanup(feedback.stop)
+        self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True)),
+        )
+        self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
+            "admitted"
+        )
+        actions = (
+            ("admit_collapsed_root", "planned"),
+            ("build_candidate", "ready_for_checks"),
+            ("observe_candidate", "passed"),
+            ("plan_landing", "passed"),
+            ("land_batch", "passed"),
+        )
+        self.mocks["execute_merge_train_controller_run_once"].side_effect = [
+            MergeTrainControllerRunOnceResult(
+                accepted_result={"controller_action": action, "candidate": {"status": status}},
+                records={},
+            )
+            for action, status in actions
+        ]
+        results = self._run()
+        self.assertEqual(len(results), len(actions))
+        self.assertFalse(results[-1].continue_pass)
+
+    def test_pending_candidate_checks_end_the_pass(self) -> None:
+        feedback = patch.object(
+            merge_train_scheduler, "_deliver_controller_feedback", return_value=(0, 0)
+        )
+        feedback.start()
+        self.addCleanup(feedback.stop)
+        self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True)),
+        )
+        self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
+            "admitted"
+        )
+        self.mocks["execute_merge_train_controller_run_once"].side_effect = [
+            MergeTrainControllerRunOnceResult(
+                accepted_result={"controller_action": action, "candidate": {"status": status}},
+                records={},
+            )
+            for action, status in (
+                ("plan_candidate", "planned"),
+                ("build_candidate", "ready_for_checks"),
+                ("observe_candidate", "ready_for_checks"),
+            )
+        ]
+        self.assertEqual(len(self._run()), 3)
+
+    def test_policy_disarmed_between_actions_stops_the_pass(self) -> None:
+        feedback = patch.object(
+            merge_train_scheduler, "_deliver_controller_feedback", return_value=(0, 0)
+        )
+        feedback.start()
+        self.addCleanup(feedback.stop)
+        enabled = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True))
+        )
+        disabled = _policy_record(("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=False)))
+        self.mocks["resolve_merge_train_policy_record"].side_effect = [enabled, enabled, disabled]
+        self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
+            "admitted"
+        )
+        self.mocks[
+            "execute_merge_train_controller_run_once"
+        ].return_value = MergeTrainControllerRunOnceResult(
+            accepted_result={"controller_action": "plan_candidate"}, records={}
+        )
+        self.assertEqual(len(self._run()), 1)
+
+    def test_repeated_progress_is_bounded_and_other_targets_run(self) -> None:
+        feedback = patch.object(
+            merge_train_scheduler, "_deliver_controller_feedback", return_value=(0, 0)
+        )
+        feedback.start()
+        self.addCleanup(feedback.stop)
+        self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True)),
+            ("cbusillo/beta", MergeTrainSchedulerPolicy(enabled=True, mutate=True)),
+        )
+        self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
+            "admitted"
+        )
+        self.mocks[
+            "execute_merge_train_controller_run_once"
+        ].return_value = MergeTrainControllerRunOnceResult(
+            accepted_result={"controller_action": "plan_candidate"}, records={}
+        )
+        results = self._run()
+        self.assertTrue(any(result.repository == "cbusillo/beta" for result in results))
+
+    def test_admission_is_rechecked_between_actions(self) -> None:
+        feedback = patch.object(
+            merge_train_scheduler, "_deliver_controller_feedback", return_value=(0, 0)
+        )
+        feedback.start()
+        self.addCleanup(feedback.stop)
+        self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True)),
+        )
+        self.mocks["evaluate_merge_train_admission_from_store"].side_effect = [
+            _admission("admitted"),
+            _admission("deferred", "backoff_pending"),
+        ]
+        self.mocks[
+            "execute_merge_train_controller_run_once"
+        ].return_value = MergeTrainControllerRunOnceResult(
+            accepted_result={"controller_action": "plan_candidate"}, records={}
+        )
+        results = self._run()
+        self.assertEqual(results[-1].reason_code, "backoff_pending")
+        self.mocks["execute_merge_train_controller_run_once"].assert_called_once()
+
     def test_only_scheduler_enabled_targets_run(self) -> None:
         self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
             ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True)),
@@ -288,6 +407,25 @@ class MergeTrainSchedulerPassTests(TestCase):
 
 
 class MergeTrainSchedulerLoopTests(TestCase):
+    def test_event_wait_starts_a_fresh_pass_without_waiting_for_the_sweep(self) -> None:
+        stop_event = MagicMock(spec=Event)
+        stop_event.is_set.return_value = False
+        event_wait = MagicMock()
+        with patch.object(
+            merge_train_scheduler, "run_merge_train_scheduler_pass", return_value=()
+        ) as run:
+            run_merge_train_scheduler_loop(
+                record_store=object(),
+                control_plane_root=_ROOT,
+                stop_event=stop_event,
+                max_passes=2,
+                wait_for_event=event_wait,
+                monotonic=lambda: 0,
+            )
+        self.assertEqual(run.call_count, 2)
+        event_wait.assert_called_once()
+        stop_event.wait.assert_not_called()
+
     def test_passes_start_on_the_interval_and_survive_a_failed_pass(self) -> None:
         clock = iter([0.0, 40.0, 300.0, 310.0])
         waits: list[float] = []
