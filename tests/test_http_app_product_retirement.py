@@ -1240,7 +1240,14 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def _assert_tracked_checkpoint_insert_race(self, database_url: str) -> None:
         store = self._store(Path("."), database_url=database_url)
-        self.addCleanup(store.close)
+        try:
+            await self._assert_tracked_checkpoint_insert_race_with_store(store)
+        finally:
+            store.close()
+
+    async def _assert_tracked_checkpoint_insert_race_with_store(
+        self, store: PostgresRecordStore
+    ) -> None:
         app = self._app(store, actions=("product_retirement.plan", "product_retirement.apply"))
         with patch(
             "control_plane.product_retirement.observe_tracked_dokploy_application",
@@ -1414,13 +1421,13 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(first.status_code, 409, first.text)
         self.assertEqual(first.json()["error"]["code"], "mutation_reconciliation_required")
-        self.assertTrue(
-            any(
-                record.trace_id == first.json()["trace_id"]
-                and record.outcome == "reconcile_required"
-                for record in records
-            )
+        terminal = next(
+            record
+            for record in records
+            if record.trace_id == first.json()["trace_id"]
+            and record.outcome == "reconcile_required"
         )
+        self.assertEqual(terminal.mutation_evidence.error_message, "injected final profile failure")
 
     async def test_tracked_concurrent_expiry_seals_one_finalization_checkpoint(self) -> None:
         with TemporaryDirectory() as directory:
