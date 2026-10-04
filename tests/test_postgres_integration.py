@@ -1245,7 +1245,8 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                         future = workers.submit(write_lane)
                         try:
                             self.assertTrue(at_lock.wait(10))
-                            self.assertFalse(future.done())
+                            with self.assertRaises(TimeoutError):
+                                future.result(timeout=0.1)
                         finally:
                             owner_session.commit()
                         with self.assertRaises(

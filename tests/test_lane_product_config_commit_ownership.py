@@ -283,7 +283,8 @@ class FilesystemLaneWriteLockTests(unittest.TestCase):
                     with owner_store._product_authority_bundle_lock():
                         future = workers.submit(write_lane)
                         self.assertTrue(at_lock.wait(5))
-                        self.assertFalse(future.done())
+                        with self.assertRaises(TimeoutError):
+                            future.result(timeout=0.1)
                         owner_store._write_model_locked(
                             "launchplane_product_profiles",
                             profile.product,
