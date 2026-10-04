@@ -123,7 +123,7 @@ class LaneProductConfigCommitOwnershipTests(unittest.IsolatedAsyncioTestCase):
                     profile = LaunchplaneProductProfileRecord.model_validate(
                         _odoo_profile_payload_with_prod_lane()
                     )
-                    if padding:
+                    if padding and scenario != "duplicate_lane":
                         profile = LaunchplaneProductProfileRecord.model_validate(
                             {
                                 **profile.model_dump(),
@@ -221,7 +221,11 @@ class LaneProductConfigCommitOwnershipTests(unittest.IsolatedAsyncioTestCase):
                                     update={
                                         "product": "other-product",
                                         "lanes": tuple(
-                                            lane
+                                            lane.model_copy(update=padding)
+                                            if scenario == "duplicate_lane"
+                                            and padding
+                                            and lane.instance == "testing"
+                                            else lane
                                             for lane in profile.lanes
                                             if scenario in ("reassigned", "duplicate_lane")
                                             or lane.instance == "prod"
