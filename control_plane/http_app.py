@@ -7699,8 +7699,21 @@ def create_launchplane_fastapi_app(
             return replay_response
         try:
             applied_plan = control_plane_odoo_addon_settings.apply_odoo_addon_settings_plan(
-                record_store=typed_store, request=settings_request
+                record_store=typed_store,
+                request=settings_request,
+                required_context_owner=(
+                    (settings_request.product, settings_request.context)
+                    if isinstance(identity, LocalOperatorIdentity)
+                    else None
+                ),
             )
+        except ProductContextOwnershipError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="local_operator_lane_scope_required",
+                message="Product context ownership changed before the lane write committed.",
+            ) from error
         except control_plane_odoo_addon_settings.OdooAddonSettingsRefusal as error:
             raise _launchplane_http_error(
                 status_code=409,
@@ -7982,8 +7995,22 @@ def create_launchplane_fastapi_app(
             return replay_response
         try:
             applied_plan = control_plane_integration_allowances.apply_integration_allowances_plan(
-                record_store=typed_store, request=allowances_request, actor=actor
+                record_store=typed_store,
+                request=allowances_request,
+                actor=actor,
+                required_context_owner=(
+                    (allowances_request.product, allowances_request.context)
+                    if isinstance(identity, LocalOperatorIdentity)
+                    else None
+                ),
             )
+        except ProductContextOwnershipError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="local_operator_lane_scope_required",
+                message="Product context ownership changed before the lane write committed.",
+            ) from error
         except control_plane_integration_allowances.IntegrationAllowancesRefusal as error:
             raise _launchplane_http_error(
                 status_code=409,
@@ -8183,8 +8210,22 @@ def create_launchplane_fastapi_app(
             return replay_response
         try:
             applied_plan = control_plane_testing_lane_hold.apply_testing_hold_plan(
-                record_store=typed_store, request=hold_request, actor=actor
+                record_store=typed_store,
+                request=hold_request,
+                actor=actor,
+                required_context_owner=(
+                    (hold_request.product, hold_request.context)
+                    if isinstance(identity, LocalOperatorIdentity)
+                    else None
+                ),
             )
+        except ProductContextOwnershipError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="local_operator_lane_scope_required",
+                message="Product context ownership changed before the lane write committed.",
+            ) from error
         except control_plane_testing_lane_hold.TestingHoldRefusal as error:
             raise _launchplane_http_error(
                 status_code=409,

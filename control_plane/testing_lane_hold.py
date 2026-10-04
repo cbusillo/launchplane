@@ -78,6 +78,7 @@ class TestingHoldStore(TestingHoldReader, Protocol):
         *,
         expected_record: DokployTargetRecord,
         replacement_record: DokployTargetRecord,
+        required_context_owner: tuple[str, str] | None = None,
     ) -> DokployTargetRecord: ...
 
 
@@ -247,7 +248,10 @@ def read_testing_hold(
 
 
 def build_testing_hold_plan(
-    *, record_store: TestingHoldStore, request: TestingHoldApplyRequest, actor: str
+    *,
+    record_store: TestingHoldStore,
+    request: TestingHoldApplyRequest,
+    actor: str,
 ) -> tuple[TestingHoldPlan, DokployTargetRecord]:
     """Validate the request against the current record and return a digest-bound plan."""
 
@@ -289,7 +293,11 @@ def build_testing_hold_plan(
 
 
 def apply_testing_hold_plan(
-    *, record_store: TestingHoldStore, request: TestingHoldApplyRequest, actor: str
+    *,
+    record_store: TestingHoldStore,
+    request: TestingHoldApplyRequest,
+    actor: str,
+    required_context_owner: tuple[str, str] | None = None,
 ) -> TestingHoldPlan:
     """Re-plan against the current record, require the reviewed digest, write, read back.
 
@@ -329,6 +337,11 @@ def apply_testing_hold_plan(
                         "updated_at": utc_now_timestamp(),
                         "source_label": TESTING_HOLD_SOURCE_LABEL,
                     }
+                ),
+                **(
+                    {"required_context_owner": required_context_owner}
+                    if required_context_owner is not None
+                    else {}
                 ),
             )
         except DokployTargetRecordChanged as error:

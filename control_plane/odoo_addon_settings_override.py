@@ -85,7 +85,12 @@ class OdooAddonSettingsStore(Protocol):
         self, *, context_name: str, instance_name: str
     ) -> OdooInstanceOverrideRecord: ...
 
-    def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> object: ...
+    def write_odoo_instance_override_record(
+        self,
+        record: OdooInstanceOverrideRecord,
+        *,
+        required_context_owner: tuple[str, str] | None = None,
+    ) -> object: ...
 
     def read_dokploy_target_record(
         self, *, context_name: str, instance_name: str
@@ -606,6 +611,7 @@ def apply_odoo_addon_settings_plan(
     *,
     record_store: OdooAddonSettingsStore,
     request: OdooAddonSettingsApplyRequest,
+    required_context_owner: tuple[str, str] | None = None,
 ) -> OdooAddonSettingsPlan:
     """Re-plan against current authority, require the reviewed digest, write, read back."""
 
@@ -619,7 +625,12 @@ def apply_odoo_addon_settings_plan(
     applied = False
     if plan.changed:
         record_store.write_odoo_instance_override_record(
-            replacement.model_copy(update={"updated_at": _utc_now_timestamp()})
+            replacement.model_copy(update={"updated_at": _utc_now_timestamp()}),
+            **(
+                {"required_context_owner": required_context_owner}
+                if required_context_owner is not None
+                else {}
+            ),
         )
         applied = True
     stored = _read_existing_record(
