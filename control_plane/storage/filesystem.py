@@ -3468,6 +3468,8 @@ class FilesystemRecordStore:
         *,
         expected_record: DokployTargetRecord,
         replacement_record: DokployTargetRecord,
+        required_context_owner: tuple[str, str] | None = None,
+        required_product_config_target: tuple[str, str, str] | None = None,
     ) -> DokployTargetRecord:
         if (expected_record.context, expected_record.instance) != (
             replacement_record.context,
@@ -3476,6 +3478,14 @@ class FilesystemRecordStore:
             raise ValueError("Dokploy target compare-and-write cannot move a record between lanes.")
         record_id = _context_instance_record_id(expected_record.context, expected_record.instance)
         with self._product_authority_bundle_lock():
+            if required_context_owner is not None or required_product_config_target is not None:
+                require_bundle_context_owner(
+                    ProductAuthorityBundle(
+                        required_context_owner=required_context_owner,
+                        required_product_config_target=required_product_config_target,
+                    ),
+                    self._list_product_profile_records_locked(),
+                )
             current_record = self._read_model_locked(
                 DokployTargetRecord, "dokploy_targets", record_id
             )
@@ -6676,10 +6686,25 @@ class FilesystemRecordStore:
     def list_environment_inventory(self) -> tuple[EnvironmentInventory, ...]:
         return self._list_models(EnvironmentInventory, "inventory")
 
-    def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> Path:
-        return self._write_model(
-            "odoo_instance_overrides", f"{record.context}-{record.instance}", record
-        )
+    def write_odoo_instance_override_record(
+        self,
+        record: OdooInstanceOverrideRecord,
+        *,
+        required_context_owner: tuple[str, str] | None = None,
+        required_product_config_target: tuple[str, str, str] | None = None,
+    ) -> Path:
+        with self._product_authority_bundle_lock():
+            if required_context_owner is not None or required_product_config_target is not None:
+                require_bundle_context_owner(
+                    ProductAuthorityBundle(
+                        required_context_owner=required_context_owner,
+                        required_product_config_target=required_product_config_target,
+                    ),
+                    self._list_product_profile_records_locked(),
+                )
+            return self._write_model_locked(
+                "odoo_instance_overrides", f"{record.context}-{record.instance}", record
+            )
 
     def read_odoo_instance_override_record(
         self, *, context_name: str, instance_name: str

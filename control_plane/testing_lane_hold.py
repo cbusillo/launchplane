@@ -16,6 +16,7 @@ from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from control_plane.storage.product_authority_bundle import LaneProductConfigWriteRequirements
 from control_plane.contracts.durable_operation_authorization import (
     LAUNCHPLANE_RECONCILE_SUBJECT,
     DurableOperationCallerIdentity,
@@ -78,6 +79,8 @@ class TestingHoldStore(TestingHoldReader, Protocol):
         *,
         expected_record: DokployTargetRecord,
         replacement_record: DokployTargetRecord,
+        required_context_owner: tuple[str, str] | None = None,
+        required_product_config_target: tuple[str, str, str] | None = None,
     ) -> DokployTargetRecord: ...
 
 
@@ -247,7 +250,10 @@ def read_testing_hold(
 
 
 def build_testing_hold_plan(
-    *, record_store: TestingHoldStore, request: TestingHoldApplyRequest, actor: str
+    *,
+    record_store: TestingHoldStore,
+    request: TestingHoldApplyRequest,
+    actor: str,
 ) -> tuple[TestingHoldPlan, DokployTargetRecord]:
     """Validate the request against the current record and return a digest-bound plan."""
 
@@ -289,7 +295,12 @@ def build_testing_hold_plan(
 
 
 def apply_testing_hold_plan(
-    *, record_store: TestingHoldStore, request: TestingHoldApplyRequest, actor: str
+    *,
+    record_store: TestingHoldStore,
+    request: TestingHoldApplyRequest,
+    actor: str,
+    required_context_owner: tuple[str, str] | None = None,
+    required_product_config_target: tuple[str, str, str] | None = None,
 ) -> TestingHoldPlan:
     """Re-plan against the current record, require the reviewed digest, write, read back.
 
@@ -329,6 +340,15 @@ def apply_testing_hold_plan(
                         "updated_at": utc_now_timestamp(),
                         "source_label": TESTING_HOLD_SOURCE_LABEL,
                     }
+                ),
+                **(
+                    LaneProductConfigWriteRequirements(
+                        required_context_owner=required_context_owner,
+                        required_product_config_target=required_product_config_target,
+                    )
+                    if required_context_owner is not None
+                    or required_product_config_target is not None
+                    else LaneProductConfigWriteRequirements()
                 ),
             )
         except DokployTargetRecordChanged as error:
