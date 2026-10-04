@@ -693,12 +693,12 @@ The set deliberately leaves out:
 Secondary Odoo addon settings, integration allowances, and testing-hold writes
 carry the named product's exact `(product, context, instance)` lane into storage
 for every supported caller. Storage rechecks lane ownership under the same
-lock and transaction as product-profile writes. A reassigned or ambiguous lane
-refuses writes by callers other than `local_operator` with
-`product_profile_conflict` (409), leaving the lane record unchanged.
-`local_operator` callers retain the exclusive-context requirement below and its
-`local_operator_lane_scope_required` (403) refusal. Privileged callers can still
-write a uniquely owned instance in a
+lock and transaction as product-profile writes. Losing or duplicating the exact
+lane returns `product_profile_conflict` (409), leaving the lane record unchanged.
+`local_operator` callers also retain the exclusive-context requirement below:
+that check runs first and returns `local_operator_lane_scope_required` (403)
+when the context stops belonging to the named product alone. Privileged callers
+can still write a uniquely owned instance in a
 context shared by products using different instances. Dry-runs and unchanged
 applies perform no lane record write and retain their existing behavior.
 
