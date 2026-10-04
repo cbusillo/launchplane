@@ -1482,7 +1482,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 )
             finally:
                 store.close()
-            request_id = str(create_payload["records"]["request_id"])
+            request_id = str(cast(dict[str, object], create_payload["records"])["request_id"])
             claim_status, _claim_payload = _claim_every_code_work_request_in_postgres(
                 database_url,
                 request_id,
@@ -1588,7 +1588,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 )
             finally:
                 store.close()
-            request_id = str(create_payload["records"]["request_id"])
+            request_id = str(cast(dict[str, object], create_payload["records"])["request_id"])
             claim_status, _claim_payload = _claim_every_code_work_request_in_postgres(
                 database_url,
                 request_id,

@@ -2736,14 +2736,9 @@ preflights.
   Existing persisted records are retained until the separately authorized
   storage retirement; #1313 tracks the remaining retired domain code.
 
-- Every Code PR feedback webhooks and `/preview ok` or `/preview changes ...`
-  source-issue comments are actor-gated before they become pending work for a
-  local session. The repository owner is trusted, the source issue author is
-  trusted for Every Code source-issue validation. Those semantics are distinct
-  from Launchplane manager approval of a rendered product preview: local People
-  or planning maps never authorize runtime approval. Bot-authored and untrusted
-  human comments are accepted-but-skipped so webhook delivery remains idempotent
-  without sending automation chatter to Every Code.
+- Historical Every Code feedback records retain their actor and source-issue
+  provenance. The removed webhook no longer ingests PR or issue comments.
+
 - Agent callers should prefer `GET /v1/every-code/summary` over raw work-request
   reads when they only need status. The summary projection links back to the
   issue and result PR, reports whether work is active, stuck, complete, or

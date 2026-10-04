@@ -75,8 +75,8 @@ Service implementation ownership is split by runtime responsibility:
 - `control_plane/every_code_github_webhook.py` is retired domain code awaiting
   deletion under #1313; it is not registered as HTTP ingress.
 - `control_plane/http_app.py` owns FastAPI composition, dependency injection,
-  remaining core and mutation route registration, and the webhook callable used
-  by the unauthenticated GitHub route. Domain modules under
+  remaining core and mutation route registration, and the independent signed
+  GitHub App and trusted-maintenance receiver callables. Domain modules under
   `control_plane/http_routes/` own extracted read handlers and registrations,
   plus the dependency-explicit evidence-ingress and Generic Web write
   registrars.
