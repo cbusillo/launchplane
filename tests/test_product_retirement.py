@@ -164,6 +164,13 @@ class _Store:
         self.records[record_id] = record
         return None
 
+    def list_product_retirement_records(self, **_: object) -> tuple[ProductRetirementRecord, ...]:
+        return tuple(
+            record
+            for record in self.records.values()
+            if isinstance(record, ProductRetirementRecord)
+        )
+
 
 def _request(*, mode: str = "plan", **overrides: object) -> ProductRetirementRequest:
     payload: dict[str, object] = {

@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import json
 from hashlib import sha256
 import logging
+import re
 from time import sleep
 from typing import TYPE_CHECKING, Callable, Literal, Protocol, TypeVar
 from urllib.error import HTTPError, URLError
@@ -101,9 +102,22 @@ _GITHUB_WEB_FLOW_USER_ID = 19864447
 
 
 class MergeTrainGitHubError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        request_description: str = "",
+        rate_limited: bool = False,
+        rate_limit_reset: int | None = None,
+        retry_after_seconds: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.request_description = request_description
+        self.rate_limited = rate_limited
+        self.rate_limit_reset = rate_limit_reset
+        self.retry_after_seconds = retry_after_seconds
 
 
 class MergeTrainGitHubStaleHeadError(MergeTrainGitHubError):
@@ -235,7 +249,9 @@ class UrllibMergeTrainGitHubTransport:
                 )
                 return json.loads(response_text) if response_text.strip() else None
         except HTTPError as error:
-            raise _github_http_error(path=path, status_code=error.code, error=error) from error
+            raise _github_http_error(
+                method=method, path=path, status_code=error.code, error=error
+            ) from error
         except (URLError, OSError) as error:
             raise MergeTrainGitHubError(f"GitHub API request failed for {path}: {error}") from error
         except json.JSONDecodeError as error:
@@ -3484,6 +3500,8 @@ def _required_branch_checks(
             path=f"/repos/{repository_path}/branches/{encoded_base_branch}",
         )
     except MergeTrainGitHubError as error:
+        if error.rate_limited:
+            raise
         if error.status_code in {403, 404}:
             raise MergeTrainGitHubError(
                 "Merge train candidate validation requires a readable protected-branch "
@@ -3750,8 +3768,71 @@ def _required_value(value: str, message: str) -> str:
     return normalized
 
 
-def _github_http_error(*, path: str, status_code: int, error: HTTPError) -> MergeTrainGitHubError:
-    message = f"GitHub API request failed for {path}: HTTP {status_code}"
-    if status_code == 409:
-        return MergeTrainGitHubStaleHeadError(message, status_code=status_code)
-    return MergeTrainGitHubError(message, status_code=status_code)
+def _github_request_route_template(path: str) -> str:
+    # Emit only known route syntax. Every dynamic component, query and fragment
+    # is discarded, including unrecognized endpoints.
+    route = path.split("?", 1)[0].split("#", 1)[0]
+    templates = (
+        "/graphql",
+        "/repos/{owner}/{repo}/pulls",
+        "/repos/{owner}/{repo}/pulls/{number}",
+        "/repos/{owner}/{repo}/pulls/{number}/merge",
+        "/repos/{owner}/{repo}/pulls/{number}/update-branch",
+        "/repos/{owner}/{repo}/pulls/{number}/commits",
+        "/repos/{owner}/{repo}/issues/{number}/comments",
+        "/repos/{owner}/{repo}/issues/{number}/labels",
+        "/repos/{owner}/{repo}/issues/{number}/timeline",
+        "/repos/{owner}/{repo}/issues/{number}/events",
+        "/repos/{owner}/{repo}/branches/{branch}",
+        "/repos/{owner}/{repo}/rules/branches/{branch}",
+        "/repos/{owner}/{repo}/collaborators/{username}/permission",
+        "/repos/{owner}/{repo}/commits/{sha}",
+        "/repos/{owner}/{repo}/commits/{sha}/check-runs",
+        "/repos/{owner}/{repo}/commits/{sha}/status",
+        "/repos/{owner}/{repo}/compare/{comparison}",
+        "/repos/{owner}/{repo}/git/commits/{sha}",
+        "/repos/{owner}/{repo}/git/refs",
+        "/repos/{owner}/{repo}/git/ref/{reference}",
+        "/repos/{owner}/{repo}/git/refs/{reference}",
+        "/repos/{owner}/{repo}/merges",
+    )
+    for template in templates:
+        pattern = re.sub(r"\{[^}]+\}", "[^/]+", template)
+        if template.endswith("/{reference}"):
+            pattern = pattern.rsplit("[^/]+", 1)[0] + ".+"
+        if re.fullmatch(pattern, route):
+            return template
+    return "/{unknown_route}"
+
+
+def _github_http_error(
+    *, method: str, path: str, status_code: int, error: HTTPError
+) -> MergeTrainGitHubError:
+    safe_method = (
+        method.upper()
+        if method.upper() in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"}
+        else "UNKNOWN"
+    )
+    description = f"{safe_method} {_github_request_route_template(path)} HTTP {status_code}"
+    headers = error.headers
+    rate_limited = status_code == 429 or (
+        status_code == 403
+        and headers is not None
+        and (
+            bool(headers.get("retry-after"))
+            or headers.get("x-ratelimit-remaining", "").strip() == "0"
+        )
+    )
+    reset = headers.get("x-ratelimit-reset", "").strip() if headers is not None else ""
+    reset_time = int(reset) if re.fullmatch(r"[0-9]{1,12}", reset) else None
+    retry_after = headers.get("retry-after", "").strip() if headers is not None else ""
+    retry_seconds = int(retry_after) if re.fullmatch(r"[0-9]{1,12}", retry_after) else None
+    error_type = MergeTrainGitHubStaleHeadError if status_code == 409 else MergeTrainGitHubError
+    return error_type(
+        f"GitHub API request failed: {description}",
+        status_code=status_code,
+        request_description=description,
+        rate_limited=rate_limited,
+        rate_limit_reset=reset_time if rate_limited else None,
+        retry_after_seconds=retry_seconds if rate_limited else None,
+    )
