@@ -83,7 +83,6 @@ class ProductRetirementOperatorWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.workflow = load_workflow(".github/workflows/product-retirement.yml")
         self.worker_reference = self.workflow.job_uses("retire")
-        self.reusable_workflow = _load_pinned_workflow(self.worker_reference)
 
     def test_operations_documentation_binds_wrapper_and_pinned_worker(self) -> None:
         operations = Path("docs/operations.md").read_text(encoding="utf-8")
@@ -93,7 +92,8 @@ class ProductRetirementOperatorWorkflowTests(unittest.TestCase):
         self.assertIn(f"job_workflow_ref={self.worker_reference}", operations)
 
     def test_wrapper_dispatch_inputs_agree_with_pinned_worker(self) -> None:
-        reusable_trigger = self.reusable_workflow.data["on"]
+        reusable_workflow = _load_pinned_workflow(self.worker_reference)
+        reusable_trigger = reusable_workflow.data["on"]
         assert isinstance(reusable_trigger, dict)
         reusable_call = reusable_trigger["workflow_call"]
         assert isinstance(reusable_call, dict)

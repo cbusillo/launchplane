@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from control_plane.child_process_errors import (
+    _MAX_SAFE_DETAIL_LENGTH,
     normalize_child_process_failure,
     redact_untrusted_text,
 )
@@ -41,7 +42,7 @@ class ChildProcessErrorTests(unittest.TestCase):
         self.assertEqual(first.code, "github_cli_failed")
         self.assertEqual(first.correlation_id, second.correlation_id)
         self.assertTrue(first.correlation_id.startswith("cpf-"))
-        self.assertLessEqual(len(first.detail), 240)
+        self.assertLessEqual(len(first.detail), _MAX_SAFE_DETAIL_LENGTH)
         self.assertNotIn("\n", first.detail)
         for value in (
             "example-bearer-value",

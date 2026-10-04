@@ -26,6 +26,7 @@ from control_plane.contracts.repository_evidence import (
 )
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidateRecord,
+    MergeTrainBatchHeldOutEntry,
     MergeTrainBatchLandingPlanRecord,
     build_merge_train_batch_landing_plan,
 )
@@ -277,6 +278,7 @@ def _evaluate_live(
     provider: _EvidenceProvider,
     evidence: RepositoryEvidence,
     extra_pull_requests: tuple[MergeTrainPullRequestSnapshot, ...] = (),
+    held_out: tuple[MergeTrainBatchHeldOutEntry, ...] = (),
     target_conversations: MergeTrainReviewConversations | None = None,
 ) -> MergeAdmissionEvaluation:
     policy_record = build_test_merge_train_policy_record(repository=OWNER_REPOSITORY)
@@ -287,6 +289,9 @@ def _evaluate_live(
         base_sha=OWNER_BASE_SHA,
         head_sha=evidence.target.head_sha,
         tree_sha=evidence.target.tree_sha,
+    )
+    candidate_record = candidate_record.model_copy(
+        update={"candidate": candidate_record.candidate.model_copy(update={"held_out": held_out})}
     )
     evaluator = LiveMergeAdmissionEvaluator(
         store=store,
@@ -481,6 +486,43 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                 ),
             )
         self.assertEqual(result.readiness.state, "ready")
+
+    def test_held_out_pull_request_ahead_of_the_plan_is_excluded_only_at_its_recorded_head(
+        self,
+    ) -> None:
+        held_out = MergeTrainBatchHeldOutEntry(pull_request_number=2021, head_sha="d" * 40)
+        cases = (
+            ("unchanged", held_out.pull_request_number, held_out.head_sha, True),
+            ("head_changed", held_out.pull_request_number, "e" * 40, False),
+            ("different_pr_same_head", 2020, held_out.head_sha, False),
+        )
+        for case, number, head_sha, admitted in cases:
+            with self.subTest(case=case), TemporaryDirectory() as directory:
+                store = FilesystemRecordStore(state_dir=Path(directory))
+                evidence = _repository_evidence()
+
+                def evaluate() -> MergeAdmissionEvaluation:
+                    return _evaluate_live(
+                        store=store,
+                        provider=_EvidenceProvider(evidence),
+                        evidence=evidence,
+                        extra_pull_requests=(
+                            _queued_pull_request(
+                                number=number,
+                                head_sha=head_sha,
+                                created_at="2026-08-11T02:59:00Z",
+                            ),
+                        ),
+                        held_out=(held_out,),
+                    )
+
+                if admitted:
+                    result = evaluate()
+                    self.assertEqual(result.readiness.state, "ready")
+                else:
+                    with self.assertRaises(MergeAdmissionDeniedError) as denied:
+                        evaluate()
+                    self.assertEqual(denied.exception.reason_code, "landing_lineage_changed")
 
 
 class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
