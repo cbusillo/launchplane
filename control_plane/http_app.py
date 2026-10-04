@@ -50,6 +50,7 @@ from control_plane.authz_candidate_preparation import (
 from control_plane.authz_scope import DOKPLOY_TARGET_LANE_SETUP_ACTION
 from control_plane.dokploy.target_source_setup import DokployComposeSourcePartialError
 from control_plane.dokploy_target_setup_http import (
+    DokployComposeDomainPartialError,
     DokployTargetSetupEnvelope,
     execute_dokploy_target_setup,
 )
@@ -24192,6 +24193,16 @@ def create_launchplane_fastapi_app(
                     (lane_owner, setup_request.context) if lane_scoped_only else None
                 ),
             )
+        except DokployComposeDomainPartialError as error:
+            raise LaunchplaneHTTPException(
+                status_code=502,
+                detail={
+                    "trace_id": trace_id,
+                    "code": "dokploy_domain_partial_outcome",
+                    "message": str(error),
+                    "records": {"domain_recovery": json.dumps(error.recovery)},
+                },
+            ) from error
         except DokployComposeSourcePartialError as error:
             raise _launchplane_http_error(
                 status_code=502,
