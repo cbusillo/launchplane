@@ -1098,7 +1098,10 @@ Controller actions have these retry/stop semantics:
   without issuing another branch merge. Otherwise it merges the current child
   normally. Missing compare evidence refuses execution. The new collapse has its
   own current-policy admission and child-head expectations, and landing reconciles
-  its children; retired proof never supplies admission under the new policy.
+  children still open in that fresh plan; retired proof never supplies admission
+  under the new policy. GitHub may already mark a carried child merged indirectly
+  and remove it from discovery. Current-policy root landing still proceeds, but
+  this path does not recover Launchplane's comment and label for that absent child.
   Requalifying carried proof under a different policy is not supported.
   A completed stack never revives its older planned progress.
 - `wait_for_root_checks`: The collapsed root PR's required checks are still
@@ -1471,4 +1474,6 @@ No old-policy record authorizes a merge under a different policy. Checkpointed
 partial execution at an unchanged root stays visible and excluded from fresh
 replanning. Changed-root and uncheckpointed effects can be recovered through
 fresh current-policy controller discovery: current Git ancestry prevents another merge of
-an already-contained child, and the fresh collapse owns its landing disposition.
+an already-contained child, and the fresh collapse owns disposition of its
+remaining open children. A carried child GitHub already merged indirectly stays
+closed; this recovery does not restore its Launchplane landing annotations.

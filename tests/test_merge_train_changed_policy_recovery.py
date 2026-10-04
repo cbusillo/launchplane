@@ -66,7 +66,13 @@ class _StackTransport:
 
 class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def _recovery(
-        self, *, checkpointed: bool, moved: bool, child_changed: bool = False, deeper: bool = False
+        self,
+        *,
+        checkpointed: bool,
+        moved: bool,
+        child_changed: bool = False,
+        deeper: bool = False,
+        indirectly_merged: bool = False,
     ) -> None:
         graph = _StackTransport()
         if deeper:
@@ -83,6 +89,19 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     repository=repository, base_branch=base_branch
                 )
                 root, child = snapshot.pull_requests
+                if indirectly_merged and graph.contains(graph.heads[root.head_ref], child.head_sha):
+                    return snapshot.model_copy(
+                        update={
+                            "pull_requests": (
+                                root.model_copy(
+                                    update={
+                                        "head_sha": graph.heads[root.head_ref],
+                                        "base_sha": snapshot.base_sha,
+                                    }
+                                ),
+                            )
+                        }
+                    )
                 return snapshot.model_copy(
                     update={
                         "pull_requests": (
@@ -240,6 +259,32 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
                 store.write_merge_train_policy_record(current)
+                if indirectly_merged:
+                    # GitHub's indirect merge has already closed the carried child.
+                    closed.add(2)
+                    for _ in range(10):
+                        response = await run()
+                        self.assertEqual(response.status_code, 202, response.text)
+                        result = response.json()["result"]
+                        if result["controller_action"] == "land_batch":
+                            break
+                    self.assertEqual(result["controller_action"], "land_batch")
+                    self.assertEqual(closed, {2})
+                    self.assertEqual(len(graph.merge_requests), 1)
+                    self.assertTrue(
+                        all(
+                            r.candidate.policy_sha256 == current.policy_sha256
+                            for r in store.list_merge_train_batch_candidate_records()
+                        )
+                    )
+                    for old in original_records:
+                        retained = next(
+                            r
+                            for r in store.list_merge_train_stack_collapse_plan_records()
+                            if r.record_id == old.record_id
+                        )
+                        self.assertEqual(retained.plan, old.plan)
+                    return
                 before_dry_run = store.list_merge_train_stack_collapse_plan_records()
                 dry_run = await run(False)
                 self.assertEqual(dry_run.status_code, 202, dry_run.text)
@@ -337,3 +382,8 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         await self._recovery(checkpointed=False, moved=False, deeper=True)
+
+    async def test_indirectly_merged_child_absent_from_discovery_does_not_block_current_policy_landing(
+        self,
+    ) -> None:
+        await self._recovery(checkpointed=False, moved=False, indirectly_merged=True)
