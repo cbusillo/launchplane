@@ -1055,7 +1055,8 @@ Controller actions have these retry/stop semantics:
   cannot revive older execution. During that same-policy resumption, carried
   mutations remain checkpointed and are not merged again. Obsolete-policy
   execution with checkpointed branch merges and an unchanged open root remains
-  unapplied and visible through run-once's `details`, with code
+  unapplied. Passes selecting saved work or live discovery without a usable
+  candidate or landing report it through run-once's `details`, with code
   `merge_train_stack_collapse_policy_changed`, a representative `record_id`, and
   per-root `entries`; it is not retired merely because its policy
   changed. Plans with no checkpointed branch merges, and moved or missing
@@ -1072,9 +1073,12 @@ Controller actions have these retry/stop semantics:
   root to a replacement batch.
   The maintained helper preserves the representative code/record and entry
   count through its existing details projection; the HTTP response contains
-  the full per-root entries. Previously retired obsolete progress is also
-  reported when its checkpointed root returns, unless a newer active collapse
-  already owns that root, including newer retired recovery. Only each collapse's latest progress is used;
+  the full per-root entries. Active candidate and landing phases need not
+  repeat that inventory. Previously retired obsolete progress is also
+  reported when its checkpointed root returns, unless newer progress from
+  another collapse exists for that root. That includes active, retired and
+  completed histories, whether or not the newer progress can resume.
+  Only each collapse's latest progress is used;
   completed history cannot revive older execution. The existing supported
   resumption requires the original policy digest to be current again and all
   current head/readiness checks to pass; it merges only remaining children.
