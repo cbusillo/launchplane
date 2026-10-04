@@ -2577,12 +2577,14 @@ def _advance_without_candidate_record(
         repository=request.repository, base_branch=request.base_branch, status="superseded"
     )
     active_collapse_ids = {record.plan.collapse_id for record in latest_records}
+    active_root_numbers = {record.plan.root_pull_request_number for record in latest_records}
     retired_executions = tuple(
         progress
         for records in _group_stack_collapse_records(retired_records).values()
         if (progress := latest_merge_train_stack_collapse_progress_record(tuple(records)))
         is not None
         and progress.plan.collapse_id not in active_collapse_ids
+        and progress.plan.root_pull_request_number not in active_root_numbers
         and progress.plan.status in {"planned", "collapsing"}
         and "; retired:" in progress.source
         and progress.plan.policy_key == repository_policy.policy_key
@@ -2942,6 +2944,20 @@ def _advance_planned_stack_collapse_record(
         )
     except ValueError as error:
         raise MergeTrainControllerRequestError(str(error)) from error
+    if planned_collapse_record.status == "superseded" and request.mutate:
+        lease.checkpoint(
+            active_action=MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
+            active_phase="resume_returned_stack_root",
+            active_record_id=planned_collapse_record.record_id,
+            active_pull_request_number=planned_collapse_record.plan.root_pull_request_number,
+        )
+        planned_collapse_record = build_merge_train_stack_collapse_plan_record(
+            ordinary_job_binding=lease.record.ordinary_job_binding,
+            plan=planned_collapse_record.plan.model_copy(update={"updated_at": recorded_at}),
+            source=f"service:controller:resume-retired-collapse:{trace_id}",
+            updated_at=recorded_at,
+        )
+        stack_collapse_store.write_merge_train_stack_collapse_plan_record(planned_collapse_record)
     result: dict[str, object] = {
         "repository": request.repository,
         "base_branch": request.base_branch,

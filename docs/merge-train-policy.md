@@ -1373,3 +1373,6 @@ execution, and saved waits, in that order. It does not read GitHub readiness or
 validate live applicability; run-once makes that decision. A waiting collapse
 still requires the exact current policy digest. A policy change during that
 wait is refused rather than admitting the old collapse under a new policy.
+The phases differ on policy change: obsolete execution steps aside, while a
+saved wait is refused. Safe recovery across that policy change remains a
+separate investigation.

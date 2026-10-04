@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from control_plane.contracts.merge_train_stack_collapse import (
     build_merge_train_stack_collapse_plan_record,
+    build_merge_train_stack_collapse_id,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
@@ -36,10 +37,13 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
         waiting: bool = False,
         status: str = "planned",
         reopen: bool = False,
+        held_mid_execution: bool = False,
+        active_replacement: bool = False,
     ) -> None:
         probes: list[int] = []
         merges: list[int] = []
         root_visible = reason != "root_missing_from_open_snapshot"
+        replacement_record_id = ""
 
         class Reader(_FakeCollapsedRootStackedMergeTrainSnapshotReader):
             def read_merge_train_snapshot(
@@ -71,17 +75,25 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                                             "number": number,
                                             "head_ref": "feature/child-10"
                                             if number == 12
-                                            else "feature/leaf-10",
+                                            else (
+                                                "feature/leaf-10"
+                                                if number == 13
+                                                else "feature/new-leaf-10"
+                                            ),
                                             "head_sha": "partial-middle-head"
                                             if number == 12
-                                            else "head-leaf",
+                                            else ("head-leaf" if number == 13 else "new-leaf-head"),
                                             "base_ref": "feature/root-10"
                                             if number == 12
-                                            else "feature/child-10",
+                                            else (
+                                                "feature/child-10"
+                                                if number == 13
+                                                else "feature/leaf-10"
+                                            ),
                                             "required_checks_status": "pass",
                                         }
                                     )
-                                    for number in (12, 13)
+                                    for number in ((12, 13, 14) if active_replacement else (12, 13))
                                 )
                                 if reopen
                                 else ()
@@ -105,7 +117,12 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                 snapshot = Reader(transport=self.transport).read_merge_train_snapshot(
                     repository=repository, base_branch="main"
                 )
-                return next(pr for pr in snapshot.pull_requests if pr.number == pull_request_number)
+                pr = next(pr for pr in snapshot.pull_requests if pr.number == pull_request_number)
+                return (
+                    pr.model_copy(update={"is_draft": True})
+                    if held_mid_execution and pr.number == 12
+                    else pr
+                )
 
             def merge_stack_child_into_parent(self, **kwargs: Any) -> str:
                 if reopen and kwargs["child_pull_request_number"] == 12:
@@ -206,15 +223,80 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(response.status_code, 202, response.text)
                         self.assertEqual(
                             response.json()["result"]["controller_action"],
-                            "execute_stack_collapse"
+                            (
+                                "stack_unsupported"
+                                if held_mid_execution
+                                else "execute_stack_collapse"
+                            )
                             if reopen and index == 1
                             else "wait_for_root_checks",
                         )
+                    if held_mid_execution and index == 1:
+                        returned_id = response.json()["result"][
+                            "merge_train_stack_collapse_plan_record_id"
+                        ]
+                        returned = next(
+                            r
+                            for r in store.list_merge_train_stack_collapse_plan_records()
+                            if r.record_id == returned_id
+                        )
+                        self.assertEqual(returned.status, "active")
+                    if active_replacement and index == 1:
+                        self.assertEqual(
+                            response.json()["result"].get(
+                                "merge_train_stack_collapse_plan_record_id"
+                            ),
+                            replacement_record_id,
+                        )
                     if reopen and index == 0:
                         root_visible = True
+                        if active_replacement:
+                            plan = obsolete.plan.model_dump(mode="json")
+                            plan["entries"][1]["head_sha"] = "partial-middle-head"
+                            leaf = plan["entries"][-1]
+                            plan["entries"].append(
+                                {
+                                    **leaf,
+                                    "position": 4,
+                                    "pull_request_number": 14,
+                                    "head_ref": "feature/new-leaf-10",
+                                    "head_sha": "new-leaf-head",
+                                    "base_ref": leaf["head_ref"],
+                                    "base_sha": leaf["head_sha"],
+                                }
+                            )
+                            plan["mutations"] = [
+                                dict(
+                                    child_pull_request_number=child["pull_request_number"],
+                                    parent_pull_request_number=parent["pull_request_number"],
+                                    child_head_sha=child["head_sha"],
+                                    expected_parent_head_sha=parent["head_sha"],
+                                    parent_head_ref=parent["head_ref"],
+                                )
+                                for parent, child in reversed(
+                                    tuple(zip(plan["entries"], plan["entries"][1:]))
+                                )
+                            ]
+                            plan["status"] = "planned"
+                            plan["child_dispositions"] = []
+                            plan["collapse_id"] = build_merge_train_stack_collapse_id(
+                                repository=obsolete.plan.repository,
+                                base_branch="main",
+                                root_pull_request_number=11,
+                                entry_head_shas=tuple(
+                                    entry["head_sha"] for entry in plan["entries"]
+                                ),
+                            )
+                            replacement = build_merge_train_stack_collapse_plan_record(
+                                plan=obsolete.plan.model_validate(plan),
+                                source="test:new-root-stack",
+                                updated_at=obsolete.updated_at,
+                            )
+                            store.write_merge_train_stack_collapse_plan_record(replacement)
+                            replacement_record_id = replacement.record_id
                         before = store.list_merge_train_stack_collapse_plan_records()
             if reopen:
-                self.assertEqual(merges, [12] if mutate else [])
+                self.assertEqual(merges, [12] if mutate and not held_mid_execution else [])
                 if not mutate:
                     self.assertEqual(store.list_merge_train_stack_collapse_plan_records(), before)
                 return
@@ -258,6 +340,24 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                     status="collapsing",
                     reopen=True,
                 )
+
+    async def test_held_child_after_restore_returns_an_active_phase_handle(self) -> None:
+        await self._obsolete_case(
+            reason="root_missing_from_open_snapshot",
+            mutate=True,
+            status="collapsing",
+            reopen=True,
+            held_mid_execution=True,
+        )
+
+    async def test_new_stack_on_returned_root_prevents_old_execution_resuming(self) -> None:
+        await self._obsolete_case(
+            reason="root_missing_from_open_snapshot",
+            mutate=False,
+            status="collapsing",
+            reopen=True,
+            active_replacement=True,
+        )
 
     async def test_obsolete_wait_preserves_current_policy_validation(self) -> None:
         for mutate in (False, True):
