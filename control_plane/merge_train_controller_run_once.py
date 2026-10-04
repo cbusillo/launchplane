@@ -2590,6 +2590,74 @@ def _advance_without_candidate_record(
     retired_records = stack_collapse_store.list_merge_train_stack_collapse_plan_records(
         repository=request.repository, base_branch=request.base_branch, status="superseded"
     )
+    # Old-policy proof cannot be rebound or discarded while its branch effects
+    # remain. Keep it visible, but let disjoint saved work use its own proof.
+    obsolete_records = tuple(
+        record
+        for record in latest_records
+        if record.plan.status in {"planned", "collapsing", "waiting_for_root_checks"}
+        and (
+            record.plan.policy_key != repository_policy.policy_key
+            or record.plan.policy_sha256 != policy_sha256
+        )
+    )
+    latest_history = tuple(
+        progress
+        for records in _group_stack_collapse_records(waiting_records + retired_records).values()
+        if (progress := latest_merge_train_stack_collapse_progress_record(tuple(records)))
+        is not None
+    )
+    retired_obsolete_records = tuple(
+        record
+        for record in latest_history
+        if record.status == "superseded"
+        and "; retired:" in record.source
+        and record.plan.status in {"collapsing", "waiting_for_root_checks"}
+        and any(mutation.status == "mutated" for mutation in record.plan.mutations)
+        and (
+            record.plan.policy_key != repository_policy.policy_key
+            or record.plan.policy_sha256 != policy_sha256
+        )
+    )
+    if retired_obsolete_records:
+        snapshot = snapshot or github_client.read_merge_train_snapshot(
+            repository=request.repository, base_branch=request.base_branch
+        )
+        observed_heads = {pr.number: pr.head_sha for pr in snapshot.pull_requests}
+        obsolete_records += tuple(
+            record
+            for record in retired_obsolete_records
+            if observed_heads.get(record.plan.root_pull_request_number)
+            == _stack_collapse_current_head_shas(record.plan)[record.plan.root_pull_request_number]
+        )
+    obsolete_numbers = {
+        entry.pull_request_number for record in obsolete_records for entry in record.plan.entries
+    }
+    obsolete_refs = {entry.head_ref for record in obsolete_records for entry in record.plan.entries}
+
+    def independent(record: MergeTrainStackCollapsePlanRecord) -> bool:
+        return all(
+            entry.pull_request_number not in obsolete_numbers
+            and entry.head_ref not in obsolete_refs
+            for entry in record.plan.entries
+        )
+
+    def report_obsolete(result: dict[str, object]) -> dict[str, object]:
+        if obsolete_records:
+            result["blocked_stack_collapse_records"] = [
+                {
+                    "record_id": record.record_id,
+                    "root_pull_request_number": record.plan.root_pull_request_number,
+                    "reason_code": "merge_train_stack_collapse_policy_changed",
+                }
+                for record in sorted(obsolete_records, key=lambda record: record.record_id)
+            ]
+        return result
+
+    latest_records = tuple(record for record in latest_records if independent(record))
+    latest_waiting_records = tuple(
+        record for record in latest_waiting_records if independent(record)
+    )
     active_collapse_ids = {record.plan.collapse_id for record in latest_records}
     active_root_numbers = {record.plan.root_pull_request_number for record in latest_records}
     retired_executions = tuple(
@@ -2624,6 +2692,7 @@ def _advance_without_candidate_record(
                 for mutation in record.plan.mutations
                 if mutation.status != "mutated"
             )
+            and independent(record)
         )
     # Resume saved execution before reporting an unrelated root's pending checks.
     # Select progress per collapse first so completed histories cannot revive plans.
@@ -2649,7 +2718,7 @@ def _advance_without_candidate_record(
             if planned_result is not None:
                 if planned_collapse_record.status == "superseded" and not request.mutate:
                     planned_result.pop("merge_train_stack_collapse_plan_record_id", None)
-                return planned_result
+                return report_obsolete(planned_result)
 
     pending_wait_result: dict[str, object] | None = None
     for waiting_collapse_record in sorted(
@@ -2675,9 +2744,23 @@ def _advance_without_candidate_record(
         if waiting_result is None:
             continue
         if waiting_result["controller_action"] != "wait_for_root_checks":
-            return waiting_result
+            return report_obsolete(waiting_result)
         if pending_wait_result is None:
             pending_wait_result = waiting_result
+    if obsolete_records:
+        return report_obsolete(
+            {
+                "repository": request.repository,
+                "base_branch": request.base_branch,
+                "mode": "blocked",
+                "controller_action": "block",
+                "blocking_reason": {
+                    "code": "merge_train_stack_collapse_policy_changed",
+                    "message": "Saved stack collapse proof requires its original policy; "
+                    "current-policy recovery has not been established.",
+                },
+            }
+        )
     if pending_wait_result is not None:
         assert snapshot is not None
         queue_snapshot = _without_held_out_pull_requests(

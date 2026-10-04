@@ -41,6 +41,8 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
         active_replacement: bool = False,
         closed_child: bool = False,
         moved_child: bool = False,
+        retired_policy: bool = False,
+        restore_policy: bool = False,
     ) -> None:
         probes: list[int] = []
         merges: list[int] = []
@@ -61,7 +63,11 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                         "head_ref": "feature/root-10",
                         "head_sha": "unrelated-push"
                         if reason in {"root_moved", "snapshot_lag"}
-                        else ("head-root" if reopen else root.head_sha),
+                        else (
+                            "head-root"
+                            if reopen or (reason == "policy_changed" and status == "collapsing")
+                            else root.head_sha
+                        ),
                     }
                 )
                 return snapshot.model_copy(
@@ -160,7 +166,7 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
         ):
             state_dir = Path(directory) / "state"
-            _seed_merge_train_policy(state_dir)
+            original_policy = _seed_merge_train_policy(state_dir)
             waiting_id = _seed_executed_merge_train_stack_collapse_plan_record(state_dir)
             store = FilesystemRecordStore(state_dir)
             original = next(
@@ -212,13 +218,32 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                     source=obsolete.source,
                     updated_at=obsolete.updated_at,
                 )
-            if reason == "policy_changed":
+            if reason == "policy_changed" and not restore_policy:
                 obsolete = obsolete.model_copy(
                     update={"plan": obsolete.plan.model_copy(update={"policy_sha256": "0" * 64})}
                 )
+            if restore_policy:
+                changed_policy = original_policy.policy.model_dump(mode="json")
+                changed_policy["policies"][0]["blocked_label"] = "test-policy-blocked"
+                store.write_merge_train_policy_record(
+                    original_policy.model_validate(
+                        {
+                            **original_policy.model_dump(mode="json"),
+                            "record_id": f"{original_policy.record_id}-changed",
+                            "policy": changed_policy,
+                            "policy_sha256": "",
+                        }
+                    )
+                )
             if not waiting:
                 older = _other_stack(original, offset=10, status="planned", newer=False)
+                if retired_policy:
+                    older = older.model_copy(update={"status": "superseded"})
                 store.write_merge_train_stack_collapse_plan_record(older)
+            if retired_policy:
+                obsolete = obsolete.model_copy(
+                    update={"status": "superseded", "source": "test; retired:policy_changed:test"}
+                )
             store.write_merge_train_stack_collapse_plan_record(obsolete)
             before = store.list_merge_train_stack_collapse_plan_records()
             app = create_launchplane_fastapi_app(
@@ -242,8 +267,25 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                             "mutate": True if reopen and index == 0 else mutate,
                         },
                     )
-                    if waiting:
-                        self.assertEqual(response.status_code, 400, response.text)
+                    if reason == "policy_changed" and not (restore_policy and index == 1):
+                        self.assertEqual(response.status_code, 202, response.text)
+                        result = response.json()["result"]
+                        self.assertEqual(result["controller_action"], "block")
+                        self.assertEqual(
+                            result["blocking_reason"]["code"],
+                            "merge_train_stack_collapse_policy_changed",
+                        )
+                        self.assertIn(
+                            obsolete.record_id,
+                            [
+                                record["record_id"]
+                                for record in result["blocked_stack_collapse_records"]
+                            ],
+                        )
+                        self.assertEqual(
+                            store.list_merge_train_stack_collapse_plan_records(), before
+                        )
+                        self.assertFalse(store.list_merge_train_batch_candidate_records())
                     else:
                         self.assertEqual(response.status_code, 202, response.text)
                         self.assertEqual(
@@ -275,6 +317,8 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                         )
                     if reopen and index == 0:
                         root_visible = True
+                        if restore_policy:
+                            store.write_merge_train_policy_record(original_policy)
                         if active_replacement:
                             plan = obsolete.plan.model_dump(mode="json")
                             plan["entries"][1]["head_sha"] = "partial-middle-head"
@@ -330,7 +374,7 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                 if not mutate or closed_child or moved_child:
                     self.assertEqual(store.list_merge_train_stack_collapse_plan_records(), before)
                 return
-            if waiting or not mutate or reason == "snapshot_lag":
+            if waiting or not mutate or reason in {"snapshot_lag", "policy_changed"}:
                 self.assertEqual(store.list_merge_train_stack_collapse_plan_records(), before)
             else:
                 active = store.list_merge_train_stack_collapse_plan_records(status="active")
@@ -408,6 +452,24 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
         for mutate in (False, True):
             with self.subTest(mutate=mutate):
                 await self._obsolete_case(reason="policy_changed", mutate=mutate, waiting=True)
+
+    async def test_retired_obsolete_partial_execution_remains_visible_and_unapplied(self) -> None:
+        for mutate in (False, True):
+            with self.subTest(mutate=mutate):
+                await self._obsolete_case(
+                    reason="policy_changed", mutate=mutate, status="collapsing", retired_policy=True
+                )
+
+    async def test_original_policy_restoration_resumes_only_remaining_child(self) -> None:
+        for mutate in (False, True):
+            with self.subTest(mutate=mutate):
+                await self._obsolete_case(
+                    reason="policy_changed",
+                    mutate=mutate,
+                    status="collapsing",
+                    reopen=True,
+                    restore_policy=True,
+                )
 
     def test_record_projection_prioritizes_execution_across_collapses(self) -> None:
         with TemporaryDirectory() as directory:

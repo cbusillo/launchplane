@@ -1040,14 +1040,25 @@ Controller actions have these retry/stop semantics:
   unrelated root push or a root leaving the open snapshot makes that saved
   plan step aside. Contradictory snapshot/ref evidence leaves execution
   recoverable for a later pass. A mutating pass
-  supersedes all of that obsolete execution's active progress, retaining history
+  supersedes all of a moved or missing root's active progress, retaining history
   and a retirement reason; dry runs leave records unchanged. A retired execution
   may resume only when it has no active replacement, its policy is current, and
   its root and visible children return at their checkpointed heads, and every
   child with a pending mutation is present and ready. Latest completed history
   cannot revive older execution. During that same-policy resumption, carried
-  mutations remain checkpointed and are not merged again; this does not qualify
-  recovery after a policy change.
+  mutations remain checkpointed and are not merged again. Obsolete-policy
+  execution remains unapplied and visible through run-once's
+  `blocked_stack_collapse_records`; it is not retired merely because its policy
+  changed. An independently valid saved collapse sharing no PR or branch ref
+  with that stack may proceed, with the obsolete evidence attached to its
+  response. Otherwise run-once reports `block` with
+  `merge_train_stack_collapse_policy_changed` before live discovery can replan
+  carried children. Previously retired obsolete progress is also reported when
+  its checkpointed root returns. Only each collapse's latest progress is used;
+  completed history cannot revive older execution. The existing supported
+  resumption requires the original policy digest to be current again and all
+  current head/readiness checks to pass; it merges only remaining children.
+  Requalifying carried proof under a different policy is not supported.
   A completed stack never revives its older planned progress.
 - `wait_for_root_checks`: The collapsed root PR's required checks are still
   running. Stop and poll later; do not call phase endpoints. When no saved
@@ -1406,6 +1417,9 @@ execution, and saved waits, in that order. It does not read GitHub readiness or
 validate live applicability; run-once makes that decision. A waiting collapse
 still requires the exact current policy digest. A policy change during that
 wait is refused rather than admitting the old collapse under a new policy.
-The phases differ on policy change: obsolete execution steps aside, while a
-saved wait is refused. Safe recovery across that policy change remains a
-separate investigation.
+Run-once reports obsolete saved waits and execution as blocked records rather
+than aborting the whole pass with HTTP 400. Disjoint current-policy saved
+execution or ready waits can proceed with that blocking evidence attached.
+Pending waits and fresh live discovery do not outrank unresolved obsolete
+proof. No old-policy record authorizes a merge under a different policy, and
+no obsolete partial execution is silently retired into fresh replanning.

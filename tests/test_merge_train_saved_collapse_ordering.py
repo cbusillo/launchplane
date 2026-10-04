@@ -77,6 +77,7 @@ class SavedCollapseOrderingTests(unittest.IsolatedAsyncioTestCase):
         other_checks: str = "pass",
         root_mergeable: str = "mergeable",
         expected_action: str | None = None,
+        shared_ref: bool = False,
     ) -> None:
         class Reader(_FakeCollapsedRootStackedMergeTrainSnapshotReader):
             def read_merge_train_snapshot(
@@ -99,7 +100,7 @@ class SavedCollapseOrderingTests(unittest.IsolatedAsyncioTestCase):
                 other_child = child.model_copy(
                     update={
                         "number": 12,
-                        "head_ref": "feature/child-10",
+                        "head_ref": root.head_ref if shared_ref else "feature/child-10",
                         "base_ref": other_root.head_ref,
                         "required_checks_status": "pass",
                     }
@@ -160,6 +161,14 @@ class SavedCollapseOrderingTests(unittest.IsolatedAsyncioTestCase):
                 if record.record_id == waiting_id
             )
             other = _other_stack(waiting, offset=10, status=other_status, newer=newer)
+            if shared_ref:
+                plan = other.plan.model_dump(mode="json")
+                plan["entries"][1]["head_ref"] = waiting.plan.root_head_ref
+                other = build_merge_train_stack_collapse_plan_record(
+                    plan=other.plan.model_validate(plan),
+                    source=other.source,
+                    updated_at=other.updated_at,
+                )
             if obsolete_reason == "policy_changed":
                 other = other.model_copy(
                     update={"plan": other.plan.model_copy(update={"policy_sha256": "0" * 64})}
@@ -199,7 +208,18 @@ class SavedCollapseOrderingTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(result["controller_action"], expected_action)
             if expected_action == "block":
-                self.assertEqual(result["dry_run_result"]["selected_pr"]["number"], 1)
+                if obsolete_reason == "policy_changed":
+                    self.assertEqual(
+                        result["blocking_reason"]["code"],
+                        "merge_train_stack_collapse_policy_changed",
+                    )
+                else:
+                    self.assertEqual(result["dry_run_result"]["selected_pr"]["number"], 1)
+            if obsolete_reason == "policy_changed":
+                self.assertEqual(
+                    result["blocked_stack_collapse_records"][0]["record_id"], other.record_id
+                )
+                self.assertIn(other, store.list_merge_train_stack_collapse_plan_records())
             selected = waiting if obsolete_reason else other
             if not mutate and expected_action != "block":
                 self.assertEqual(
@@ -262,6 +282,31 @@ class SavedCollapseOrderingTests(unittest.IsolatedAsyncioTestCase):
                         mutate=mutate,
                         obsolete_reason=reason,
                     )
+
+    async def test_obsolete_policy_wait_does_not_mask_independent_ready_wait(self) -> None:
+        for newer in (False, True):
+            for mutate in (False, True):
+                with self.subTest(newer=newer, mutate=mutate):
+                    await self._run_case(
+                        other_status="waiting_for_root_checks",
+                        newer=newer,
+                        checks="pass",
+                        mutate=mutate,
+                        obsolete_reason="policy_changed",
+                    )
+
+    async def test_current_policy_wait_sharing_obsolete_stack_ref_stays_blocked(self) -> None:
+        for mutate in (False, True):
+            with self.subTest(mutate=mutate):
+                await self._run_case(
+                    other_status="waiting_for_root_checks",
+                    newer=True,
+                    checks="pass",
+                    mutate=mutate,
+                    obsolete_reason="policy_changed",
+                    shared_ref=True,
+                    expected_action="block",
+                )
 
     async def test_pending_saved_wait_does_not_mask_blocked_queue_head(self) -> None:
         for checks, mergeable in (("fail", "mergeable"), ("pass", "conflicting")):
