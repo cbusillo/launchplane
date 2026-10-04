@@ -694,10 +694,10 @@ not the named product's alone, and a context- or global-scoped secret written
 through an instance request: those would change what another product or
 another lane, such as production, resolves. Odoo addon settings, integration
 allowances, and testing-hold writes carry the caller's required product/context
-owner into storage. Storage re-checks exclusive ownership under the
+ownership into storage. Storage re-checks exclusive ownership under the
 product-authority-bundle lock in the same transaction as the write, so an admin
 profile change during an apply cannot redirect that write to another product.
-A changed owner is refused with `local_operator_lane_scope_required` (403).
+A changed context assignment is refused with `local_operator_lane_scope_required` (403).
 Backup authority applies from a
 `local_operators` caller likewise refuse a submitted target revision the
 submitted policy doesn't use, or one another product's active backup policy
