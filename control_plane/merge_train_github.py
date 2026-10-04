@@ -3498,6 +3498,8 @@ def _required_branch_checks(
             path=f"/repos/{repository_path}/branches/{encoded_base_branch}",
         )
     except MergeTrainGitHubError as error:
+        if error.rate_limited:
+            raise
         if error.status_code in {403, 404}:
             raise MergeTrainGitHubError(
                 "Merge train candidate validation requires a readable protected-branch "
@@ -3778,6 +3780,7 @@ def _github_request_route_template(path: str) -> str:
         "/repos/{owner}/{repo}/issues/{number}/comments",
         "/repos/{owner}/{repo}/issues/{number}/labels",
         "/repos/{owner}/{repo}/issues/{number}/timeline",
+        "/repos/{owner}/{repo}/issues/{number}/events",
         "/repos/{owner}/{repo}/branches/{branch}",
         "/repos/{owner}/{repo}/rules/branches/{branch}",
         "/repos/{owner}/{repo}/collaborators/{username}/permission",

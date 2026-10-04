@@ -13,6 +13,7 @@ from control_plane.merge_train_github import (
     MergeTrainGitHubError,
     MergeTrainGitHubMergeRejectedError,
     UrllibMergeTrainGitHubTransport,
+    _required_branch_checks,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 
@@ -39,6 +40,32 @@ def _failed_request(
 
 
 class MergeTrainGitHubFailureTests(unittest.TestCase):
+    def test_protected_branch_read_preserves_rate_limit_classification(self) -> None:
+        for headers, classification in (
+            (
+                {"Retry-After": "60", "X-RateLimit-Reset": "1791090000"},
+                "retryable:github_rate_limited",
+            ),
+            ({}, "operator_required:github_request_rejected"),
+        ):
+            with self.subTest(headers=headers):
+                original = _failed_request(
+                    403, headers, path="/repos/private-owner/private-repo/branches/main"
+                )
+                transport = UrllibMergeTrainGitHubTransport(token="secret-token")
+                with patch.object(transport, "request", side_effect=original):
+                    with self.assertRaises(MergeTrainGitHubError) as caught:
+                        _required_branch_checks(
+                            transport=transport,
+                            repository_path="private-owner/private-repo",
+                            base_branch="main",
+                        )
+                detail = _controller_exception_reconciliation_detail(caught.exception)
+                self.assertTrue(detail.startswith(classification + ";"), detail)
+                self.assertIn("GET /repos/{owner}/{repo}/branches/{branch} HTTP 403", detail)
+                if "X-RateLimit-Reset" in headers:
+                    self.assertIn("reset_at:1791090000", detail)
+
     def test_refusal_and_rate_limit_classification_preserves_safe_request(self) -> None:
         cases: tuple[tuple[int, dict[str, str], str], ...] = (
             (403, {}, "operator_required:github_request_rejected"),
@@ -103,6 +130,11 @@ class MergeTrainGitHubFailureTests(unittest.TestCase):
             ),
             ("POST", "/graphql?token=secret-query", "/graphql"),
             ("GET", "/secret-unknown-route?token=secret-query", "/{unknown_route}"),
+            (
+                "GET",
+                "/repos/secret-owner/secret-repo/issues/7/events?page=secret-query",
+                "/repos/{owner}/{repo}/issues/{number}/events",
+            ),
         )
         for method, path, template in cases:
             with self.subTest(path=path):
