@@ -1055,16 +1055,23 @@ Controller actions have these retry/stop semantics:
   cannot revive older execution. During that same-policy resumption, carried
   mutations remain checkpointed and are not merged again. Obsolete-policy
   execution with checkpointed branch merges and an unchanged open root remains
-  unapplied and visible through run-once's
-  `blocked_stack_collapse_records`; it is not retired merely because its policy
+  unapplied and visible through run-once's `details`, with code
+  `merge_train_stack_collapse_policy_changed`, a representative `record_id`, and
+  per-root `entries`; it is not retired merely because its policy
   changed. Plans with no checkpointed branch merges, and moved or missing
   roots, retain their existing retirement/step-aside path. An independently
   valid saved collapse sharing no PR or branch ref
   with that stack may proceed, with the obsolete evidence attached to its
-  response. Otherwise run-once reports `block` with
-  `merge_train_stack_collapse_policy_changed` before live discovery can replan
-  carried children. Previously retired obsolete progress is also reported when
-  its checkpointed root returns. Only each collapse's latest progress is used;
+  response. Live discovery excludes the blocked stack's PR numbers and branch
+  refs, including dependent base refs, so fresh unrelated current-policy work
+  can also proceed without replanning carried children. Independent pending
+  waits retain their normal behavior. If nothing else can be selected, run-once
+  reports `block` with `merge_train_stack_collapse_policy_changed`.
+  The maintained helper preserves the representative code/record and entry
+  count through its existing details projection; the HTTP response contains
+  the full per-root entries. Previously retired obsolete progress is also
+  reported when its checkpointed root returns, unless a newer active collapse
+  already owns that root. Only each collapse's latest progress is used;
   completed history cannot revive older execution. The existing supported
   resumption requires the original policy digest to be current again and all
   current head/readiness checks to pass; it merges only remaining children.
@@ -1432,9 +1439,9 @@ execution, and saved waits, in that order. It does not read GitHub readiness or
 validate live applicability; run-once makes that decision. A waiting collapse
 still requires the exact current policy digest. A policy change during that
 wait is refused rather than admitting the old collapse under a new policy.
-Run-once reports obsolete saved waits and execution as blocked records rather
+Run-once reports obsolete saved waits and execution in its details rather
 than aborting the whole pass with HTTP 400. Disjoint current-policy saved
-execution or ready waits can proceed with that blocking evidence attached.
-Pending waits and fresh live discovery do not outrank unresolved obsolete
-proof. No old-policy record authorizes a merge under a different policy, and
+execution, ready waits and fresh live work can proceed with that blocking
+evidence attached. The affected PRs and refs remain excluded from discovery.
+No old-policy record authorizes a merge under a different policy, and
 no obsolete partial execution is silently retired into fresh replanning.

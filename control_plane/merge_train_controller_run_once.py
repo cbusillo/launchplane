@@ -2628,6 +2628,12 @@ def _advance_without_candidate_record(
         and "; retired:" in record.source
         and record.plan.status in {"collapsing", "waiting_for_root_checks"}
         and any(mutation.status == "mutated" for mutation in record.plan.mutations)
+        and not any(
+            active.plan.root_pull_request_number == record.plan.root_pull_request_number
+            and active.plan.collapse_id != record.plan.collapse_id
+            and (active.updated_at, active.record_id) > (record.updated_at, record.record_id)
+            for active in latest_records
+        )
         and (
             record.plan.policy_key != repository_policy.policy_key
             or record.plan.policy_sha256 != policy_sha256
@@ -2658,14 +2664,17 @@ def _advance_without_candidate_record(
 
     def report_obsolete(result: dict[str, object]) -> dict[str, object]:
         if obsolete_records:
-            result["blocked_stack_collapse_records"] = [
-                {
-                    "record_id": record.record_id,
-                    "root_pull_request_number": record.plan.root_pull_request_number,
-                    "reason_code": "merge_train_stack_collapse_policy_changed",
-                }
-                for record in sorted(obsolete_records, key=lambda record: record.record_id)
-            ]
+            result["details"] = {
+                "code": "merge_train_stack_collapse_policy_changed",
+                "record_id": obsolete_records[0].record_id,
+                "entries": [
+                    {
+                        "record_id": record.record_id,
+                        "root_pull_request_number": record.plan.root_pull_request_number,
+                    }
+                    for record in sorted(obsolete_records, key=lambda record: record.record_id)
+                ],
+            }
         return result
 
     latest_records = tuple(record for record in latest_records if independent(record))
@@ -2762,17 +2771,16 @@ def _advance_without_candidate_record(
         if pending_wait_result is None:
             pending_wait_result = waiting_result
     if obsolete_records:
-        return report_obsolete(
-            {
-                "repository": request.repository,
-                "base_branch": request.base_branch,
-                "mode": "blocked",
-                "controller_action": "block",
-                "blocking_reason": {
-                    "code": "merge_train_stack_collapse_policy_changed",
-                    "message": "Saved stack collapse proof requires its original policy; "
-                    "current-policy recovery has not been established.",
-                },
+        assert snapshot is not None
+        snapshot = snapshot.model_copy(
+            update={
+                "pull_requests": tuple(
+                    pr
+                    for pr in snapshot.pull_requests
+                    if pr.number not in obsolete_numbers
+                    and pr.head_ref not in obsolete_refs
+                    and pr.base_ref not in obsolete_refs
+                )
             }
         )
     if pending_wait_result is not None:
@@ -2790,16 +2798,18 @@ def _advance_without_candidate_record(
         )
         # Pending saved checks must not hide the ordinary queue's blocking reason.
         if queue_result.intended_next_action == "block":
-            return {
-                "repository": request.repository,
-                "base_branch": request.base_branch,
-                "mode": "dry-run",
-                "controller_action": "block",
-                "dry_run_result": queue_result.model_dump(mode="json"),
-            }
-        return pending_wait_result
+            return report_obsolete(
+                {
+                    "repository": request.repository,
+                    "base_branch": request.base_branch,
+                    "mode": "dry-run",
+                    "controller_action": "block",
+                    "dry_run_result": queue_result.model_dump(mode="json"),
+                }
+            )
+        return report_obsolete(pending_wait_result)
 
-    return _advance_from_live_snapshot(
+    live_result = _advance_from_live_snapshot(
         github_client=github_client,
         request=request,
         policy=policy,
@@ -2813,6 +2823,19 @@ def _advance_without_candidate_record(
         snapshot=snapshot,
         held_out=held_out,
     )
+    if obsolete_records and live_result["controller_action"] == "idle":
+        live_result = {
+            "repository": request.repository,
+            "base_branch": request.base_branch,
+            "mode": "blocked",
+            "controller_action": "block",
+            "blocking_reason": {
+                "code": "merge_train_stack_collapse_policy_changed",
+                "message": "This saved stack requires its original policy; unrelated work "
+                "can proceed while its proof remains blocked.",
+            },
+        }
+    return report_obsolete(live_result)
 
 
 def _advance_waiting_stack_collapse_record(

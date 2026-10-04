@@ -238,9 +238,7 @@ class SavedCollapseOrderingTests(unittest.IsolatedAsyncioTestCase):
                         result["dry_run_result"]["selected_pr"]["mergeable"], root_mergeable
                     )
             if obsolete_reason == "policy_changed" and other_status == "waiting_for_root_checks":
-                self.assertEqual(
-                    result["blocked_stack_collapse_records"][0]["record_id"], other.record_id
-                )
+                self.assertEqual(result["details"]["entries"][0]["record_id"], other.record_id)
                 self.assertIn(other, store.list_merge_train_stack_collapse_plan_records())
             selected = waiting if obsolete_reason else other
             if not mutate and expected_action != "block":
