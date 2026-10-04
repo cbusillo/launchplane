@@ -12,7 +12,7 @@ from control_plane.contracts.product_reconcile import (
     ProductReconcileTarget,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.product_reconcile_read import product_reconcile_request_view
+from control_plane.product_reconcile_read import _MAX_TEXT_LENGTH, product_reconcile_request_view
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _asgi_get, _product_profile_read_policy
 from tests.support.auth import StubVerifier, identity
@@ -166,11 +166,11 @@ class ProductReconcileRequestViewTests(unittest.TestCase):
 
         view = product_reconcile_request_view(record)
 
-        self.assertGreater(len(summary), 400)
+        self.assertGreater(len(summary), _MAX_TEXT_LENGTH)
         self.assertEqual(view.last_plan["last_failed_error_summary"], summary)
         self.assertIn(_OPERATION_ID, view.last_error)
         self.assertNotIn(_SECRETS[1], view.last_error)
-        self.assertLessEqual(len(view.last_error), 400)
+        self.assertLessEqual(len(view.last_error), _MAX_TEXT_LENGTH)
 
 
 if __name__ == "__main__":

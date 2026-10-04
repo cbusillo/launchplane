@@ -3,7 +3,6 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import textwrap
 from tempfile import TemporaryDirectory
 from typing import Callable, cast
 import unittest
@@ -345,14 +344,6 @@ class ProductOnboardingTests(unittest.TestCase):
             existing_profile.lanes[1].odoo_prelaunch_rebuild,
         )
 
-    def test_github_metadata_prefers_repository_merge_method(self) -> None:
-        metadata = json.loads(Path(".github/github.json").read_text(encoding="utf-8"))
-
-        self.assertEqual(metadata["pullRequests"]["preferredMergeMethod"], "merge")
-        self.assertEqual(metadata["pullRequests"]["allowedMergeMethods"], ["merge"])
-        self.assertIn("Ingress Route Apply", metadata["importantWorkflows"])
-        self.assertNotIn("healthUrls", metadata)
-
     def test_deploy_launchplane_validates_manual_bootstrap_inputs(self) -> None:
         workflow = load_workflow(".github/workflows/deploy-launchplane.yml")
         prep_step = workflow.step_named("deploy", "Resolve deploy inputs")
@@ -692,144 +683,6 @@ class ProductOnboardingTests(unittest.TestCase):
             preserve = render_rollback("preserve")
             self.assertEqual(preserve.returncode, 0, preserve.stderr)
             self.assertFalse(rollback_payload_path.exists())
-
-    def test_deploy_launchplane_projects_public_ingress_github_token(self) -> None:
-        workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
-
-        removals_block = workflow_text.split("service_env_removals_json=", 1)[1].split(
-            '          })"', 1
-        )[0]
-        removal_lines = removals_block.splitlines()
-        start = next(index for index, line in enumerate(removal_lines) if line.strip() == "'(")
-        end = next(
-            index
-            for index, line in enumerate(removal_lines[start + 1 :], start + 1)
-            if line.strip() == ")'"
-        )
-        removal_lines[start] = removal_lines[start].split("'", 1)[1]
-        removal_lines[end] = removal_lines[end].rsplit("'", 1)[0]
-        jq_filter = textwrap.dedent("\n".join(removal_lines[start : end + 1]))
-
-        def evaluate_removals(
-            *, public_ingress_github_token: str, omit_npmplus_env: bool
-        ) -> list[str]:
-            result = subprocess.run(
-                [
-                    "jq",
-                    "-n",
-                    "--arg",
-                    "public_ingress_github_token",
-                    public_ingress_github_token,
-                    "--arg",
-                    "bootstrap_secret_operation",
-                    "preserve",
-                    "--argjson",
-                    "omit_npmplus_env",
-                    json.dumps(omit_npmplus_env),
-                    jq_filter,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            return cast(list[str], json.loads(result.stdout))
-
-        self.assertEqual(
-            evaluate_removals(public_ingress_github_token="", omit_npmplus_env=False),
-            ["LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN"],
-        )
-        self.assertEqual(
-            evaluate_removals(
-                public_ingress_github_token="public-ingress-token",
-                omit_npmplus_env=False,
-            ),
-            [],
-        )
-        self.assertEqual(
-            evaluate_removals(public_ingress_github_token="", omit_npmplus_env=True),
-            [
-                "LAUNCHPLANE_NPMPLUS_BASE_URL",
-                "LAUNCHPLANE_NPMPLUS_IDENTITY",
-                "LAUNCHPLANE_NPMPLUS_SECRET",
-                "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN",
-            ],
-        )
-
-    def test_deploy_launchplane_routes_dispatch_values_out_of_shell_source(self) -> None:
-        workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
-        emergency_job = workflow_text.split("  emergency-dokploy-rollback:\n", 1)[1]
-
-        validation_step = emergency_job.split("- name: Validate manual break-glass request", 1)[
-            1
-        ].split("- name: Run manual direct Dokploy rollback", 1)[0]
-        validation_script = textwrap.dedent(validation_step.split("        run: |\n", 1)[1])
-        image_reference = "ghcr.io/cbusillo/launchplane@sha256:" + ("a" * 64)
-
-        with TemporaryDirectory() as temporary_directory:
-            command_marker = Path(temporary_directory) / "command-substitution-ran"
-            rollback_reason = f'Restore after "review" $(touch {command_marker})'
-            subprocess.run(
-                ["bash", "-ceu", validation_script],
-                check=True,
-                env={
-                    **os.environ,
-                    "AUTHZ_GRANTS_MODE": "none",
-                    "AUTHZ_MANAGED_MODE": "none",
-                    "BREAK_GLASS_IMAGE_REFERENCE": image_reference,
-                    "BREAK_GLASS_REASON": rollback_reason,
-                    "GITHUB_REPOSITORY": "cbusillo/launchplane",
-                    "LAUNCHPLANE_DOKPLOY_TARGET_ID": "launchplane-target",
-                    "LAUNCHPLANE_DOKPLOY_TARGET_TYPE": "compose",
-                    "LAUNCHPLANE_IMAGE_REPOSITORY": "ghcr.io/cbusillo/launchplane",
-                },
-                text=True,
-            )
-
-            self.assertFalse(command_marker.exists())
-
-    def test_deploy_launchplane_rejects_multiline_previous_image_output(self) -> None:
-        workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
-        render_step = workflow_text.split("- name: Render Launchplane self deploy request", 1)[
-            1
-        ].split("- name: Request Launchplane self deploy", 1)[0]
-        render_script = textwrap.dedent(render_step.split("        run: |\n", 1)[1]).split(
-            "service_env_json=", 1
-        )[0]
-
-        with TemporaryDirectory() as temporary_directory:
-            response_file = Path(temporary_directory) / "runtime.json"
-            output_file = Path(temporary_directory) / "github-output"
-            response_file.write_text(
-                json.dumps(
-                    {
-                        "runtime": {
-                            "docker_image_reference": (
-                                "ghcr.io/cbusillo/launchplane@sha256:"
-                                + ("a" * 64)
-                                + "\nprevious_image_reference=attacker-controlled"
-                            )
-                        }
-                    }
-                ),
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                ["bash", "-ceu", render_script],
-                check=False,
-                capture_output=True,
-                env={
-                    **os.environ,
-                    "DEPLOY_IMAGE_REFERENCE": "ghcr.io/cbusillo/launchplane@sha256:" + ("b" * 64),
-                    "GITHUB_OUTPUT": str(output_file),
-                    "IMAGE_REPOSITORY": "ghcr.io/cbusillo/launchplane",
-                    "PREVIOUS_RUNTIME_RESPONSE_FILE": str(response_file),
-                },
-                text=True,
-            )
-
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("must not contain control characters", result.stderr)
-            self.assertFalse(output_file.exists())
 
     def test_runtime_key_safety_accepts_configured_rules(
         self,

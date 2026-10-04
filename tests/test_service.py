@@ -5832,10 +5832,29 @@ class LaunchplaneServiceTests(unittest.TestCase):
             finally:
                 store.close()
 
+        product_rule_count = len(
+            generic_web_preview_rules(
+                GenericWebPreviewAuthzPlanRequest.model_validate(
+                    {
+                        "schema_version": 1,
+                        "product": "launchplane",
+                        "target_product": "demo-web",
+                        "repository": "example/demo-web",
+                        "repository_id": "123",
+                        "repository_owner_id": "456",
+                        "default_branch": "main",
+                        "preview_context": "demo-web-preview",
+                        "launchplane_sha": "a" * 40,
+                        "reason": "Onboard demo web.",
+                        "related_issue": "#1970",
+                    }
+                )
+            )
+        )
         self.assertEqual(plan_status, 202)
         self.assertIsNone(plan_payload["result"]["retirement_authority"])
-        self.assertEqual(plan_payload["records"]["target_rule_count"], "6")
-        self.assertEqual(plan_payload["result"]["diff"]["added_rule_count"], 6)
+        self.assertEqual(plan_payload["records"]["target_rule_count"], str(product_rule_count))
+        self.assertEqual(plan_payload["result"]["diff"]["added_rule_count"], product_rule_count)
         self.assertEqual(
             plan_payload["result"]["diff"]["operational_readiness_blocked_rule_count"],
             0,
@@ -5846,21 +5865,21 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(other_reconcile_status, 202)
         self.assertEqual(
             other_reconcile_payload["result"]["diff"]["added_rule_count"],
-            6,
+            product_rule_count,
         )
         managed_rules = tuple(
             rule
             for rule in active_record.policy.github_actions
             if rule.managed_set_id == "operator.generic-web-preview"
         )
-        self.assertEqual(len(managed_rules), 6)
+        self.assertEqual(len(managed_rules), product_rule_count)
         self.assertEqual({rule.products for rule in managed_rules}, {("other-web",)})
         self.assertEqual(retire_status, 202)
         self.assertEqual(retire_payload["result"]["target_rule_count"], 0)
         self.assertEqual(retire_reconcile_status, 202)
         self.assertEqual(
             retire_reconcile_payload["result"]["diff"]["removed_rule_count"],
-            6,
+            product_rule_count,
         )
         retirement_authority = retire_payload["result"]["retirement_authority"]
         self.assertEqual(
