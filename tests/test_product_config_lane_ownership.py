@@ -68,7 +68,7 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 cls._apps[product] = create_launchplane_fastapi_app(
                     verifier=_StubVerifier(_identity()),
                     authz_policy=policy,
-                    record_store_factory=cls._record_store.get,
+                    record_store_factory=lambda: cls._record_store.get(),
                 )
             yield cls._apps[product]
         finally:
@@ -231,9 +231,9 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
 
             def change_then_write(bundle: ProductAuthorityBundle) -> None:
                 if add_foreign_claim_on_commit:
-                    other = store.read_product_profile_record("other-site")
+                    foreign_profile = store.read_product_profile_record("other-site")
                     store.write_product_profile_record(
-                        other.model_copy(
+                        foreign_profile.model_copy(
                             update={
                                 "lanes": (
                                     profile.lanes[0].model_copy(
