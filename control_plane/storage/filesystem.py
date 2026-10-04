@@ -3826,6 +3826,13 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
+    def create_product_retirement_secret_audit_event(self, event: SecretAuditEvent) -> Path:
+        if not self._create_model_if_absent(
+            "launchplane_secret_audit_events", event.event_id, event
+        ):
+            raise ValueError("Product retirement secret audit events are append-only.")
+        return self._record_path("launchplane_secret_audit_events", event.event_id)
+
     def write_secret_audit_event(self, event: SecretAuditEvent) -> Path:
         return self._write_model("launchplane_secret_audit_events", event.event_id, event)
 
