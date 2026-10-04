@@ -96,6 +96,7 @@ class IntegrationAllowancesStore(Protocol):
         *,
         expected_record: DokployTargetRecord,
         replacement_record: DokployTargetRecord,
+        required_context_owner: tuple[str, str] | None = None,
     ) -> DokployTargetRecord: ...
 
 
@@ -395,6 +396,7 @@ def apply_integration_allowances_plan(
     record_store: IntegrationAllowancesStore,
     request: IntegrationAllowancesApplyRequest,
     actor: str,
+    required_context_owner: tuple[str, str] | None = None,
 ) -> IntegrationAllowancesPlan:
     """Re-plan against the current record, require the reviewed digest, write, read back."""
 
@@ -433,6 +435,11 @@ def apply_integration_allowances_plan(
                         "updated_at": utc_now_timestamp(),
                         "source_label": INTEGRATION_ALLOWANCES_SOURCE_LABEL,
                     }
+                ),
+                **(
+                    {"required_context_owner": required_context_owner}
+                    if required_context_owner is not None
+                    else {}
                 ),
             )
         except DokployTargetRecordChanged as error:
