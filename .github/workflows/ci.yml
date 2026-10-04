@@ -7,6 +7,8 @@ name: CI
       - main
       - "launchplane/train/**"
   pull_request:
+  schedule:
+    - cron: "17 9 * * *"
 
 permissions:
   contents: read
@@ -776,7 +778,8 @@ jobs:
       - postgres_integration
     if: >-
       always() &&
-      (github.event_name == 'pull_request' || github.event_name == 'push')
+      (github.event_name == 'pull_request' || github.event_name == 'push' ||
+      github.event_name == 'schedule')
     permissions:
       actions: read
       contents: read
@@ -798,6 +801,26 @@ jobs:
             echo "::warning title=CI time budget exceeded::${message} See docs/style/testing.md."
           else
             echo "${message}"
+          fi
+
+      - name: Report scheduled main CI
+        if: always() && github.event_name == 'schedule'
+        env:
+          CI_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          {
+            echo '## Scheduled main CI'
+            echo
+            echo "Commit: ${GITHUB_SHA}"
+            echo
+            echo '| Job | Result |'
+            echo '| --- | --- |'
+            jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"' <<<"${CI_RESULTS}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if jq -e 'any(.[]; .result == "failure" or .result == "cancelled")' \
+            <<<"${CI_RESULTS}" >/dev/null; then
+            echo '::warning title=Scheduled main CI failed::Review this run for time-driven dependency, image or test failures.'
           fi
 
       - name: Require successful CI path

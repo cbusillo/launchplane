@@ -1,4 +1,5 @@
-"""Bounded, reviewed changes to a product's production-use classification."""
+"""Bounded, reviewed changes to a product's production-use classification, and to
+whether its Client's release acceptance starts the release."""
 
 from __future__ import annotations
 
@@ -8,7 +9,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ReleaseOnAcceptance,
+)
 
 ProductionUse = Literal["unknown", "prelaunch", "live"]
 ProductionUseMode = Literal["dry-run", "apply"]
@@ -25,6 +29,8 @@ class ProductProductionUseApplyRequest(BaseModel):
     schema_version: Literal[1] = 1
     mode: ProductionUseMode = "dry-run"
     production_use: ProductionUse
+    # Omitted: unchanged. Only an Odoo product's acceptance starts a release.
+    release_on_acceptance: ReleaseOnAcceptance | None = None
     reviewed_plan_sha256: str = ""
     reason: str
 
@@ -51,6 +57,8 @@ class ProductProductionUsePlan(BaseModel):
     product: str
     production_use_before: ProductionUse
     production_use_after: ProductionUse
+    release_on_acceptance_before: ReleaseOnAcceptance = "held"
+    release_on_acceptance_after: ReleaseOnAcceptance = "held"
     changed: bool
     applied: bool = False
     reason: str
@@ -69,6 +77,9 @@ def build_product_production_use_plan(
         "reason": request.reason,
         "source": PRODUCT_PRODUCTION_USE_SOURCE,
     }
+    if request.release_on_acceptance is not None:
+        evidence["release_on_acceptance"] = request.release_on_acceptance
+    release_on_acceptance_after = request.release_on_acceptance or profile.release_on_acceptance
     digest = hashlib.sha256(
         json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -79,7 +90,10 @@ def build_product_production_use_plan(
         product=profile.product,
         production_use_before=profile.production_use,
         production_use_after=request.production_use,
-        changed=profile.production_use != request.production_use,
+        release_on_acceptance_before=profile.release_on_acceptance,
+        release_on_acceptance_after=release_on_acceptance_after,
+        changed=profile.production_use != request.production_use
+        or profile.release_on_acceptance != release_on_acceptance_after,
         reason=request.reason,
         profile_updated_at_before=profile.updated_at,
         plan_sha256=digest,
@@ -87,11 +101,16 @@ def build_product_production_use_plan(
 
 
 def updated_product_production_use_profile(
-    *, profile: LaunchplaneProductProfileRecord, production_use: ProductionUse, updated_at: str
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    production_use: ProductionUse,
+    release_on_acceptance: ReleaseOnAcceptance,
+    updated_at: str,
 ) -> LaunchplaneProductProfileRecord:
     updated = profile.model_copy(
         update={
             "production_use": production_use,
+            "release_on_acceptance": release_on_acceptance,
             "updated_at": updated_at,
             "source": PRODUCT_PRODUCTION_USE_SOURCE,
         }

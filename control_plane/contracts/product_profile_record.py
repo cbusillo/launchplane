@@ -532,6 +532,9 @@ class ProductOwnerProfile(BaseModel):
         return bool(self.github_id)
 
 
+ReleaseOnAcceptance = Literal["held", "promote", "promote_with_rollback_drill"]
+
+
 class LaunchplaneProductProfileRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -539,6 +542,13 @@ class LaunchplaneProductProfileRecord(BaseModel):
     lifecycle_state: ProductLifecycleState = "active"
     # Unknown existing records require review; only explicit prelaunch records are exempt.
     production_use: Literal["unknown", "prelaunch", "live"] = "unknown"
+    # Whether the Client's release acceptance starts the gated promotion. Held by
+    # default; an admin switches a product on. See docs/release-review.md. A held
+    # product serializes exactly as before the switch existed, so digests over
+    # profiles do not change.
+    release_on_acceptance: ReleaseOnAcceptance = Field(
+        default="held", exclude_if=lambda value: value == "held"
+    )
     product: str
     display_name: str
     repository: str

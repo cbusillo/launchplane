@@ -29,6 +29,137 @@ from tests.support.auth import _StubVerifier
 
 
 class CollapseReconciliationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_newer_completed_stack_does_not_hide_older_waiting_root(self) -> None:
+        for checks in ("pass", "pending"):
+            for mutate in (False, True):
+                with self.subTest(checks=checks, mutate=mutate):
+
+                    class Reader(_FakeCollapsedRootStackedMergeTrainSnapshotReader):
+                        def read_merge_train_snapshot(
+                            self, *, repository: str, base_branch: str
+                        ) -> MergeTrainDryRunSnapshot:
+                            snapshot = super().read_merge_train_snapshot(
+                                repository=repository, base_branch=base_branch
+                            )
+                            root, child = snapshot.pull_requests
+                            return snapshot.model_copy(
+                                update={
+                                    "pull_requests": (
+                                        root.model_copy(update={"required_checks_status": checks}),
+                                        child.model_copy(update={"required_checks_status": "pass"}),
+                                    )
+                                }
+                            )
+
+                    class Client(_FakeMergeTrainGitHubClient):
+                        def merge_stack_child_into_parent(self, **kwargs: Any) -> str:
+                            raise AssertionError("saved child must not be merged again")
+
+                    with (
+                        TemporaryDirectory() as directory,
+                        patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+                    ):
+                        state_dir = Path(directory) / "state"
+                        _seed_merge_train_policy(state_dir)
+                        waiting_id = _seed_executed_merge_train_stack_collapse_plan_record(
+                            state_dir
+                        )
+                        store = FilesystemRecordStore(state_dir)
+                        waiting = next(
+                            record
+                            for record in store.list_merge_train_stack_collapse_plan_records()
+                            if record.record_id == waiting_id
+                        )
+                        completed_plan = waiting.plan.model_copy(
+                            update={
+                                "collapse_id": "newer-completed-collapse",
+                                "root_pull_request_number": 11,
+                                "root_head_ref": "feature/other",
+                                "status": "ready_for_train",
+                                "entries": tuple(
+                                    entry.model_copy(
+                                        update={
+                                            "pull_request_number": entry.pull_request_number + 10
+                                        }
+                                    )
+                                    for entry in waiting.plan.entries
+                                ),
+                                "mutations": tuple(
+                                    mutation.model_copy(
+                                        update={
+                                            "child_pull_request_number": 12,
+                                            "parent_pull_request_number": 11,
+                                            "merge_commit_sha": "collapsed-other",
+                                        }
+                                    )
+                                    for mutation in waiting.plan.mutations
+                                ),
+                                "child_dispositions": tuple(
+                                    disposition.model_copy(
+                                        update={"pull_request_number": 12, "status": "closed"}
+                                    )
+                                    for disposition in waiting.plan.child_dispositions
+                                ),
+                                "created_at": "2026-05-14T21:00:00Z",
+                                "updated_at": "2026-05-14T21:02:00Z",
+                            }
+                        )
+                        store.write_merge_train_stack_collapse_plan_record(
+                            build_merge_train_stack_collapse_plan_record(
+                                plan=completed_plan,
+                                source="test:completed-other-stack",
+                                updated_at=completed_plan.updated_at,
+                            )
+                        )
+                        before = store.list_merge_train_stack_collapse_plan_records()
+                        app = create_launchplane_fastapi_app(
+                            verifier=_StubVerifier(_merge_train_service_identity()),
+                            authz_policy=_merge_train_service_policy(),
+                            record_store_factory=lambda: store,
+                        )
+                        with (
+                            patch(
+                                "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                                Reader,
+                            ),
+                            patch(
+                                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                                Client,
+                            ),
+                        ):
+                            response = await _post_merge_train_controller_run_once(
+                                app,
+                                {
+                                    "schema_version": 1,
+                                    "repository": waiting.plan.repository,
+                                    "base_branch": "main",
+                                    "mutate": mutate,
+                                },
+                            )
+                        self.assertEqual(response.status_code, 202, response.text)
+                        result = response.json()["result"]
+                        self.assertEqual(
+                            result["controller_action"],
+                            "admit_collapsed_root" if checks == "pass" else "wait_for_root_checks",
+                        )
+                        self.assertEqual(
+                            result["merge_train_stack_collapse_plan_record_id"], waiting_id
+                        )
+                        self.assertEqual(
+                            store.list_merge_train_stack_collapse_plan_records(), before
+                        )
+                        candidates = store.list_merge_train_batch_candidate_records()
+                        if mutate and checks == "pass":
+                            self.assertEqual(len(candidates), 1)
+                            root_proof = candidates[0].candidate.stack_collapse_root
+                            assert root_proof is not None
+                            self.assertEqual(
+                                root_proof.collapse_record_id,
+                                waiting_id,
+                            )
+                        else:
+                            self.assertFalse(candidates)
+
     async def test_retires_changed_and_missing_roots_without_reviving_older_progress(self) -> None:
         for missing in (False, True):
             for mutate in (False, True):

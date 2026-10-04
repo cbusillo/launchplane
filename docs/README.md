@@ -48,6 +48,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   inside Launchplane), scheduled for deletion; see DIRECTION.md.
 - [merge-train-policy.md](merge-train-policy.md) — repository/base-branch merge
   train policy contract, enqueue authority, and smoke-target policy.
+- [merge-train-events.md](merge-train-events.md) — signed App events, worker wake hints,
+  bounded controller progression and timed recovery.
 - [merge-readiness.md](merge-readiness.md) — ephemeral machine-derived merge
   readiness facets, fail-closed aggregation, and live-evidence adapter boundary.
 - [governance-evidence.md](governance-evidence.md) — one read-only API and

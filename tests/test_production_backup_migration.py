@@ -1,37 +1,9 @@
-from pathlib import Path
-from tempfile import TemporaryDirectory
 import unittest
 
-from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
-from control_plane.production_backup_authority import (
-    plan_production_backup_authority_write,
-)
 from control_plane.production_backup_migration import (
     LegacyProductionBackupMigrationRequest,
     build_legacy_production_backup_authority_envelope,
 )
-from control_plane.storage.filesystem import FilesystemRecordStore
-
-
-def _runtime_record(*, backup_mode: str = "both") -> RuntimeEnvironmentRecord:
-    return RuntimeEnvironmentRecord(
-        scope="instance",
-        context="example-product",
-        instance="prod",
-        env={
-            "VERIREEL_PROD_PROXMOX_HOST": "proxmox.example.invalid",
-            "VERIREEL_PROD_PROXMOX_USER": "backup-operator",
-            "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY": "private-secret",
-            "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS": "known-host-secret",
-            "VERIREEL_PROD_CT_ID": "101",
-            "VERIREEL_PROD_BACKUP_MODE": backup_mode,
-            "VERIREEL_PROD_BACKUP_STORAGE": "pbs-production",
-            "VERIREEL_PROD_SNAPSHOT_PREFIX": "example-predeploy",
-            "VERIREEL_PROD_SNAPSHOT_KEEP": 5,
-        },
-        updated_at="2026-09-03T01:00:00Z",
-        source_label="legacy-live-record",
-    )
 
 
 def _request(*, mode: str = "dry_run", reviewed_digest: str = "") -> dict[str, object]:
@@ -55,89 +27,20 @@ def _request(*, mode: str = "dry_run", reviewed_digest: str = "") -> dict[str, o
 
 
 class ProductionBackupMigrationTests(unittest.TestCase):
-    def test_mixed_case_identifiers_use_the_exact_normalized_stream(self) -> None:
-        with TemporaryDirectory() as directory:
-            store = FilesystemRecordStore(Path(directory))
-            store.write_runtime_environment_record(_runtime_record())
-            payload = _request()
-            for key in (
-                "product",
-                "context",
-                "instance",
-                "source_target_id",
-                "destination_target_id",
-            ):
-                value = payload[key]
-                assert isinstance(value, str)
-                payload[key] = f" {value.upper()} "
-            envelope = build_legacy_production_backup_authority_envelope(
-                record_store=store,
-                request=LegacyProductionBackupMigrationRequest.model_validate(payload),
-            )
-            self.assertEqual(envelope.policy.context, "example-product")
-            self.assertEqual(envelope.policy.instance, "prod")
-            self.assertEqual(
-                envelope.policy.fast_snapshot.source_target_id, envelope.targets[0].target_id
-            )
+    def test_migration_refuses_without_reading_or_writing_legacy_authority(self) -> None:
+        from unittest.mock import Mock
 
-    def test_migration_builds_redacted_dual_backup_authority_and_preserves_legacy_gate(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory:
-            store = FilesystemRecordStore(Path(temporary_directory))
-            runtime_record = _runtime_record()
-            store.write_runtime_environment_record(runtime_record)
-            request = LegacyProductionBackupMigrationRequest.model_validate(_request())
-            envelope = build_legacy_production_backup_authority_envelope(
-                record_store=store,
-                request=request,
-            )
-            serialized = envelope.model_dump_json()
-            self.assertNotIn("private-secret", serialized)
-            self.assertNotIn("known-host-secret", serialized)
-            self.assertIn("pbs-production", serialized)
-            plan = plan_production_backup_authority_write(
-                record_store=store,
-                envelope=envelope,
-            )
-            response_json = plan.result.model_dump_json()
-            self.assertNotIn("proxmox.example.invalid", response_json)
-            self.assertNotIn("pbs-production", response_json)
-
-            apply_request = LegacyProductionBackupMigrationRequest.model_validate(
-                _request(mode="apply", reviewed_digest=plan.result.authority_digest)
-            )
-            apply_envelope = build_legacy_production_backup_authority_envelope(
-                record_store=store,
-                request=apply_request,
-            )
-            result = store.apply_production_backup_authority(apply_envelope)
-            self.assertEqual(result.status, "applied")
-            self.assertEqual(
-                store.list_runtime_environment_records(
-                    scope="instance",
-                    context_name="example-product",
-                    instance_name="prod",
-                ),
-                (runtime_record,),
-            )
-
-    def test_migration_rejects_partial_or_changed_legacy_authority(self) -> None:
-        with TemporaryDirectory() as temporary_directory:
-            store = FilesystemRecordStore(Path(temporary_directory))
-            store.write_runtime_environment_record(_runtime_record(backup_mode="snapshot"))
-            with self.assertRaisesRegex(ValueError, "requires both snapshot"):
-                build_legacy_production_backup_authority_envelope(
-                    record_store=store,
-                    request=LegacyProductionBackupMigrationRequest.model_validate(_request()),
+        for mode in ("dry_run", "apply"):
+            with self.subTest(mode=mode):
+                store = Mock()
+                request = LegacyProductionBackupMigrationRequest.model_validate(
+                    _request(mode=mode, reviewed_digest="reviewed" if mode == "apply" else "")
                 )
-            with self.assertRaisesRegex(ValueError, "revision changed"):
-                build_legacy_production_backup_authority_envelope(
-                    record_store=store,
-                    request=LegacyProductionBackupMigrationRequest.model_validate(
-                        _request() | {"runtime_environment_updated_at": "2026-09-03T00:00:00Z"}
-                    ),
-                )
+                with self.assertRaisesRegex(ValueError, "/v1/production-backup-authority/apply"):
+                    build_legacy_production_backup_authority_envelope(
+                        record_store=store, request=request
+                    )
+                self.assertEqual(store.mock_calls, [])
 
     def test_apply_requires_reviewed_dry_run_digest(self) -> None:
         with self.assertRaisesRegex(ValueError, "reviewed_authority_digest"):

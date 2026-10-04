@@ -1,5 +1,4 @@
 import unittest
-from subprocess import CompletedProcess, TimeoutExpired
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -7,7 +6,6 @@ from unittest.mock import patch
 import click
 
 from control_plane import runtime_environments as control_plane_runtime_environments
-from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.durable_operation_authorization import (
     DurableOperationAuthorization,
@@ -25,7 +23,6 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows import verireel_prod_backup_gate_worker
 from control_plane.workflows.verireel_prod_backup_gate import (
-    _resolve_worker_runtime_environment,
     DEFAULT_TIMEOUT_SECONDS,
     _run_delegated_worker,
     enqueue_verireel_prod_backup_gate,
@@ -110,28 +107,6 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
         )
         self.authorization_policy_patcher.start()
         self.addCleanup(self.authorization_policy_patcher.stop)
-
-    def _write_prod_worker_secret_bindings(self, store: PostgresRecordStore) -> None:
-        plaintext_values = {
-            "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS": "runtime-known-hosts",
-            "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY": "runtime-private-key",
-        }
-        with patch.dict(
-            "os.environ",
-            {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
-        ):
-            for binding_key, plaintext_value in plaintext_values.items():
-                control_plane_secrets.write_secret_value(
-                    record_store=store,
-                    scope="context_instance",
-                    integration=control_plane_secrets.LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
-                    name=binding_key,
-                    plaintext_value=plaintext_value,
-                    binding_key=binding_key,
-                    context_name="verireel",
-                    instance_name="prod",
-                    actor="test",
-                )
 
     def test_schema_v2_operation_requires_authorization_provenance(self) -> None:
         legacy_record = self._operation_record(include_authorization=False)
@@ -239,132 +214,22 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
             finally:
                 stores[1].close()
 
-    def test_worker_takes_ssh_keys_only_from_the_worker_store(self) -> None:
+    def test_legacy_dispatch_refuses_without_reading_runtime_or_starting_worker(self) -> None:
         with (
-            patch(
-                "control_plane.workflows.verireel_prod_backup_gate.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value={
-                    "VERIREEL_PROD_PROXMOX_HOST": "proxmox.runtime.example",
-                    "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY": "inherited-private-key",
-                    "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS": "inherited-known-hosts",
-                },
-            ),
-            patch(
-                "control_plane.workflows.verireel_prod_backup_gate.control_plane_secrets.resolve_lane_worker_secret_values",
-                return_value={},
-            ),
+            patch("subprocess.run") as run,
+            patch.object(
+                control_plane_runtime_environments, "resolve_runtime_environment_values"
+            ) as resolve,
         ):
-            values = _resolve_worker_runtime_environment(
-                control_plane_root=Path("."),
-                request=VeriReelProdBackupGateWorkerRequest(
-                    context="verireel",
-                    instance="prod",
-                    backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
-                ),
-            )
-
-        self.assertEqual(values, {"VERIREEL_PROD_PROXMOX_HOST": "proxmox.runtime.example"})
-
-    def test_run_delegated_worker_prefers_runtime_environment_values(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = self._sqlite_database_url(root)
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            try:
-                for record in control_plane_runtime_environments.build_runtime_environment_records_from_definition(
-                    control_plane_runtime_environments.RuntimeEnvironmentDefinition(
-                        schema_version=1,
-                        shared_env={},
-                        contexts={
-                            "verireel": control_plane_runtime_environments.RuntimeEnvironmentContextDefinition(
-                                shared_env={},
-                                instances={
-                                    "prod": control_plane_runtime_environments.RuntimeEnvironmentInstanceDefinition(
-                                        env={
-                                            "LAUNCHPLANE_VERIREEL_PROD_BACKUP_GATE_WORKER_COMMAND": "uv run python -m control_plane.workflows.verireel_prod_backup_gate_worker",
-                                            "VERIREEL_PROD_PROXMOX_HOST": "proxmox.runtime.example",
-                                            "VERIREEL_PROD_PROXMOX_USER": "runtime-user",
-                                            "VERIREEL_PROD_CT_ID": "211",
-                                            "VERIREEL_PROD_BACKUP_STORAGE": "pbs-runtime",
-                                            "VERIREEL_PROD_GATE_HEALTH_TIMEOUT_MS": "25000",
-                                        }
-                                    )
-                                },
-                            )
-                        },
-                    ),
-                    updated_at="2026-04-25T00:00:00Z",
-                    source_label="test",
-                ):
-                    store.write_runtime_environment_record(record)
-                self._write_prod_worker_secret_bindings(store)
-            finally:
-                store.close()
-
-            captured: dict[str, object] = {}
-
-            def _fake_run(command: list[str], **kwargs: object) -> CompletedProcess[str]:
-                captured["command"] = command
-                captured["env"] = kwargs["env"]
-                return CompletedProcess(
-                    args=command,
-                    returncode=0,
-                    stdout=(
-                        '{"schema_version":1,"status":"pass","snapshot_name":"ver-predeploy-20260425-001500",'
-                        '"started_at":"2026-04-25T00:15:00Z","finished_at":"2026-04-25T00:16:00Z",'
-                        '"detail":"Backup completed.","evidence":{"snapshot_name":"ver-predeploy-20260425-001500"}}\n'
-                    ),
-                    stderr="",
-                )
-
-            with (
-                patch(
-                    "control_plane.workflows.verireel_prod_backup_gate.subprocess.run",
-                    side_effect=_fake_run,
-                ),
-                patch.dict(
-                    "os.environ",
-                    {
-                        "LAUNCHPLANE_DATABASE_URL": database_url,
-                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
-                        "LAUNCHPLANE_VERIREEL_PROD_BACKUP_GATE_WORKER_COMMAND": "legacy worker",
-                        "VERIREEL_PROD_PROXMOX_HOST": "legacy.example",
-                        "VERIREEL_PROD_PROXMOX_USER": "legacy-user",
-                        "VERIREEL_PROD_CT_ID": "999",
-                    },
-                    clear=True,
-                ),
-            ):
-                result = _run_delegated_worker(
-                    control_plane_root=root,
+            with self.assertRaisesRegex(click.ClickException, "/v1/production-backup-gates"):
+                _run_delegated_worker(
+                    control_plane_root=Path("unused"),
                     request=VeriReelProdBackupGateWorkerRequest(
-                        context="verireel",
-                        instance="prod",
-                        backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                        context="example", instance="prod", backup_record_id="legacy-backup"
                     ),
                 )
-
-        self.assertEqual(result.status, "pass")
-        self.assertEqual(
-            captured["command"],
-            [
-                "uv",
-                "run",
-                "python",
-                "-m",
-                "control_plane.workflows.verireel_prod_backup_gate_worker",
-            ],
-        )
-        worker_env = captured["env"]
-        assert isinstance(worker_env, dict)
-        self.assertEqual(worker_env["VERIREEL_PROD_PROXMOX_HOST"], "proxmox.runtime.example")
-        self.assertEqual(worker_env["VERIREEL_PROD_PROXMOX_USER"], "runtime-user")
-        self.assertEqual(worker_env["VERIREEL_PROD_CT_ID"], "211")
-        self.assertEqual(worker_env["VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY"], "runtime-private-key")
-        self.assertEqual(worker_env["VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS"], "runtime-known-hosts")
-        self.assertEqual(worker_env["VERIREEL_PROD_BACKUP_STORAGE"], "pbs-runtime")
-        self.assertEqual(worker_env["VERIREEL_PROD_GATE_HEALTH_TIMEOUT_MS"], "25000")
+        resolve.assert_not_called()
+        run.assert_not_called()
 
     def test_prod_backup_gate_default_timeout_allows_longer_vzdump_backup(self) -> None:
         self.assertEqual(DEFAULT_TIMEOUT_SECONDS, 1800)
@@ -876,120 +741,18 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
                     "backup-gate-verireel-prod-run-12345-attempt-1"
                 )
 
-    def test_run_delegated_worker_reports_timeout_as_click_exception(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-
-            with (
-                patch(
-                    "control_plane.workflows.verireel_prod_backup_gate._worker_environment",
-                    return_value={"LAUNCHPLANE_VERIREEL_PROD_BACKUP_GATE_WORKER_COMMAND": "worker"},
-                ),
-                patch(
-                    "control_plane.workflows.verireel_prod_backup_gate.subprocess.run",
-                    side_effect=TimeoutExpired(cmd=["worker"], timeout=12),
-                ),
-            ):
-                with self.assertRaisesRegex(
-                    click.ClickException,
-                    "VeriReel prod backup gate worker timed out after 12 seconds",
-                ):
-                    _run_delegated_worker(
-                        control_plane_root=root,
-                        request=VeriReelProdBackupGateWorkerRequest(
-                            context="verireel",
-                            instance="prod",
-                            backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
-                            timeout_seconds=12,
-                        ),
-                    )
-
-    def test_worker_uses_explicit_ssh_material_for_remote_proxmox_commands(self) -> None:
-        captured_commands: list[list[str]] = []
-
-        def _fake_run(command: list[str], **kwargs: object) -> CompletedProcess[str]:
-            captured_commands.append(command)
-            if len(captured_commands) == 1:
-                identity_file = Path(command[command.index("-i") + 1])
-                known_hosts_option = next(
-                    item for item in command if item.startswith("UserKnownHostsFile=")
-                )
-                known_hosts_file = Path(known_hosts_option.partition("=")[2])
-                self.assertTrue(identity_file.exists())
-                self.assertTrue(known_hosts_file.exists())
-                self.assertEqual(identity_file.stat().st_mode & 0o777, 0o600)
-                self.assertEqual(known_hosts_file.stat().st_mode & 0o777, 0o600)
-                self.assertEqual(identity_file.read_text(encoding="utf-8"), "test-private-key\n")
-                self.assertEqual(
-                    known_hosts_file.read_text(encoding="utf-8"),
-                    "proxmox.runtime.example ssh-ed25519 test-key\n",
-                )
-                return CompletedProcess(args=command, returncode=0, stdout="", stderr="")
-            return CompletedProcess(args=command, returncode=0, stdout="", stderr="")
-
+    def test_legacy_worker_refuses_even_with_backup_disabled(self) -> None:
         with (
-            patch.dict(
-                "os.environ",
-                {
-                    "VERIREEL_PROD_PROXMOX_HOST": "proxmox.runtime.example",
-                    "VERIREEL_PROD_PROXMOX_USER": "runtime-user",
-                    "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY": "test-private-key",
-                    "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS": "proxmox.runtime.example ssh-ed25519 test-key",
-                    "VERIREEL_PROD_CT_ID": "211",
-                    "VERIREEL_PROD_BACKUP_MODE": "snapshot",
-                    "VERIREEL_TESTING_BASE_URL": "",
-                    "VERIREEL_PROD_OPERATOR_BASE_URL": "",
-                },
-                clear=True,
-            ),
-            patch(
-                "control_plane.workflows.verireel_prod_backup_gate_worker.subprocess.run",
-                side_effect=_fake_run,
-            ),
+            patch.dict("os.environ", {"VERIREEL_PROD_BACKUP_MODE": "none"}, clear=True),
+            patch("subprocess.run") as run,
         ):
-            result = verireel_prod_backup_gate_worker.execute_worker(
-                VeriReelProdBackupGateWorkerRequest(
-                    context="verireel",
-                    instance="prod",
-                    backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
-                )
-            )
-
-        self.assertEqual(result.status, "pass")
-        self.assertTrue(captured_commands)
-        command = captured_commands[0]
-        self.assertEqual(command[0], "ssh")
-        self.assertIn("runtime-user@proxmox.runtime.example", command)
-        remote_command_start = command.index("runtime-user@proxmox.runtime.example") + 1
-        self.assertEqual(
-            command[remote_command_start : remote_command_start + 3], ["pct", "snapshot", "211"]
-        )
-        self.assertRegex(
-            command[remote_command_start + 3],
-            r"^ver-predeploy-\d{8}-\d{6}-[0-9a-f]{6}$",
-        )
-
-    def test_worker_requires_explicit_ssh_material_for_remote_proxmox_commands(self) -> None:
-        with patch.dict(
-            "os.environ",
-            {
-                "VERIREEL_PROD_PROXMOX_HOST": "proxmox.runtime.example",
-                "VERIREEL_PROD_PROXMOX_USER": "runtime-user",
-                "VERIREEL_PROD_CT_ID": "211",
-                "VERIREEL_PROD_BACKUP_MODE": "snapshot",
-            },
-            clear=True,
-        ):
-            with self.assertRaisesRegex(
-                click.ClickException, "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY"
-            ):
+            with self.assertRaisesRegex(click.ClickException, "typed production backup"):
                 verireel_prod_backup_gate_worker.execute_worker(
                     VeriReelProdBackupGateWorkerRequest(
-                        context="verireel",
-                        instance="prod",
-                        backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                        context="example", instance="prod", backup_record_id="legacy-backup"
                     )
                 )
+        run.assert_not_called()
 
     def test_execute_verireel_prod_backup_gate_records_pass_status(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

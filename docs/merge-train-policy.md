@@ -1014,7 +1014,10 @@ Controller actions have these retry/stop semantics:
   disposes of its stack's children when it lands. A mutating pass retires all
   progress records of an inapplicable wait when the root head changes or the
   root leaves the open snapshot, recording the reason in the record source.
-  Dry runs leave records unchanged. A root that returns at its collapsed head
+  Dry runs leave records unchanged. A waiting root remains selectable from its
+  latest waiting progress even after an independent
+  stack completes; a completed stack cannot hide another stack's saved wait.
+  A root that returns at its collapsed head
   can resume its retired wait when its visible children still have the stored
   heads. A root waiting on checks or ready for admission then skips another
   collapse; other states continue through ordinary queue handling. Retirement preserves the collapse history:

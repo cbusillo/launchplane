@@ -165,3 +165,62 @@ class VerifiedTreeWorkflowTests(unittest.TestCase):
         ):
             with self.subTest(event=event, ref=ref):
                 self.assertFalse(self.proof(event=event, ref=ref))
+
+    def test_schedule_rechecks_even_an_already_green_main_commit(self) -> None:
+        self.responses[self.current_checks] = {"check_runs": [self.gate()]}
+        self.assertFalse(self.proof(event="schedule", ref="refs/heads/main"))
+
+
+class ScheduledCiReportingTests(unittest.TestCase):
+    def test_scheduled_report_keeps_failed_and_skipped_job_results_visible(self) -> None:
+        step = load_workflow(".github/workflows/ci.yml").step_named(
+            "ci_gate", "Report scheduled main CI"
+        )
+        assert step is not None
+        with TemporaryDirectory() as directory:
+            summary = Path(directory) / "summary"
+            result = subprocess.run(
+                ["bash", "-c", step.run],
+                env=os.environ
+                | {
+                    "CI_RESULTS": json.dumps(
+                        {
+                            "static_checks": {"result": "failure"},
+                            "test": {"result": "success"},
+                            "test_fork": {"result": "skipped"},
+                        }
+                    ),
+                    "GITHUB_SHA": "fixture-commit",
+                    "GITHUB_STEP_SUMMARY": str(summary),
+                },
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            report = summary.read_text()
+        self.assertIn("static_checks | failure", report)
+        self.assertIn("test | success", report)
+        self.assertIn("test_fork | skipped", report)
+        self.assertIn("::warning", result.stdout)
+
+    def test_clean_scheduled_report_does_not_warn(self) -> None:
+        step = load_workflow(".github/workflows/ci.yml").step_named(
+            "ci_gate", "Report scheduled main CI"
+        )
+        assert step is not None
+        with TemporaryDirectory() as directory:
+            result = subprocess.run(
+                ["bash", "-c", step.run],
+                env=os.environ
+                | {
+                    "CI_RESULTS": json.dumps(
+                        {"test": {"result": "success"}, "test_fork": {"result": "skipped"}}
+                    ),
+                    "GITHUB_SHA": "fixture-commit",
+                    "GITHUB_STEP_SUMMARY": str(Path(directory) / "summary"),
+                },
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        self.assertNotIn("::warning", result.stdout)

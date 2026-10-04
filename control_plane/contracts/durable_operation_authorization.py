@@ -26,7 +26,12 @@ DurableOperationIdentityType = Literal[
 # "launchplane_reconcile": Launchplane's own reconciler; no caller and no policy rule.
 # "policy_administrator": the signed-in person the active policy names as its
 # administrator by immutable GitHub id; re-checked against the active policy.
-DurableOperationGrant = Literal["policy_rule", "launchplane_reconcile", "policy_administrator"]
+# "client_release_acceptance": the product's recorded Client accepted the release;
+# no policy rule. It names the decision, and the worker re-checks that the decision
+# is still the product's newest, accepted, by its Client, and that releases are not held.
+DurableOperationGrant = Literal[
+    "policy_rule", "launchplane_reconcile", "policy_administrator", "client_release_acceptance"
+]
 LAUNCHPLANE_RECONCILE_SUBJECT = "launchplane-reconciler"
 _MANAGED_RULE_TEXT_FIELDS = ("managed_set_id", "managed_rule_id")
 _POLICY_PROVENANCE_TEXT_FIELDS = ("policy_record_id", "policy_sha256", "policy_source")
@@ -71,7 +76,8 @@ class DurableOperationCallerIdentity(BaseModel):
     github_id: int = Field(default=0, ge=0)
     organizations: tuple[str, ...] = ()
     teams: tuple[str, ...] = ()
-    role: Literal["", "read_only", "admin"] = ""
+    # "client": the product's Client, who holds no policy role.
+    role: Literal["", "read_only", "admin", "client"] = ""
 
     @model_validator(mode="after")
     def _validate_identity(self) -> "DurableOperationCallerIdentity":
@@ -97,7 +103,7 @@ class DurableOperationCallerIdentity(BaseModel):
                     "Durable GitHub Actions identity requires repository, workflow_ref, and subject."
                 )
         elif self.identity_type == "github_human":
-            if not self.login or self.github_id < 1 or self.role not in {"read_only", "admin"}:
+            if not self.login or self.github_id < 1 or not self.role:
                 raise ValueError(
                     "Durable GitHub human identity requires login, github_id, and role."
                 )
@@ -124,6 +130,7 @@ class DurableOperationAuthorization(BaseModel):
     authorized_at: str
     caller: DurableOperationCallerIdentity
     grant: DurableOperationGrant = "policy_rule"
+    release_decision_record_id: str = ""
 
     @model_validator(mode="after")
     def _validate_authorization(self) -> "DurableOperationAuthorization":
@@ -138,8 +145,23 @@ class DurableOperationAuthorization(BaseModel):
             setattr(self, field_name, str(getattr(self, field_name)).strip())
         self.context = self.context.lower()
         self.instances = tuple(value.lower() for value in _normalized_values(self.instances))
+        self.release_decision_record_id = self.release_decision_record_id.strip()
         if not self.instances:
             raise ValueError("Durable operation authorization requires exact instances.")
+        if (self.grant == "client_release_acceptance") != bool(self.release_decision_record_id):
+            raise ValueError("Only a Client release grant names a release decision, and it must.")
+        if (self.grant == "client_release_acceptance") != (self.caller.role == "client"):
+            raise ValueError("Only a Client release grant has a Client caller.")
+        if self.grant == "client_release_acceptance":
+            if self.caller.identity_type != "github_human":
+                raise ValueError("A Client release grant requires a GitHub human caller.")
+            if (
+                any(getattr(self, field_name) for field_name in _POLICY_RULE_TEXT_FIELDS)
+                or self.policy_revision
+                or self.policy_schema_version is not None
+            ):
+                raise ValueError("A Client release grant carries no policy rule.")
+            return self
         if self.grant == "launchplane_reconcile":
             if self.caller.identity_type != "launchplane_reconcile":
                 raise ValueError("A Launchplane reconcile grant requires the reconcile identity.")
@@ -176,6 +198,8 @@ class DurableOperationAuthorization(BaseModel):
         # the other grants omit the fields they never carry.
         payload = handler(self)
         if isinstance(payload, dict):
+            if self.grant != "client_release_acceptance":
+                payload.pop("release_decision_record_id", None)
             if self.grant == "policy_rule":
                 payload.pop("grant", None)
             elif self.grant == "policy_administrator":

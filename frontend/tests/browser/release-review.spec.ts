@@ -5,6 +5,7 @@ test("Owner cannot accept undisclosed shared component changes", async ({ page }
   await expect(page.getByText("Shared website components changed outside this repository's checklist. Admin review is required.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Accept release" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Record admin approval override" })).toHaveCount(0);
+  await expect(page.getByText("Releases are on hold for Example site.")).toBeVisible();
 });
 
 test("An unavailable checklist names its reason code and trace ID", async ({ page }) => {
@@ -33,9 +34,11 @@ test("Owner reviews the complete release and can request changes after accepting
   await expect(page.getByRole("button", { name: "Request changes" })).toBeDisabled();
   const versions = page.locator(".release-review-technical");
   await expect(versions.locator("dl")).toBeHidden();
+  await expect(page.getByText("Accepting puts this version on the live site, Example site (www.example.invalid).")).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("owner-initial.png"), fullPage: true });
   await page.getByRole("button", { name: "Accept release" }).click();
-  await expect(page.getByRole("status")).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("Launchplane is starting it");
+  await expect(page.getByRole("region", { name: "Release progress" }).getByRole("listitem")).toHaveCount(5);
   await expect(page.getByRole("region", { name: "Latest release decision" })).toContainText("site-owner");
   await page.screenshot({ path: testInfo.outputPath("owner-accepted.png"), fullPage: true });
   const feedback = "The booking button needs a clearer label.\nKeep the contact link visible on a phone.";

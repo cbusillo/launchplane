@@ -205,12 +205,9 @@ live authority across DB, files, and process env:
 - VeriReel prod rollback dispatch resolves worker/runtime-action config from
   `verireel/prod` runtime-environment records, then passes those values to the
   delegated worker process
-- VeriReel prod backup-gate dispatch resolves the same `verireel/prod`
-  delegated-worker runtime contract plus backup-shape values such as
-  `VERIREEL_PROD_BACKUP_MODE`, `VERIREEL_PROD_BACKUP_STORAGE`,
-  `VERIREEL_PROD_SNAPSHOT_PREFIX`, `VERIREEL_PROD_SNAPSHOT_KEEP`, and
-  `VERIREEL_PROD_GATE_HEALTH_TIMEOUT_MS` from DB-backed runtime-environment
-  records before it captures the backup gate
+- legacy VeriReel backup dispatch and worker commands refuse without reading
+  product-prefixed backup environment values or invoking host commands; use
+  `/v1/production-backup-gates` with typed authority instead
 - typed production backup target records now own non-secret Proxmox guest and
   storage destination authority, while typed production backup policy records
   own the exact promotion action's required snapshot and independent-backup
@@ -218,10 +215,10 @@ live authority across DB, files, and process env:
 - product config, driver views, and operational readiness read those typed
   records and report missing, invalid, stale, retired, or ready state without
   exposing provider destination values
-- the explicit legacy runtime migration can copy the current VeriReel backup
-  topology into typed records only from one exact DB-backed instance runtime
-  record and a reviewed digest; it leaves the live legacy worker contract in
-  place until the provider-neutral execution and enforcement slices land
+- legacy runtime migration refuses without reading or writing authority;
+  submit reviewed typed targets and policy through
+  `/v1/production-backup-authority/apply`. Both snapshot and independent backup
+  remain mandatory; no legacy environment value supplies a fallback
 - VeriReel app maintenance, preview refresh, preview destroy, and preview
   inventory routes resolve Dokploy host, token, preview URL shape, app identity,
   and target identity from Launchplane-managed secrets plus DB-backed runtime

@@ -22,9 +22,10 @@ the checklist. Admins get a separate **Admin Approval Override** section
 and approval-justification field explaining that their decision supplies
 approval under their own identity and replaces an earlier
 request for changes. A saved decision whose release record has not been
-published shows that pending state beside the decision. Every decision is
-recorded without deploying; deployment remains a later operation with its own
-release and backup checks.
+published shows that pending state beside the decision. Only the Client's
+acceptance can start a release, and only as described under
+[Acceptance starts the release](#acceptance-starts-the-release); every other
+decision is recorded without deploying.
 
 `GET /v1/release-review?product=<product>` serves the same checklist to the Client
 and to callers already permitted to read the product or promote it. Decisions
@@ -74,7 +75,8 @@ no credentials or grants. Launchplane saves the decision before publishing its
 record. A failed publication leaves the decision visible but cannot approve a
 promotion. Recording the same pending decision retries its publication with the
 same decision ID, including recovery when GitHub accepted a write whose response
-was lost. GitHub issue contents and membership never decide release contents or
+was lost. Repeating the product's newest published decision records nothing new,
+so a second Accept never replaces the acceptance a running release depends on. GitHub issue contents and membership never decide release contents or
 approval; the saved Launchplane decision remains authoritative.
 The complete record uses one issue body. If GitHub rejects publication, the
 decision remains saved and promotion stays blocked; records are not split into
@@ -123,8 +125,74 @@ The gate replaces manager-preview approval in the product promotion read model
 and raw generic-web promotion routes. Odoo evaluates it before backup in the
 combined run and again before direct promotion. The existing VeriReel service
 promotion wrapper also checks it. Readiness and direct dry-runs remain available
-while a Client decision is pending. Recording a decision never merges, backs up,
-dispatches a workflow, or deploys.
+while a Client decision is pending. Recording a decision never merges or
+dispatches a workflow, and only a Client's acceptance starts a release.
+
+## Acceptance starts the release
+
+Each product profile records `release_on_acceptance`: `held` (the default for
+every product), `promote`, or `promote_with_rollback_drill`. An admin with
+`product_profile.write` changes it in the product's Client settings, through
+`POST /v1/product-profiles/{product}/production-use` with the optional
+`release_on_acceptance` field: dry run, Apply bound to the reviewed plan digest,
+audit record, and profile read-back. A held profile serializes exactly as it did
+before the switch existed.
+
+When the product's recorded Client accepts a release of an Odoo product that is
+not `prelaunch` and not held, the decision stores `release_start`, fixed at that
+moment. Recording it starts nothing by itself. Launchplane's Odoo stable worker
+checks about every 30 seconds and queues the same operations the admin's
+Release panel queues:
+
+1. a verified production backup;
+2. the queued promotion with that backup, which takes the logical backup,
+   deploys, runs post-deploy and health checks, and rolls back on failure.
+
+With `promote_with_rollback_drill` it then runs the rollback drill:
+
+3. a rollback to the production version the Client's checklist was compiled
+   against, at that artifact's newest passing prod deployment. It never uses the
+   default "previous deployment" choice, so an image recorded as a failed
+   promotion cannot be picked;
+4. a second verified backup, because backup evidence is single-use;
+5. the same promotion again.
+
+The rollback restores the checklist's production version, so the checklist
+recompiles to the digest the Client accepted, and that acceptance covers the
+second promotion and nothing else. A product drills once. After a release's
+drill passes, `promote_with_rollback_drill` behaves as `promote`.
+
+Each step runs under a `client_release_acceptance` grant that names the
+decision. Before a step is queued, the worker checks all of the following:
+
+- the decision is still the product's newest one, `accepted`, published, and by
+  the product's recorded Client;
+- releases are not held, and the product is not `prelaunch`;
+- the production and testing lanes still carry the checklist's artifacts;
+- the recompiled checklist digest still equals the decision's, and it is
+  approved.
+
+The worker repeats the decision, Client and hold checks before every provider
+effect. The promotion still checks release approval for the exact candidate and
+the verified backup.
+
+A changed candidate, a newer decision, or a hold therefore stops the release
+before its next step and never falls back to a newer testing build. A failed or
+cancelled step stops the release, and nothing more runs until the Client
+accepts again. An admin override never starts a release; it stays a hand
+promotion from the Release panel. No automated identity gains a promote right,
+and an automation token still cannot submit a decision.
+
+The review page says before the Accept button whether accepting puts the
+version on the live site, naming it, or whether releases are held. After
+acceptance it shows each step's status. `GET /v1/release-review` returns
+`release_on_acceptance` (what the next acceptance would do), `live_site_url`,
+and `release_run`, derived from the step operations, whose ids come from the
+decision.
+
+A release that changes shared Odoo addon sources still needs an admin override,
+so it remains a hand promotion. The Client cannot undo a live release; that is
+an admin rollback.
 
 Direct deploys cannot change what a production lane runs. The generic-web
 deploy, VeriReel prod-deploy, and Odoo target-replacement apply routes, and the
