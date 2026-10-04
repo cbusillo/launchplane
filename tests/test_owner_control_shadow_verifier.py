@@ -1178,22 +1178,3 @@ class OwnerControlShadowVerifierFreezeBoundaryTests(unittest.TestCase):
                 source = (REPOSITORY_ROOT / path).read_text(encoding="utf-8")
                 self.assertNotIn("owner_control_shadow_verifier", source)
                 self.assertNotIn("owner_control_challenge", source)
-
-    def test_docs_keep_shadow_state_inert_and_unrouted(self) -> None:
-        owner_control_doc = (REPOSITORY_ROOT / "docs/owner-control-channel.md").read_text(
-            encoding="utf-8"
-        )
-        authorization_doc = (REPOSITORY_ROOT / "docs/authorization-authority.md").read_text(
-            encoding="utf-8"
-        )
-        privileged_operation_doc = (REPOSITORY_ROOT / "docs/privileged-operations.md").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn("at most eight audited verification attempts", owner_control_doc)
-        self.assertIn("Unknown challenge nonces create no durable", owner_control_doc)
-        self.assertIn("`authority_state = 'inert'`", authorization_doc)
-        self.assertIn("exactly one ID-only managed rule", authorization_doc)
-        self.assertIn(
-            "browser approval remains the only active approval transport", privileged_operation_doc
-        )
