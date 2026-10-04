@@ -50,6 +50,29 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
                             driver=driver, mode=mode, target=("own-site", instance)
                         )
 
+    async def test_persisted_padded_lanes_plan_and_apply_without_rewriting_profiles(self) -> None:
+        for driver in ("generic-web", "odoo"):
+            for instance in ("testing", ""):
+                for padded_lane in (
+                    (" own-site\t", "testing"),
+                    ("own-site", " testing\n"),
+                ):
+                    with self.subTest(driver=driver, instance=instance, lane=padded_lane):
+                        await self._request_config(
+                            driver=driver,
+                            mode="apply",
+                            target=("own-site", instance),
+                            stored_lane=padded_lane,
+                        )
+
+    async def test_padded_foreign_lane_claim_at_commit_refuses_atomically(self) -> None:
+        await self._request_config(
+            mode="apply",
+            add_foreign_claim_on_commit=True,
+            refused=True,
+            foreign_lane=(" own-site\t", " testing\n"),
+        )
+
     async def test_profile_changed_before_commit_refuses_without_config_writes(self) -> None:
         await self._request_config(mode="apply", change_profile=True, refused=True)
 
@@ -105,6 +128,8 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
         historical: bool = False,
         context_secret: bool = False,
         add_foreign_claim_on_commit: bool = False,
+        stored_lane: tuple[str, str] = ("own-site", "testing"),
+        foreign_lane: tuple[str, str] = ("own-site", "testing"),
     ) -> None:
         with TemporaryDirectory() as directory:
             store = PostgresRecordStore(
@@ -116,7 +141,7 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 if driver == "generic-web"
                 else _odoo_preview_profile_payload("own-site")
             )
-            profile_payload["lanes"] = [{"context": "own-site", "instance": "testing"}]
+            profile_payload["lanes"] = [{"context": stored_lane[0], "instance": stored_lane[1]}]
             profile = LaunchplaneProductProfileRecord.model_validate(profile_payload)
             store.write_product_profile_record(profile)
             store.write_product_profile_record(
@@ -176,7 +201,18 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 if add_foreign_claim_on_commit:
                     other = store.read_product_profile_record("other-site")
                     store.write_product_profile_record(
-                        other.model_copy(update={"lanes": profile.lanes})
+                        other.model_copy(
+                            update={
+                                "lanes": (
+                                    profile.lanes[0].model_copy(
+                                        update={
+                                            "context": foreign_lane[0],
+                                            "instance": foreign_lane[1],
+                                        }
+                                    ),
+                                )
+                            }
+                        )
                     )
                 else:
                     store.write_product_profile_record(profile.model_copy(update={"lanes": ()}))
@@ -217,6 +253,9 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
                             writer.assert_not_called()
                     else:
                         self.assertEqual(response.status_code, 202, response.text)
+                        self.assertEqual(
+                            store.read_product_profile_record(profile.product), profile
+                        )
                         if mode == "apply":
                             self.assertEqual(
                                 store.list_runtime_environment_records()[0].env,

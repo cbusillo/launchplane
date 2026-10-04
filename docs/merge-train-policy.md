@@ -1021,7 +1021,17 @@ Controller actions have these retry/stop semantics:
   eligible interrupted execution before planned execution and all saved root
   waits. An inapplicable saved execution steps aside for another eligible
   saved stack. Plans under an obsolete policy are left unapplied, and an
-  unrelated root push makes that saved plan step aside; both retain history.
+  unrelated root push or a root leaving the open snapshot makes that saved
+  plan step aside. Contradictory snapshot/ref evidence leaves execution
+  recoverable for a later pass. A mutating pass
+  supersedes all of that obsolete execution's active progress, retaining history
+  and a retirement reason; dry runs leave records unchanged. A retired execution
+  may resume only when it has no active replacement, its policy is current, and
+  its root and visible children return at their checkpointed heads, and every
+  child with a pending mutation is present and ready. Latest completed history
+  cannot revive older execution. During that same-policy resumption, carried
+  mutations remain checkpointed and are not merged again; this does not qualify
+  recovery after a policy change.
   A completed stack never revives its older planned progress.
 - `wait_for_root_checks`: The collapsed root PR's required checks are still
   running. Stop and poll later; do not call phase endpoints. When no saved
@@ -1373,3 +1383,13 @@ Live worker reads build the same `MergeTrainDryRunSnapshot` contract from
 GitHub pull requests for the policy repository/base branch. The reader only uses
 GET requests, preserves unknown mergeability or check evidence as `unknown` or
 `pending`, and fails closed when required pull request fields are missing.
+
+The controller record-action status is advisory evidence from saved records. It
+selects each collapse's latest progress, then interrupted execution, planned
+execution, and saved waits, in that order. It does not read GitHub readiness or
+validate live applicability; run-once makes that decision. A waiting collapse
+still requires the exact current policy digest. A policy change during that
+wait is refused rather than admitting the old collapse under a new policy.
+The phases differ on policy change: obsolete execution steps aside, while a
+saved wait is refused. Safe recovery across that policy change remains a
+separate investigation.
