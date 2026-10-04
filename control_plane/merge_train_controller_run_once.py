@@ -3193,6 +3193,15 @@ def _advance_from_live_snapshot(
                     # A retired record is not an actionable phase handle.
                     restored_result.pop("merge_train_stack_collapse_plan_record_id", None)
                 return restored_result
+    if dry_run_result.intended_next_action == "block":
+        # Report the queue's failure before rediscovering still-open carried children.
+        return {
+            "repository": request.repository,
+            "base_branch": request.base_branch,
+            "mode": "dry-run",
+            "controller_action": "block",
+            "dry_run_result": dry_run_result.model_dump(mode="json"),
+        }
     if selected_pr is not None and merge_train_snapshot_has_stack_topology(
         snapshot=snapshot, dry_run_result=dry_run_result
     ):

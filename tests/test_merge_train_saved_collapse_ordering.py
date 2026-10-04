@@ -77,6 +77,7 @@ class SavedCollapseOrderingTests(unittest.IsolatedAsyncioTestCase):
         other_checks: str = "pass",
         root_mergeable: str = "mergeable",
         expected_action: str | None = None,
+        include_other: bool = True,
     ) -> None:
         class Reader(_FakeCollapsedRootStackedMergeTrainSnapshotReader):
             def read_merge_train_snapshot(
@@ -104,6 +105,20 @@ class SavedCollapseOrderingTests(unittest.IsolatedAsyncioTestCase):
                         "required_checks_status": "pass",
                     }
                 )
+                if not include_other:
+                    return snapshot.model_copy(
+                        update={
+                            "pull_requests": (
+                                root.model_copy(
+                                    update={
+                                        "required_checks_status": checks,
+                                        "mergeable": root_mergeable,
+                                    }
+                                ),
+                                child.model_copy(update={"required_checks_status": "pass"}),
+                            )
+                        }
+                    )
                 return snapshot.model_copy(
                     update={
                         "pull_requests": (
@@ -164,7 +179,8 @@ class SavedCollapseOrderingTests(unittest.IsolatedAsyncioTestCase):
                 other = other.model_copy(
                     update={"plan": other.plan.model_copy(update={"policy_sha256": "0" * 64})}
                 )
-            store.write_merge_train_stack_collapse_plan_record(other)
+            if include_other:
+                store.write_merge_train_stack_collapse_plan_record(other)
             for index in range(padding):
                 store.write_merge_train_stack_collapse_plan_record(
                     _other_stack(waiting, offset=20 + index, status="ready_for_train", newer=True)
@@ -200,6 +216,12 @@ class SavedCollapseOrderingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["controller_action"], expected_action)
             if expected_action == "block":
                 self.assertEqual(result["dry_run_result"]["selected_pr"]["number"], 1)
+                self.assertEqual(
+                    result["dry_run_result"]["selected_pr"]["required_checks_status"], checks
+                )
+                self.assertEqual(
+                    result["dry_run_result"]["selected_pr"]["mergeable"], root_mergeable
+                )
             selected = waiting if obsolete_reason else other
             if not mutate and expected_action != "block":
                 self.assertEqual(
@@ -277,3 +299,17 @@ class SavedCollapseOrderingTests(unittest.IsolatedAsyncioTestCase):
                             mutate=mutate,
                             expected_action="block",
                         )
+
+    async def test_blocked_saved_root_is_not_recollapsed_with_its_open_carried_child(self) -> None:
+        for checks, mergeable in (("fail", "mergeable"), ("pass", "conflicting")):
+            for mutate in (False, True):
+                with self.subTest(checks=checks, mergeable=mergeable, mutate=mutate):
+                    await self._run_case(
+                        other_status="waiting_for_root_checks",
+                        newer=False,
+                        checks=checks,
+                        root_mergeable=mergeable,
+                        mutate=mutate,
+                        include_other=False,
+                        expected_action="block",
+                    )

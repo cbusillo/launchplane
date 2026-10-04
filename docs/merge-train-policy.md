@@ -1068,6 +1068,11 @@ Controller actions have these retry/stop semantics:
   applicable pending wait is reported, unless ordinary whole-queue selection
   reports a blocking PR after excluding surviving held-out entries. In that case the controller reports the queue block
   rather than an unrelated saved root's pending checks.
+  Ordinary live discovery also reports the selected queue block before planning
+  a new stack collapse. A failed or conflicting collapsed root with a still-open
+  carried child therefore reports its current blocking evidence without planning
+  another collapse or repeating the carried merge. Existing failure policy still
+  decides whether the queue pauses or selects a later eligible pull request.
   A root that returns at its collapsed head
   can resume its retired wait when its visible children still have the stored
   heads. A root waiting on checks or ready for admission then skips another
