@@ -9,6 +9,7 @@ from control_plane.contracts.merge_train_stack_collapse import (
     build_merge_train_stack_collapse_plan_record,
     build_merge_train_stack_collapse_id,
 )
+from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate_record
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
 from control_plane.merge_train_github import MergeTrainGitHubStaleHeadError
@@ -48,6 +49,8 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
         independent_wait: bool = True,
         fresh_independent: bool = False,
         newer_policy_replacement: bool = False,
+        retired_replacement: bool = False,
+        failed_candidate: bool = False,
     ) -> None:
         probes: list[int] = []
         merges: list[int] = []
@@ -55,6 +58,7 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
             reason != "root_missing_from_open_snapshot" and policy_root_state != "missing"
         )
         replacement_record_id = ""
+        replacement_collapse_id = ""
 
         class Reader(_FakeCollapsedRootStackedMergeTrainSnapshotReader):
             def read_merge_train_snapshot(
@@ -305,7 +309,7 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                     "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient", Client
                 ),
             ):
-                for index in range(1 if fresh_independent else 2):
+                for index in range(3 if fresh_independent else 2):
                     response = await _post_merge_train_controller_run_once(
                         app,
                         {
@@ -327,7 +331,11 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                         result = response.json()["result"]
                         self.assertEqual(
                             result["controller_action"],
-                            "plan_candidate"
+                            (
+                                ("plan_candidate", "build_candidate", "observe_candidate")[index]
+                                if mutate
+                                else "plan_candidate"
+                            )
                             if fresh_independent
                             else (
                                 "wait_for_root_checks"
@@ -335,18 +343,23 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                                 else "block"
                             ),
                         )
-                        self.assertEqual(
-                            result["details"]["code"],
-                            "merge_train_stack_collapse_policy_changed",
-                        )
-                        self.assertIn(
-                            obsolete.record_id,
-                            [record["record_id"] for record in result["details"]["entries"]],
-                        )
+                        if not (fresh_independent and mutate and index > 0):
+                            self.assertEqual(
+                                result["details"]["code"],
+                                "merge_train_stack_collapse_policy_changed",
+                            )
+                            self.assertIn(
+                                obsolete.record_id,
+                                [record["record_id"] for record in result["details"]["entries"]],
+                            )
                         self.assertEqual(
                             store.list_merge_train_stack_collapse_plan_records(), before
                         )
                         if fresh_independent:
+                            if not failed_candidate:
+                                self.assertNotIn(
+                                    "superseded_merge_train_batch_candidate_record_id", result
+                                )
                             self.assertEqual(
                                 [
                                     entry["pull_request_number"]
@@ -383,12 +396,22 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                         )
                         self.assertEqual(returned.status, "active")
                     if active_replacement and index == 1:
-                        self.assertEqual(
-                            response.json()["result"].get(
-                                "merge_train_stack_collapse_plan_record_id"
-                            ),
-                            replacement_record_id,
-                        )
+                        if retired_replacement:
+                            self.assertNotIn(
+                                "merge_train_stack_collapse_plan_record_id",
+                                response.json()["result"],
+                            )
+                            self.assertEqual(
+                                response.json()["result"]["stack_collapse_plan"]["collapse_id"],
+                                replacement_collapse_id,
+                            )
+                        else:
+                            self.assertEqual(
+                                response.json()["result"].get(
+                                    "merge_train_stack_collapse_plan_record_id"
+                                ),
+                                replacement_record_id,
+                            )
                     if reopen and index == 0:
                         root_visible = True
                         if restore_policy:
@@ -454,9 +477,32 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                                 source="test:new-root-stack",
                                 updated_at=plan["updated_at"],
                             )
+                            if retired_replacement:
+                                replacement = replacement.model_copy(
+                                    update={
+                                        "status": "superseded",
+                                        "source": "test; retired:root_missing_from_open_snapshot:test",
+                                    }
+                                )
                             store.write_merge_train_stack_collapse_plan_record(replacement)
                             replacement_record_id = replacement.record_id
+                            replacement_collapse_id = replacement.plan.collapse_id
                         before = store.list_merge_train_stack_collapse_plan_records()
+                    if fresh_independent and failed_candidate and index == 1:
+                        built = next(
+                            record
+                            for record in store.list_merge_train_batch_candidate_records()
+                            if record.candidate.status == "ready_for_checks"
+                        )
+                        store.write_merge_train_batch_candidate_record(
+                            build_merge_train_batch_candidate_record(
+                                candidate=built.candidate.model_copy(
+                                    update={"status": "failed", "required_checks_status": "fail"}
+                                ),
+                                source="test:failed-independent-candidate",
+                                updated_at=built.updated_at,
+                            )
+                        )
             if reopen:
                 self.assertEqual(
                     merges,
@@ -612,14 +658,27 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                 )
 
     async def test_newer_current_policy_progress_is_not_masked_by_retired_old_policy(self) -> None:
+        for retired_replacement in (False, True):
+            with self.subTest(retired_replacement=retired_replacement):
+                await self._obsolete_case(
+                    reason="policy_changed",
+                    mutate=False,
+                    status="collapsing",
+                    reopen=True,
+                    active_replacement=True,
+                    retired_policy=True,
+                    newer_policy_replacement=True,
+                    retired_replacement=retired_replacement,
+                )
+
+    async def test_failed_independent_candidate_never_reflows_in_obsolete_root(self) -> None:
         await self._obsolete_case(
             reason="policy_changed",
-            mutate=False,
             status="collapsing",
-            reopen=True,
-            active_replacement=True,
-            retired_policy=True,
-            newer_policy_replacement=True,
+            mutate=True,
+            independent_wait=False,
+            fresh_independent=True,
+            failed_candidate=True,
         )
 
     def test_record_projection_prioritizes_execution_across_collapses(self) -> None:

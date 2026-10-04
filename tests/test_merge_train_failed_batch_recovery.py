@@ -68,6 +68,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         self.reflow_client = client
         result = try_reflow_failed_merge_train_candidate(
             candidate_store=store,
+            stack_collapse_store=store,
             active_candidate_record=record,
             policy=self.policy,
             policy_sha256="policy-digest",

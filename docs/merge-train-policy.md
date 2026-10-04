@@ -1067,14 +1067,23 @@ Controller actions have these retry/stop semantics:
   can also proceed without replanning carried children. Independent pending
   waits retain their normal behavior. If nothing else can be selected, run-once
   reports `block` with `merge_train_stack_collapse_policy_changed`.
+  The same exclusion is applied during active and failed candidate reflow, so
+  later passes neither churn the independent candidate nor add an obsolete
+  root to a replacement batch.
   The maintained helper preserves the representative code/record and entry
   count through its existing details projection; the HTTP response contains
   the full per-root entries. Previously retired obsolete progress is also
   reported when its checkpointed root returns, unless a newer active collapse
-  already owns that root. Only each collapse's latest progress is used;
+  already owns that root, including newer retired recovery. Only each collapse's latest progress is used;
   completed history cannot revive older execution. The existing supported
   resumption requires the original policy digest to be current again and all
   current head/readiness checks to pass; it merges only remaining children.
+  Alternatively, pushing a new commit to the root makes the old proof
+  inapplicable and resumes current-policy discovery with fresh head/readiness
+  proof. Closing and reopening at the same checkpointed head keeps the policy
+  block. This unchanged-root disposition does not qualify recovery of a branch
+  merge whose checkpoint was never recorded, or no-repeat behavior after the
+  root moves; those paths retain their existing retirement semantics.
   Requalifying carried proof under a different policy is not supported.
   A completed stack never revives its older planned progress.
 - `wait_for_root_checks`: The collapsed root PR's required checks are still
@@ -1443,5 +1452,7 @@ Run-once reports obsolete saved waits and execution in its details rather
 than aborting the whole pass with HTTP 400. Disjoint current-policy saved
 execution, ready waits and fresh live work can proceed with that blocking
 evidence attached. The affected PRs and refs remain excluded from discovery.
-No old-policy record authorizes a merge under a different policy, and
-no obsolete partial execution is silently retired into fresh replanning.
+No old-policy record authorizes a merge under a different policy. Checkpointed
+partial execution at an unchanged root stays visible and excluded from fresh
+replanning; changed-root and uncheckpointed-effect recovery are not qualified
+by that guarantee.
