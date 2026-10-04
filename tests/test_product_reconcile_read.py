@@ -144,7 +144,8 @@ class ProductReconcileRequestViewTests(unittest.TestCase):
         self.assertEqual(product_reconcile_request_view(record).last_delivery_id, _DELIVERY_ID)
 
     def test_shows_every_key_a_failed_testing_deploy_names(self) -> None:
-        keys = [f"ODOO_TUNING_SETTING_{index:02d}" for index in range(60)]
+        # Enough keys to pass the last_error cap, so the summary must carry them instead.
+        keys = [f"ODOO_TUNING_SETTING_{index:03d}" for index in range(_MAX_TEXT_LENGTH // 20 + 1)]
         summary = f"The deploy plan was not ready. Keys: {', '.join(keys)}."
         record = ProductReconcileRequestRecord(
             target_key="cm:testing",
