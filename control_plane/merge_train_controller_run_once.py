@@ -2021,6 +2021,7 @@ def _advance_active_candidate_record(
             lease=lease,
             github_client=github_client,
             candidate_store=candidate_store,
+            stack_collapse_store=stack_collapse_store,
             active_candidate_record=active_candidate_record,
             policy=policy,
             policy_sha256=policy_sha256,
@@ -2275,6 +2276,15 @@ def _reflow_stale_candidate_record(
         repository=request.repository,
         base_branch=request.base_branch,
     )
+    snapshot = _without_obsolete_stack_collapse_pull_requests(
+        snapshot=snapshot,
+        records=_read_obsolete_stack_collapse_records(
+            store=stack_collapse_store,
+            snapshot=snapshot,
+            repository_policy=repository_policy,
+            policy_sha256=policy_sha256,
+        ),
+    )
     candidate_snapshot = _without_held_out_pull_requests(
         snapshot=snapshot,
         held_out=_surviving_held_out_entries(
@@ -2527,6 +2537,83 @@ def _advance_passed_candidate_record(
     }
 
 
+def _obsolete_stack_collapse_records(
+    *,
+    records: tuple[MergeTrainStackCollapsePlanRecord, ...],
+    snapshot: MergeTrainDryRunSnapshot,
+    repository_policy: MergeTrainRepositoryPolicy,
+    policy_sha256: str,
+) -> tuple[MergeTrainStackCollapsePlanRecord, ...]:
+    latest = tuple(
+        progress
+        for group in _group_stack_collapse_records(records).values()
+        if (progress := latest_merge_train_stack_collapse_progress_record(tuple(group))) is not None
+    )
+    observed_heads = {pr.number: pr.head_sha for pr in snapshot.pull_requests}
+    return tuple(
+        record
+        for record in latest
+        if record.plan.status in {"planned", "collapsing", "waiting_for_root_checks"}
+        and any(mutation.status == "mutated" for mutation in record.plan.mutations)
+        and (record.status == "active" or "; retired:" in record.source)
+        and (
+            record.plan.policy_key != repository_policy.policy_key
+            or record.plan.policy_sha256 != policy_sha256
+        )
+        and observed_heads.get(record.plan.root_pull_request_number)
+        == _stack_collapse_current_head_shas(record.plan)[record.plan.root_pull_request_number]
+        and not (
+            record.status == "superseded"
+            and any(
+                newer.plan.root_pull_request_number == record.plan.root_pull_request_number
+                and newer.plan.collapse_id != record.plan.collapse_id
+                and (newer.updated_at, newer.record_id) > (record.updated_at, record.record_id)
+                for newer in latest
+            )
+        )
+    )
+
+
+def _without_obsolete_stack_collapse_pull_requests(
+    *,
+    snapshot: MergeTrainDryRunSnapshot,
+    records: tuple[MergeTrainStackCollapsePlanRecord, ...],
+) -> MergeTrainDryRunSnapshot:
+    numbers = {entry.pull_request_number for record in records for entry in record.plan.entries}
+    refs = {entry.head_ref for record in records for entry in record.plan.entries}
+    return snapshot.model_copy(
+        update={
+            "pull_requests": tuple(
+                pr
+                for pr in snapshot.pull_requests
+                if pr.number not in numbers and pr.head_ref not in refs and pr.base_ref not in refs
+            )
+        }
+    )
+
+
+def _read_obsolete_stack_collapse_records(
+    *,
+    store: MergeTrainStackCollapsePlanRecordStore,
+    snapshot: MergeTrainDryRunSnapshot,
+    repository_policy: MergeTrainRepositoryPolicy,
+    policy_sha256: str,
+) -> tuple[MergeTrainStackCollapsePlanRecord, ...]:
+    records = tuple(
+        record
+        for status in ("active", "superseded")
+        for record in store.list_merge_train_stack_collapse_plan_records(
+            repository=snapshot.repository, base_branch=snapshot.base_branch, status=status
+        )
+    )
+    return _obsolete_stack_collapse_records(
+        records=records,
+        snapshot=snapshot,
+        repository_policy=repository_policy,
+        policy_sha256=policy_sha256,
+    )
+
+
 def _advance_without_candidate_record(
     *,
     request: MergeTrainControllerRunOnceEnvelope,
@@ -2590,6 +2677,46 @@ def _advance_without_candidate_record(
     retired_records = stack_collapse_store.list_merge_train_stack_collapse_plan_records(
         repository=request.repository, base_branch=request.base_branch, status="superseded"
     )
+    snapshot = snapshot or github_client.read_merge_train_snapshot(
+        repository=request.repository, base_branch=request.base_branch
+    )
+    obsolete_records = _obsolete_stack_collapse_records(
+        records=waiting_records + retired_records,
+        snapshot=snapshot,
+        repository_policy=repository_policy,
+        policy_sha256=policy_sha256,
+    )
+    obsolete_numbers = {
+        entry.pull_request_number for record in obsolete_records for entry in record.plan.entries
+    }
+    obsolete_refs = {entry.head_ref for record in obsolete_records for entry in record.plan.entries}
+
+    def independent(record: MergeTrainStackCollapsePlanRecord) -> bool:
+        return all(
+            entry.pull_request_number not in obsolete_numbers
+            and entry.head_ref not in obsolete_refs
+            for entry in record.plan.entries
+        )
+
+    def report_obsolete(result: dict[str, object]) -> dict[str, object]:
+        if obsolete_records:
+            result["details"] = {
+                "code": "merge_train_stack_collapse_policy_changed",
+                "record_id": obsolete_records[0].record_id,
+                "entries": [
+                    {
+                        "record_id": record.record_id,
+                        "root_pull_request_number": record.plan.root_pull_request_number,
+                    }
+                    for record in sorted(obsolete_records, key=lambda record: record.record_id)
+                ],
+            }
+        return result
+
+    latest_records = tuple(record for record in latest_records if independent(record))
+    latest_waiting_records = tuple(
+        record for record in latest_waiting_records if independent(record)
+    )
     active_collapse_ids = {record.plan.collapse_id for record in latest_records}
     active_root_numbers = {record.plan.root_pull_request_number for record in latest_records}
     retired_executions = tuple(
@@ -2624,6 +2751,7 @@ def _advance_without_candidate_record(
                 for mutation in record.plan.mutations
                 if mutation.status != "mutated"
             )
+            and independent(record)
         )
     # Resume saved execution before reporting an unrelated root's pending checks.
     # Select progress per collapse first so completed histories cannot revive plans.
@@ -2649,7 +2777,7 @@ def _advance_without_candidate_record(
             if planned_result is not None:
                 if planned_collapse_record.status == "superseded" and not request.mutate:
                     planned_result.pop("merge_train_stack_collapse_plan_record_id", None)
-                return planned_result
+                return report_obsolete(planned_result)
 
     pending_wait_result: dict[str, object] | None = None
     for waiting_collapse_record in sorted(
@@ -2675,9 +2803,14 @@ def _advance_without_candidate_record(
         if waiting_result is None:
             continue
         if waiting_result["controller_action"] != "wait_for_root_checks":
-            return waiting_result
+            return report_obsolete(waiting_result)
         if pending_wait_result is None:
             pending_wait_result = waiting_result
+    if obsolete_records:
+        assert snapshot is not None
+        snapshot = _without_obsolete_stack_collapse_pull_requests(
+            snapshot=snapshot, records=obsolete_records
+        )
     if pending_wait_result is not None:
         assert snapshot is not None
         queue_snapshot = _without_held_out_pull_requests(
@@ -2693,16 +2826,18 @@ def _advance_without_candidate_record(
         )
         # Pending saved checks must not hide the ordinary queue's blocking reason.
         if queue_result.intended_next_action == "block":
-            return {
-                "repository": request.repository,
-                "base_branch": request.base_branch,
-                "mode": "dry-run",
-                "controller_action": "block",
-                "dry_run_result": queue_result.model_dump(mode="json"),
-            }
-        return pending_wait_result
+            return report_obsolete(
+                {
+                    "repository": request.repository,
+                    "base_branch": request.base_branch,
+                    "mode": "dry-run",
+                    "controller_action": "block",
+                    "dry_run_result": queue_result.model_dump(mode="json"),
+                }
+            )
+        return report_obsolete(pending_wait_result)
 
-    return _advance_from_live_snapshot(
+    live_result = _advance_from_live_snapshot(
         github_client=github_client,
         request=request,
         policy=policy,
@@ -2716,6 +2851,19 @@ def _advance_without_candidate_record(
         snapshot=snapshot,
         held_out=held_out,
     )
+    if obsolete_records and live_result["controller_action"] == "idle":
+        live_result = {
+            "repository": request.repository,
+            "base_branch": request.base_branch,
+            "mode": "blocked",
+            "controller_action": "block",
+            "blocking_reason": {
+                "code": "merge_train_stack_collapse_policy_changed",
+                "message": "This saved stack requires its original policy or a new root head; unrelated work "
+                "can proceed while its proof remains blocked.",
+            },
+        }
+    return report_obsolete(live_result)
 
 
 def _advance_waiting_stack_collapse_record(
@@ -3393,6 +3541,7 @@ def stale_merge_train_landing_plan(
 def try_reflow_failed_merge_train_candidate(
     *,
     candidate_store: MergeTrainBatchCandidateRecordStore,
+    stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
     active_candidate_record: MergeTrainBatchCandidateRecord,
     policy: MergeTrainPolicy,
     policy_sha256: str,
@@ -3413,6 +3562,17 @@ def try_reflow_failed_merge_train_candidate(
         )
     except Exception:
         return None
+    snapshot = _without_obsolete_stack_collapse_pull_requests(
+        snapshot=snapshot,
+        records=_read_obsolete_stack_collapse_records(
+            store=stack_collapse_store,
+            snapshot=snapshot,
+            repository_policy=policy.find_repository_policy(
+                repository=repository, base_branch=base_branch
+            ),
+            policy_sha256=policy_sha256,
+        ),
+    )
     held_out = _surviving_held_out_entries(
         policy=policy, snapshot=snapshot, held_out=active_candidate_record.candidate.held_out
     )
