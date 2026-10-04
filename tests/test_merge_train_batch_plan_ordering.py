@@ -101,6 +101,9 @@ class BatchPlanOrderingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(feedback[0]["base_branch"], saved.plan.base_branch)
             self.assertEqual(feedback[0]["controller_action"], "block")
             self.assertEqual(feedback[0]["controller_record_id"], "")
+            self.assertNotIn(
+                result["dry_run_result"]["blocked_label"], cast(str, feedback[0]["message"])
+            )
             self.assertIn(
                 "checks failed" if checks == "fail" else "merge conflicts",
                 cast(str, feedback[0]["message"]),

@@ -55,6 +55,7 @@ def build_feedback_payloads(
         event=event,
         result=result,
         controller_record_id=controller_record_id,
+        phase=phase,
     )
     payloads: list[dict[str, object]] = [
         {
@@ -242,6 +243,7 @@ def _feedback_message(
     event: str,
     result: dict[str, Any],
     controller_record_id: str,
+    phase: str,
 ) -> str:
     if event == "completed":
         batch_pr = _as_dict(result.get("landing_plan")).get("candidate_pull_request_number")
@@ -252,6 +254,18 @@ def _feedback_message(
         return "Launchplane stopped using this train record because its stored evidence is stale."
     if event == "blocked":
         detail = _blocking_detail(result)
+        if (
+            phase == "batch-candidate"
+            and controller_action == "block"
+            and "candidate" not in result
+        ):
+            selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))
+            if selected.get("mergeable") == "conflicting":
+                detail = "pull request has merge conflicts"
+            elif selected.get("required_checks_status") == "fail" and (
+                selected.get("owner_review_required") is not True
+            ):
+                detail = "required checks failed"
         if detail:
             return f"Launchplane needs attention before the train can continue: {detail}"
         return "Launchplane needs attention before the train can continue."
