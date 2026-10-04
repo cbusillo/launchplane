@@ -983,6 +983,13 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     self.assertEqual(retry.status_code, 409, retry.text)
                     self.assertEqual(
+                        retry.json()["error"]["code"],
+                        {
+                            "request": "product_retirement_blocked",
+                            "plan": "idempotency_key_reused",
+                        }.get(change, "mutation_reconciliation_required"),
+                    )
+                    self.assertEqual(
                         store.read_product_profile_record("example-site").lifecycle_state,
                         "retiring",
                     )

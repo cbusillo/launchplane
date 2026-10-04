@@ -810,8 +810,6 @@ def _reconcile(
                 response_trace_id=response_trace_id,
                 lease_seconds=lease_seconds,
                 heartbeat_interval_seconds=heartbeat_interval_seconds,
-                # Revalidation failure must not discard the held reconciliation operation.
-                release_pre_effect_failures=False,
             )
     if observation.outcome != "present":
         return DurableProviderOperationResult(
