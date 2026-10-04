@@ -535,6 +535,11 @@ navigation. Its receipt means the credential was stored, not that a running
 product uses it. The admin reviews and applies the selected submission version
 through the existing dry-run/apply form. See [secrets.md](secrets.md#client-credential-input).
 
+Client-login previews use the shared read-only browser operation path. A lost
+response or interrupted navigation permits a fresh preview with a revised login
+and reason, including after reload. Save remains a mutation: an uncertain result
+locks the draft and retains its request fingerprint and idempotency key.
+
 ## Cleanup Safety
 
 Legacy cleanup is an admin or maintenance action, not a primary product flow.
