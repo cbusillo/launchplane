@@ -517,6 +517,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _github_branch(sha="parent-head"),
+                {"status": "diverged"},
                 {"sha": "parent-after-child"},
             )
         )
@@ -544,6 +545,11 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     None,
                 ),
                 (
+                    "GET",
+                    "/repos/example/merge-train-repo/compare/child-head...parent-head",
+                    None,
+                ),
+                (
                     "POST",
                     "/repos/example/merge-train-repo/merges",
                     {
@@ -556,6 +562,46 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 ),
             ],
         )
+
+    def test_merge_stack_child_recovers_contained_head_without_a_provider_merge(self) -> None:
+        for status in ("ahead", "identical"):
+            with self.subTest(status=status):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(_github_branch(sha="current-parent"), {"status": status})
+                )
+                result = GitHubMergeTrainClient(transport=transport).merge_stack_child_into_parent(
+                    repository="example/merge-train-repo",
+                    child_head_sha="child-head",
+                    expected_parent_head_sha="current-parent",
+                    parent_head_ref="feature/root",
+                    protected_base_ref="main",
+                    collapse_id="fresh-current-policy-collapse",
+                    child_pull_request_number=11,
+                    parent_pull_request_number=10,
+                )
+                self.assertEqual(result, "current-parent")
+                self.assertTrue(all(request.method == "GET" for request in transport.requests))
+                self.assertEqual(
+                    transport.requests[-1].path,
+                    "/repos/example/merge-train-repo/compare/child-head...current-parent",
+                )
+
+    def test_merge_stack_child_refuses_unavailable_inclusion_evidence(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(_github_branch(sha="parent-head"), None)
+        )
+        with self.assertRaises(MergeTrainGitHubError):
+            GitHubMergeTrainClient(transport=transport).merge_stack_child_into_parent(
+                repository="example/merge-train-repo",
+                child_head_sha="child-head",
+                expected_parent_head_sha="parent-head",
+                parent_head_ref="feature/root",
+                protected_base_ref="main",
+                collapse_id="collapse-123",
+                child_pull_request_number=11,
+                parent_pull_request_number=10,
+            )
+        self.assertTrue(all(request.method == "GET" for request in transport.requests))
 
     def test_merge_stack_child_into_parent_rejects_stale_parent_branch(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
@@ -659,6 +705,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _github_branch(sha="parent-head"),
+                {"status": "diverged"},
                 {"sha": "parent-after-child"},
             )
         )
