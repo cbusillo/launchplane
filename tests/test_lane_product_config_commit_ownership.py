@@ -78,7 +78,7 @@ class LaneProductConfigCommitOwnershipTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         for store_type in (FilesystemRecordStore, PostgresRecordStore):
             for scenario in (
-                ("unchanged", "reassigned")
+                ("unchanged", "reassigned", "shared_context")
                 if caller == "local_operator"
                 else ("unchanged", "reassigned", "shared_context", "lost_instance")
             ):
@@ -207,7 +207,9 @@ class LaneProductConfigCommitOwnershipTests(unittest.IsolatedAsyncioTestCase):
                             payload=apply_payload,
                         )
                     writer.assert_called_once()
-                    refused = scenario in ("reassigned", "lost_instance")
+                    refused = scenario in ("reassigned", "lost_instance") or (
+                        caller == "local_operator" and scenario == "shared_context"
+                    )
                     self.assertEqual(
                         response.status_code,
                         (403 if caller == "local_operator" else 409) if refused else 202,
