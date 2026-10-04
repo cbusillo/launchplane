@@ -3663,7 +3663,9 @@ is pinned to an immutable reusable worker. Authorization must bind both the
 caller `workflow_ref` and the exact immutable `job_workflow_ref`. Derive the
 caller from [the dispatch wrapper](../.github/workflows/product-retirement.yml)
 on the default branch, and copy the worker reference from its `retire` job
-`uses:` value. The wrapper is the source of the current worker revision.
+`uses:` value. The caller format is
+`<owner>/<repository>/<wrapper path>@refs/heads/<default branch>`. The wrapper
+is the source of the current worker revision.
 
 This describes an existing transitional authorization path, not approval to
 create or expand it. New grants and managed-set changes are a stop boundary;
@@ -3687,7 +3689,8 @@ A grant would bind the caller `workflow_ref` from
 [the dispatch wrapper](../.github/workflows/detached-application-retirement.yml)
 on the default branch and the exact immutable `job_workflow_ref` from its
 `retire` job `uses:` value. Copy the worker reference from the wrapper rather
-than a separate documentation pin.
+than a separate documentation pin. The caller format is
+`<owner>/<repository>/<wrapper path>@refs/heads/<default branch>`.
 
 The future admin sequence is plan then apply. Inputs are exact Dokploy
 project/environment/application names, the candidate target SHA-256, a sorted
