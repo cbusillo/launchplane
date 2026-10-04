@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
-from control_plane import live_target_runtime
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import BearerIdentityConfig
 from control_plane.storage.postgres import PostgresRecordStore
@@ -246,7 +245,7 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(driver.json()["error"]["code"], "runtime_retirement_conflict")
 
     async def test_retirement_uses_the_checked_profile_during_a_declaration_edit(self) -> None:
-        original_keys = live_target_runtime.product_lane_declared_keys
+        original_read = self.store.read_product_profile_record
         for key, declared in (("APP_THEME", False), ("LEGACY_TUNING", True)):
             for mode in ("dry-run", "apply") if declared else ("dry-run",):
                 with self.subTest(key=key, mode=mode):
@@ -268,36 +267,22 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
                         )
                         self.assertEqual(review.status_code, 202, review.text)
 
-                    def edit_before_declared_keys(
-                        *,
-                        record_store: live_target_runtime.LiveTargetRuntimeProfileStore,
-                        product_name: str,
-                        context_name: str,
-                        instance_name: str,
-                        profile: LaunchplaneProductProfileRecord | None = None,
-                    ) -> set[str]:
-                        self.store.write_product_profile_record(
-                            _profile().model_copy(update={"expected_config": edited_config})
-                        )
-                        if profile is None:
-                            return original_keys(
-                                record_store=record_store,
-                                product_name=product_name,
-                                context_name=context_name,
-                                instance_name=instance_name,
+                    read_count = 0
+
+                    def edit_after_checked_profile(product: str) -> LaunchplaneProductProfileRecord:
+                        nonlocal read_count
+                        read_count += 1
+                        snapshot = original_read(product)
+                        if read_count == 3:
+                            self.store.write_product_profile_record(
+                                profile.model_copy(update={"expected_config": edited_config})
                             )
-                        return original_keys(
-                            record_store=record_store,
-                            product_name=product_name,
-                            context_name=context_name,
-                            instance_name=instance_name,
-                            profile=profile,
-                        )
+                        return snapshot
 
                     with patch.object(
-                        live_target_runtime,
-                        "product_lane_declared_keys",
-                        side_effect=edit_before_declared_keys,
+                        self.store,
+                        "read_product_profile_record",
+                        side_effect=edit_after_checked_profile,
                     ):
                         response = await self._submit(
                             {
