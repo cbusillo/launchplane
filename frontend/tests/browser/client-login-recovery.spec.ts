@@ -15,11 +15,52 @@ async function mockProduct(page: Page) {
   } } }));
 }
 
+for (const storageFailure of ["unavailable", "read-back-mismatch", "operation-key-unavailable"] as const) {
+test(`Client-login Save refuses ${storageFailure} storage and can retry after recovery`, async ({ page }) => {
+  await mockProduct(page);
+  const applies: Record<string, unknown>[] = [];
+  await page.route("**/v1/product-profiles/atlas-commerce/owner", async route => {
+    if (route.request().postDataJSON().mode === "apply") applies.push(route.request().postDataJSON());
+    await respondWithPlan(route);
+  });
+  await page.addInitScript(({ storageFailure }) => {
+    window.__denyProfileDraft = true;
+    const original = Storage.prototype.setItem;
+    Storage.prototype.setItem = function(key, value) {
+      const selected = storageFailure === "operation-key-unavailable"
+        ? key.startsWith("launchplane.browser-operation.") : key.endsWith(":owner");
+      if (window.__denyProfileDraft && selected) {
+        if (storageFailure !== "read-back-mismatch") throw new DOMException("Quota exceeded", "QuotaExceededError");
+        return; // A browser that silently fails to retain the draft.
+      }
+      return original.call(this, key, value);
+    };
+  }, { storageFailure });
+  await page.goto("/ui/products/atlas-commerce");
+  const panel = page.getByRole("region", { name: "example-owner (id 9001)", exact: true });
+  await panel.getByLabel("GitHub login").fill("new-client");
+  await panel.getByLabel("Change reason").fill("Review the original reason.");
+  await panel.getByRole("button", { name: "Preview change", exact: true }).click();
+  await panel.getByLabel("Change reason").fill("An unreviewed reason.");
+  await expect(panel.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  await panel.getByLabel("Change reason").fill("Review the original reason.");
+  await panel.getByRole("button", { name: "Save", exact: true }).click();
+  if (storageFailure === "operation-key-unavailable") {
+    await expect(panel.getByRole("status").filter({ hasText: "Save was not sent" })).toBeVisible();
+  } else await expect(panel.getByRole("alert")).toContainText("Nothing was sent");
+  expect(applies).toHaveLength(0);
+  await page.evaluate(() => { window.__denyProfileDraft = false; });
+  await panel.getByRole("button", { name: storageFailure === "operation-key-unavailable" ? "Retry save" : "Save", exact: true }).click();
+  await expect(page.getByRole("region", { name: "new-client (id 7009)", exact: true }).getByRole("status")).toContainText("Saved.");
+  expect(applies).toEqual([{ schema_version: 1, mode: "apply", github_login: "new-client", reason: "Review the original reason." }]);
+});
+}
+
 async function respondWithPlan(route: Route) {
   const body = route.request().postDataJSON();
   await route.fulfill({ status: 202, json: { status: "accepted", trace_id: "client-change", records: {}, result: {
     owner_before: { github_login: "example-owner", github_id: "9001" },
-    owner_after: { github_login: body.github_login, github_id: "7009" },
+    owner_after: body.clear ? null : { github_login: body.github_login, github_id: "7009" },
     changed: true, applied: body.mode === "apply",
   } } });
 }
@@ -65,13 +106,19 @@ for (const interruption of ["lost", "lost-reload", "reload-submitting", "navigat
   });
 }
 
-test("Client-login uncertain Apply locks the draft and retries the same request and key", async ({ page }) => {
+for (const recovery of ["same-tab", "reload", "clear-reload", "navigation", "reload-submitting"] as const) {
+test(`Client-login uncertain Apply recovers after ${recovery} with the same request and key`, async ({ page }, testInfo) => {
   await mockProduct(page);
   const applies: Array<{ body: Record<string, unknown>; key: string }> = [];
+  let held: Route | null = null;
   await page.route("**/v1/product-profiles/atlas-commerce/owner", async route => {
     if (route.request().postDataJSON().mode === "apply") {
       applies.push({ body: route.request().postDataJSON(), key: route.request().headers()["idempotency-key"] });
-      if (applies.length === 1) { await route.abort("failed"); return; }
+      if (applies.length === 1) {
+        if (recovery === "reload-submitting") held = route;
+        else await route.abort("failed");
+        return;
+      }
     }
     await respondWithPlan(route);
   });
@@ -79,16 +126,30 @@ test("Client-login uncertain Apply locks the draft and retries the same request 
   const panel = page.getByRole("region", { name: "example-owner (id 9001)", exact: true });
   await panel.getByLabel("GitHub login").fill("new-client");
   await panel.getByLabel("Change reason").fill("Save the reviewed Client.");
-  await panel.getByRole("button", { name: "Preview change", exact: true }).click();
+  await panel.getByRole("button", { name: recovery === "clear-reload" ? "Clear" : "Preview change", exact: true }).click();
   await panel.getByRole("button", { name: "Save", exact: true }).click();
+  if (recovery === "reload-submitting") await expect.poll(() => applies.length).toBe(1);
+  else await expect(panel.getByRole("button", { name: "Retry save", exact: true })).toBeEnabled();
+  if (recovery === "navigation") {
+    await page.getByRole("link", { name: "Product Ops", exact: true }).click();
+    await expect(panel).toHaveCount(0);
+    await page.locator(".product-directory-row").filter({ hasText: "Atlas Commerce" }).click();
+  } else if (recovery !== "same-tab") await page.reload();
   await expect(panel.getByRole("button", { name: "Retry save", exact: true })).toBeEnabled();
   await expect(panel.getByLabel("GitHub login")).toBeDisabled();
   await expect(panel.getByLabel("Change reason")).toBeDisabled();
   await expect(panel.getByRole("button", { name: "Preview change", exact: true })).toBeDisabled();
   await expect(panel.getByRole("button", { name: "Clear", exact: true })).toBeDisabled();
+  await expect(panel.getByLabel("Change reason")).toHaveValue("Save the reviewed Client.");
+  if (recovery === "reload") await panel.screenshot({ path: testInfo.outputPath("client-login-recovered.png") });
   await panel.getByRole("button", { name: "Retry save", exact: true }).click();
-  await expect(page.getByRole("region", { name: "new-client (id 7009)", exact: true }).getByRole("status")).toContainText("Saved.");
+  await expect(page.getByRole("region", { name: recovery === "clear-reload" ? "No Client set" : "new-client (id 7009)", exact: true }).getByRole("status")).toContainText("Saved.");
   expect(applies).toHaveLength(2);
   expect(applies[0].key).toBeTruthy();
   expect(applies[1]).toEqual(applies[0]);
+  await page.reload();
+  await expect(panel.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  await expect(panel.getByLabel("Change reason")).toBeEnabled();
+  if (held) await held.abort().catch(() => {});
 });
+}
