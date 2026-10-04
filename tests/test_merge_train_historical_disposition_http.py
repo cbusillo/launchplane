@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -54,7 +53,10 @@ class HistoricalDispositionHttpTests(unittest.IsolatedAsyncioTestCase):
                 app = _app(store)
                 transport = _ReadOnlyTransport(responses=_provider_responses())
                 with (
-                    patch.dict(os.environ, {"GH_TOKEN": "test-token"}),
+                    patch(
+                        "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                        return_value="test-token",
+                    ),
                     patch(
                         "control_plane.http_app.UrllibMergeTrainGitHubTransport",
                         return_value=transport,
@@ -89,7 +91,10 @@ class HistoricalDispositionHttpTests(unittest.IsolatedAsyncioTestCase):
             app = _app(store)
             transport = _ReadOnlyTransport(responses=_provider_responses() + _provider_responses())
             with (
-                patch.dict(os.environ, {"GH_TOKEN": "test-token"}),
+                patch(
+                    "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                    return_value="test-token",
+                ),
                 patch(TRANSPORT, return_value=transport),
             ):
                 dry = await _post_merge_train_controller_run_once(

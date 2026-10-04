@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -882,7 +881,10 @@ class HistoricalCompletionHttpTests(unittest.IsolatedAsyncioTestCase):
             transport = _ReadOnlyTransport(responses=_provider_responses())
             app = await self._app(fixture.store)
             with (
-                patch.dict(os.environ, {"GH_TOKEN": "test-token"}, clear=False),
+                patch(
+                    "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                    return_value="test-token",
+                ),
                 patch(
                     "control_plane.http_app.UrllibMergeTrainGitHubTransport",
                     return_value=transport,
@@ -919,7 +921,10 @@ class HistoricalCompletionHttpTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             with (
-                patch.dict(os.environ, {"GH_TOKEN": "test-token"}, clear=False),
+                patch(
+                    "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                    return_value="test-token",
+                ),
                 patch(
                     "control_plane.http_app.UrllibMergeTrainGitHubTransport",
                     side_effect=AssertionError("denied request reached provider"),
@@ -936,7 +941,10 @@ class HistoricalCompletionHttpTests(unittest.IsolatedAsyncioTestCase):
             fixture = _HistoricalCompletionFixture(Path(directory))
             app = await self._app(fixture.store)
             with (
-                patch.dict(os.environ, {"GH_TOKEN": "test-token"}, clear=False),
+                patch(
+                    "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                    return_value="test-token",
+                ),
                 patch(
                     "control_plane.http_app.UrllibMergeTrainGitHubTransport",
                     side_effect=AssertionError("mutation selector reached provider"),
@@ -959,7 +967,10 @@ class HistoricalCompletionHttpTests(unittest.IsolatedAsyncioTestCase):
             _historical_completion_payload(mismatch_payload)["expected_effect_sha"] = "other-effect"
             mismatch_transport = _ReadOnlyTransport(responses=_provider_responses())
             with (
-                patch.dict(os.environ, {"GH_TOKEN": "test-token"}, clear=False),
+                patch(
+                    "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                    return_value="test-token",
+                ),
                 patch(
                     "control_plane.http_app.UrllibMergeTrainGitHubTransport",
                     return_value=mismatch_transport,
@@ -977,7 +988,10 @@ class HistoricalCompletionHttpTests(unittest.IsolatedAsyncioTestCase):
                 responses=_provider_responses() + _provider_responses()
             )
             with (
-                patch.dict(os.environ, {"GH_TOKEN": "test-token"}, clear=False),
+                patch(
+                    "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                    return_value="test-token",
+                ),
                 patch(
                     "control_plane.http_app.UrllibMergeTrainGitHubTransport",
                     return_value=replay_transport,

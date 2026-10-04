@@ -5591,7 +5591,7 @@ allowed_actor_roles = ["repo_owner", "repo_admin"]
 kind = "github_actions_oidc"
 name = "launchplane-merge-train"
 [policies.github_token]
-env_var = "GH_TOKEN"
+runtime_context = "example_context"
 """.strip(),
                 encoding="utf-8",
             )
@@ -5653,7 +5653,7 @@ allowed_actor_roles = ["repo_owner", "repo_admin"]
 kind = "github_actions_oidc"
 name = "launchplane-merge-train"
 [policies.github_token]
-env_var = "GH_TOKEN"
+runtime_context = "example_context"
 """.strip(),
                 encoding="utf-8",
             )
@@ -5726,7 +5726,7 @@ allowed_actor_roles = ["repo_owner"]
 kind = "github_actions_oidc"
 name = "launchplane-merge-train"
 [policies.github_token]
-env_var = "GH_TOKEN"
+runtime_context = "example_context"
 """.strip(),
                 encoding="utf-8",
             )
