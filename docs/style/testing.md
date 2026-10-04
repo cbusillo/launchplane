@@ -16,6 +16,9 @@ title: Testing Style
 - Verification code must not depend on working-tree state; read live state
   only on the path that acts on it.
 - Prefer deterministic file-system tests using `TemporaryDirectory`.
+- When a fixture follows a record written with the current clock, derive its
+  timestamps from that persisted record. A distant future date only delays the
+  failure; ordering assertions should also hold after that date passes.
 - Test fail-closed behavior explicitly.
 - Keep fixtures small and inline unless they are reused heavily.
 - When a full suite is justified, the local entrypoint is
