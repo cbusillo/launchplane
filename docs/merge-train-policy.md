@@ -1101,9 +1101,18 @@ Controller actions have these retry/stop semantics:
   Alternatively, pushing a new commit to the root makes the old proof
   inapplicable and resumes current-policy discovery with fresh head/readiness
   proof. Closing and reopening at the same checkpointed head keeps the policy
-  block. This unchanged-root disposition does not qualify recovery of a branch
-  merge whose checkpoint was never recorded, or no-repeat behavior after the
-  root moves; those paths retain their existing retirement semantics.
+  block. Uncheckpointed execution and moved roots retain their existing retirement
+  semantics. For controller execution, fresh current-policy discovery can recover their carried branch
+  effects: after current child readiness and exact parent-head checks, the GitHub
+  adapter compares the child commit with the immutable expected parent commit.
+  If that parent already contains the child, execution checkpoints that head
+  without issuing another branch merge. Otherwise it merges the current child
+  normally. Missing compare evidence refuses execution. The new collapse has its
+  own current-policy admission and child-head expectations, and landing reconciles
+  children still open in that fresh plan; retired proof never supplies admission
+  under the new policy. GitHub may already mark a carried child merged indirectly
+  and remove it from discovery. Current-policy root landing still proceeds, but
+  this path does not recover Launchplane's comment and label for that absent child.
   Requalifying carried proof under a different policy is not supported.
   A completed stack never revives its older planned progress.
 - `wait_for_root_checks`: The collapsed root PR's required checks are still
@@ -1474,5 +1483,8 @@ execution, ready waits and fresh live work can proceed with that blocking
 evidence attached. The affected PRs and refs remain excluded from discovery.
 No old-policy record authorizes a merge under a different policy. Checkpointed
 partial execution at an unchanged root stays visible and excluded from fresh
-replanning; changed-root and uncheckpointed-effect recovery are not qualified
-by that guarantee.
+replanning. Changed-root and uncheckpointed effects can be recovered through
+fresh current-policy controller discovery: current Git ancestry prevents another merge of
+an already-contained child, and the fresh collapse owns disposition of its
+remaining open children. A carried child GitHub already merged indirectly stays
+closed; this recovery does not restore its Launchplane landing annotations.
