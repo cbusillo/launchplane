@@ -51,13 +51,14 @@ class _StackTransport:
         if method == "POST" and path.endswith("/merges"):
             assert body is not None
             self.merge_requests.append(body)
-            ref, child = str(body["base"]), str(body["head"])
+            ref, child_head, message = body["base"], body["head"], body["commit_message"]
+            assert isinstance(ref, str) and isinstance(child_head, str) and isinstance(message, str)
             parent = self.heads[ref]
-            if self.contains(parent, child):
+            if self.contains(parent, child_head):
                 return None  # GitHub returns 204 with no JSON body.
             head = f"merge-{len(self.merge_requests)}"
-            self.parents[head] = (parent, child)
-            self.messages[head] = str(body["commit_message"])
+            self.parents[head] = (parent, child_head)
+            self.messages[head] = message
             self.heads[ref] = head
             return {"sha": head}
         raise AssertionError(f"unexpected provider request: {method} {path}")
@@ -318,12 +319,12 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
 
-    async def test_uncheckpointed_merge_then_policy_change_recovers_without_repeating_merge(
+    async def test_missing_checkpoint_then_policy_change_recovers_without_repeating_merge(
         self,
     ) -> None:
         await self._recovery(checkpointed=False, moved=False)
 
-    async def test_uncheckpointed_merge_then_root_push_and_policy_change_recovers(self) -> None:
+    async def test_missing_checkpoint_then_root_push_and_policy_change_recovers(self) -> None:
         await self._recovery(checkpointed=False, moved=True)
 
     async def test_checkpointed_merge_then_root_push_and_policy_change_recovers(self) -> None:
@@ -332,7 +333,7 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_new_child_work_is_merged_and_reconciled_at_its_current_head(self) -> None:
         await self._recovery(checkpointed=False, moved=True, child_changed=True)
 
-    async def test_uncheckpointed_middle_merge_recovers_then_merges_only_remaining_root(
+    async def test_missing_middle_checkpoint_recovers_then_merges_only_remaining_root(
         self,
     ) -> None:
         await self._recovery(checkpointed=False, moved=False, deeper=True)

@@ -1939,8 +1939,8 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 "Stack collapse parent branch moved outside the stored plan.",
                 status_code=409,
             )
-        # A fresh plan may include a merge carried by retired or uncheckpointed
-        # execution. Prove inclusion at the immutable, currently expected head;
+        # A fresh plan may include a merge carried by retired execution or a
+        # lost checkpoint. Prove inclusion at the immutable, currently expected head;
         # an older collapse marker is not authority for this plan.
         if self.branch_contains_commit(
             repository=repository,
