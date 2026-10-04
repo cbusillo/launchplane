@@ -937,7 +937,12 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 if change == "unchanged":
                     observations = [_observation(), _observation(), _absent_observation()]
                 elif change == "retry_observation":
-                    observations = [_observation(), TimeoutError("retry observation unavailable")]
+                    observations = [
+                        _observation(),
+                        TimeoutError("retry observation unavailable"),
+                        _observation(),
+                        TimeoutError("retry observation unavailable"),
+                    ]
                 with (
                     patch(
                         "control_plane.product_retirement.observe_tracked_dokploy_application",
@@ -958,6 +963,15 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                         headers=headers,
                         payload=payload,
                     )
+                    if change == "retry_observation":
+                        self.assertEqual(retry.status_code, 409, retry.text)
+                        retry = await _asgi_request(
+                            app,
+                            "POST",
+                            "/v1/product-retirement",
+                            headers=headers,
+                            payload=payload,
+                        )
                 if change == "unchanged":
                     self.assertEqual(retry.status_code, 202, retry.text)
                     self.assertTrue(retry.json()["result"]["provider_absence_verified"])
