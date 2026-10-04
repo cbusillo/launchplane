@@ -15,37 +15,43 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.workflow = load_workflow(".github/workflows/deploy-launchplane.yml")
 
-    def _render(self, name: str, env: dict[str, str]) -> dict[str, object]:
-        step = self.workflow.step_named("deploy", name)
+    def _run_step(
+        self, job: str, name: str, env: dict[str, str], directory: Path
+    ) -> subprocess.CompletedProcess[str]:
+        step = self.workflow.step_named(job, name)
         assert step is not None
+        runtime = directory / "runtime.json"
+        if not runtime.exists():
+            runtime.write_text("{}\n", encoding="utf-8")
+        return subprocess.run(
+            ["bash", "-c", step.run],
+            cwd=Path.cwd(),
+            env={
+                "PATH": os.environ["PATH"],
+                "HOME": str(directory),
+                "LANG": "C.UTF-8",
+                "GITHUB_OUTPUT": str(directory / "output"),
+                "RUNNER_TEMP": str(directory),
+                "PREVIOUS_RUNTIME_RESPONSE_FILE": str(runtime),
+                "LAUNCHPLANE_DOKPLOY_TARGET_TYPE": "compose",
+                "LAUNCHPLANE_DOKPLOY_TARGET_ID": "compose-test",
+                "OMIT_EVERY_CODE_ENV": "false",
+                "OMIT_TERMINAL_AGENT_ENV": "false",
+                "OMIT_OWNER_AGENT_ENV": "false",
+                "OMIT_NPMPLUS_ENV": "false",
+                **env,
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def _render(self, name: str, env: dict[str, str]) -> dict[str, object]:
         with TemporaryDirectory() as directory_name:
             directory = Path(directory_name)
-            output = directory / "output"
-            runtime = directory / "runtime.json"
-            runtime.write_text("{}\n", encoding="utf-8")
-            result = subprocess.run(
-                ["bash", "-c", step.run],
-                cwd=Path.cwd(),
-                env={
-                    "PATH": os.environ["PATH"],
-                    "HOME": str(directory),
-                    "LANG": "C.UTF-8",
-                    "GITHUB_OUTPUT": str(output),
-                    "RUNNER_TEMP": str(directory),
-                    "PREVIOUS_RUNTIME_RESPONSE_FILE": str(runtime),
-                    "LAUNCHPLANE_DOKPLOY_TARGET_TYPE": "compose",
-                    "LAUNCHPLANE_DOKPLOY_TARGET_ID": "compose-test",
-                    "OMIT_EVERY_CODE_ENV": "false",
-                    "OMIT_TERMINAL_AGENT_ENV": "false",
-                    "OMIT_OWNER_AGENT_ENV": "false",
-                    "OMIT_NPMPLUS_ENV": "false",
-                    **env,
-                },
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            result = self._run_step("deploy", name, env, directory)
             self.assertEqual(result.returncode, 0, result.stderr)
+            output = directory / "output"
             values = dict(
                 line.split("=", 1) for line in output.read_text().splitlines() if "=" in line
             )
@@ -93,6 +99,101 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
             cast(dict[str, object], rollback["deploy"])["ordinary_agent_worker_replicas"],
             {"expected": "1", "desired": "absent"},
         )
+
+    def test_self_deploy_removes_unset_public_ingress_token_and_omitted_npmplus_env(
+        self,
+    ) -> None:
+        base = {
+            "BOOTSTRAP_SECRET_OPERATION": "preserve",
+            "ORDINARY_AGENT_WORKERS": "preserve",
+            "ORDINARY_AGENT_WORKERS_EXPECTED_STATE": "absent",
+            "DEPLOYMENT_MARKER": "deploy-marker",
+            "DEPLOY_IMAGE_REFERENCE": "ghcr.io/cbusillo/launchplane@sha256:" + ("b" * 64),
+            "IMAGE_REPOSITORY": "ghcr.io/cbusillo/launchplane",
+        }
+        cases = (
+            ("", "false", ["LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN"]),
+            ("public-ingress-token", "false", None),
+            (
+                "",
+                "true",
+                [
+                    "LAUNCHPLANE_NPMPLUS_BASE_URL",
+                    "LAUNCHPLANE_NPMPLUS_IDENTITY",
+                    "LAUNCHPLANE_NPMPLUS_SECRET",
+                    "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN",
+                ],
+            ),
+        )
+        for token, omit_npmplus, removals in cases:
+            with self.subTest(token=bool(token), omit_npmplus=omit_npmplus):
+                payload = self._render(
+                    "Render Launchplane self deploy request",
+                    {
+                        **base,
+                        "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN": token,
+                        "OMIT_NPMPLUS_ENV": omit_npmplus,
+                    },
+                )
+                deploy = cast(dict[str, object], payload["deploy"])
+                self.assertEqual(deploy.get("oauth_env_removals"), removals)
+
+    def test_self_deploy_rejects_multiline_previous_image_reference(self) -> None:
+        with TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            (directory / "runtime.json").write_text(
+                json.dumps(
+                    {
+                        "runtime": {
+                            "docker_image_reference": (
+                                "ghcr.io/cbusillo/launchplane@sha256:"
+                                + ("a" * 64)
+                                + "\nprevious_image_reference=attacker-controlled"
+                            )
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self._run_step(
+                "deploy",
+                "Render Launchplane self deploy request",
+                {
+                    "BOOTSTRAP_SECRET_OPERATION": "preserve",
+                    "ORDINARY_AGENT_WORKERS": "preserve",
+                    "ORDINARY_AGENT_WORKERS_EXPECTED_STATE": "absent",
+                    "DEPLOYMENT_MARKER": "deploy-marker",
+                    "DEPLOY_IMAGE_REFERENCE": "ghcr.io/cbusillo/launchplane@sha256:" + ("b" * 64),
+                    "IMAGE_REPOSITORY": "ghcr.io/cbusillo/launchplane",
+                },
+                directory,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("must not contain control characters", result.stderr)
+            self.assertFalse((directory / "output").exists())
+
+    def test_break_glass_validation_never_executes_the_dispatch_reason(self) -> None:
+        image_reference = "ghcr.io/cbusillo/launchplane@sha256:" + ("a" * 64)
+        with TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            command_marker = directory / "command-substitution-ran"
+            result = self._run_step(
+                "emergency-dokploy-rollback",
+                "Validate manual break-glass request",
+                {
+                    "AUTHZ_GRANTS_MODE": "none",
+                    "AUTHZ_MANAGED_MODE": "none",
+                    "BREAK_GLASS_IMAGE_REFERENCE": image_reference,
+                    "BREAK_GLASS_REASON": f'Restore after "review" $(touch {command_marker})',
+                    "GITHUB_REPOSITORY": "cbusillo/launchplane",
+                    "LAUNCHPLANE_IMAGE_REPOSITORY": "ghcr.io/cbusillo/launchplane",
+                },
+                directory,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(command_marker.exists())
 
     def test_automatic_input_resolution_preserves_worker_replicas(self) -> None:
         step = self.workflow.step_named("deploy", "Resolve deploy inputs")

@@ -97,6 +97,7 @@ from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsResult,
     OdooPreviewDokployDryRunPlan,
 )
+from control_plane.workflows import odoo_stable_operation_worker
 from control_plane.workflows.odoo_stable_operation_worker import (
     OdooStableOperationWorkerResult,
     OdooStableOperationWorkerStore,
@@ -2938,8 +2939,16 @@ class ProductReconcileWorkerTests(ProductReconcileTestCase):
         )
 
         self.assertEqual(result.status, "idle")
+        operation_claims = {
+            name
+            for member in vars(odoo_stable_operation_worker).values()
+            if isinstance(member, type)
+            for name in vars(member)
+            if name.startswith("claim_next_") and name != "claim_next_product_reconcile_request"
+        }
+        self.assertTrue(operation_claims)
         self.assertEqual(store.claims[-1], "claim_next_product_reconcile_request")
-        self.assertEqual(len(store.claims), 7)
+        self.assertCountEqual(store.claims[:-1], operation_claims)
 
     def test_worker_reports_a_reconcile_it_ran(self) -> None:
         self.request()
