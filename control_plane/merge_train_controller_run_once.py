@@ -2795,6 +2795,13 @@ def _advance_planned_stack_collapse_record(
     recorded_at: str,
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object] | None:
+    # An obsolete policy plan cannot authorize execution, but must not mask
+    # another stack's recovery under the current policy. Preserve its history.
+    if (
+        planned_collapse_record.plan.policy_key != repository_policy.policy_key
+        or planned_collapse_record.plan.policy_sha256 != policy_sha256
+    ):
+        return None
     snapshot = github_client.read_merge_train_snapshot(
         repository=request.repository,
         base_branch=request.base_branch,
@@ -2823,15 +2830,20 @@ def _advance_planned_stack_collapse_record(
     )
     expected_root_sha = current_head_shas[root_mutation.parent_pull_request_number]
     if root_pull_request.head_sha != expected_root_sha:
-        observed_root_sha = github_client.find_stack_child_merge_commit(
-            repository=planned_collapse_record.plan.repository,
-            child_head_sha=current_head_shas[root_mutation.child_pull_request_number],
-            expected_parent_head_sha=expected_root_sha,
-            parent_head_ref=root_mutation.parent_head_ref,
-            collapse_id=planned_collapse_record.plan.collapse_id,
-            child_pull_request_number=root_mutation.child_pull_request_number,
-            parent_pull_request_number=root_mutation.parent_pull_request_number,
-        )
+        try:
+            observed_root_sha = github_client.find_stack_child_merge_commit(
+                repository=planned_collapse_record.plan.repository,
+                child_head_sha=current_head_shas[root_mutation.child_pull_request_number],
+                expected_parent_head_sha=expected_root_sha,
+                parent_head_ref=root_mutation.parent_head_ref,
+                collapse_id=planned_collapse_record.plan.collapse_id,
+                child_pull_request_number=root_mutation.child_pull_request_number,
+                parent_pull_request_number=root_mutation.parent_pull_request_number,
+            )
+        except MergeTrainGitHubStaleHeadError:
+            # The real client rejects unrelated pushes rather than returning
+            # an empty probe. Leave this plan unapplied and consider other stacks.
+            return None
         if observed_root_sha != root_pull_request.head_sha:
             return None
     # A root or child that is no longer ready falls through to live discovery, which
