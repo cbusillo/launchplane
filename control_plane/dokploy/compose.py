@@ -514,6 +514,10 @@ def sync_dokploy_compose_raw_source(
     )
 
 
+class DokployComposeDomainRoutePreflightError(click.ClickException):
+    """The route operation failed before attempting a provider write."""
+
+
 def ensure_compose_web_domain_route(
     *,
     host: str,
@@ -526,20 +530,36 @@ def ensure_compose_web_domain_route(
     normalized_compose_id = compose_id.strip()
     normalized_domain_host = domain_host.strip()
     if not normalized_compose_id:
-        raise click.ClickException("Compose domain route reconciliation requires a compose id.")
+        raise DokployComposeDomainRoutePreflightError(
+            "Compose domain route reconciliation requires a compose id."
+        )
     if not normalized_domain_host:
-        raise click.ClickException("Compose domain route reconciliation requires a domain host.")
+        raise DokployComposeDomainRoutePreflightError(
+            "Compose domain route reconciliation requires a domain host."
+        )
     if runtime_port <= 0:
-        raise click.ClickException("Compose domain route reconciliation requires a positive port.")
+        raise DokployComposeDomainRoutePreflightError(
+            "Compose domain route reconciliation requires a positive port."
+        )
     normalized_certificate_type = certificate_type.strip() or "none"
 
-    raw_domains = api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/domain.byComposeId",
-        query={"composeId": normalized_compose_id},
-    )
-    domains = raw_domains if isinstance(raw_domains, list) else []
+    try:
+        raw_domains = api.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/domain.byComposeId",
+            query={"composeId": normalized_compose_id},
+        )
+    except Exception as error:
+        message = "Compose domain route lookup failed before the route write."
+        if isinstance(error, api.DokployRequestFailed) and error.status_code is not None:
+            message += f" Provider HTTP status: {error.status_code}."
+        raise DokployComposeDomainRoutePreflightError(message) from error
+    if not isinstance(raw_domains, list):
+        raise DokployComposeDomainRoutePreflightError(
+            "Compose domain route lookup returned an invalid response."
+        )
+    domains = raw_domains
     existing: api.JsonObject | None = None
     for raw_domain in domains:
         domain = api.as_json_object(raw_domain)
@@ -567,7 +587,7 @@ def ensure_compose_web_domain_route(
     if existing is not None:
         domain_id = str(existing.get("domainId") or "").strip()
         if not domain_id:
-            raise click.ClickException(
+            raise DokployComposeDomainRoutePreflightError(
                 f"Dokploy domain {normalized_domain_host} is missing domainId."
             )
         api.dokploy_request(

@@ -4230,6 +4230,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with (
                 patch(
+                    "control_plane.dokploy_target_setup_http.fetch_dokploy_compose_domains_for_target_setup",
+                    return_value=(),
+                ),
+                patch(
                     "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
                 ),

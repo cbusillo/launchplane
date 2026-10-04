@@ -1717,6 +1717,8 @@ export function mergeTrainStatusForFixture(
 ): MergeTrainControllerStatusResponse {
   assertEngineeringFixtureAvailable(fixture);
   const reconciliationRequired = fixture === "missing";
+  const level1RunAgeSeconds = 6 * 24 * 60 * 60;
+  const level1RecordedAt = new Date(Date.parse(OBSERVED_AT) - level1RunAgeSeconds * 1000).toISOString();
   return {
     controller_status: {
       reconciliation_diagnostics: [],
@@ -1848,6 +1850,8 @@ export function mergeTrainStatusForFixture(
         ],
         selected_pr_number: 418,
       },
+      latest_run_source: "level1",
+      latest_run_age_seconds: level1RunAgeSeconds,
       latest_run: {
         base_branch: baseBranch,
         dry_run_result: {},
@@ -1856,7 +1860,7 @@ export function mergeTrainStatusForFixture(
         policy_key: `${repository}:${baseBranch}`,
         policy_sha256: "fixture-policy-sha256",
         poll_required: true,
-        recorded_at: OBSERVED_AT,
+        recorded_at: level1RecordedAt,
         repository,
         reread_required: true,
         run_id: "fixture-run-27",
