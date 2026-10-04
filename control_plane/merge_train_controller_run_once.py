@@ -2550,7 +2550,6 @@ def _advance_without_candidate_record(
         retired_collapse_ids: set[str] = set()
         for record in latest_waiting_records:
             collapse_id = record.plan.collapse_id
-            progress_records = record_groups[collapse_id]
             observed_head = root_heads.get(record.plan.root_pull_request_number)
             if observed_head == stack_collapse_expected_root_head_sha(record.plan):
                 continue
@@ -2561,28 +2560,56 @@ def _advance_without_candidate_record(
                     if observed_head is None
                     else "root_head_changed"
                 )
-                # Retire older progress first so an interrupted write cannot revive it.
-                for progress_record in sorted(
-                    progress_records, key=lambda item: item.record_id == record.record_id
-                ):
-                    lease.checkpoint(
-                        active_action=MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
-                        active_phase="supersede_inapplicable_collapse",
-                        active_record_id=progress_record.record_id,
-                        active_pull_request_number=record.plan.root_pull_request_number,
-                    )
-                    stack_collapse_store.write_merge_train_stack_collapse_plan_record(
-                        progress_record.model_copy(
-                            update={
-                                "status": "superseded",
-                                "source": f"{progress_record.source}; retired:{reason}:{trace_id}",
-                            }
-                        )
-                    )
+                _retire_obsolete_stack_collapse_record(
+                    request=request,
+                    stack_collapse_store=stack_collapse_store,
+                    record=record,
+                    reason=reason,
+                    trace_id=trace_id,
+                    lease=lease,
+                )
         latest_waiting_records = tuple(
             record
             for record in latest_waiting_records
             if record.plan.collapse_id not in retired_collapse_ids
+        )
+    retired_records = stack_collapse_store.list_merge_train_stack_collapse_plan_records(
+        repository=request.repository, base_branch=request.base_branch, status="superseded"
+    )
+    active_collapse_ids = {record.plan.collapse_id for record in latest_records}
+    active_root_numbers = {record.plan.root_pull_request_number for record in latest_records}
+    retired_executions = tuple(
+        progress
+        for records in _group_stack_collapse_records(retired_records).values()
+        if (progress := latest_merge_train_stack_collapse_progress_record(tuple(records)))
+        is not None
+        and progress.plan.collapse_id not in active_collapse_ids
+        and progress.plan.root_pull_request_number not in active_root_numbers
+        and progress.plan.status in {"planned", "collapsing"}
+        and "; retired:" in progress.source
+        and progress.plan.policy_key == repository_policy.policy_key
+        and progress.plan.policy_sha256 == policy_sha256
+    )
+    if retired_executions:
+        snapshot = snapshot or github_client.read_merge_train_snapshot(
+            repository=request.repository, base_branch=request.base_branch
+        )
+        observed_heads = {pr.number: pr.head_sha for pr in snapshot.pull_requests}
+        latest_records += tuple(
+            record
+            for record in retired_executions
+            if observed_heads.get(record.plan.root_pull_request_number)
+            == _stack_collapse_current_head_shas(record.plan)[record.plan.root_pull_request_number]
+            and all(
+                observed_heads[number] == head_sha
+                for number, head_sha in _stack_collapse_current_head_shas(record.plan).items()
+                if number in observed_heads
+            )
+            and all(
+                mutation.child_pull_request_number in observed_heads
+                for mutation in record.plan.mutations
+                if mutation.status != "mutated"
+            )
         )
     # Resume saved execution before reporting an unrelated root's pending checks.
     # Select progress per collapse first so completed histories cannot revive plans.
@@ -2606,6 +2633,8 @@ def _advance_without_candidate_record(
                 lease=lease,
             )
             if planned_result is not None:
+                if planned_collapse_record.status == "superseded" and not request.mutate:
+                    planned_result.pop("merge_train_stack_collapse_plan_record_id", None)
                 return planned_result
 
     pending_wait_result: dict[str, object] | None = None
@@ -2801,6 +2830,48 @@ def _advance_waiting_stack_collapse_record(
     }, snapshot
 
 
+def _stack_collapse_current_head_shas(plan: MergeTrainStackCollapsePlan) -> dict[int, str]:
+    heads = {entry.pull_request_number: entry.head_sha for entry in plan.entries}
+    for mutation in plan.mutations:
+        if mutation.status == "mutated" and mutation.merge_commit_sha:
+            heads[mutation.parent_pull_request_number] = mutation.merge_commit_sha
+    return heads
+
+
+def _retire_obsolete_stack_collapse_record(
+    *,
+    request: MergeTrainControllerRunOnceEnvelope,
+    stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
+    record: MergeTrainStackCollapsePlanRecord,
+    reason: str,
+    trace_id: str,
+    lease: MergeTrainControllerLeaseContext,
+) -> None:
+    if not request.mutate:
+        return
+    records = stack_collapse_store.list_merge_train_stack_collapse_plan_records(
+        repository=request.repository, base_branch=request.base_branch, status="active"
+    )
+    # Retire all older progress first, so interruption cannot revive this plan.
+    for progress in sorted(records, key=lambda item: item.record_id == record.record_id):
+        if progress.plan.collapse_id != record.plan.collapse_id:
+            continue
+        lease.checkpoint(
+            active_action=MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
+            active_phase="supersede_inapplicable_collapse",
+            active_record_id=progress.record_id,
+            active_pull_request_number=record.plan.root_pull_request_number,
+        )
+        stack_collapse_store.write_merge_train_stack_collapse_plan_record(
+            progress.model_copy(
+                update={
+                    "status": "superseded",
+                    "source": f"{progress.source}; retired:{reason}:{trace_id}",
+                }
+            )
+        )
+
+
 def _advance_planned_stack_collapse_record(
     *,
     request: MergeTrainControllerRunOnceEnvelope,
@@ -2814,12 +2885,22 @@ def _advance_planned_stack_collapse_record(
     recorded_at: str,
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object] | None:
-    # An obsolete policy plan cannot authorize execution, but must not mask
-    # another stack's recovery under the current policy. Preserve its history.
+    def retire(reason: str) -> None:
+        _retire_obsolete_stack_collapse_record(
+            request=request,
+            stack_collapse_store=stack_collapse_store,
+            record=planned_collapse_record,
+            reason=reason,
+            trace_id=trace_id,
+            lease=lease,
+        )
+
+    # Obsolete execution steps aside while its complete history stays available.
     if (
         planned_collapse_record.plan.policy_key != repository_policy.policy_key
         or planned_collapse_record.plan.policy_sha256 != policy_sha256
     ):
+        retire("policy_changed")
         return None
     snapshot = github_client.read_merge_train_snapshot(
         repository=request.repository,
@@ -2834,13 +2915,9 @@ def _advance_planned_stack_collapse_record(
         None,
     )
     if root_pull_request is None:
+        retire("root_missing_from_open_snapshot")
         return None
-    current_head_shas = {
-        entry.pull_request_number: entry.head_sha for entry in planned_collapse_record.plan.entries
-    }
-    for mutation in planned_collapse_record.plan.mutations:
-        if mutation.status == "mutated" and mutation.merge_commit_sha:
-            current_head_shas[mutation.parent_pull_request_number] = mutation.merge_commit_sha
+    current_head_shas = _stack_collapse_current_head_shas(planned_collapse_record.plan)
     root_mutation = next(
         mutation
         for mutation in planned_collapse_record.plan.mutations
@@ -2860,10 +2937,11 @@ def _advance_planned_stack_collapse_record(
                 parent_pull_request_number=root_mutation.parent_pull_request_number,
             )
         except MergeTrainGitHubStaleHeadError:
-            # The real client rejects unrelated pushes rather than returning
-            # an empty probe. Leave this plan unapplied and consider other stacks.
+            retire("root_moved")
             return None
         if observed_root_sha != root_pull_request.head_sha:
+            # A ref probe and PR snapshot can disagree while GitHub converges.
+            # Only a confirmed stale-head refusal above proves obsolescence.
             return None
     # A root or child that is no longer ready falls through to live discovery, which
     # reports why. A child missing from the open snapshot may already be merged, so the
@@ -2890,6 +2968,20 @@ def _advance_planned_stack_collapse_record(
         )
     except ValueError as error:
         raise MergeTrainControllerRequestError(str(error)) from error
+    if planned_collapse_record.status == "superseded" and request.mutate:
+        lease.checkpoint(
+            active_action=MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
+            active_phase="resume_returned_stack_root",
+            active_record_id=planned_collapse_record.record_id,
+            active_pull_request_number=planned_collapse_record.plan.root_pull_request_number,
+        )
+        planned_collapse_record = build_merge_train_stack_collapse_plan_record(
+            ordinary_job_binding=lease.record.ordinary_job_binding,
+            plan=planned_collapse_record.plan.model_copy(update={"updated_at": recorded_at}),
+            source=f"service:controller:resume-retired-collapse:{trace_id}",
+            updated_at=recorded_at,
+        )
+        stack_collapse_store.write_merge_train_stack_collapse_plan_record(planned_collapse_record)
     result: dict[str, object] = {
         "repository": request.repository,
         "base_branch": request.base_branch,
