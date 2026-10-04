@@ -1244,19 +1244,48 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     secret_drift=secret_drift,
                 )
 
+    async def test_tracked_secret_audit_insert_race_recovers_through_http(self) -> None:
+        for profile_failure, audit_drift in ((True, False), (False, False), (True, True)):
+            with (
+                self.subTest(profile_failure=profile_failure, audit_drift=audit_drift),
+                TemporaryDirectory() as directory,
+            ):
+                await self._assert_tracked_checkpoint_insert_race(
+                    f"sqlite+pysqlite:///{Path(directory) / 'launchplane.sqlite3'}",
+                    profile_failure=profile_failure,
+                    secret_audit_race=True,
+                    audit_drift=audit_drift,
+                )
+
     async def _assert_tracked_checkpoint_insert_race(
-        self, database_url: str, *, profile_failure: bool = True, secret_drift: bool = False
+        self,
+        database_url: str,
+        *,
+        profile_failure: bool = True,
+        secret_drift: bool = False,
+        secret_audit_race: bool = False,
+        audit_drift: bool = False,
     ) -> None:
         store = self._store(Path("."), database_url=database_url)
         try:
             await self._assert_tracked_checkpoint_insert_race_with_store(
-                store, profile_failure=profile_failure, secret_drift=secret_drift
+                store,
+                profile_failure=profile_failure,
+                secret_drift=secret_drift,
+                secret_audit_race=secret_audit_race,
+                audit_drift=audit_drift,
             )
         finally:
             store.close()
 
     async def _assert_tracked_checkpoint_insert_race_with_store(
-        self, store: PostgresRecordStore, *, profile_failure: bool, secret_drift: bool
+        self,
+        store: PostgresRecordStore,
+        *,
+        profile_failure: bool,
+        secret_drift: bool,
+        secret_audit_race: bool,
+        audit_drift: bool,
     ) -> None:
         store.write_secret_record(
             SecretRecord(
@@ -1285,6 +1314,15 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
         insert_count = 0
         insert_errors: list[IntegrityError] = []
 
+        insert_table = (
+            "launchplane_secret_audit_events"
+            if secret_audit_race
+            else "launchplane_product_retirements"
+        )
+        insert_marker = (
+            "secret-disabled:" if secret_audit_race else "product-retirement-finalization-"
+        )
+
         def before_insert(
             connection: Connection,
             cursor: Any,
@@ -1294,25 +1332,23 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             executemany: bool,
         ) -> None:
             nonlocal insert_count
-            if not statement.startswith("INSERT INTO launchplane_product_retirements"):
+            if not statement.startswith(f"INSERT INTO {insert_table}"):
                 return
-            if "product-retirement-finalization-" not in str(parameters):
+            if insert_marker not in str(parameters):
                 return
-            # Both sessions have already read the checkpoint as absent. Pause the
-            # first actual INSERT until the second HTTP attempt has committed it.
+            # Both sessions read the evidence as absent. Pause the real INSERT
+            # until the overlapping HTTP attempt commits the deterministic id.
             with lock:
                 insert_count += 1
                 number = insert_count
             if number == 1:
                 entered.set()
                 if not released.wait(30):
-                    raise TimeoutError("checkpoint INSERT synchronization timed out")
+                    raise TimeoutError("retirement INSERT synchronization timed out")
 
         def insert_error(context: ExceptionContext) -> None:
             error = context.sqlalchemy_exception
-            if isinstance(error, IntegrityError) and "product-retirement-finalization-" in str(
-                context.parameters
-            ):
+            if isinstance(error, IntegrityError) and insert_marker in str(context.parameters):
                 insert_errors.append(error)
 
         original_profile_write = store.compare_and_write_product_profile_record
@@ -1396,6 +1432,11 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(
                         second.status_code, 409 if profile_failure else 202, second.text
                     )
+                    original_audit = store.list_secret_audit_events(secret_id="race-secret")[0]
+                    if audit_drift:
+                        store.write_secret_audit_event(
+                            original_audit.model_copy(update={"actor": "local-operator:changed"})
+                        )
                     winner_secret = store.list_secret_records(
                         context_name="example-site", instance_name="prod"
                     )[0]
@@ -1425,6 +1466,8 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             store.list_secret_records(context_name="example-site", instance_name="prod")[0],
             winner_secret,
         )
+        winner_audit = store.list_secret_audit_events(secret_id="race-secret")
+        self.assertEqual(len(winner_audit), 1)
         held = store.read_idempotency_record(
             scope=idempotency_scope(
                 LocalOperatorIdentity(subject="local-owner-agent", token_label="local-owner-write")
@@ -1455,6 +1498,23 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     store.read_product_profile_record("example-site").lifecycle_state,
                     "retiring" if profile_failure else "retired",
                 )
+            if audit_drift:
+                refused = await request(
+                    app, "POST", "/v1/product-retirement", headers=self.headers, payload=payload
+                )
+                self.assertEqual(refused.status_code, 409, refused.text)
+                self.assertEqual(
+                    refused.json()["error"]["code"], "mutation_reconciliation_required"
+                )
+                self.assertEqual(
+                    store.list_secret_audit_events(secret_id="race-secret"), winner_audit
+                )
+                self.assertEqual(
+                    store.read_product_profile_record("example-site").lifecycle_state, "retiring"
+                )
+                # Fixture repair restores the original evidence before proving recovery.
+                store.write_secret_audit_event(original_audit)
+                winner_audit = (original_audit,)
             retry = await request(
                 app, "POST", "/v1/product-retirement", headers=self.headers, payload=payload
             )
@@ -1472,8 +1532,10 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             store.read_product_profile_record("example-site").lifecycle_state, "retired"
         )
+        self.assertEqual(store.list_secret_audit_events(secret_id="race-secret"), winner_audit)
         self.assertEqual(first.status_code, 409 if profile_failure else 202, first.text)
-        if secret_drift:
+        if secret_drift or (secret_audit_race and not profile_failure):
+            self.assertEqual(first.json()["records"], second.json()["records"])
             self.assertFalse(
                 any(
                     record.trace_id == first_trace_id and record.outcome == "already_absent"
@@ -1490,10 +1552,117 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
         if profile_failure:
             self.assertEqual(first.json()["error"]["code"], "mutation_reconciliation_required")
             self.assertEqual(
-                terminal.mutation_evidence.error_message, "injected final profile failure"
+                terminal.mutation_evidence.error_message,
+                "Managed secret disable evidence changed."
+                if audit_drift
+                else "injected final profile failure",
             )
         else:
             self.assertTrue(terminal.mutation_evidence.provider_absence_verified)
+
+    async def test_secret_audit_unconfirmed_insert_retains_fence_through_http(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(Path(directory))
+            try:
+                store.write_secret_record(
+                    SecretRecord(
+                        secret_id="race-secret",
+                        scope="context_instance",
+                        integration="fixture",
+                        name="fixture",
+                        context="example-site",
+                        instance="prod",
+                        current_version_id="v1",
+                        created_at=NOW,
+                        updated_at=NOW,
+                    )
+                )
+                app = self._app(
+                    store, actions=("product_retirement.plan", "product_retirement.apply")
+                )
+                with patch(
+                    "control_plane.product_retirement.observe_tracked_dokploy_application",
+                    return_value=_observation(),
+                ):
+                    plan = await request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=self.headers,
+                        payload=_plan_payload(),
+                    )
+                self.assertEqual(plan.status_code, 202, plan.text)
+                payload = _apply_payload(plan.json())
+                with (
+                    patch(
+                        "control_plane.product_retirement.observe_tracked_dokploy_application",
+                        return_value=_absent_observation(),
+                    ),
+                    patch(
+                        "control_plane.product_retirement.dokploy_api.delete_dokploy_application"
+                    ) as delete,
+                ):
+                    with patch.object(
+                        store,
+                        "write_secret_audit_event",
+                        side_effect=IntegrityError(
+                            "fixture insert", {}, RuntimeError("unconfirmed")
+                        ),
+                    ):
+                        failed = await request(
+                            app,
+                            "POST",
+                            "/v1/product-retirement",
+                            headers=self.headers,
+                            payload=payload,
+                        )
+                    self.assertEqual(failed.status_code, 409, failed.text)
+                    self.assertEqual(
+                        failed.json()["error"]["code"], "mutation_reconciliation_required"
+                    )
+                    terminal = next(
+                        record
+                        for record in store.list_product_retirement_records(product="example-site")
+                        if record.outcome == "reconcile_required"
+                    )
+                    self.assertEqual(
+                        terminal.mutation_evidence.error_message,
+                        "Managed secret disable evidence could not be confirmed.",
+                    )
+                    self.assertEqual(store.list_secret_audit_events(secret_id="race-secret"), ())
+                    for headers, changed in (
+                        ({**self.headers, "Idempotency-Key": "different-apply"}, payload),
+                        (self.headers, {**payload, "reason": "changed intent"}),
+                    ):
+                        refused = await request(
+                            app, "POST", "/v1/product-retirement", headers=headers, payload=changed
+                        )
+                        self.assertEqual(refused.status_code, 409, refused.text)
+                    held = store.read_idempotency_record(
+                        scope=idempotency_scope(
+                            LocalOperatorIdentity(
+                                subject="local-owner-agent", token_label="local-owner-write"
+                            )
+                        ),
+                        route_path="/v1/product-retirement",
+                        idempotency_key=self.headers["Idempotency-Key"],
+                    )
+                    assert held is not None
+                    self.assertEqual(held.state, "reconcile_required")
+                    self.assertEqual(
+                        store.read_product_profile_record("example-site").lifecycle_state,
+                        "retiring",
+                    )
+                    retry = await request(
+                        app, "POST", "/v1/product-retirement", headers=self.headers, payload=payload
+                    )
+                    self.assertEqual(retry.status_code, 202, retry.text)
+                    self.assertEqual(
+                        len(store.list_secret_audit_events(secret_id="race-secret")), 1
+                    )
+                    delete.assert_not_called()
+            finally:
+                store.close()
 
     async def test_tracked_concurrent_expiry_seals_one_finalization_checkpoint(self) -> None:
         with TemporaryDirectory() as directory:

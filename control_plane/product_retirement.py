@@ -1107,22 +1107,37 @@ class DokployProductRetirementAdapter:
                 detail="Launchplane disabled managed secret authority for product retirement.",
                 metadata={"plan_sha256": self._plan.plan_sha256},
             )
-            existing = next(
+            self._write_secret_disable_event(event)
+            self._disabled_secret_record_sha256.append(provider_identifier_sha256(record.secret_id))
+            self._secret_disable_event_sha256.append(provider_identifier_sha256(event.event_id))
+
+    def _write_secret_disable_event(self, event: SecretAuditEvent) -> None:
+        def read_existing() -> SecretAuditEvent | None:
+            return next(
                 (
                     stored
                     for stored in self._record_store.list_secret_audit_events(
-                        secret_id=record.secret_id
+                        secret_id=event.secret_id
                     )
                     if stored.event_id == event.event_id
                 ),
                 None,
             )
-            if existing is None:
+
+        existing = read_existing()
+        if existing is None:
+            try:
                 self._record_store.write_secret_audit_event(event)
-            elif existing.model_copy(update={"recorded_at": event.recorded_at}) != event:
-                raise ProductRetirementBlockedError("Managed secret disable evidence changed.")
-            self._disabled_secret_record_sha256.append(provider_identifier_sha256(record.secret_id))
-            self._secret_disable_event_sha256.append(provider_identifier_sha256(event.event_id))
+            except (ValueError, IntegrityError) as error:
+                existing = read_existing()
+                if existing is None:
+                    raise ProductRetirementBlockedError(
+                        "Managed secret disable evidence could not be confirmed."
+                    ) from error
+            else:
+                return
+        if existing.model_copy(update={"recorded_at": event.recorded_at}) != event:
+            raise ProductRetirementBlockedError("Managed secret disable evidence changed.")
 
     def _write_terminal_record(
         self,

@@ -938,6 +938,20 @@ class RealPostgresTrackedRetirementTests(unittest.IsolatedAsyncioTestCase):
                     url, profile_failure=profile_failure, secret_drift=secret_drift
                 )
 
+    async def test_secret_audit_insert_race_recovers_through_http(self) -> None:
+        for profile_failure, audit_drift in ((True, False), (False, False), (True, True)):
+            with (
+                self.subTest(profile_failure=profile_failure, audit_drift=audit_drift),
+                _head_postgres_database() as url,
+            ):
+                fixture = retirement_tests.ProductRetirementHttpTests()
+                await fixture._assert_tracked_checkpoint_insert_race(
+                    url,
+                    profile_failure=profile_failure,
+                    secret_audit_race=True,
+                    audit_drift=audit_drift,
+                )
+
 
 class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_target_retirement_commits_and_replays_on_postgres(self) -> None:
