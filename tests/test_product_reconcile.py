@@ -2044,11 +2044,14 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
         advance = Event()
         renewed = Event()
         finished = Event()
+        refresh_started = Event()
         renewals: list[bool] = []
+        lease_expiries: list[str] = []
+        failures: list[str] = []
         renew_lease = self.store.renew_product_reconcile_lease
 
         def renew(target_key: str, lease_owner: str, lease_seconds: int, *, now: str = "") -> bool:
-            background = current_thread() is not main_thread()
+            background = current_thread() is not main_thread() and refresh_started.is_set()
             if background and len(renewals) < 2 and not finished.is_set():
                 if not advance.wait(30):
                     raise TimeoutError("The fixture did not advance the lease clock.")
@@ -2061,6 +2064,7 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
 
         def outlast_the_lease() -> None:
             nonlocal observed_at
+            refresh_started.set()
             try:
                 # Advance only after the real heartbeat commits its previous renewal.
                 # Scheduler pressure cannot silently consume this fixture's lease.
@@ -2068,8 +2072,12 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
                     observed_at = started_at + timedelta(seconds=elapsed)
                     renewed.clear()
                     advance.set()
-                    self.assertTrue(renewed.wait(30), "The background heartbeat did not renew.")
-                self.assertTrue(all(renewals))
+                    if not renewed.wait(30):
+                        failures.append("The background heartbeat did not renew.")
+                        return
+                    lease_expiries.append(
+                        self.store.read_product_reconcile_request("site:preview:5").lease_expires_at
+                    )
                 observed_at = started_at + timedelta(seconds=3)
                 claims.append(self.store.claim_next_product_reconcile_request("worker-b", 2))
             finally:
@@ -2097,6 +2105,15 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
             )
 
         assert completed is not None
+        self.assertEqual(failures, [])
+        self.assertTrue(renewals and all(renewals))
+        self.assertEqual(
+            lease_expiries,
+            [
+                (started_at + timedelta(seconds=elapsed)).isoformat().replace("+00:00", "Z")
+                for elapsed in (3, 4)
+            ],
+        )
         self.assertEqual((completed.state, completed.last_error), ("done", ""))
         self.assertEqual(claims, [None])
 
