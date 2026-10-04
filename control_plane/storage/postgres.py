@@ -19582,6 +19582,17 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def notify_merge_train(self) -> None:
+        """Publish a wake hint through the existing pool, separate from record writes."""
+        from control_plane.merge_train_events import MERGE_TRAIN_EVENT_CHANNEL
+
+        if self.database_dialect_name != "postgresql":
+            raise ValueError("Merge train notifications require PostgreSQL.")
+        with self._engine.begin() as connection:
+            connection.execute(
+                text("SELECT pg_notify(:channel, '')"), {"channel": MERGE_TRAIN_EVENT_CHANNEL}
+            )
+
     def record_github_app_webhook_delivery(
         self,
         delivery: GitHubAppWebhookDeliveryRecord,
