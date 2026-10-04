@@ -43,8 +43,12 @@ function ownerDraftKey(login: string, clear: boolean, reason: string): string {
   return JSON.stringify([productOwnerDraftKey(login, clear), reason.trim()]);
 }
 
-function recoverOwnerDraft(storageKey: string): ReviewedOwnerDraft | null {
+function recoverOwnerDraft(storageKey: string, scope: string): ReviewedOwnerDraft | null {
   try {
+    if (!recoverBrowserOperationState(scope).requiresIdempotencyContinuity) {
+      sessionStorage.removeItem(storageKey);
+      return null;
+    }
     const raw = sessionStorage.getItem(storageKey);
     if (!raw) return null;
     const draft = JSON.parse(raw) as ReviewedOwnerDraft;
@@ -78,7 +82,7 @@ export function ProductOwnerPanel({
     status: "loading",
   });
   const storageKey = `launchplane:product-profile-draft:${product}:owner`;
-  const [recovered] = useState(() => recoverOwnerDraft(storageKey));
+  const [recovered] = useState(() => recoverOwnerDraft(storageKey, `${product}:owner:apply`));
   const [login, setLogin] = useState(recovered?.request.github_login ?? "");
   const [reason, setReason] = useState(recovered?.request.reason ?? "");
   const [localError, setLocalError] = useState("");
@@ -182,13 +186,19 @@ export function ProductOwnerPanel({
       return;
     }
     const response = await applyOperation.run(plannedDraft.request);
+    if (response) {
+      setPlannedDraft(null);
+      try { sessionStorage.removeItem(storageKey); } catch { /* Recovery ignores settled operations. */ }
+    }
     const appliedPlan = response ? productOwnerPlanFromResponse(response) : null;
     if (appliedPlan) {
       setResource({ error: "", owner: appliedPlan.after, status: "ready" });
       setPlan(appliedPlan);
       setSaved(true);
       setLogin("");
-      try { sessionStorage.removeItem(storageKey); } catch { /* The operation receipt already settled. */ }
+    } else if (response) {
+      setPlan(null);
+      setLocalError("Save returned a response this page cannot read. Read the current Client and preview a new change.");
     }
   }
 

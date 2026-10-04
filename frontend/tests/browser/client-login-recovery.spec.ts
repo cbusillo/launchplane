@@ -15,6 +15,33 @@ async function mockProduct(page: Page) {
   } } }));
 }
 
+for (const outcome of ["rejected", "unreadable"] as const) {
+  test(`Client-login does not restore a settled draft after ${outcome} Save`, async ({ page }) => {
+    await mockProduct(page);
+    let applies = 0;
+    await page.route("**/v1/product-profiles/atlas-commerce/owner", async route => {
+      if (route.request().postDataJSON().mode !== "apply") { await respondWithPlan(route); return; }
+      applies += 1;
+      await route.fulfill(outcome === "rejected"
+        ? { status: 403, json: { trace_id: "denied", error: { code: "authorization_denied", message: "Save refused." } } }
+        : { status: 202, json: { status: "accepted", trace_id: "unreadable", records: {}, result: {} } });
+    });
+    await page.goto("/ui/products/atlas-commerce");
+    const panel = page.getByRole("region", { name: "example-owner (id 9001)", exact: true });
+    await panel.getByLabel("GitHub login").fill("new-client");
+    await panel.getByLabel("Change reason").fill("Review this change.");
+    await panel.getByRole("button", { name: "Preview change", exact: true }).click();
+    await panel.getByRole("button", { name: "Save", exact: true }).click();
+    if (outcome === "rejected") await expect(panel.getByRole("status").filter({ hasText: "Save refused" })).toBeVisible();
+    else await expect(panel.getByRole("alert")).toContainText("response this page cannot read");
+    await page.reload();
+    await expect(panel.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+    await expect(panel.getByLabel("GitHub login")).toHaveValue("");
+    await expect(panel.getByLabel("Change reason")).toBeEnabled();
+    expect(applies).toBe(1);
+  });
+}
+
 for (const storageFailure of ["unavailable", "read-back-mismatch", "operation-key-unavailable"] as const) {
 test(`Client-login Save refuses ${storageFailure} storage and can retry after recovery`, async ({ page }) => {
   await mockProduct(page);
