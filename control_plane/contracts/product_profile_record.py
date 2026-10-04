@@ -532,6 +532,9 @@ class ProductOwnerProfile(BaseModel):
         return bool(self.github_id)
 
 
+ReleaseOnAcceptance = Literal["held", "promote", "promote_with_rollback_drill"]
+
+
 class LaunchplaneProductProfileRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -539,6 +542,13 @@ class LaunchplaneProductProfileRecord(BaseModel):
     lifecycle_state: ProductLifecycleState = "active"
     # Unknown existing records require review; only explicit prelaunch records are exempt.
     production_use: Literal["unknown", "prelaunch", "live"] = "unknown"
+    # Whether the Client's release acceptance starts the gated promotion. Held by
+    # default; an admin switches a product on. See docs/release-review.md. A held
+    # product serializes exactly as before the switch existed, so digests over
+    # profiles do not change.
+    release_on_acceptance: ReleaseOnAcceptance = Field(
+        default="held", exclude_if=lambda value: value == "held"
+    )
     product: str
     display_name: str
     repository: str
@@ -742,14 +752,14 @@ def is_exclusive_product_context(
 def product_target_owner_products(
     profiles: Iterable[LaunchplaneProductProfileRecord], *, context: str, instance: str = ""
 ) -> frozenset[str]:
-    """Owners of an exact lane, or every current/historical claim on a context."""
+    """Owners of a trimmed lane, or every current/historical claim on a context."""
     if not instance:
         return product_context_owner_map(profiles).get(context.lower(), frozenset())
     return frozenset(
         profile.product
         for profile in profiles
         if any(
-            lane.context.lower() == context.lower() and lane.instance == instance
+            lane.context.strip().lower() == context.lower() and lane.instance.strip() == instance
             for lane in profile.lanes
         )
     )

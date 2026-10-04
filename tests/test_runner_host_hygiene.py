@@ -14,6 +14,9 @@ from click.testing import CliRunner
 
 from control_plane.cli import main
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneObservation
+from control_plane.contracts.runner_host_hygiene import (
+    RUNNER_HOST_HYGIENE_MAX_DOCKER_INVENTORY_ITEMS,
+)
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPolicy
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPlan
@@ -1553,9 +1556,9 @@ class RunnerHostHygieneApplyPlanTests(unittest.TestCase):
                         tag="private-tag",
                         created_at="2026-07-30T00:00:00Z",
                     )
-                    for index in range(130)
+                    for index in range(RUNNER_HOST_HYGIENE_MAX_DOCKER_INVENTORY_ITEMS + 2)
                 ),
-                "image_inventory_total_count": 130,
+                "image_inventory_total_count": RUNNER_HOST_HYGIENE_MAX_DOCKER_INVENTORY_ITEMS + 2,
                 "image_inventory_truncated": False,
                 "volume_inventory": tuple(
                     RunnerHostHygieneVolumeInventoryItem(
@@ -1566,9 +1569,9 @@ class RunnerHostHygieneApplyPlanTests(unittest.TestCase):
                         referenced_by_containers=0,
                         dangling=True,
                     )
-                    for index in range(130)
+                    for index in range(RUNNER_HOST_HYGIENE_MAX_DOCKER_INVENTORY_ITEMS + 2)
                 ),
-                "volume_inventory_total_count": 130,
+                "volume_inventory_total_count": RUNNER_HOST_HYGIENE_MAX_DOCKER_INVENTORY_ITEMS + 2,
                 "volume_inventory_truncated": False,
             }
         )
@@ -1591,8 +1594,12 @@ class RunnerHostHygieneApplyPlanTests(unittest.TestCase):
         )
 
         persisted_report = persisted.pre_apply_report
-        self.assertEqual(len(persisted_report.image_inventory), 128)
-        self.assertEqual(len(persisted_report.volume_inventory), 128)
+        self.assertEqual(
+            len(persisted_report.image_inventory), RUNNER_HOST_HYGIENE_MAX_DOCKER_INVENTORY_ITEMS
+        )
+        self.assertEqual(
+            len(persisted_report.volume_inventory), RUNNER_HOST_HYGIENE_MAX_DOCKER_INVENTORY_ITEMS
+        )
         self.assertTrue(persisted_report.image_inventory_truncated)
         self.assertTrue(persisted_report.volume_inventory_truncated)
         self.assertEqual(persisted_report.image_inventory[0].repository, "")

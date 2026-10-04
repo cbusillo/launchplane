@@ -215,8 +215,10 @@ class OdooProdRollbackOperationRecord(BaseModel):
             or self.authorization.instances != (self.instance,)
         ):
             raise ValueError("Odoo prod rollback authorization must match the operation.")
-        if self.authorization.grant != "policy_administrator":
-            raise ValueError("Only the admin may queue an Odoo prod rollback.")
+        if self.authorization.grant not in {"policy_administrator", "client_release_acceptance"}:
+            raise ValueError(
+                "Only the admin or a Client's release may queue an Odoo prod rollback."
+            )
         validate_release_operation_state(self, label="Odoo prod rollback")
         return self
 

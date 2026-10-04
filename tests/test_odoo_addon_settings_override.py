@@ -34,6 +34,7 @@ from control_plane.odoo_instance_overrides import (
 )
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
 from fastapi import FastAPI
 
 from tests.http_app_test_support import _AsgiResponse, _asgi_request
@@ -52,7 +53,7 @@ def _binding_id(instance: str, setting: str) -> str:
 
 
 def _seed_lane(
-    store: FilesystemRecordStore,
+    store: FilesystemRecordStore | PostgresRecordStore,
     *,
     instance: str = "testing",
     protected_keys: tuple[str, ...] = (_PROTECTED_KEY,),

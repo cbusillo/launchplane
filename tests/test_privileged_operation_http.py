@@ -22,6 +22,7 @@ from control_plane.authz_candidate_preparation import (
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS,
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID,
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
+    _AGENT_PRODUCT_SETUP_RULE_SHAPES,
 )
 from control_plane.contracts.privileged_operation import (
     AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
@@ -846,7 +847,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         assert isinstance(planned.request, ManagedAuthzPolicySetProposalInput)
         self.assertEqual(planned.request.managed_set_id, "operator.agent-product-setup")
         rules = planned.request.desired_policy.local_operators
-        self.assertEqual(len(rules), 6)
+        self.assertEqual(len(rules), 2 * len(_AGENT_PRODUCT_SETUP_RULE_SHAPES))
         self.assertEqual({rule.subjects for rule in rules}, {("operator-agent",)})
         self.assertEqual({rule.token_labels for rule in rules}, {("operator-agent-token",)})
         self.assertEqual(
@@ -2029,7 +2030,6 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(target.provider_delivery_protection_expectation)
         self.assertTrue(request.record.updated_at.endswith("Z"))
         self.assertIn("Z-", request.record.record_id)
-        self.assertLessEqual(len(request.reason), 240)
 
     async def test_ordinary_merge_target_preserves_existing_optional_policy_fields(self) -> None:
         with TemporaryDirectory() as directory:

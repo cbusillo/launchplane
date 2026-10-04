@@ -621,17 +621,6 @@ class _HostedAuthzPolicyStore(PostgresRecordStore):
             raise AssertionError(f"test authz policy write failed: {result.status}")
 
 
-def create_every_code_github_webhook_app(**kwargs: object) -> Any:
-    state_dir = kwargs.pop("state_dir", None)
-    local_record_store = kwargs.pop("local_record_store_for_tests", None)
-    if local_record_store is None and "database_url" not in kwargs and isinstance(state_dir, Path):
-        local_record_store = FilesystemRecordStore(state_dir=state_dir)
-    if local_record_store is not None:
-        kwargs["record_store_factory"] = lambda: local_record_store
-    kwargs["every_code_github_webhook_handler"] = handle_every_code_github_webhook_request
-    return create_launchplane_fastapi_test_app(**kwargs)
-
-
 def create_launchplane_dokploy_target_setup_app(**kwargs: object) -> Any:
     state_dir = kwargs.pop("state_dir", None)
     local_record_store = kwargs.pop("local_record_store_for_tests", None)
@@ -1444,16 +1433,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
         ):
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            app = create_every_code_github_webhook_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_every_code_worker_identity()),
-                authz_policy=_every_code_worker_policy(
-                    extra_actions=("every_code_notification_attempt.read",)
-                ),
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
             store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
             try:
                 secret_result = control_plane_secrets.write_secret_value(
                     record_store=store,
@@ -1488,19 +1469,20 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 store.close()
 
             webhook_payload = _every_code_github_issue_labeled_payload()
-            create_status, create_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/github-webhook",
-                payload=webhook_payload,
-                authorization="",
-                headers={
-                    "X-GitHub-Event": "issues",
-                    "X-GitHub-Delivery": "delivery-blocked-notify",
-                    "X-Hub-Signature-256": _github_webhook_signature(webhook_payload, secret),
-                },
-            )
-            request_id = str(create_payload["records"]["request_id"])
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                create_status, create_payload = handle_every_code_github_webhook_request(
+                    json.dumps(webhook_payload).encode("utf-8"),
+                    "issues",
+                    "delivery-blocked-notify",
+                    _github_webhook_signature(webhook_payload, secret),
+                    store,
+                    root,
+                    "notification-test",
+                )
+            finally:
+                store.close()
+            request_id = str(cast(dict[str, object], create_payload["records"])["request_id"])
             claim_status, _claim_payload = _claim_every_code_work_request_in_postgres(
                 database_url,
                 request_id,
@@ -1557,16 +1539,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
         ):
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            app = create_every_code_github_webhook_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_every_code_worker_identity()),
-                authz_policy=_every_code_worker_policy(
-                    extra_actions=("every_code_notification_attempt.read",)
-                ),
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
             store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
             try:
                 secret_result = control_plane_secrets.write_secret_value(
                     record_store=store,
@@ -1601,19 +1575,20 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 store.close()
 
             webhook_payload = _every_code_github_issue_labeled_payload(issue_number=124)
-            create_status, create_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/github-webhook",
-                payload=webhook_payload,
-                authorization="",
-                headers={
-                    "X-GitHub-Event": "issues",
-                    "X-GitHub-Delivery": "delivery-blocked-notify-failed",
-                    "X-Hub-Signature-256": _github_webhook_signature(webhook_payload, secret),
-                },
-            )
-            request_id = str(create_payload["records"]["request_id"])
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                create_status, create_payload = handle_every_code_github_webhook_request(
+                    json.dumps(webhook_payload).encode("utf-8"),
+                    "issues",
+                    "delivery-blocked-notify-failed",
+                    _github_webhook_signature(webhook_payload, secret),
+                    store,
+                    root,
+                    "notification-test",
+                )
+            finally:
+                store.close()
+            request_id = str(cast(dict[str, object], create_payload["records"])["request_id"])
             claim_status, _claim_payload = _claim_every_code_work_request_in_postgres(
                 database_url,
                 request_id,
@@ -5832,10 +5807,29 @@ class LaunchplaneServiceTests(unittest.TestCase):
             finally:
                 store.close()
 
+        product_rule_count = len(
+            generic_web_preview_rules(
+                GenericWebPreviewAuthzPlanRequest.model_validate(
+                    {
+                        "schema_version": 1,
+                        "product": "launchplane",
+                        "target_product": "demo-web",
+                        "repository": "example/demo-web",
+                        "repository_id": "123",
+                        "repository_owner_id": "456",
+                        "default_branch": "main",
+                        "preview_context": "demo-web-preview",
+                        "launchplane_sha": "a" * 40,
+                        "reason": "Onboard demo web.",
+                        "related_issue": "#1970",
+                    }
+                )
+            )
+        )
         self.assertEqual(plan_status, 202)
         self.assertIsNone(plan_payload["result"]["retirement_authority"])
-        self.assertEqual(plan_payload["records"]["target_rule_count"], "6")
-        self.assertEqual(plan_payload["result"]["diff"]["added_rule_count"], 6)
+        self.assertEqual(plan_payload["records"]["target_rule_count"], str(product_rule_count))
+        self.assertEqual(plan_payload["result"]["diff"]["added_rule_count"], product_rule_count)
         self.assertEqual(
             plan_payload["result"]["diff"]["operational_readiness_blocked_rule_count"],
             0,
@@ -5846,21 +5840,21 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(other_reconcile_status, 202)
         self.assertEqual(
             other_reconcile_payload["result"]["diff"]["added_rule_count"],
-            6,
+            product_rule_count,
         )
         managed_rules = tuple(
             rule
             for rule in active_record.policy.github_actions
             if rule.managed_set_id == "operator.generic-web-preview"
         )
-        self.assertEqual(len(managed_rules), 6)
+        self.assertEqual(len(managed_rules), product_rule_count)
         self.assertEqual({rule.products for rule in managed_rules}, {("other-web",)})
         self.assertEqual(retire_status, 202)
         self.assertEqual(retire_payload["result"]["target_rule_count"], 0)
         self.assertEqual(retire_reconcile_status, 202)
         self.assertEqual(
             retire_reconcile_payload["result"]["diff"]["removed_rule_count"],
-            6,
+            product_rule_count,
         )
         retirement_authority = retire_payload["result"]["retirement_authority"]
         self.assertEqual(

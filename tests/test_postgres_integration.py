@@ -28,6 +28,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from tests.test_odoo_addon_settings_override import _existing_record as _addon_override_record
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from tests import test_http_app_product_retirement as retirement_tests
@@ -233,6 +234,7 @@ from tests.test_detached_application_retirement import (
 from control_plane.contracts.secret_record import SecretRecord, SecretVersion
 from control_plane.storage.product_authority_bundle import (
     ProductProfileConflictError,
+    ProductContextOwnershipError,
     ProductAuthorityBundle,
     SecretRecordConflictError,
     RuntimeEnvironmentConflictError,
@@ -924,6 +926,19 @@ def _owner_acceptance_system_event(
     )
 
 
+class RealPostgresTrackedRetirementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_checkpoint_insert_race_recovers_through_http(self) -> None:
+        for profile_failure, secret_drift in ((True, False), (False, False), (False, True)):
+            with (
+                self.subTest(profile_failure=profile_failure, secret_drift=secret_drift),
+                _head_postgres_database() as url,
+            ):
+                fixture = retirement_tests.ProductRetirementHttpTests()
+                await fixture._assert_tracked_checkpoint_insert_race(
+                    url, profile_failure=profile_failure, secret_drift=secret_drift
+                )
+
+
 class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_target_retirement_commits_and_replays_on_postgres(self) -> None:
         with _head_postgres_database() as url:
@@ -1172,6 +1187,92 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 ),
                 provider,
             )
+
+    def test_lane_writers_wait_for_context_reassignment_and_refuse_it(self) -> None:
+        for writer_kind, guard in (
+            ("target", "context"),
+            ("override", "context"),
+            ("target", "lane"),
+            ("override", "lane"),
+        ):
+            with (
+                self.subTest(writer=writer_kind, guard=guard),
+                _store_for_fresh_head_database() as store,
+            ):
+                profile = _product_profile().model_copy(
+                    update={
+                        "lanes": (ProductLaneProfile(context="example-site", instance="testing"),)
+                    }
+                )
+                store.write_product_profile_record(profile)
+                context = profile.lanes[0].context
+                target = DokployTargetRecord(
+                    context=context, instance="testing", updated_at="2026-10-03T00:00:00Z"
+                )
+                store.write_dokploy_target_record(target)
+                override = _addon_override_record().model_copy(update={"context": context})
+                at_lock = threading.Event()
+                original_lock = store._lock_product_authority_bundle_write
+
+                def signal_lock(session: Any) -> None:
+                    at_lock.set()
+                    original_lock(session)
+
+                def write_lane() -> None:
+                    requirements: dict[str, Any] = (
+                        {"required_context_owner": (profile.product, context)}
+                        if guard == "context"
+                        else {
+                            "required_product_config_target": (profile.product, context, "testing")
+                        }
+                    )
+                    if writer_kind == "target":
+                        store.compare_and_write_dokploy_target_record(
+                            expected_record=target,
+                            replacement_record=target.model_copy(
+                                update={"source_label": "guarded-write"}
+                            ),
+                            **requirements,
+                        )
+                    else:
+                        store.write_odoo_instance_override_record(override, **requirements)
+
+                # Hold the profile lock on another connection until reassignment commits.
+                with store._session_factory() as owner_session:
+                    original_lock(owner_session)
+                    owner_session.merge(
+                        store._product_profile_row(profile.model_copy(update={"lanes": ()}))
+                    )
+                    owner_session.merge(
+                        store._product_profile_row(
+                            profile.model_copy(update={"product": "foreign-product"})
+                        )
+                    )
+                    owner_session.flush()
+                    with (
+                        patch.object(
+                            store, "_lock_product_authority_bundle_write", side_effect=signal_lock
+                        ),
+                        ThreadPoolExecutor(max_workers=1) as workers,
+                    ):
+                        future = workers.submit(write_lane)
+                        try:
+                            self.assertTrue(at_lock.wait(10))
+                            with self.assertRaises(TimeoutError):
+                                future.result(timeout=0.1)
+                        finally:
+                            owner_session.commit()
+                        with self.assertRaises(
+                            ProductContextOwnershipError
+                            if guard == "context"
+                            else ProductProfileConflictError
+                        ):
+                            future.result(timeout=10)
+                self.assertEqual(
+                    store.read_dokploy_target_record(context_name=context, instance_name="testing"),
+                    target,
+                )
+                self.assertEqual(store.list_odoo_instance_override_records(), ())
 
     def test_profile_guard_rejects_a_bundle_after_another_connection_changes_the_owner(
         self,

@@ -68,6 +68,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         self.reflow_client = client
         result = try_reflow_failed_merge_train_candidate(
             candidate_store=store,
+            stack_collapse_store=store,
             active_candidate_record=record,
             policy=self.policy,
             policy_sha256="policy-digest",
@@ -154,7 +155,11 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                     MergeTrainBatchHeldOutEntry(
                         pull_request_number=3,
                         head_sha=third.head_sha,
-                        conflicts_with=(1,),
+                        conflicts_with=(1, 2),
+                        probe_base_sha=self.snapshot.base_sha,
+                        conflicts_with_head_shas=tuple(
+                            pr.head_sha for pr in self.snapshot.pull_requests[:2]
+                        ),
                     ),
                 ),
             )
@@ -187,7 +192,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             self.assertEqual(persisted.batch_body_retry_of, "earlier-failure")
             self.assertEqual(
                 [(entry.pull_request_number, entry.conflicts_with) for entry in persisted.held_out],
-                [(3, (1,))],
+                [(3, (1, 2))],
             )
             later = self._reflow(restarted, persisted)
             self.reflow_client.probe_batch_entry_conflicts.assert_not_called()

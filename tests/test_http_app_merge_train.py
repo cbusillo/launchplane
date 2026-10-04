@@ -328,6 +328,53 @@ class FastApiMergeTrainReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(controller_status["latest_dry_run"]["selected_pr_number"], 1)
         self.assertEqual(controller_status["reconciliation_diagnostics"], [])
 
+    async def test_controller_status_exposes_safe_http_failure_after_restart(self) -> None:
+        from control_plane.merge_train_controller_run_once import (
+            merge_train_controller_mutation_fence,
+        )
+        from tests.test_merge_train_github_failures import _failed_request
+
+        with TemporaryDirectory() as temporary:
+            state_dir = Path(temporary) / "state"
+            policy = _seed_merge_train_policy(state_dir)
+            error = _failed_request(403, {"Retry-After": "60", "X-RateLimit-Reset": "1791090000"})
+            with self.assertRaises(MergeTrainGitHubError):
+                with merge_train_controller_mutation_fence(
+                    record_store=FilesystemRecordStore(state_dir=state_dir),
+                    repository="cbusillo/sellyouroutboard",
+                    base_branch="main",
+                    policy_key=policy.policy.policies[0].policy_key,
+                    policy_sha256=policy.policy_sha256,
+                    trace_id="fixture-http-failure",
+                    active_action="land_batch",
+                    active_phase="merge_batch_entries",
+                    active_record_id="fixture-landing",
+                ):
+                    raise error
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=state_dir),
+            )
+            response = await _asgi_get(
+                app,
+                "/v1/work-graph/merge-train/controller/status?repository=cbusillo/sellyouroutboard&base_branch=main",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn(
+            "retryable:github_rate_limited; request:GET /repos/{owner}/{repo}/pulls/{number} HTTP 403; reset_at:1791090000",
+            response.text,
+        )
+        for private in (
+            "secret-token",
+            "secret-query",
+            "secret-provider-message",
+            "private-owner",
+            "private-repo",
+        ):
+            self.assertNotIn(private, response.text)
+
     async def test_controller_status_reads_scoped_diagnostic_without_broader_governance(
         self,
     ) -> None:
@@ -3049,6 +3096,8 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                     "head_sha": "head-2",
                     "reason": "entry_conflict",
                     "conflicts_with": [1],
+                    "probe_base_sha": results[0]["candidate"]["base_sha"],
+                    "conflicts_with_head_shas": ["head-1"],
                 }
             ],
         )
@@ -3206,7 +3255,17 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             ],
             [(2, [1])],
         )
-        self.assertEqual(results[0]["conflict_probe"]["held_out"], planned["held_out"])
+        self.assertEqual(
+            results[0]["conflict_probe"]["held_out"],
+            [
+                {
+                    key: value
+                    for key, value in entry.items()
+                    if key in {"pull_request_number", "head_sha", "reason", "conflicts_with"}
+                }
+                for entry in planned["held_out"]
+            ],
+        )
         self.assertEqual(probe_executor.ref_events[0][0], "prepare")
         self.assertEqual(probe_executor.ref_events[-1], ("delete", probe_executor.probe_ref))
         self.assertEqual(

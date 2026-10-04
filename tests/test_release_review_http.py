@@ -109,6 +109,37 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.store.list_deployment_records(), ())
 
+    async def test_client_acceptance_starts_the_release_unless_held_or_overridden(self) -> None:
+        def newest() -> str:
+            return self.store.list_release_review_decision_records(product="example-site")[
+                0
+            ].release_start
+
+        held = await self.post()
+        self.assertEqual(held.status_code, 200, held.text)
+        self.assertEqual(held.json()["release_on_acceptance"], "held")
+        self.assertEqual(newest(), "")
+        self.store.write_product_profile_record(
+            profile().model_copy(update={"release_on_acceptance": "promote_with_rollback_drill"})
+        )
+        accepted = await self.post()
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        self.assertEqual(accepted.json()["release_on_acceptance"], "promote_with_rollback_drill")
+        self.assertEqual(newest(), "promote_with_rollback_drill")
+        # A second click repeats the decision a running release depends on.
+        started = self.store.list_release_review_decision_records(product="example-site")
+        repeated = await self.post()
+        self.assertEqual(repeated.status_code, 200, repeated.text)
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product="example-site"), started
+        )
+        override = await self.post(
+            actor="operator", github_id=9003, outcome="overridden", reason="Hand promotion."
+        )
+        self.assertEqual(override.status_code, 200, override.text)
+        self.assertEqual(newest(), "")
+        self.assertEqual(self.store.list_deployment_records(), ())
+
     async def test_other_human_and_owner_override_are_denied(self) -> None:
         for args in (
             {"actor": "another-user", "github_id": 9002},

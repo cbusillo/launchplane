@@ -10,7 +10,7 @@ from starlette.types import Message, Receive, Scope, Send
 from control_plane.http_app import BoundedRequestBodyMiddleware
 
 
-_WEBHOOK_PATH = "/v1/every-code/github-webhook"
+_WEBHOOK_PATH = "/v1/github/app-webhook"
 _WEBHOOK_BODY_LIMIT = 2 * 1024 * 1024
 _JSON_MUTATION_ROUTES = (
     ("/v1/product-config/apply", 2 * 1024 * 1024),
