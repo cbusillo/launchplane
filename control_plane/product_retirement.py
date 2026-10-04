@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Literal, Protocol, cast
 
 import click
+from sqlalchemy.exc import IntegrityError
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -955,15 +956,27 @@ class DokployProductRetirementAdapter:
             )
             try:
                 self._record_store.write_product_retirement_record(checkpoint)
-            except ValueError:
+            except (ValueError, IntegrityError) as error:
                 # A concurrent same-operation attempt may have sealed the checkpoint first.
                 existing = self._read_finalization_record(provider_operation_key)
                 if existing is None:
-                    raise
+                    raise ProductRetirementBlockedError(
+                        "Retirement finalization checkpoint could not be confirmed."
+                    ) from error
                 self._finalization_record = existing
             else:
                 self._finalization_record = checkpoint
-            self._validate_finalization_authority()
+            profile = self._validate_finalization_authority()
+            current_secrets = self._record_store.list_secret_records(
+                context_name=self._plan.context, instance_name=self._plan.instance
+            )
+            if _secret_snapshot(current_secrets) != (
+                self._plan.authority_snapshot.secret_record_refs,
+                self._plan.authority_snapshot.secret_record_sha256,
+            ):
+                raise ProductRetirementBlockedError(
+                    "Managed secret evidence changed after planning."
+                )
         for runtime_record in current_runtime:
             event_id = (
                 f"product-retirement:{self._plan.plan_sha256}:"
