@@ -72,13 +72,11 @@ Service implementation ownership is split by runtime responsibility:
   configuration, policy and provider composition, OAuth/session wiring,
   FastAPI application construction, startup validation, Uvicorn execution, and
   store cleanup.
-- `control_plane/every_code_github_webhook.py` owns the Every Code GitHub
-  webhook store protocol, signature verification boundary, payload parsing,
-  actor trust, deduplication, issue and pull-request closure, preview
-  validation, and PR-feedback handling.
+- `control_plane/every_code_github_webhook.py` is retired domain code awaiting
+  deletion under #1313; it is not registered as HTTP ingress.
 - `control_plane/http_app.py` owns FastAPI composition, dependency injection,
-  remaining core and mutation route registration, and the webhook callable used
-  by the unauthenticated GitHub route. Domain modules under
+  remaining core and mutation route registration, and the independent signed
+  GitHub App and trusted-maintenance receiver callables. Domain modules under
   `control_plane/http_routes/` own extracted read handlers and registrations,
   plus the dependency-explicit evidence-ingress and Generic Web write
   registrars.
@@ -430,10 +428,6 @@ governed expectation, custody and currentness contract.
   - `POST /v1/every-code/notification-policies/apply` (native FastAPI for
     bearer-token callers, DB-backed storage, `local_operator` reason enforcement,
     and optional `Idempotency-Key` replay/conflict handling)
-  - `POST /v1/every-code/github-webhook` (native FastAPI,
-    unauthenticated GitHub HMAC verification, signed-event skip semantics,
-    Every Code work-request creation/dedupe, issue and pull-request close
-    handling, preview validation comments, and PR-feedback ingestion)
   - `POST /v1/every-code/work-requests/create` (native FastAPI for
     bearer-token callers, `every_code_work_request.write` authorization on
     `launchplane`/`launchplane`, record-store write capability checks, and
@@ -951,34 +945,20 @@ Validate the Launchplane UI shell with browser navigation or `GET /ui`. Do not u
 `HEAD /ui` as the only availability check, because static app-shell fallback
 behavior can differ between request methods.
 
-`POST /v1/every-code/github-webhook`,
-`POST /v1/manager-preview-approval/github-webhook`, and
-`POST /v1/github/app-webhook` are the only unauthenticated write routes. They
-trust request bodies through route-specific GitHub webhook HMAC verification
-instead of OIDC. Before buffering or HMAC processing, the
-ASGI boundary requires exactly
-one unsigned-decimal `Content-Length`, rejects transfer-encoded or missing-length
-requests, caps both declared and observed body bytes at 2 MiB, and rejects a
-declared/observed length mismatch. Contract failures return `400` or `413`
-without invoking the webhook handler. The route requires
-`X-Hub-Signature-256`, `X-GitHub-Delivery`, and `X-GitHub-Event`, supports
-`issues.labeled` events for the `every-code` label, and accepts pull-request
-`closed` events to terminalize linked Every Code work requests. Other signed
-events, actions, or labels return `202` with `skipped: true`. Matching
-issue-label deliveries create or return the durable Every Code work request and
-include `deduped` plus the delivery id in the response. Matching pull-request
-close deliveries can close every linked request referenced by the PR, including
-still-queued requests that never stored a result PR URL. The route is native
-FastAPI.
+`POST /v1/every-code/github-webhook` is removed. Signed label deliveries,
+PR feedback, and close events sent there return `404` and cannot create work.
+The service bootstrap no longer connects the retired Every Code handler.
+Existing records and other retired worker endpoints remain for the separately
+tracked retirement in #1313; no stored records or credentials are deleted here.
 
-Both existing signed webhook surfaces also invoke the common
-trusted-maintenance capture handler after signature verification and payload
-decoding for `pull_request` deliveries. This reuse intentionally adds no new
-route, secret, durable raw webhook receipt, or runtime configuration. Invalid
-signatures, missing delivery IDs, and malformed payloads stop at the existing
-ingress boundary and never reach the trusted-maintenance handler. Unsupported
-or nonmatching deliveries remain accepted/skipped so unrelated Every Code and
-manager-preview behavior stays compatible.
+`POST /v1/manager-preview-approval/github-webhook` and
+`POST /v1/github/app-webhook` retain their independent signature verification.
+Before buffering or HMAC processing, the ASGI boundary requires exactly one
+unsigned-decimal `Content-Length`, rejects transfer-encoded or missing-length
+requests, caps declared and observed body bytes at 2 MiB, and rejects a
+length mismatch. Contract failures return `400` or `413` without invoking
+the webhook handler. Trusted-maintenance capture remains reachable through
+its dedicated signed receiver at the retained manager-preview URL.
 
 Trusted-maintenance capture treats the signed payload as a structural pre-filter
 only. It can use the signed numeric repository tuple, PR number, sender

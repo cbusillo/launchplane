@@ -862,25 +862,6 @@ def latest_completed_merge_train_batch_landing_plan_record(
     )
 
 
-def latest_merge_train_stack_collapse_plan_record(
-    *,
-    record_store: MergeTrainStackCollapsePlanRecordStore,
-    repository: str,
-    base_branch: str,
-    plan_status: str,
-) -> MergeTrainStackCollapsePlanRecord | None:
-    records = record_store.list_merge_train_stack_collapse_plan_records(
-        repository=repository,
-        base_branch=base_branch,
-        status="active",
-        limit=25,
-    )
-    latest_record = latest_merge_train_stack_collapse_progress_record(records)
-    if latest_record is None or latest_record.plan.status != plan_status:
-        return None
-    return latest_record
-
-
 def latest_merge_train_stack_collapse_plan_record_for_landing(
     *,
     record_store: MergeTrainStackCollapsePlanRecordStore,
@@ -2552,12 +2533,14 @@ def _advance_without_candidate_record(
         repository=request.repository, base_branch=request.base_branch, status="active"
     )
     record_groups = _group_stack_collapse_records(waiting_records)
-    latest_waiting_records = tuple(
+    latest_records = tuple(
         progress
         for records in record_groups.values()
         if (progress := latest_merge_train_stack_collapse_progress_record(tuple(records)))
         is not None
-        and progress.plan.status == "waiting_for_root_checks"
+    )
+    latest_waiting_records = tuple(
+        record for record in latest_records if record.plan.status == "waiting_for_root_checks"
     )
     if latest_waiting_records:
         snapshot = github_client.read_merge_train_snapshot(
@@ -2601,10 +2584,36 @@ def _advance_without_candidate_record(
             for record in latest_waiting_records
             if record.plan.collapse_id not in retired_collapse_ids
         )
-    waiting_collapse_record = latest_merge_train_stack_collapse_progress_record(
-        latest_waiting_records
-    )
-    if waiting_collapse_record is not None:
+    # Resume saved execution before reporting an unrelated root's pending checks.
+    # Select progress per collapse first so completed histories cannot revive plans.
+    for plan_status in ("collapsing", "planned"):
+        planned_records = sorted(
+            (record for record in latest_records if record.plan.status == plan_status),
+            key=lambda record: (record.updated_at, record.record_id),
+            reverse=True,
+        )
+        for planned_collapse_record in planned_records:
+            planned_result = _advance_planned_stack_collapse_record(
+                request=request,
+                policy_sha256=policy_sha256,
+                repository_policy=repository_policy,
+                transport=transport,
+                github_client=github_client,
+                stack_collapse_store=stack_collapse_store,
+                planned_collapse_record=planned_collapse_record,
+                trace_id=trace_id,
+                recorded_at=recorded_at,
+                lease=lease,
+            )
+            if planned_result is not None:
+                return planned_result
+
+    pending_wait_result: dict[str, object] | None = None
+    for waiting_collapse_record in sorted(
+        latest_waiting_records,
+        key=lambda record: (record.updated_at, record.record_id),
+        reverse=True,
+    ):
         waiting_result, snapshot = _advance_waiting_stack_collapse_record(
             github_client=github_client,
             request=request,
@@ -2620,35 +2629,14 @@ def _advance_without_candidate_record(
             recorded_at=recorded_at,
             lease=lease,
         )
-        if waiting_result is not None:
+        if waiting_result is None:
+            continue
+        if waiting_result["controller_action"] != "wait_for_root_checks":
             return waiting_result
-
-    planned_collapse_record = latest_merge_train_stack_collapse_plan_record(
-        record_store=stack_collapse_store,
-        repository=request.repository,
-        base_branch=request.base_branch,
-        plan_status="collapsing",
-    ) or latest_merge_train_stack_collapse_plan_record(
-        record_store=stack_collapse_store,
-        repository=request.repository,
-        base_branch=request.base_branch,
-        plan_status="planned",
-    )
-    if planned_collapse_record is not None:
-        planned_result = _advance_planned_stack_collapse_record(
-            request=request,
-            policy_sha256=policy_sha256,
-            repository_policy=repository_policy,
-            transport=transport,
-            github_client=github_client,
-            stack_collapse_store=stack_collapse_store,
-            planned_collapse_record=planned_collapse_record,
-            trace_id=trace_id,
-            recorded_at=recorded_at,
-            lease=lease,
-        )
-        if planned_result is not None:
-            return planned_result
+        if pending_wait_result is None:
+            pending_wait_result = waiting_result
+    if pending_wait_result is not None:
+        return pending_wait_result
 
     return _advance_from_live_snapshot(
         github_client=github_client,
@@ -2807,6 +2795,13 @@ def _advance_planned_stack_collapse_record(
     recorded_at: str,
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object] | None:
+    # An obsolete policy plan cannot authorize execution, but must not mask
+    # another stack's recovery under the current policy. Preserve its history.
+    if (
+        planned_collapse_record.plan.policy_key != repository_policy.policy_key
+        or planned_collapse_record.plan.policy_sha256 != policy_sha256
+    ):
+        return None
     snapshot = github_client.read_merge_train_snapshot(
         repository=request.repository,
         base_branch=request.base_branch,
@@ -2835,15 +2830,20 @@ def _advance_planned_stack_collapse_record(
     )
     expected_root_sha = current_head_shas[root_mutation.parent_pull_request_number]
     if root_pull_request.head_sha != expected_root_sha:
-        observed_root_sha = github_client.find_stack_child_merge_commit(
-            repository=planned_collapse_record.plan.repository,
-            child_head_sha=current_head_shas[root_mutation.child_pull_request_number],
-            expected_parent_head_sha=expected_root_sha,
-            parent_head_ref=root_mutation.parent_head_ref,
-            collapse_id=planned_collapse_record.plan.collapse_id,
-            child_pull_request_number=root_mutation.child_pull_request_number,
-            parent_pull_request_number=root_mutation.parent_pull_request_number,
-        )
+        try:
+            observed_root_sha = github_client.find_stack_child_merge_commit(
+                repository=planned_collapse_record.plan.repository,
+                child_head_sha=current_head_shas[root_mutation.child_pull_request_number],
+                expected_parent_head_sha=expected_root_sha,
+                parent_head_ref=root_mutation.parent_head_ref,
+                collapse_id=planned_collapse_record.plan.collapse_id,
+                child_pull_request_number=root_mutation.child_pull_request_number,
+                parent_pull_request_number=root_mutation.parent_pull_request_number,
+            )
+        except MergeTrainGitHubStaleHeadError:
+            # The real client rejects unrelated pushes rather than returning
+            # an empty probe. Leave this plan unapplied and consider other stacks.
+            return None
         if observed_root_sha != root_pull_request.head_sha:
             return None
     # A root or child that is no longer ready falls through to live discovery, which
