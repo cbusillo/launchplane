@@ -43,10 +43,13 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
         moved_child: bool = False,
         retired_policy: bool = False,
         restore_policy: bool = False,
+        policy_root_state: str = "unchanged",
     ) -> None:
         probes: list[int] = []
         merges: list[int] = []
-        root_visible = reason != "root_missing_from_open_snapshot"
+        root_visible = (
+            reason != "root_missing_from_open_snapshot" and policy_root_state != "missing"
+        )
         replacement_record_id = ""
 
         class Reader(_FakeCollapsedRootStackedMergeTrainSnapshotReader):
@@ -62,7 +65,7 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                         "number": 11,
                         "head_ref": "feature/root-10",
                         "head_sha": "unrelated-push"
-                        if reason in {"root_moved", "snapshot_lag"}
+                        if reason in {"root_moved", "snapshot_lag"} or policy_root_state == "moved"
                         else (
                             "head-root"
                             if reopen or (reason == "policy_changed" and status == "collapsing")
@@ -267,7 +270,13 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                             "mutate": True if reopen and index == 0 else mutate,
                         },
                     )
-                    if reason == "policy_changed" and not (restore_policy and index == 1):
+                    policy_blocked = (
+                        reason == "policy_changed"
+                        and (waiting or status == "collapsing")
+                        and policy_root_state == "unchanged"
+                        and not (restore_policy and index == 1)
+                    )
+                    if policy_blocked:
                         self.assertEqual(response.status_code, 202, response.text)
                         result = response.json()["result"]
                         self.assertEqual(result["controller_action"], "block")
@@ -374,7 +383,16 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                 if not mutate or closed_child or moved_child:
                     self.assertEqual(store.list_merge_train_stack_collapse_plan_records(), before)
                 return
-            if waiting or not mutate or reason in {"snapshot_lag", "policy_changed"}:
+            if (
+                (waiting and policy_root_state == "unchanged")
+                or not mutate
+                or reason == "snapshot_lag"
+                or (
+                    reason == "policy_changed"
+                    and status == "collapsing"
+                    and policy_root_state == "unchanged"
+                )
+            ):
                 self.assertEqual(store.list_merge_train_stack_collapse_plan_records(), before)
             else:
                 active = store.list_merge_train_stack_collapse_plan_records(status="active")
@@ -384,7 +402,14 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                 retired = store.list_merge_train_stack_collapse_plan_records(status="superseded")
                 saved = next(r for r in retired if r.record_id == obsolete.record_id)
                 self.assertEqual(saved.plan, obsolete.plan)
-                self.assertIn(reason, saved.source)
+                self.assertIn(
+                    "root_missing_from_open_snapshot"
+                    if waiting and policy_root_state == "missing"
+                    else (
+                        "root_head_changed" if waiting and policy_root_state == "moved" else reason
+                    ),
+                    saved.source,
+                )
             self.assertFalse(store.list_merge_train_batch_candidate_records())
             self.assertEqual(
                 probes,
@@ -393,7 +418,9 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                 else (([11] if mutate else [11, 11]) if reason == "root_moved" else []),
             )
 
-    async def test_obsolete_execution_is_retired_without_repeated_probes(self) -> None:
+    async def test_inapplicable_execution_steps_aside_without_losing_carried_policy_proof(
+        self,
+    ) -> None:
         for reason in ("root_moved", "policy_changed", "root_missing_from_open_snapshot"):
             for mutate in (False, True):
                 for status in ("planned", "collapsing"):
@@ -459,6 +486,19 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                 await self._obsolete_case(
                     reason="policy_changed", mutate=mutate, status="collapsing", retired_policy=True
                 )
+
+    async def test_obsolete_policy_missing_or_moved_root_steps_aside(self) -> None:
+        for state in ("missing", "moved"):
+            for waiting in (False, True):
+                for mutate in (False, True):
+                    with self.subTest(state=state, waiting=waiting, mutate=mutate):
+                        await self._obsolete_case(
+                            reason="policy_changed",
+                            mutate=mutate,
+                            status="collapsing",
+                            waiting=waiting,
+                            policy_root_state=state,
+                        )
 
     async def test_original_policy_restoration_resumes_only_remaining_child(self) -> None:
         for mutate in (False, True):

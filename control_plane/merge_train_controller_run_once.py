@@ -2592,15 +2592,29 @@ def _advance_without_candidate_record(
     )
     # Old-policy proof cannot be rebound or discarded while its branch effects
     # remain. Keep it visible, but let disjoint saved work use its own proof.
-    obsolete_records = tuple(
+    obsolete_candidates = tuple(
         record
         for record in latest_records
         if record.plan.status in {"planned", "collapsing", "waiting_for_root_checks"}
+        and any(mutation.status == "mutated" for mutation in record.plan.mutations)
         and (
             record.plan.policy_key != repository_policy.policy_key
             or record.plan.policy_sha256 != policy_sha256
         )
     )
+    if obsolete_candidates:
+        snapshot = snapshot or github_client.read_merge_train_snapshot(
+            repository=request.repository, base_branch=request.base_branch
+        )
+        observed_heads = {pr.number: pr.head_sha for pr in snapshot.pull_requests}
+        obsolete_records = tuple(
+            record
+            for record in obsolete_candidates
+            if observed_heads.get(record.plan.root_pull_request_number)
+            == _stack_collapse_current_head_shas(record.plan)[record.plan.root_pull_request_number]
+        )
+    else:
+        obsolete_records = ()
     latest_history = tuple(
         progress
         for records in _group_stack_collapse_records(waiting_records + retired_records).values()

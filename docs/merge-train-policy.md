@@ -1047,9 +1047,12 @@ Controller actions have these retry/stop semantics:
   child with a pending mutation is present and ready. Latest completed history
   cannot revive older execution. During that same-policy resumption, carried
   mutations remain checkpointed and are not merged again. Obsolete-policy
-  execution remains unapplied and visible through run-once's
+  execution with checkpointed branch merges and an unchanged open root remains
+  unapplied and visible through run-once's
   `blocked_stack_collapse_records`; it is not retired merely because its policy
-  changed. An independently valid saved collapse sharing no PR or branch ref
+  changed. Plans with no checkpointed branch merges, and moved or missing
+  roots, retain their existing retirement/step-aside path. An independently
+  valid saved collapse sharing no PR or branch ref
   with that stack may proceed, with the obsolete evidence attached to its
   response. Otherwise run-once reports `block` with
   `merge_train_stack_collapse_policy_changed` before live discovery can replan

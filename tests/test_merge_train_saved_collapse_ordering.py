@@ -215,7 +215,7 @@ class SavedCollapseOrderingTests(unittest.IsolatedAsyncioTestCase):
                     )
                 else:
                     self.assertEqual(result["dry_run_result"]["selected_pr"]["number"], 1)
-            if obsolete_reason == "policy_changed":
+            if obsolete_reason == "policy_changed" and other_status == "waiting_for_root_checks":
                 self.assertEqual(
                     result["blocked_stack_collapse_records"][0]["record_id"], other.record_id
                 )
