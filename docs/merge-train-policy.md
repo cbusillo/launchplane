@@ -1003,11 +1003,17 @@ Controller actions have these retry/stop semantics:
   is next. Dry-run may report. Mutate once, then call again.
 - `execute_stack_collapse`: A stored planned or partially `collapsing` plan
   should be applied or resumed. Mutate once, then call again. Stop if the
-  resulting plan is `blocked` or `stale`.
+  resulting plan is `blocked` or `stale`. Saved execution is selected from
+  each collapse's latest progress across the full active history, with
+  eligible interrupted execution before planned execution and all saved root
+  waits. An inapplicable saved execution steps aside for another eligible
+  saved stack. Plans under an obsolete policy are left unapplied, and an
+  unrelated root push makes that saved plan step aside; both retain history.
+  A completed stack never revives its older planned progress.
 - `wait_for_root_checks`: The collapsed root PR's required checks are still
-  running. Stop and poll later; do not call phase endpoints. Any other state
-  of the collapsed root is answered from the whole queue, the same as for any
-  queued pull request: a root behind its base refreshes for a direct landing
+  running. Stop and poll later; do not call phase endpoints. When no saved
+  execution or applicable saved wait supplies an action, the controller answers
+  from the whole queue, the same as for any queued pull request: a root behind its base refreshes for a direct landing
   or keeps its head when joining a multi-PR merge batch, a root
   with failed checks or conflicts reports `block`, and a root that left the
   queue lets the other ready pull requests proceed. A refreshed root still
@@ -1017,6 +1023,10 @@ Controller actions have these retry/stop semantics:
   Dry runs leave records unchanged. A waiting root remains selectable from its
   latest waiting progress even after an independent
   stack completes; a completed stack cannot hide another stack's saved wait.
+  All applicable saved waits are considered before reporting pending checks,
+  so a pending root cannot mask another saved root that is ready for admission.
+  When no saved root is ready and no saved execution can resume, the newest
+  applicable pending wait is reported.
   A root that returns at its collapsed head
   can resume its retired wait when its visible children still have the stored
   heads. A root waiting on checks or ready for admission then skips another
