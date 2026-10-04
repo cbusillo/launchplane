@@ -1288,11 +1288,12 @@ at the response's `generated_at`. Both fields are null when no Level 1 run
 exists. `latest_run` reads only `launchplane_merge_train_runs`, ordered by
 `recorded_at` descending and then `run_id` descending, independently of write
 order. Controller passes persist separate lease, candidate, and landing records;
-they do not write Level 1 run history. A September Level 1 run can therefore
-appear alongside October controller activity. Its timestamp and age describe
+they do not write Level 1 run history. An older Level 1 run can therefore
+appear alongside newer controller activity. Its timestamp and age describe
 that historical evidence, not the last controller pass or a current queue
 observation. Admission continues to use that Level 1 history for its existing
-poll/backoff rules and current-policy controller records for its action hint.
+poll/backoff rules; a newer idle Level 1 run also supersedes older controller
+records before current-policy filtering produces the action hint.
 
 The response also includes the
 controller lease holder, active action and phase, lease and heartbeat age, reconciliation

@@ -455,9 +455,15 @@ function ControllerStatus({
         <section className="engineering-dry-run">
           <header>
             <div>
-              <span className="engineering-kicker">Latest dry-run evidence</span>
+              <span className="engineering-kicker">Stored ordered-queue dry run</span>
               <h2>{humanize(status.latest_dry_run.intended_next_action)}</h2>
               <p>{status.latest_dry_run.next_action_detail}</p>
+              <p>
+                Historical queue evidence
+                {status.latest_run ? (
+                  <> from <time dateTime={status.latest_run.recorded_at}>{formatTime(status.latest_run.recorded_at)}</time></>
+                ) : null}.
+              </p>
             </div>
             <div className="engineering-chip-row">
               <span>{status.latest_dry_run.queue_count} queued</span>

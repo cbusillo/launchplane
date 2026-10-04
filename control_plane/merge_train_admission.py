@@ -173,7 +173,9 @@ class MergeTrainControllerStatusReadModel(BaseModel):
         default=None,
         description="Latest stored Level 1 ordered-queue run; not the latest controller pass.",
     )
-    latest_run_source: Literal["level1"] | None = None
+    latest_run_source: Literal["level1"] | None = Field(
+        default=None, description="History source for latest_run; null when no run exists."
+    )
     latest_run_age_seconds: int | None = Field(
         default=None, ge=0, description="Age of the Level 1 run at generated_at."
     )

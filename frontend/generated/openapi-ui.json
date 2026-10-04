@@ -14983,6 +14983,7 @@
                 "type": "null"
               }
             ],
+            "description": "History source for latest_run; null when no run exists.",
             "title": "Latest Run Source"
           },
           "reconciliation_diagnostics": {

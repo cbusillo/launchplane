@@ -303,7 +303,9 @@ class FastApiMergeTrainReadTests(unittest.IsolatedAsyncioTestCase):
     async def test_controller_status_reads_stored_dry_run(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch("control_plane.http_app.resolve_merge_train_github_token") as resolve_token,
+            patch(
+                "control_plane.merge_train_github.UrllibMergeTrainGitHubTransport.request"
+            ) as github_request,
         ):
             state_dir = Path(temporary_directory_name) / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
@@ -338,7 +340,7 @@ class FastApiMergeTrainReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(controller_status["latest_dry_run"]["queue_count"], 1)
         self.assertEqual(controller_status["latest_dry_run"]["selected_pr_number"], 1)
         self.assertEqual(controller_status["reconciliation_diagnostics"], [])
-        resolve_token.assert_not_called()
+        github_request.assert_not_called()
 
     async def test_controller_status_exposes_safe_http_failure_after_restart(self) -> None:
         from control_plane.merge_train_controller_run_once import (
