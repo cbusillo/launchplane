@@ -1233,26 +1233,30 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 store.close()
 
     async def test_tracked_checkpoint_insert_race_recovers_through_http(self) -> None:
-        for profile_failure in (True, False):
-            with self.subTest(profile_failure=profile_failure), TemporaryDirectory() as directory:
+        for profile_failure, secret_drift in ((True, False), (False, False), (False, True)):
+            with (
+                self.subTest(profile_failure=profile_failure, secret_drift=secret_drift),
+                TemporaryDirectory() as directory,
+            ):
                 await self._assert_tracked_checkpoint_insert_race(
                     f"sqlite+pysqlite:///{Path(directory) / 'launchplane.sqlite3'}",
                     profile_failure=profile_failure,
+                    secret_drift=secret_drift,
                 )
 
     async def _assert_tracked_checkpoint_insert_race(
-        self, database_url: str, *, profile_failure: bool = True
+        self, database_url: str, *, profile_failure: bool = True, secret_drift: bool = False
     ) -> None:
         store = self._store(Path("."), database_url=database_url)
         try:
             await self._assert_tracked_checkpoint_insert_race_with_store(
-                store, profile_failure=profile_failure
+                store, profile_failure=profile_failure, secret_drift=secret_drift
             )
         finally:
             store.close()
 
     async def _assert_tracked_checkpoint_insert_race_with_store(
-        self, store: PostgresRecordStore, *, profile_failure: bool
+        self, store: PostgresRecordStore, *, profile_failure: bool, secret_drift: bool
     ) -> None:
         store.write_secret_record(
             SecretRecord(
@@ -1395,6 +1399,14 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     winner_secret = store.list_secret_records(
                         context_name="example-site", instance_name="prod"
                     )[0]
+                    if secret_drift:
+                        winner_secret = winner_secret.model_copy(
+                            update={
+                                "current_version_id": "v2",
+                                "status": "configured",
+                            }
+                        )
+                        store.write_secret_record(winner_secret)
                 finally:
                     released.set()
                     first = await first_task
@@ -1461,6 +1473,14 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             store.read_product_profile_record("example-site").lifecycle_state, "retired"
         )
         self.assertEqual(first.status_code, 409 if profile_failure else 202, first.text)
+        if secret_drift:
+            self.assertFalse(
+                any(
+                    record.trace_id == first_trace_id and record.outcome == "already_absent"
+                    for record in records
+                )
+            )
+            return
         terminal = next(
             record
             for record in records

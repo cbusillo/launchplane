@@ -970,6 +970,13 @@ class DokployProductRetirementAdapter:
             current_secrets = self._record_store.list_secret_records(
                 context_name=self._plan.context, instance_name=self._plan.instance
             )
+            if _secret_snapshot(current_secrets) != (
+                self._plan.authority_snapshot.secret_record_refs,
+                self._plan.authority_snapshot.secret_record_sha256,
+            ):
+                raise ProductRetirementBlockedError(
+                    "Managed secret evidence changed after planning."
+                )
         for runtime_record in current_runtime:
             event_id = (
                 f"product-retirement:{self._plan.plan_sha256}:"
