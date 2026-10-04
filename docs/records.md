@@ -1694,12 +1694,11 @@ provider message or rollback health exception is embedded in the detail.
   with exact expected-current records, one canonical authority digest,
   PostgreSQL idempotency, and atomic target/policy revision writes. The bounded
   response omits provider destination values.
-- The legacy runtime migration route reads one exact DB-backed instance runtime
-  record, requires both snapshot and independent-backup modes, copies only
-  non-secret Proxmox target facts into revision-one typed records, and binds the
-  runtime record's exact `updated_at`. It does not remove or alter the legacy
-  gate; provider execution and final runtime-key retirement remain downstream
-  work.
+- New attempts on the legacy runtime migration route refuse without reading
+  environment values or creating authority. Historical idempotent replies remain
+  replayable. Use reviewed typed target/policy input through the apply route;
+  snapshot and independent-backup requirements remain mandatory. Live runtime-key
+  removal and product proof remain separate #2309 operations.
 
 ## Backup Gate Record
 
@@ -1745,8 +1744,9 @@ provider message or rollback health exception is embedded in the detail.
   `verireel_prod_backup_gate_operations` for file-backed local state. The HTTP
   route writes a pending backup-gate record plus a typed operation record; the
   supervised `verireel-workers` process claims the operation, heartbeats its
-  lease, runs the delegated backup worker, writes the terminal backup-gate
-  evidence, and completes the operation record. Expired operations retry only
+  lease, executes shared captures from typed bindings, writes terminal backup-gate
+  evidence, and completes the operation record. Legacy requests without a typed
+  binding receive failed records without invoking the delegated host worker. Expired operations retry only
   before the external backup side-effect boundary; once the phase reaches
   `backup_gate`, lease expiry fails closed for admin review.
   A pending operation can be cancelled through the deployed service. The
@@ -1919,8 +1919,8 @@ backfill or authorization change.
   The payload remains the storage authority, so this contract does not require
   promoted SQL columns or an Alembic migration.
 - Durable Operation Authorization has a `grant`: `policy_rule` (the default,
-  serialized without the field, exactly as before), `policy_administrator`, or
-  `launchplane_reconcile`.
+  serialized without the field, exactly as before), `policy_administrator`,
+  `launchplane_reconcile`, or `client_release_acceptance`.
   A `policy_administrator` grant is captured, for any product and action, when
   the caller is a signed-in GitHub human with role `admin` whom the active
   policy names as its administrator by immutable GitHub id (the strict
@@ -1932,10 +1932,12 @@ backfill or authorization change.
   names the recorded caller's GitHub id as administrator. It creates no grant or
   credential, and no automated identity can hold it; managed-rule checks never
   accept it. Every other caller still needs exactly one managed rule, except
-  that queued Odoo prod promotions and rollbacks accept only this grant. A guard
+  that queued Odoo prod promotions and rollbacks accept only this grant or a
+  Client release grant. A guard
   normally checks once before the first provider effect; a queued promotion
-  re-reads it again before its deploy starts, so a revocation during the logical
-  backup stops the deploy.
+  re-reads it again before its deploy starts and just before the deploy first
+  writes to the provider, so a revocation during the logical backup or the
+  deploy's preparation stops the deploy.
   A reconcile grant has caller identity type `launchplane_reconcile` with the
   fixed subject `launchplane-reconciler` and carries no managed rule or policy
   fields; neither form accepts the other's identity. Only the reconciler builds
@@ -1946,6 +1948,24 @@ backfill or authorization change.
   other operation kind or destination fails with
   `operation_authorization_reconcile_refused`, and policy-rule checks never
   accept it.
+  A `client_release_acceptance` grant has a GitHub human caller with role
+  `client`, names the release decision in `release_decision_record_id`, and
+  carries no managed rule or policy fields. Only the Odoo stable worker builds it
+  (`control_plane/client_release.py`), when it queues a step of a Client's
+  accepted release: a production backup, a promotion, or a rollback on `prod`.
+  No HTTP request can supply one. The production backup and Odoo release workers
+  accept it only while the named decision is still the product's newest, is
+  `accepted` and published, and was made by the product's recorded Client; the
+  product must also be Odoo, not `prelaunch`, with `release_on_acceptance` not
+  `held`. Otherwise the operation fails with
+  `operation_authorization_client_release_refused`. Every other guard refuses it.
+- A release decision's `release_start` (`promote` or
+  `promote_with_rollback_drill`, omitted when empty) records whether the Client's
+  acceptance starts the release. It is fixed when the decision is recorded. A
+  product profile's `release_on_acceptance` is omitted while `held`. The step
+  operations of an accepted release take ids derived from the decision, so the
+  release needs no record of its own; see
+  [Acceptance starts the release](release-review.md#acceptance-starts-the-release).
 - A worker re-evaluates the recorded caller and the same managed rule against
   the current active policy after claim and again immediately before the first
   provider mutation. A later policy revision may authorize execution only when

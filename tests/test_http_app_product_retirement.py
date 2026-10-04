@@ -26,6 +26,11 @@ from control_plane.http_app import (
     idempotency_scope,
 )
 from control_plane.product_retirement import BoundProductRetirement, build_provider_observation
+from control_plane.product_retirement import ProductRetirementBlockedError
+from control_plane.product_retirement_no_target import (
+    bind_no_target_retirement,
+    observe_no_target_absence,
+)
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.product_reconcile import ProductReconcileTarget
 from control_plane.product_reconcile import request_product_reconcile_sweep
@@ -542,6 +547,90 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(store.list_product_retirement_records(product="example-site"), ())
                 store.close()
 
+    def test_no_target_normalized_app_names_block_renamed_or_ambiguous_applications(self) -> None:
+        for target_name, preview_prefix, app_name, blocked in (
+            ("Example Site PROD", "Example Preview", "example-site-prod-abc123", True),
+            ("Example Site PROD", "Example Preview", "example-site-prod", True),
+            ("Example Site PROD", "Example Preview", "example-preview-pr-7-abc123", True),
+            ("Example Site PROD", "Example Preview", "example-site-pr-7-abc123", True),
+            ("Example Site PROD", "Example Preview", "EXAMPLE-SITE-PR-7-ABC123", True),
+            ("Example  Site PROD", "Example Preview", "example--site-prod-abc123", True),
+            ("Example.Site_PROD", "Example Preview", "example.site_prod-abc123", True),
+            # A neighbouring application can share the base: ambiguity must refuse.
+            ("Example Site PROD", "Example Preview", "example-site-prod-other-site", True),
+            ("Demo Service Prod", "Example Preview", "demo-service-production-abc123", False),
+            ("Demo.Site_PROD", "Example Preview", "demo-site-prod-abc123", False),
+            ("Example Site PROD", "Example Preview", "example-sites-pr-7-abc123", False),
+            ("Example Site PROD", "Example Preview", "example-previewing-abc123", False),
+        ):
+            with self.subTest(app_name=app_name), TemporaryDirectory() as directory:
+                store = self._no_target_store(Path(directory))
+                target = store.read_dokploy_target_record(
+                    context_name="example-site", instance_name="prod"
+                )
+                store.write_dokploy_target_record(
+                    target.model_copy(update={"target_name": target_name})
+                )
+                profile = store.read_product_profile_record("example-site")
+                store.write_product_profile_record(
+                    profile.model_copy(
+                        update={
+                            "preview": profile.preview.model_copy(
+                                update={"app_name_prefix": preview_prefix}
+                            )
+                        }
+                    )
+                )
+                bound = bind_no_target_retirement(
+                    record_store=store,
+                    request=ProductRetirementRequest.model_validate(
+                        {**_plan_payload(), "no_target": True, "expected_target_sha256": ""}
+                    ),
+                )
+                with (
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "test"),
+                    ),
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_api.search_dokploy_applications",
+                        return_value=({"applicationId": "orphan"},),
+                    ),
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_api.fetch_dokploy_target_payload",
+                        return_value={
+                            "applicationId": "orphan",
+                            "name": "renamed",
+                            "appName": app_name,
+                            "repository": "unrelated-site",
+                            "dockerImage": "ghcr.io/another/unrelated:latest",
+                        },
+                    ),
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_api.fetch_dokploy_application_domains",
+                        return_value=({"host": "unrelated.invalid"},),
+                    ),
+                    patch(
+                        "control_plane.product_retirement_no_target.dokploy_api.dokploy_request",
+                        side_effect=AssertionError("Unexpected provider request"),
+                    ),
+                ):
+                    if blocked:
+                        with self.assertRaises(ProductRetirementBlockedError):
+                            observe_no_target_absence(
+                                control_plane_root=Path(directory), bound=bound, observed_at=NOW
+                            )
+                    else:
+                        observation = observe_no_target_absence(
+                            control_plane_root=Path(directory), bound=bound, observed_at=NOW
+                        )
+                        self.assertEqual(observation.state, "absent")
+                self.assertEqual(
+                    store.read_product_profile_record("example-site").lifecycle_state, "active"
+                )
+                self.assertEqual(store.read_preview_record("stale-preview").state, "failed")
+                store.close()
+
     def _store(self, root: Path, *, database_url: str = "") -> PostgresRecordStore:
         store = PostgresRecordStore(
             database_url=database_url or f"sqlite+pysqlite:///{root / 'launchplane.sqlite3'}"
@@ -864,6 +953,154 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(TARGET_ID, json.dumps(apply.json()))
         self.assertEqual(sum(record.outcome == "started" for record in records), 1)
 
+    async def test_tracked_uncertain_completion_retry_preserves_conflict_guards(self) -> None:
+        for change in (
+            "key",
+            "request",
+            "plan",
+            "observation",
+            "unknown",
+            "retry_observation",
+            "unchanged",
+        ):
+            with self.subTest(change=change), TemporaryDirectory() as directory:
+                store = self._store(Path(directory))
+                app = self._app(
+                    store, actions=("product_retirement.plan", "product_retirement.apply")
+                )
+                with patch(
+                    "control_plane.product_retirement.observe_tracked_dokploy_application",
+                    return_value=_observation(),
+                ):
+                    plan = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=self.headers,
+                        payload=_plan_payload(),
+                    )
+                    replacement_plan = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers={**self.headers, "Idempotency-Key": "another-plan-key"},
+                        payload=_plan_payload(),
+                    )
+                self.assertEqual(plan.status_code, 202, plan.text)
+                self.assertEqual(replacement_plan.status_code, 202, replacement_plan.text)
+                payload = _apply_payload(plan.json())
+                with (
+                    patch(
+                        "control_plane.product_retirement.observe_tracked_dokploy_application",
+                        return_value=_observation(),
+                    ),
+                    patch(
+                        "control_plane.product_retirement.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "test"),
+                    ),
+                    patch(
+                        "control_plane.product_retirement.dokploy_api.delete_dokploy_application",
+                        side_effect=TimeoutError("lost delete response"),
+                    ),
+                ):
+                    failed = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=self.headers,
+                        payload=payload,
+                    )
+                self.assertEqual(failed.status_code, 409, failed.text)
+                headers = self.headers
+                if change == "key":
+                    headers = {**headers, "Idempotency-Key": "different-apply-key"}
+                elif change == "request":
+                    payload = {**payload, "reason": "A different retirement intent."}
+                elif change == "plan":
+                    payload = _apply_payload(replacement_plan.json())
+                observations: list[ProductRetirementProviderObservation | Exception] = [
+                    _observation(name="changed-name")
+                    if change == "observation"
+                    else TimeoutError("observation unavailable")
+                ]
+                if change == "unchanged":
+                    observations = [_observation(), _observation(), _absent_observation()]
+                elif change == "key":
+                    observations = [_observation(), _absent_observation()]
+                elif change == "retry_observation":
+                    observations = [
+                        _observation(),
+                        TimeoutError("retry observation unavailable"),
+                        _observation(),
+                        TimeoutError("retry observation unavailable"),
+                    ]
+                with (
+                    patch(
+                        "control_plane.product_retirement.observe_tracked_dokploy_application",
+                        side_effect=observations,
+                    ) as observe,
+                    patch(
+                        "control_plane.product_retirement.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "test"),
+                    ),
+                    patch(
+                        "control_plane.product_retirement.dokploy_api.delete_dokploy_application"
+                    ) as delete,
+                ):
+                    retry = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=headers,
+                        payload=payload,
+                    )
+                    if change == "retry_observation":
+                        self.assertEqual(retry.status_code, 409, retry.text)
+                        retry = await _asgi_request(
+                            app,
+                            "POST",
+                            "/v1/product-retirement",
+                            headers=headers,
+                            payload=payload,
+                        )
+                if change == "unchanged":
+                    self.assertEqual(retry.status_code, 202, retry.text)
+                    self.assertTrue(retry.json()["result"]["provider_absence_verified"])
+                    self.assertEqual(
+                        store.read_product_profile_record("example-site").lifecycle_state,
+                        "retired",
+                    )
+                    delete.assert_called_once()
+                else:
+                    self.assertEqual(retry.status_code, 409, retry.text)
+                    self.assertEqual(
+                        retry.json()["error"]["code"],
+                        {
+                            "request": "product_retirement_blocked",
+                            "plan": "idempotency_key_reused",
+                        }.get(change, "mutation_reconciliation_required"),
+                    )
+                    self.assertEqual(
+                        store.read_product_profile_record("example-site").lifecycle_state,
+                        "retiring",
+                    )
+                    delete.assert_not_called()
+                    if change in {"key", "request", "plan"}:
+                        observe.assert_not_called()
+                    held = store.read_idempotency_record(
+                        scope=idempotency_scope(
+                            LocalOperatorIdentity(
+                                subject="local-owner-agent", token_label="local-owner-write"
+                            )
+                        ),
+                        route_path="/v1/product-retirement",
+                        idempotency_key=self.headers["Idempotency-Key"],
+                    )
+                    self.assertIsNotNone(held)
+                    assert held is not None
+                    self.assertEqual(held.state, "reconcile_required")
+                store.close()
+
     async def test_provider_failure_persists_reconciliation_and_retiring_lifecycle(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = self._store(Path(temporary_directory_name))
@@ -948,6 +1185,29 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 f"/v1/product-retirements/{reconcile_record.record_id}",
                 headers={"Authorization": "Bearer local-operator-token"},
             )
+            with (
+                patch(
+                    "control_plane.product_retirement.observe_tracked_dokploy_application",
+                    return_value=_absent_observation(),
+                ) as observe,
+                patch(
+                    "control_plane.product_retirement.dokploy_api.delete_dokploy_application"
+                ) as delete,
+            ):
+                retry = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/product-retirement",
+                    headers=self.headers,
+                    payload=_apply_payload(plan.json()),
+                )
+                self.assertEqual(retry.status_code, 202, retry.text)
+                self.assertTrue(retry.json()["result"]["provider_absence_verified"])
+                self.assertEqual(
+                    store.read_product_profile_record("example-site").lifecycle_state, "retired"
+                )
+                self.assertGreater(observe.call_count, 0)
+                delete.assert_not_called()
             store.close()
         self.assertEqual(apply.status_code, 409)
         self.assertEqual(profile.lifecycle_state, "retiring")

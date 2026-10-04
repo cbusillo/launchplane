@@ -1027,7 +1027,7 @@ class AgentProductSetupCandidateCompilerTests(unittest.TestCase):
         state, candidate = self._compile(policy, products=("example-shop", "example-docs"))
         self.assertEqual(state, "planned")
         assert candidate is not None
-        self.assertEqual(len(candidate.desired_policy.local_operators), 6)
+        self.assertEqual(len(candidate.desired_policy.local_operators), 2 * len(_setup_rules()))
 
     def test_remove_proposes_empty_fragment_and_absent_remove_is_noop(self) -> None:
         self.assertEqual(

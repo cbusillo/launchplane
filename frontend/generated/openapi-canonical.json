@@ -3419,6 +3419,88 @@
         "title": "ChangeImpactCoverage",
         "type": "object"
       },
+      "ClientReleaseRunView": {
+        "additionalProperties": false,
+        "description": "What a Client's accepted release has done so far, derived from its operations.",
+        "properties": {
+          "decision_record_id": {
+            "title": "Decision Record Id",
+            "type": "string"
+          },
+          "rollback_drill": {
+            "title": "Rollback Drill",
+            "type": "boolean"
+          },
+          "state": {
+            "enum": [
+              "waiting",
+              "running",
+              "passed",
+              "stopped"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/ClientReleaseStepView"
+            },
+            "title": "Steps",
+            "type": "array"
+          }
+        },
+        "required": [
+          "decision_record_id",
+          "rollback_drill",
+          "state",
+          "steps"
+        ],
+        "title": "ClientReleaseRunView",
+        "type": "object"
+      },
+      "ClientReleaseStepView": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "backup",
+              "promote",
+              "rollback"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "not_started",
+              "pending",
+              "running",
+              "reconciliation_required",
+              "pass",
+              "fail",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "step": {
+            "title": "Step",
+            "type": "string"
+          }
+        },
+        "required": [
+          "step",
+          "kind",
+          "status",
+          "operation_id"
+        ],
+        "title": "ClientReleaseStepView",
+        "type": "object"
+      },
       "DataProvenance": {
         "additionalProperties": false,
         "properties": {
@@ -12539,6 +12621,16 @@
           "promotion_workflow": {
             "$ref": "#/components/schemas/ProductPromotionWorkflowProfile"
           },
+          "release_on_acceptance": {
+            "default": "held",
+            "enum": [
+              "held",
+              "promote",
+              "promote_with_rollback_drill"
+            ],
+            "title": "Release On Acceptance",
+            "type": "string"
+          },
           "repository": {
             "title": "Repository",
             "type": "string"
@@ -18413,6 +18505,11 @@
           },
           "context": {
             "title": "Context",
+            "type": "string"
+          },
+          "expected_artifact_id": {
+            "default": "",
+            "title": "Expected Artifact Id",
             "type": "string"
           },
           "from_instance": {
@@ -35907,6 +36004,16 @@
             "default": "",
             "title": "Release Issue Url",
             "type": "string"
+          },
+          "release_start": {
+            "default": "",
+            "enum": [
+              "",
+              "promote",
+              "promote_with_rollback_drill"
+            ],
+            "title": "Release Start",
+            "type": "string"
           }
         },
         "required": [
@@ -35980,6 +36087,11 @@
             "title": "Display Name",
             "type": "string"
           },
+          "live_site_url": {
+            "default": "",
+            "title": "Live Site Url",
+            "type": "string"
+          },
           "owner_github_login": {
             "title": "Owner Github Login",
             "type": "string"
@@ -35987,6 +36099,26 @@
           "product": {
             "title": "Product",
             "type": "string"
+          },
+          "release_on_acceptance": {
+            "default": "held",
+            "enum": [
+              "held",
+              "promote",
+              "promote_with_rollback_drill"
+            ],
+            "title": "Release On Acceptance",
+            "type": "string"
+          },
+          "release_run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ClientReleaseRunView"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "review": {
             "$ref": "#/components/schemas/ReleaseReviewStatus"
@@ -57786,6 +57918,11 @@
                         "title": "Context",
                         "type": "string"
                       },
+                      "expected_artifact_id": {
+                        "default": "",
+                        "title": "Expected Artifact Id",
+                        "type": "string"
+                      },
                       "from_instance": {
                         "default": "testing",
                         "title": "From Instance",
@@ -78823,6 +78960,22 @@
                     "title": "Reason",
                     "type": "string"
                   },
+                  "release_on_acceptance": {
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "held",
+                          "promote",
+                          "promote_with_rollback_drill"
+                        ],
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Release On Acceptance"
+                  },
                   "reviewed_plan_sha256": {
                     "default": "",
                     "title": "Reviewed Plan Sha256",
@@ -79879,7 +80032,7 @@
             "description": "Service Unavailable"
           }
         },
-        "summary": "Dry-run or apply an exact legacy runtime backup migration"
+        "summary": "Refuse new legacy runtime backup migrations; use typed authority apply"
       }
     },
     "/v1/production-backup-gates": {

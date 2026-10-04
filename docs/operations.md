@@ -256,21 +256,20 @@ reviewed digest also binds the exact active source and destination target
 record IDs and digests resolved during dry-run, including policy-only updates
 that do not write new target revisions.
 
-The legacy migration route is
-`POST /v1/production-backup-authority/legacy-runtime-migration`. It requires an
-exact product/context/instance/action, admin-chosen stable target IDs, the
-source runtime record's exact `updated_at`, review timestamps, evidence-age
-limits, source, and reason. Dry-run reads only the exact DB-backed instance
-runtime record and requires both snapshot and `vzdump` modes. Apply requires the
-reviewed digest and idempotency key. The migration copies only non-secret host,
-user, guest, storage, prefix, and retention facts into typed records; SSH key
-and known-host material are never copied or returned.
+The compatibility route
+`POST /v1/production-backup-authority/legacy-runtime-migration` refuses new
+migration attempts without reading runtime-environment backup values or writing
+targets and policies. Submit explicit reviewed typed records through
+`POST /v1/production-backup-authority/apply` instead. Historical idempotent
+responses remain replayable; they do not create new authority. A new attempt
+returns the compatibility error `legacy_backup_migration_conflict` (409); this
+is a permanent refusal, so retrying it cannot migrate authority.
 
-Do not remove the legacy VeriReel runtime keys after this migration. The current
-worker continues to use them until the provider-neutral execution slice and
-promotion-enforcement slice are merged and verified. This migration establishes
-typed authority without weakening the live backup gate or claiming provider
-execution has moved.
+Legacy VeriReel backup dispatch and worker commands also refuse without host
+effects. Capture through `POST /v1/production-backup-gates` after typed policy
+onboarding. Both snapshot and independent backup remain mandatory. Removing
+obsolete live runtime keys, onboarding production policy and proving a real
+promotion remain separate guarded operations under #2309.
 
 ## Mutation Reservation Recovery
 
@@ -1523,6 +1522,14 @@ or monitor passes therefore re-plan against current state instead of overwriting
 admin state, opening a second incident, or losing evidence. Any supported
 non-monitor incident-state mutation must increment `state_version`.
 
+A deploy records its new runtime identity once its own rollout check passes,
+and the public route can still answer from the previous container for a few
+seconds. So a `wrong_runtime_identity` probe is confirmed before it counts: the
+scheduled run waits once (30 seconds, however many lanes mismatched), reads
+each lane's expected identity again, and probes it again. Only the
+confirming probe is stored. A mismatch that persists opens or updates the
+incident as before; a handover that settles records a pass.
+
 Notification policies carry a reminder interval from 15 minutes through seven
 days; the generic migrated/default interval is six hours. Each incident/policy
 pair stores its material-event anchor, current reminder window, last reminder,
@@ -2595,6 +2602,13 @@ context only, and `context_instance` has both context and instance.
     its idempotency receipt finds the lane already holding the requested
     allowances and reports `changed: false` with a read-back, instead of
     `stale`.
+- An upstream restore passes `ODOO_RESTORE_KEPT_INTEGRATIONS` to the data-workflow
+  runner from the lane's `pre_live` and `read_only_source` allowances. These
+  integrations keep their restored settings through devkit's credential clearing.
+  `dev_store` is excluded: the restored production values are cleared before the
+  lane's development account is applied. Production and previews receive an
+  empty list, as does a lane without eligible allowances. This input is passed
+  in the restore schedule script, rather than persisted in the target environment.
 - The integration read-back enforces the allowances. The deploy, restore, stable
   bootstrap and target replacement data-workflow schedules run it with web
   stopped, before web starts again, on every Odoo lane that is not production,
@@ -2628,7 +2642,10 @@ context only, and `context_instance` has both context and instance.
     The schedule removes `/volumes/data/.launchplane_integration_readback_passed`
     before its workflow and writes their SHA-256 there only when the workflow
     completed (so it applied the payload) and the read-back then passed. A failed
-    workflow leaves web waiting even when the database reads clean. So a provider
+    workflow leaves web waiting even when the database reads clean. An unset or
+    empty optional payload is supported, but a failed Docker exec reading it
+    fails the schedule. Recovery must successfully read the payload before it
+    can write a pass or start web. So a provider
     deploy that runs before the schedule (a ship deploy, a
     changed target environment, target replacement, a preview refresh) or any
     restart after a refusal leaves web waiting instead of serving. A backup
@@ -3604,7 +3621,11 @@ key, the reviewed record ID/digest, and the exact confirmation shown by the
 workflow input contract.
 
 An apply that returns reconciliation-required must be retried with the same
-idempotency key after the provider can be observed. A `retiring` profile is an
+idempotency key and reviewed request after the provider can be observed. The HTTP
+endpoint delegates replay to the durable runner, which observes uncertain tracked
+completion before retrying. Changed requests or reviewed plans and different
+keys cannot take over the held operation; unavailable or changed provider
+evidence leaves it reconciliation-required. A `retiring` profile is an
 intentional fail-closed state: deploys, monitoring, previews, onboarding,
 discovery, and work-graph automation must leave it untouched while the durable
 operation reconciles. Completion verifies provider absence, removes mutable
@@ -3634,6 +3655,24 @@ generation evidence. A complete Dokploy application enumeration and fresh
 application/domain reads must show no stable name, preview prefix, repository,
 image repository, or known domain belonging to the product. Missing, malformed,
 unauthorized or incomplete provider evidence blocks planning and apply.
+
+The proof also checks normalized `appName` bases for stable and preview names:
+trim, replace each literal space with a hyphen, and lowercase, preserving dots,
+underscores and repeated spaces as repeated hyphens. Dokploy's
+[`cleanAppName` / `buildAppName` source](https://github.com/Dokploy/dokploy/blob/48504fde4eb210056f7d9f80406f9692a1a7ea8a/packages/server/src/db/schema/utils.ts)
+defines this transformation and adds a random suffix to supplied bases;
+[`updateApplication`](https://github.com/Dokploy/dokploy/blob/48504fde4eb210056f7d9f80406f9692a1a7ea8a/packages/server/src/services/application.ts)
+preserves `appName` when the display name changes. An exact normalized stable
+base or its hyphen-delimited extension, or a normalized preview prefix, blocks
+absence even with unrelated repository, image and domain evidence. Launchplane
+preview creation supplies `{product}-{preview_slug}` as `appName` independently
+of the display-name prefix, so the proof also checks the normalized product base
+and its hyphen-delimited extensions. Provider `appName` comparisons ignore case
+conservatively for historical names. Shared-base
+ambiguity refuses retirement; resolve the provider/configuration identity before
+retrying. There is no override. This is not general punctuation-removing
+slugification; current Dokploy create validation also rejects spaces in supplied
+`appName` values, so this proof conservatively covers historical normalized names.
 
 The plan binds the profile, configuration and stale preview records. Apply
 repeats the provider proof, rechecks those records under database locks, refuses

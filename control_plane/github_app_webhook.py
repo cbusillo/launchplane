@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 import json
+import logging
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
@@ -72,11 +73,18 @@ def _resolve_managed_webhook_secret() -> str:
     )
 
 
+def _wake_merge_train(record_store: object, event: str, payload: dict[str, object]) -> bool:
+    from control_plane.merge_train_events import wake_merge_train_for_event
+
+    return wake_merge_train_for_event(record_store, event, payload)
+
+
 @dataclass(frozen=True)
 class GitHubAppWebhookDependencies:
     webhook_secret: Callable[[], str] = _resolve_managed_webhook_secret
     verify_signature: Callable[..., None] = verify_github_webhook_signature
     now: Callable[[], str] = utc_now_timestamp
+    wake_merge_train: Callable[[object, str, dict[str, object]], bool] = _wake_merge_train
 
 
 def handle_github_app_webhook_request(
@@ -139,9 +147,20 @@ def handle_github_app_webhook_request(
 
     normalized_event = event_name.strip().lower()
     action = _string(payload, "action").lower()
+    # Only verified deliveries can wake a worker. A failed notification never
+    # prevents product reconciliation; the train's timed sweep recovers it.
+    try:
+        train_woken = dependencies.wake_merge_train(record_store, normalized_event, payload)
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Merge train event wake failed; timed sweep will retry."
+        )
+        train_woken = False
     target_shapes = _target_shapes(event_name=normalized_event, action=action, payload=payload)
     if not target_shapes:
-        return accepted("ignored", reason="unsupported_event")
+        return accepted(
+            "ignored", reason="merge_train_woken" if train_woken else "unsupported_event"
+        )
     repository_id = _positive_id(_mapping(payload, "repository"), "id")
     if not repository_id:
         return accepted("ignored", reason="missing_repository")

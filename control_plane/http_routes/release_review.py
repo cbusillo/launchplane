@@ -1,4 +1,9 @@
-"""Human-only release decisions; recording an opinion never deploys anything."""
+"""Human-only release decisions.
+
+Recording a decision deploys nothing by itself. A Client's acceptance of a product
+whose releases are not held is stamped with how its release runs, and Launchplane's
+worker then promotes it through the gated path (``control_plane.client_release``).
+"""
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -10,7 +15,15 @@ import click
 from fastapi import Depends, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.client_release import (
+    ClientReleaseRunView,
+    read_client_release_run,
+    release_start_for_acceptance,
+)
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ReleaseOnAcceptance,
+)
 from control_plane.contracts.release_review import (
     ReleaseDecision,
     ReleaseReviewDecisionRecord,
@@ -44,6 +57,11 @@ class ReleaseReviewResponse(BaseModel):
     viewer_is_owner: bool
     can_override: bool
     review: ReleaseReviewStatus
+    # Whether accepting starts the release, the site it goes live on, and what the
+    # newest accepted release has done so far.
+    release_on_acceptance: ReleaseOnAcceptance = "held"
+    live_site_url: str = ""
+    release_run: ClientReleaseRunView | None = None
 
 
 class ReleaseReviewDecisionEnvelope(BaseModel):
@@ -126,12 +144,23 @@ def register_release_review_routes(
             context="launchplane",
         )
 
+    def release_run(
+        store: object, profile: LaunchplaneProductProfileRecord
+    ) -> ClientReleaseRunView | None:
+        latest = cast(ReleaseReviewStore, store).list_release_review_decision_records(
+            product=profile.product, limit=1
+        )
+        if not latest:
+            return None
+        return read_client_release_run(store=store, profile=profile, decision=latest[0])
+
     def response(
         store: object,
         profile: LaunchplaneProductProfileRecord,
         identity: LaunchplaneIdentity,
         trace_id: str,
     ) -> ReleaseReviewResponse:
+        prod_lane = next((lane for lane in profile.lanes if lane.instance == "prod"), None)
         return ReleaseReviewResponse(
             trace_id=trace_id,
             product=profile.product,
@@ -141,6 +170,10 @@ def register_release_review_routes(
             and viewer_is_product_owner(profile=profile, identity=identity),
             can_override=can_override(profile, identity),
             review=dependencies.current_review(store, profile, trace_id),
+            release_on_acceptance=release_start_for_acceptance(store=store, profile=profile)
+            or "held",
+            live_site_url=prod_lane.base_url if prod_lane is not None else "",
+            release_run=release_run(store, profile),
         )
 
     def read_release_review(
@@ -199,23 +232,49 @@ def register_release_review_routes(
             actor_github_id=str(identity.github_id),
             actor_github_login=identity.login,
             decided_at=datetime.now(UTC).isoformat(),
+            # Fixed now: holding releases later stops the run but never edits this.
+            release_start=(
+                release_start_for_acceptance(store=record_store, profile=profile)
+                if envelope.decision == "accepted"
+                else ""
+            ),
         )
         previous = review.latest_decision
-        if (
+        store = cast(ReleaseReviewStore, record_store)
+        repeated = bool(
             previous
-            and not previous.release_issue_url
             and previous.actor_github_id == decision.actor_github_id
             and previous.decision == decision.decision
             and previous.reason == decision.reason
-        ):
+            and previous.release_start == decision.release_start
+        )
+        if repeated and previous and not previous.release_issue_url:
             decision = previous
-        store = cast(ReleaseReviewStore, record_store)
-        store.write_release_review_decision_record(decision)
-        try:
-            issue_url = dependencies.publish_decision(profile, decision)
-        except (AttributeError, FileNotFoundError, StopIteration, ValueError, click.ClickException):
-            issue_url = ""
-        if issue_url:
+        newest = store.list_release_review_decision_records(product=profile.product, limit=1)
+        if (
+            repeated
+            and previous
+            and previous.release_issue_url
+            and newest
+            and newest[0].record_id == previous.record_id
+        ):
+            # Repeating the newest published decision records nothing new, so a second
+            # click never replaces the acceptance a running release depends on.
+            decision = previous
+            issue_url = previous.release_issue_url
+        else:
+            store.write_release_review_decision_record(decision)
+            try:
+                issue_url = dependencies.publish_decision(profile, decision)
+            except (
+                AttributeError,
+                FileNotFoundError,
+                StopIteration,
+                ValueError,
+                click.ClickException,
+            ):
+                issue_url = ""
+        if issue_url and not decision.release_issue_url:
             decision = decision.model_copy(update={"release_issue_url": issue_url})
             store.write_release_review_decision_record(decision)
         blockers: tuple[str, ...] = (
@@ -225,13 +284,14 @@ def register_release_review_routes(
             blockers += (RELEASE_RECORD_PENDING,)
         return current.model_copy(
             update={
+                "release_run": release_run(record_store, profile),
                 "review": review.model_copy(
                     update={
                         "latest_decision": decision,
                         "approved": bool(issue_url) and decision.decision != "changes_requested",
                         "blockers": blockers,
                     }
-                )
+                ),
             }
         )
 

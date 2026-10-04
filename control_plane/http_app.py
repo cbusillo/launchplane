@@ -823,6 +823,7 @@ from control_plane.storage.postgres import (
 )
 from control_plane.workflows.product_onboarding import plan_product_onboarding_authority_bundle
 from control_plane.workflows.public_ingress_monitor import (
+    RUNTIME_IDENTITY_CONFIRMATION_DELAY_SECONDS,
     PublicIngressMonitorStore,
     public_ingress_notification_drivers,
     run_public_ingress_monitor_once,
@@ -13368,6 +13369,7 @@ def create_launchplane_fastapi_app(
                 replacement_profile = control_plane_product_production_use_setting.updated_product_production_use_profile(
                     profile=profile,
                     production_use=plan.production_use_after,
+                    release_on_acceptance=plan.release_on_acceptance_after,
                     updated_at=utc_now_timestamp(),
                 )
             except ValueError as error:
@@ -21646,8 +21648,8 @@ def create_launchplane_fastapi_app(
             route_path=_PRODUCT_RETIREMENT_ROUTE,
             idempotency_key=normalized_key,
             trace_id=trace_id,
-            # The durable runner owns no-target replay and uncertain-commit reconciliation.
-            check_replay=not retirement_request.no_target,
+            # The durable runner owns replay and uncertain-completion reconciliation.
+            check_replay=False,
             request_payload=retirement_request.model_dump(
                 mode="json", exclude={"no_target"} if not retirement_request.no_target else set()
             ),
@@ -24307,7 +24309,9 @@ def create_launchplane_fastapi_app(
             ) from error
 
         recorded_at = utc_now_timestamp()
-        monitor_result = run_public_ingress_monitor_once(
+        # The confirmation wait must not hold the event loop.
+        monitor_result = await run_in_threadpool(
+            run_public_ingress_monitor_once,
             record_store=monitor_store,
             checked_at=recorded_at,
             timeout_seconds=monitor_request.timeout_seconds,
@@ -24316,6 +24320,9 @@ def create_launchplane_fastapi_app(
                 public_ingress_notification_drivers(record_store=record_store)
                 if monitor_request.notify
                 else None
+            ),
+            runtime_identity_confirmation_delay_seconds=(
+                RUNTIME_IDENTITY_CONFIRMATION_DELAY_SECONDS
             ),
         )
         result = monitor_result.model_dump(mode="json")

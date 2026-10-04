@@ -3201,6 +3201,10 @@ export function releaseReviewForFixture(mode: string): import("./generated/opena
   const response: import("./generated/openapi.ts").ReleaseReviewResponse = {
     trace_id: "fixture-release-review", product: "example-site", display_name: "Example site",
     owner_github_login: "site-owner", viewer_is_owner: mode !== "operator", can_override: mode === "operator",
+    // The products fixture's releases start on acceptance; the others are held.
+    release_on_acceptance: mode === "products" ? "promote_with_rollback_drill" : "held",
+    live_site_url: mode === "products" ? "https://www.example.invalid" : "",
+    release_run: null,
     review: {
       required: true, approved: false, checklist_digest: "a".repeat(64), latest_decision: null, unavailable_reason: null,
       blockers: additionalChanges.length ? additionalChanges : ["Client approval of this release is required."],
@@ -3234,7 +3238,14 @@ export function releaseDecisionForFixture(
 ): import("./generated/openapi.ts").ReleaseReviewResponse {
   const checklist = response.review.checklist;
   if (!checklist) return response;
-  return { ...response, review: {
+  const releaseStart = decision === "accepted" && published && response.release_on_acceptance !== "held"
+    ? response.release_on_acceptance : "";
+  const steps = releaseStart === "promote_with_rollback_drill"
+    ? (["backup", "promote", "rollback", "backup", "promote"] as const) : (["backup", "promote"] as const);
+  return { ...response, release_run: releaseStart ? {
+    decision_record_id: "fixture-release-decision", rollback_drill: releaseStart === "promote_with_rollback_drill", state: "running",
+    steps: steps.map((kind, index) => ({ step: `${kind}-${index}`, kind, status: index === 0 ? "running" : "not_started", operation_id: `fixture-operation-${index}` })),
+  } : response.release_run, review: {
     ...response.review,
     approved: published && decision !== "changes_requested",
     blockers: !published ? ["The release record could not be published."] : decision === "changes_requested" ? ["The Client requested changes."] : [],
@@ -3244,25 +3255,27 @@ export function releaseDecisionForFixture(
       actor_github_id: decision === "overridden" ? "9002" : "9001",
       actor_github_login: decision === "overridden" ? "site-operator" : "site-owner",
       decided_at: "2026-09-26T12:00:00Z", release_issue_url: published ? "https://github.com/example/site/issues/43" : "",
+      release_start: releaseStart,
     },
   } };
 }
 
 // Development-only profile controls; this module is excluded from production builds.
 const fixtureProfileFields = new Map<string, string>();
-export function productProfileFieldForFixture(fixture: DataFixtureMode, product: string, field: "image" | "production"): { value: string; suggested: string } {
+export function productProfileFieldForFixture(fixture: DataFixtureMode, product: string, field: "image" | "production" | "release"): { value: string; suggested: string } {
   assertFixtureAvailable(fixture);
-  const value = fixtureProfileFields.get(`${product}:${field}`) ?? (field === "image" ? "ghcr.io/example/old-package" : "unknown");
+  const value = fixtureProfileFields.get(`${product}:${field}`) ?? ({ image: "ghcr.io/example/old-package", production: "unknown", release: "held" } as const)[field];
   return { value, suggested: field === "image" ? `ghcr.io/${productsForFixture(fixture).find(item => item.product === product)?.repository ?? "example/atlas-commerce"}` : value };
 }
 export async function applyProductProfileFieldForFixture(
-  fixture: DataFixtureMode, product: string, field: "image" | "production",
-  payload: { mode?: "dry-run" | "apply"; reason: string; image_repository?: string; production_use?: string },
+  fixture: DataFixtureMode, product: string, field: "image" | "production" | "release",
+  payload: { mode?: "dry-run" | "apply"; reason: string; image_repository?: string; production_use?: string; release_on_acceptance?: string | null },
 ): Promise<AcceptedEvidenceResponse> {
   const { value: before, suggested } = productProfileFieldForFixture(fixture, product, field);
-  const after = field === "image" ? payload.image_repository?.trim().replace(/\/+$/, "") : payload.production_use;
+  const after = field === "image" ? payload.image_repository?.trim().replace(/\/+$/, "")
+    : field === "release" ? payload.release_on_acceptance ?? before : payload.production_use;
   if (field === "image" && after !== suggested) throw new LaunchplaneApiError(`The image repository must be ${suggested}.`, 400, "fixture-image", "image_repository_not_repository_named");
-  const prefix = field === "image" ? "image_repository" : "production_use";
+  const prefix = ({ image: "image_repository", production: "production_use", release: "release_on_acceptance" } as const)[field];
   const applied = payload.mode === "apply";
   if (applied && after) fixtureProfileFields.set(`${product}:${field}`, after);
   return {

@@ -40,6 +40,8 @@ class ReleaseChecklist(BaseModel):
 
 
 ReleaseDecision = Literal["accepted", "changes_requested", "overridden"]
+# How an accepted release runs, fixed when the Client accepts it: "" starts nothing.
+ReleaseStart = Literal["", "promote", "promote_with_rollback_drill"]
 
 
 class ReleaseReviewDecisionRecord(BaseModel):
@@ -55,6 +57,9 @@ class ReleaseReviewDecisionRecord(BaseModel):
     actor_github_login: str = Field(min_length=1)
     decided_at: str = Field(min_length=1)
     release_issue_url: str = ""
+    # Omitted when empty, so decisions recorded before acceptance started releases
+    # serialize as they did.
+    release_start: ReleaseStart = Field(default="", exclude_if=lambda value: value == "")
 
     @model_validator(mode="after")
     def validate_decision(self) -> "ReleaseReviewDecisionRecord":
@@ -64,6 +69,8 @@ class ReleaseReviewDecisionRecord(BaseModel):
             raise ValueError("Requesting changes or overriding requires a reason.")
         if self.decision != "overridden" and self.actor_github_id != self.checklist.owner_github_id:
             raise ValueError("Only the product's Client can accept or request changes.")
+        if self.release_start and self.decision != "accepted":
+            raise ValueError("Only the Client's acceptance starts a release.")
         return self
 
 

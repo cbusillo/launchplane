@@ -12,7 +12,7 @@ from tests.support.auth import _StubVerifier, _identity
 from tests.support.http import get as http_get
 from tests.support.http import request as http_request
 from tests.test_production_backup_authority import _dry_run_envelope
-from tests.test_production_backup_migration import _request, _runtime_record
+from tests.test_production_backup_migration import _request
 
 
 _WORKFLOW_REF = "example/example-product/.github/workflows/promote.yml@refs/heads/main"
@@ -172,7 +172,7 @@ class ProductionBackupAuthorityHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("pbs-production", ready.text)
             store.close()
 
-    async def test_authority_negative_paths_and_normalized_migration(self) -> None:
+    async def test_authority_negative_paths_and_legacy_migration_refusal(self) -> None:
         identity = _identity(
             repository="example/example-product",
             workflow_ref=_WORKFLOW_REF,
@@ -208,7 +208,6 @@ class ProductionBackupAuthorityHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(response.status_code, status, response.text)
                     self.assertEqual(response.json()["error"]["code"], code)
                     self.assertEqual(store.list_production_backup_policy_records(), ())
-            store.write_runtime_environment_record(_runtime_record())
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(identity),
                 authz_policy=_authz_policy(),
@@ -221,8 +220,11 @@ class ProductionBackupAuthorityHttpTests(unittest.IsolatedAsyncioTestCase):
                 headers={"Authorization": "Bearer valid-token"},
                 payload=_request() | {"context": "EXAMPLE-PRODUCT", "instance": "PROD"},
             )
-            self.assertEqual(migration.status_code, 200, migration.text)
-            self.assertEqual(migration.json()["result"]["status"], "would_apply")
+            self.assertEqual(migration.status_code, 409, migration.text)
+            self.assertEqual(migration.json()["error"]["code"], "legacy_backup_migration_conflict")
+            self.assertIn("/v1/production-backup-authority/apply", migration.text)
+            self.assertEqual(store.list_production_backup_policy_records(), ())
+            self.assertEqual(store.list_production_backup_target_records(), ())
 
     async def test_local_operator_revises_only_its_own_policy_targets(self) -> None:
         policy = _authz_policy().model_dump(mode="json")
