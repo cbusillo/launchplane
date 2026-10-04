@@ -552,12 +552,15 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             ("Example Site PROD", "Example Preview", "example-site-prod-abc123", True),
             ("Example Site PROD", "Example Preview", "example-site-prod", True),
             ("Example Site PROD", "Example Preview", "example-preview-pr-7-abc123", True),
+            ("Example Site PROD", "Example Preview", "example-site-pr-7-abc123", True),
+            ("Example Site PROD", "Example Preview", "EXAMPLE-SITE-PR-7-ABC123", True),
             ("Example  Site PROD", "Example Preview", "example--site-prod-abc123", True),
             ("Example.Site_PROD", "Example Preview", "example.site_prod-abc123", True),
             # A neighbouring application can share the base: ambiguity must refuse.
             ("Example Site PROD", "Example Preview", "example-site-prod-other-site", True),
-            ("Example Site PROD", "Example Preview", "example-site-production-abc123", False),
-            ("Example.Site_PROD", "Example Preview", "example-site-prod-abc123", False),
+            ("Demo Service Prod", "Example Preview", "demo-service-production-abc123", False),
+            ("Demo.Site_PROD", "Example Preview", "demo-site-prod-abc123", False),
+            ("Example Site PROD", "Example Preview", "example-sites-pr-7-abc123", False),
             ("Example Site PROD", "Example Preview", "example-previewing-abc123", False),
         ):
             with self.subTest(app_name=app_name), TemporaryDirectory() as directory:

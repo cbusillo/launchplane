@@ -3643,7 +3643,11 @@ defines this transformation and adds a random suffix to supplied bases;
 [`updateApplication`](https://github.com/Dokploy/dokploy/blob/48504fde4eb210056f7d9f80406f9692a1a7ea8a/packages/server/src/services/application.ts)
 preserves `appName` when the display name changes. An exact normalized stable
 base or its hyphen-delimited extension, or a normalized preview prefix, blocks
-absence even with unrelated repository, image and domain evidence. Shared-base
+absence even with unrelated repository, image and domain evidence. Launchplane
+preview creation supplies `{product}-{preview_slug}` as `appName` independently
+of the display-name prefix, so the proof also checks the normalized product base
+and its hyphen-delimited extensions. Provider `appName` comparisons ignore case
+conservatively for historical names. Shared-base
 ambiguity refuses retirement; resolve the provider/configuration identity before
 retrying. There is no override. This is not general punctuation-removing
 slugification; current Dokploy create validation also rejects spaces in supplied
