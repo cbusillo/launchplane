@@ -3355,8 +3355,16 @@ def _graphql_repository(
         ),
         "GitHub GraphQL response",
     )
-    if payload.get("errors"):
-        raise MergeTrainGitHubError("GitHub GraphQL request returned errors.")
+    errors = payload.get("errors")
+    if errors:
+        rate_limited = isinstance(errors, list) and all(
+            isinstance(error, dict) and error.get("type") == "RATE_LIMITED" for error in errors
+        )
+        raise MergeTrainGitHubError(
+            "GitHub GraphQL request returned errors.",
+            rate_limited=rate_limited,
+            request_description="POST /graphql" if rate_limited else "",
+        )
     data = _json_object(payload.get("data"), "GitHub GraphQL data")
     return _json_object(data.get("repository"), "GitHub GraphQL repository")
 
@@ -3398,7 +3406,9 @@ def _classic_conversation_rule(
             variables={"ref": f"refs/heads/{base_branch}"},
         )
         ref = _json_object(repository.get("ref"), "GitHub GraphQL base ref")
-    except MergeTrainGitHubError:
+    except MergeTrainGitHubError as error:
+        if error.rate_limited:
+            raise
         return "unreadable"
     rule = ref.get("refUpdateRule")
     if rule is None:
@@ -3421,7 +3431,9 @@ def _ruleset_conversation_rule(
                 path=f"/repos/{repository_path}/rules/branches/{encoded_branch}"
                 f"?per_page=100&page={page}",
             )
-        except MergeTrainGitHubError:
+        except MergeTrainGitHubError as error:
+            if error.rate_limited:
+                raise
             return "unreadable"
         if not isinstance(rules, list):
             return "unreadable"
