@@ -681,7 +681,14 @@ public reasons. A thread opened by code scanning tells the author to fix the
 code rather than resolve the thread.
 The other entries plan and land without it, and resolving the thread brings it
 back. An unreadable rule is not taken as absent: unresolved threads still make
-the entry ineligible, and the reason says the rule could not be read. A planned
+the entry ineligible, and the reason says the rule could not be read. Quota-limited
+classic or ruleset reads interrupt the snapshot instead of becoming unreadable
+policy: the controller retains the safe request and retry metadata as
+`retryable:github_rate_limited`, and admission waits for a fresh read.
+GraphQL body errors containing only `RATE_LIMITED` entries also interrupt the
+read with that diagnosis and the fixed `POST /graphql` request description.
+Refusals, mixed GraphQL errors and malformed policy responses keep the unreadable-rule
+behavior. A planned
 entry that gains a thread before landing blocks admission with
 `pull_request_conversations_unresolved`. The batch PR is checked the same way
 after its checks pass and before any admission; an unresolved thread there,
