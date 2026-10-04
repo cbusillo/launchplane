@@ -2185,6 +2185,12 @@ secret binding for the target runtime class. Request bodies for this route must
 not be copied into logs, issues, docs, or workflow artifacts because they can
 contain plaintext secret values.
 
+Lane ownership comparisons trim surrounding whitespace from stored lane context
+and instance values, consistently in product-config preflight, Odoo route resolution,
+and the commit-time ownership guard. Existing padded profiles remain readable without
+rewriting their stored values. A foreign product claiming the same trimmed lane
+still makes ownership ambiguous and refuses the write before publishing records.
+
 Product-config dry-run continuity markers and idempotency request fingerprints
 covering secret input are persisted only as purpose-separated HMACs keyed from
 the active managed-secret root. Concurrent same-key applies that race after the

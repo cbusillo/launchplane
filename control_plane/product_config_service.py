@@ -62,7 +62,7 @@ def resolve_product_config_profile(
             code="product_config_lane_not_owned",
         ) from error
     if not context or not any(
-        lane.context == context and (not instance or lane.instance == instance)
+        lane.context.strip() == context and (not instance or lane.instance.strip() == instance)
         for lane in profile.lanes
     ):
         raise control_plane_product_config.ProductConfigError(
