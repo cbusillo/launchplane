@@ -966,7 +966,10 @@ class DokployProductRetirementAdapter:
                 self._finalization_record = existing
             else:
                 self._finalization_record = checkpoint
-            self._validate_finalization_authority()
+            profile = self._validate_finalization_authority()
+            current_secrets = self._record_store.list_secret_records(
+                context_name=self._plan.context, instance_name=self._plan.instance
+            )
         for runtime_record in current_runtime:
             event_id = (
                 f"product-retirement:{self._plan.plan_sha256}:"

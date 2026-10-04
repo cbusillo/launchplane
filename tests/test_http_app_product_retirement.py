@@ -1233,21 +1233,40 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 store.close()
 
     async def test_tracked_checkpoint_insert_race_recovers_through_http(self) -> None:
-        with TemporaryDirectory() as directory:
-            await self._assert_tracked_checkpoint_insert_race(
-                f"sqlite+pysqlite:///{Path(directory) / 'launchplane.sqlite3'}"
-            )
+        for profile_failure in (True, False):
+            with self.subTest(profile_failure=profile_failure), TemporaryDirectory() as directory:
+                await self._assert_tracked_checkpoint_insert_race(
+                    f"sqlite+pysqlite:///{Path(directory) / 'launchplane.sqlite3'}",
+                    profile_failure=profile_failure,
+                )
 
-    async def _assert_tracked_checkpoint_insert_race(self, database_url: str) -> None:
+    async def _assert_tracked_checkpoint_insert_race(
+        self, database_url: str, *, profile_failure: bool = True
+    ) -> None:
         store = self._store(Path("."), database_url=database_url)
         try:
-            await self._assert_tracked_checkpoint_insert_race_with_store(store)
+            await self._assert_tracked_checkpoint_insert_race_with_store(
+                store, profile_failure=profile_failure
+            )
         finally:
             store.close()
 
     async def _assert_tracked_checkpoint_insert_race_with_store(
-        self, store: PostgresRecordStore
+        self, store: PostgresRecordStore, *, profile_failure: bool
     ) -> None:
+        store.write_secret_record(
+            SecretRecord(
+                secret_id="race-secret",
+                scope="context_instance",
+                integration="fixture",
+                name="fixture",
+                context="example-site",
+                instance="prod",
+                current_version_id="v1",
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
         app = self._app(store, actions=("product_retirement.plan", "product_retirement.apply"))
         with patch(
             "control_plane.product_retirement.observe_tracked_dokploy_application",
@@ -1301,7 +1320,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             expected_record: LaunchplaneProductProfileRecord,
             replacement_record: LaunchplaneProductProfileRecord,
         ) -> object:
-            if replacement_record.lifecycle_state == "retired":
+            if profile_failure and replacement_record.lifecycle_state == "retired":
                 raise ValueError("injected final profile failure")
             return original_profile_write(
                 expected_record=expected_record, replacement_record=replacement_record
@@ -1347,6 +1366,11 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                         idempotency_key=self.headers["Idempotency-Key"],
                     )
                     assert held is not None
+                    first_trace_id = next(
+                        record.trace_id
+                        for record in store.list_product_retirement_records(product="example-site")
+                        if record.mode == "apply" and record.outcome == "started"
+                    )
                     clock_value[0] = (
                         (
                             datetime.fromisoformat(held.lease_expires_at.replace("Z", "+00:00"))
@@ -1355,10 +1379,22 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                         .isoformat()
                         .replace("+00:00", "Z")
                     )
-                    second = await request(
-                        app, "POST", "/v1/product-retirement", headers=self.headers, payload=payload
+                    with patch(
+                        "control_plane.http_app.utc_now_timestamp", return_value=clock_value[0]
+                    ):
+                        second = await request(
+                            app,
+                            "POST",
+                            "/v1/product-retirement",
+                            headers=self.headers,
+                            payload=payload,
+                        )
+                    self.assertEqual(
+                        second.status_code, 409 if profile_failure else 202, second.text
                     )
-                    self.assertEqual(second.status_code, 409, second.text)
+                    winner_secret = store.list_secret_records(
+                        context_name="example-site", instance_name="prod"
+                    )[0]
                 finally:
                     released.set()
                     first = await first_task
@@ -1373,6 +1409,10 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             record for record in records if record.mutation_evidence.finalization_at
         )
         self.assertEqual(len(checkpoints), 1)
+        self.assertEqual(
+            store.list_secret_records(context_name="example-site", instance_name="prod")[0],
+            winner_secret,
+        )
         held = store.read_idempotency_record(
             scope=idempotency_scope(
                 LocalOperatorIdentity(subject="local-owner-agent", token_label="local-owner-write")
@@ -1381,7 +1421,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             idempotency_key=self.headers["Idempotency-Key"],
         )
         assert held is not None
-        self.assertEqual(held.state, "reconcile_required")
+        self.assertEqual(held.state, "reconcile_required" if profile_failure else "completed")
         with (
             patch(
                 "control_plane.product_retirement.observe_tracked_dokploy_application",
@@ -1400,7 +1440,8 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(refused.status_code, 409, refused.text)
                 self.assertEqual(
-                    store.read_product_profile_record("example-site").lifecycle_state, "retiring"
+                    store.read_product_profile_record("example-site").lifecycle_state,
+                    "retiring" if profile_failure else "retired",
                 )
             retry = await request(
                 app, "POST", "/v1/product-retirement", headers=self.headers, payload=payload
@@ -1419,15 +1460,20 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             store.read_product_profile_record("example-site").lifecycle_state, "retired"
         )
-        self.assertEqual(first.status_code, 409, first.text)
-        self.assertEqual(first.json()["error"]["code"], "mutation_reconciliation_required")
+        self.assertEqual(first.status_code, 409 if profile_failure else 202, first.text)
         terminal = next(
             record
             for record in records
-            if record.trace_id == first.json()["trace_id"]
-            and record.outcome == "reconcile_required"
+            if record.trace_id == first_trace_id
+            and record.outcome == ("reconcile_required" if profile_failure else "already_absent")
         )
-        self.assertEqual(terminal.mutation_evidence.error_message, "injected final profile failure")
+        if profile_failure:
+            self.assertEqual(first.json()["error"]["code"], "mutation_reconciliation_required")
+            self.assertEqual(
+                terminal.mutation_evidence.error_message, "injected final profile failure"
+            )
+        else:
+            self.assertTrue(terminal.mutation_evidence.provider_absence_verified)
 
     async def test_tracked_concurrent_expiry_seals_one_finalization_checkpoint(self) -> None:
         with TemporaryDirectory() as directory:
