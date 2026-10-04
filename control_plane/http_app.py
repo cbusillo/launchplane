@@ -15533,6 +15533,7 @@ def create_launchplane_fastapi_app(
                     product_name=product_config_request.product,
                     context_name=product_config_request.context,
                     instance_name=product_config_request.instance,
+                    profile=retirement_profile,
                 )
                 control_plane_live_target_runtime.validate_provider_key_retirement(
                     retired_keys=set(retired_provider_keys), application_keys=application_keys

@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane import live_target_runtime
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import BearerIdentityConfig
 from control_plane.storage.postgres import PostgresRecordStore
@@ -243,6 +244,88 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
         )
         self.assertEqual(driver.status_code, 400, driver.text)
         self.assertEqual(driver.json()["error"]["code"], "runtime_retirement_conflict")
+
+    async def test_retirement_uses_the_checked_profile_during_a_declaration_edit(self) -> None:
+        original_keys = live_target_runtime.product_lane_declared_keys
+        for key, declared in (("APP_THEME", False), ("LEGACY_TUNING", True)):
+            for mode in ("dry-run", "apply") if declared else ("dry-run",):
+                with self.subTest(key=key, mode=mode):
+                    profile = _profile()
+                    self.store.write_product_profile_record(profile)
+                    declarations = profile.expected_config.runtime_environment_keys
+                    edited_config = profile.expected_config.model_copy(
+                        update={
+                            "runtime_environment_keys": (
+                                (*declarations, declarations[0].model_copy(update={"key": key}))
+                                if declared
+                                else tuple(item for item in declarations if item.key != key)
+                            )
+                        }
+                    )
+                    if mode == "apply":
+                        review = await self._submit(
+                            {"mode": "dry-run", "retired_provider_keys": [key]}
+                        )
+                        self.assertEqual(review.status_code, 202, review.text)
+
+                    def edit_before_declared_keys(
+                        *,
+                        record_store: live_target_runtime.LiveTargetRuntimeProfileStore,
+                        product_name: str,
+                        context_name: str,
+                        instance_name: str,
+                        profile: LaunchplaneProductProfileRecord | None = None,
+                    ) -> set[str]:
+                        self.store.write_product_profile_record(
+                            _profile().model_copy(update={"expected_config": edited_config})
+                        )
+                        if profile is None:
+                            return original_keys(
+                                record_store=record_store,
+                                product_name=product_name,
+                                context_name=context_name,
+                                instance_name=instance_name,
+                            )
+                        return original_keys(
+                            record_store=record_store,
+                            product_name=product_name,
+                            context_name=context_name,
+                            instance_name=instance_name,
+                            profile=profile,
+                        )
+
+                    with patch.object(
+                        live_target_runtime,
+                        "product_lane_declared_keys",
+                        side_effect=edit_before_declared_keys,
+                    ):
+                        response = await self._submit(
+                            {
+                                "mode": mode,
+                                "confirmation": "APPLY example-site/testing",
+                                "retired_provider_keys": [key],
+                            },
+                            idempotency_key=f"retirement-declaration-{key}-{mode}",
+                        )
+                    if not declared:
+                        self.assertEqual(response.status_code, 400, response.text)
+                        self.assertEqual(
+                            response.json()["error"]["code"], "runtime_retirement_conflict"
+                        )
+                    elif mode == "dry-run":
+                        self.assertEqual(response.status_code, 202, response.text)
+                    else:
+                        self.assertEqual(response.status_code, 409, response.text)
+                        self.assertEqual(
+                            response.json()["error"]["code"], "product_profile_conflict"
+                        )
+                    self.assertNotEqual(
+                        self.store.read_product_profile_record("example-site"), profile
+                    )
+                    self.assertEqual(
+                        self.store.list_runtime_environment_records(), (_runtime_record(),)
+                    )
+                    self.assertEqual(self.store.list_secret_records(), ())
 
     async def test_local_operator_cannot_record_undeclared_settings_on_a_live_product(
         self,
