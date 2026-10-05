@@ -345,6 +345,67 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         self.assertEqual(saved.record_id, retry.record_id)
         self.assertEqual(self.provider.deployed_artifacts, [])
 
+    def test_unpublished_acceptance_backs_off_then_reuses_its_saved_record(self) -> None:
+        self.switch("director_standing")
+        backoff = StandingReleaseReviewBackoff()
+        self.publish.side_effect = ValueError("Issues unavailable")
+        with (
+            patch("control_plane.client_release.monotonic", return_value=0) as clock,
+            patch(
+                "control_plane.client_release.current_release_review", side_effect=self.review
+            ) as read,
+        ):
+            advance_client_releases(
+                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+            )
+            saved = self.store.list_release_review_decision_records(product=self.profile.product)[0]
+            advance_client_releases(
+                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+            )
+            read.assert_called_once()
+            self.publish.assert_called_once()
+            self.assertEqual(self.store.list_verireel_prod_backup_gate_operation_records(), ())
+            clock.return_value = backoff.blocked[self.profile.product][1] + 1
+            self.publish.side_effect = None
+            advance_client_releases(
+                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+            )
+            retry = self.store.list_release_review_decision_records(product=self.profile.product)[0]
+            self.assertEqual(retry.record_id, saved.record_id)
+            self.assertNotIn(self.profile.product, backoff.blocked)
+            self.assertEqual(len(self.store.list_verireel_prod_backup_gate_operation_records()), 1)
+
+    def test_returning_to_a_previously_decided_candidate_backs_off_reads(self) -> None:
+        self.switch("director_standing")
+        self.advance()
+        prior_inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        assert prior_inventory.runtime_identity is not None
+        self.store.write_environment_inventory(
+            prior_inventory.model_copy(
+                update={
+                    "runtime_identity": prior_inventory.runtime_identity.model_copy(
+                        update={"source_git_ref": "d" * 40}
+                    )
+                }
+            )
+        )
+        self.accept()
+        self.store.write_environment_inventory(prior_inventory)
+        backoff = StandingReleaseReviewBackoff()
+        with patch(
+            "control_plane.client_release.current_release_review", side_effect=self.review
+        ) as read:
+            advance_client_releases(
+                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+            )
+            advance_client_releases(
+                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+            )
+        read.assert_called_once()
+        self.assertEqual(self.provider.deployed_artifacts, [])
+
     def test_stale_candidate_or_hold_after_backup_never_deploys(self) -> None:
         self.accept()
         self.advance()

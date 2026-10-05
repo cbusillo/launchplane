@@ -461,6 +461,7 @@ def _record_standing_acceptance(
         blocked = backoff.blocked.get(profile.product)
         if blocked is not None and blocked[0] == fingerprint and monotonic() < blocked[1]:
             return
+        backoff.blocked[profile.product] = (fingerprint, monotonic() + 300)
     # Stamp before reads: a human decision made while GitHub is being read remains
     # newer than this standing decision even if its DB write finishes first.
     decided_at = datetime.now(UTC).isoformat()
@@ -473,11 +474,7 @@ def _record_standing_acceptance(
         or checklist.production == checklist.candidate
         or checklist_blockers(checklist)
     ):
-        if backoff is not None:
-            backoff.blocked[profile.product] = (fingerprint, monotonic() + 300)
         return
-    if backoff is not None:
-        backoff.blocked.pop(profile.product, None)
     existing = review.latest_decision
     if existing is not None and existing.decision != "accepted":
         return
@@ -512,6 +509,8 @@ def _record_standing_acceptance(
         store.write_release_review_decision_record(
             decision.model_copy(update={"release_issue_url": issue_url})
         )
+        if backoff is not None:
+            backoff.blocked.pop(profile.product, None)
 
 
 def _run_generic_web_promotion(
