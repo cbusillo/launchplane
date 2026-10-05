@@ -305,8 +305,12 @@ for changed-file verification; no default-branch fallback is invented. Changed s
 resolve only within the committed tree and are classified under the link path;
 links outside that tree or through submodules fail closed. Link hops are bounded,
 and a broken base-side link supplies no preexisting finding exemption, so a PR
-can repair it. The changed-file scan does not discover unchanged links that
-depend on a changed target; that wider dependency gap remains in the test audit. Use in-repository
+can repair it. The changed-file scan also includes unchanged text symlinks when
+a target or intermediate path in their committed resolution changes, including
+deleted targets. Both snapshots supply dependency paths; findings remain
+classified under the logical link path, and unchanged findings retain their
+base-side exemption. An unrelated preexisting broken link is outside the diff.
+Use in-repository
 links or regular committed files for verification, or full-audit for local analysis. Submodule contents are a reported coverage gap
 because they belong to another repository. Allowed docs, tests, schema examples, Launchplane self-bootstrap wiring,
 admin-supplied inputs, and thin connector mechanics keep explicit allow

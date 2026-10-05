@@ -14,6 +14,115 @@ from tests.test_config_authority_audit import _init_repo, _commit_all, _git
 
 
 class CommittedConfigAuthorityGateTests(unittest.TestCase):
+    def test_unchanged_links_scan_changed_targets_under_the_runtime_path(self) -> None:
+        for target_change in ("authority", "safe", "preexisting", "deleted", "retargeted"):
+            with self.subTest(target_change=target_change), TemporaryDirectory() as directory:
+                root = Path(directory)
+                _init_repo(root)
+                fixture = root / "tests/fixtures/runtime.env"
+                fixture.parent.mkdir(parents=True)
+                fixture.write_text(
+                    "PRODUCT_DOMAIN=live.example\n"
+                    if target_change == "preexisting"
+                    else "# safe\n"
+                )
+                (root / "tests/fixtures/alias").symlink_to("runtime.env")
+                (root / "runtime.env").symlink_to("tests/fixtures/alias")
+                _commit_all(root)
+                base = _git(root, "rev-parse", "HEAD")
+                if target_change == "deleted":
+                    fixture.unlink()
+                elif target_change == "retargeted":
+                    alternate = root / "tests/fixtures/alternate.env"
+                    alternate.write_text("PRODUCT_DOMAIN=live.example\n")
+                    alias = root / "tests/fixtures/alias"
+                    alias.unlink()
+                    alias.symlink_to("alternate.env")
+                else:
+                    fixture.write_text(
+                        "# intended edit\n"
+                        + ("PRODUCT_DOMAIN=live.example\n" if target_change != "safe" else "")
+                    )
+                _commit_all(root)
+                head = _git(root, "rev-parse", "HEAD")
+                if target_change == "deleted":
+                    with self.assertRaisesRegex(ValueError, "does not resolve"):
+                        build_config_authority_audit(
+                            control_plane_root=root,
+                            mode="changed-files-gate",
+                            base_sha=base,
+                            head_sha=head,
+                        )
+                    continue
+                payload = build_config_authority_audit(
+                    control_plane_root=root,
+                    mode="changed-files-gate",
+                    base_sha=base,
+                    head_sha=head,
+                )
+                expected = "pass" if target_change in {"safe", "preexisting"} else "fail"
+                self.assertEqual(
+                    evaluate_config_authority_gate(payload, profile="product-repo")["status"],
+                    expected,
+                )
+                files = payload["source_files"]
+                assert isinstance(files, list)
+                self.assertIn("runtime.env", {file["path"] for file in files})
+                fixture.write_text("# dirty local repair\n")
+                self.assertEqual(
+                    payload,
+                    build_config_authority_audit(
+                        control_plane_root=root,
+                        mode="changed-files-gate",
+                        base_sha=base,
+                        head_sha=head,
+                    ),
+                )
+
+    def test_unchanged_link_follows_a_retargeted_directory_component(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _init_repo(root)
+            for name, content in (("safe", "# safe\n"), ("live", "PRODUCT_DOMAIN=live.example\n")):
+                fixture = root / f"tests/fixtures/{name}/runtime.env"
+                fixture.parent.mkdir(parents=True)
+                fixture.write_text(content)
+            directory_link = root / "tests/fixtures/selected"
+            directory_link.symlink_to("safe")
+            (root / "runtime.env").symlink_to("tests/fixtures/selected/runtime.env")
+            _commit_all(root)
+            base = _git(root, "rev-parse", "HEAD")
+            directory_link.unlink()
+            directory_link.symlink_to("live")
+            _commit_all(root)
+            payload = build_config_authority_audit(
+                control_plane_root=root,
+                mode="changed-files-gate",
+                base_sha=base,
+                head_sha=_git(root, "rev-parse", "HEAD"),
+            )
+            self.assertEqual(
+                evaluate_config_authority_gate(payload, profile="product-repo")["status"], "fail"
+            )
+
+    def test_unrelated_edit_does_not_scan_existing_broken_link(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _init_repo(root)
+            (root / "runtime.env").symlink_to("missing.env")
+            (root / "README.md").write_text("# Before\n")
+            _commit_all(root)
+            base = _git(root, "rev-parse", "HEAD")
+            (root / "README.md").write_text("# Intended documentation edit\n")
+            _commit_all(root)
+            payload = build_config_authority_audit(
+                control_plane_root=root,
+                mode="changed-files-gate",
+                base_sha=base,
+                head_sha=_git(root, "rev-parse", "HEAD"),
+            )
+            self.assertEqual(evaluate_config_authority_gate(payload)["status"], "pass")
+
     def test_full_audit_refuses_commit_arguments(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

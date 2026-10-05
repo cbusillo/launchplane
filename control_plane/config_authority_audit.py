@@ -1517,16 +1517,21 @@ def build_config_authority_audit(
             "--name-only",
             "-z",
             "--no-renames",
-            "--diff-filter=ACMT",
+            "--diff-filter=ACMTD",
             base_sha,
             head_sha,
             "--",
             strict=True,
         ).split("\0")
+        base_modes = _git_file_modes(root, base_sha)
+        head_modes = _git_file_modes(root, head_sha)
+        changed_paths = _committed_changed_source_paths(
+            root, base_sha, head_sha, base_modes, head_modes, changed_paths
+        )
         source_files, coverage_gaps = _committed_source_files(root, head_sha, changed_paths)
         base_paths = {
             path
-            for path, file_mode in _git_file_modes(root, base_sha).items()
+            for path, file_mode in base_modes.items()
             if file_mode in {"100644", "100755", "120000"}
         }
         baseline_files, _ = _committed_source_files(
@@ -1703,7 +1708,14 @@ class _CommittedPathUnavailable(ValueError):
     pass
 
 
-def _resolve_committed_path(root: Path, revision: str, path: str, modes: Mapping[str, str]) -> str:
+def _resolve_committed_path(
+    root: Path,
+    revision: str,
+    path: str,
+    modes: Mapping[str, str],
+    *,
+    dependencies: set[str] | None = None,
+) -> str:
     pending = deque(path.split("/"))
     resolved: list[str] = []
     hops = 0
@@ -1717,6 +1729,8 @@ def _resolve_committed_path(root: Path, revision: str, path: str, modes: Mapping
             resolved.pop()
             continue
         candidate = "/".join([*resolved, part])
+        if dependencies is not None:
+            dependencies.add(candidate)
         mode = modes.get(candidate)
         if mode == "120000":
             hops += 1
@@ -1743,6 +1757,32 @@ def _resolve_committed_path(root: Path, revision: str, path: str, modes: Mapping
             raise _CommittedPathUnavailable(f"Committed path does not resolve in the tree: {path}.")
         resolved.append(part)
     return "/".join(resolved) or "."
+
+
+def _committed_changed_source_paths(
+    root: Path,
+    base_sha: str,
+    head_sha: str,
+    base_modes: Mapping[str, str],
+    head_modes: Mapping[str, str],
+    changed_paths: Sequence[str],
+) -> list[str]:
+    changed = set(changed_paths) - {""}
+    selected = changed.intersection(head_modes)
+    for path, mode in head_modes.items():
+        if mode != "120000" or path in selected or not _is_text_scan_candidate(root / path):
+            continue
+        dependencies: set[str] = set()
+        for revision, modes in ((base_sha, base_modes), (head_sha, head_modes)):
+            try:
+                _resolve_committed_path(root, revision, path, modes, dependencies=dependencies)
+            except _CommittedPathUnavailable:
+                # An unrelated broken link is outside this diff. A changed dependency
+                # selects it below, so the head-side source read still fails closed.
+                pass
+        if changed.intersection(dependencies):
+            selected.add(path)
+    return sorted(selected)
 
 
 def _committed_source_files(
