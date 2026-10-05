@@ -28,7 +28,7 @@ class RepositoryPinVerifierTests(unittest.TestCase):
             _initialize_repository(root)
             worker = root / ".github/workflows/worker.yml"
             worker.write_text(
-                '"on":\n  workflow_call:\n    inputs:\n      target:\n        type: string\n        required: true\n'
+                '"on":\n  workflow_call:\n    inputs:\n      target:\n        type: string\n        required: True\n'
             )
             pin = _commit(root, "worker")
             for path in WRAPPER_PATHS:
@@ -99,6 +99,14 @@ class RepositoryPinVerifierTests(unittest.TestCase):
             stub = root / "uv"
             stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CAPTURE"\n')
             stub.chmod(0o755)
+            git_stub = root / "git"
+            git_stub.write_text(
+                "#!/bin/sh\n"
+                'if [ "$3" = cat-file ]; then exit "${GIT_MISSING:-0}"; fi\n'
+                'if [ "$3" = fetch ]; then printf "%s\\n" "$@" >> "$FETCH_CAPTURE"; exit "${FETCH_FAILURE:-0}"; fi\n'
+                "exit 2\n"
+            )
+            git_stub.chmod(0o755)
             capture = root / "capture"
             base, head = "a" * 40, "b" * 40
             env = os.environ | {
@@ -130,6 +138,26 @@ class RepositoryPinVerifierTests(unittest.TestCase):
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(capture.exists())
+            fetch_capture = root / "fetch-capture"
+            result = subprocess.run(
+                ["bash", "-c", step.run],
+                env=env | {"GIT_MISSING": "1", "FETCH_CAPTURE": str(fetch_capture)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(base, fetch_capture.read_text().splitlines())
+            self.assertIn(head, fetch_capture.read_text().splitlines())
+            capture.unlink()
+            result = subprocess.run(
+                ["bash", "-c", step.run],
+                env=env
+                | {"GIT_MISSING": "1", "FETCH_CAPTURE": str(fetch_capture), "FETCH_FAILURE": "1"},
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(capture.exists())
             for key in ("BASE_SHA", "HEAD_SHA"):
                 result = subprocess.run(
                     ["bash", "-c", step.run],

@@ -88,10 +88,15 @@ jobs:
             pull_request|merge_group|push) ;;
             *) echo "No explicit commit-pair mapping for ${EVENT_NAME}; use the CLI with an explicit pair or full-audit." >&2; exit 1 ;;
           esac
-          if [[ "$BASE_SHA" =~ ^0+$ || "$HEAD_SHA" =~ ^0+$ ]]; then
-            echo "Cannot verify a zero-SHA comparison." >&2
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ || ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ || "$BASE_SHA" =~ ^0+$ || "$HEAD_SHA" =~ ^0+$ ]]; then
+            echo "Comparison requires two full, nonzero commit SHAs." >&2
             exit 1
           fi
+          for revision in "$BASE_SHA" "$HEAD_SHA"; do
+            if ! git -C ../product-repo cat-file -e "${revision}^{commit}"; then
+              git -C ../product-repo fetch --no-tags origin "$revision"
+            fi
+          done
           args=(
             uv run launchplane service audit-config-authority
             --control-plane-root ../product-repo

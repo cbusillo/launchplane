@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 from pathlib import Path
 from collections.abc import Mapping
@@ -18,6 +19,21 @@ WRAPPER_PATHS = (
 )
 
 
+class WorkflowLoader(yaml.SafeLoader):
+    """Keep the workflow 'on' key and YAML 1.2 boolean semantics."""
+
+
+WorkflowLoader.yaml_implicit_resolvers = {
+    key: [(tag, pattern) for tag, pattern in values if tag != "tag:yaml.org,2002:bool"]
+    for key, values in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+WorkflowLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:bool",
+    re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
+    list("tTfF"),
+)
+
+
 def _read_workflow(root: Path, revision: str, path: str) -> dict[str, object]:
     result = subprocess.run(
         ("git", "show", f"{revision}:{path}"),
@@ -29,8 +45,10 @@ def _read_workflow(root: Path, revision: str, path: str) -> dict[str, object]:
     )
     if result.returncode:
         raise ValueError(f"Cannot read workflow {path} at {revision}.")
-    # BaseLoader preserves the YAML 'on' key and compares scalar representations.
-    data = yaml.load(result.stdout, Loader=yaml.BaseLoader)
+    try:
+        data = yaml.load(result.stdout, Loader=WorkflowLoader)
+    except yaml.YAMLError as error:
+        raise ValueError(f"Cannot parse workflow {path} at {revision}.") from error
     if not isinstance(data, dict):
         raise ValueError(f"Workflow {path} must be a mapping.")
     return data
@@ -99,7 +117,7 @@ def main() -> None:
             repository=args.repository,
         )
         violations = verify_worker_pins(args.repo_root, report.head_sha, args.repository)
-    except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+    except (ValueError, OSError, subprocess.TimeoutExpired, KeyError) as error:
         parser.exit(1, f"Pin verification failed: {error}\n")
     print(
         json.dumps(

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
+import posixpath
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
@@ -1416,9 +1417,10 @@ class AuditSourceFile:
     index_blob_sha: str
     worktree_sha256: str
     committed_text: str | None = None
+    resolved_git_path: str | None = None
 
     def as_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "path": self.relative_path,
             "size": self.size,
             "mtime_ns": self.mtime_ns,
@@ -1428,6 +1430,10 @@ class AuditSourceFile:
             "index_blob_sha": self.index_blob_sha,
             "worktree_sha256": self.worktree_sha256,
         }
+
+        if self.resolved_git_path is not None:
+            payload["resolved_git_path"] = self.resolved_git_path
+        return payload
 
 
 @dataclass(frozen=True)
@@ -1519,7 +1525,7 @@ def build_config_authority_audit(
         base_paths = {
             path
             for path, file_mode in _git_file_modes(root, base_sha).items()
-            if file_mode in {"100644", "100755"}
+            if file_mode in {"100644", "100755", "120000"}
         }
         baseline_files, _ = _committed_source_files(
             root, base_sha, [path for path in changed_paths if path in base_paths]
@@ -1678,8 +1684,35 @@ def render_config_authority_markdown(payload: Mapping[str, object]) -> str:
 
 
 def _git_file_modes(root: Path, revision: str) -> dict[str, str]:
-    entries = _git_output(root, "ls-tree", "-r", "-z", revision, strict=True).split("\0")
-    return {entry.split("\t", 1)[1]: entry.split(" ", 1)[0] for entry in entries if entry}
+    entries = _git_output(root, "ls-tree", "-r", "-t", "-z", revision, strict=True).split("\0")
+    return {".": "040000"} | {
+        entry.split("\t", 1)[1]: entry.split(" ", 1)[0] for entry in entries if entry
+    }
+
+
+def _resolve_committed_path(root: Path, revision: str, path: str, modes: Mapping[str, str]) -> str:
+    seen: set[str] = set()
+    while True:
+        if path in seen:
+            raise ValueError(f"Committed symlink cycle at {path}.")
+        seen.add(path)
+        parts = path.split("/")
+        prefixes = ["/".join(parts[:index]) for index in range(1, len(parts) + 1)]
+        if any(modes.get(prefix) == "160000" for prefix in prefixes[:-1]):
+            raise ValueError(f"Committed symlink cannot resolve through a submodule: {path}.")
+        link = next((prefix for prefix in prefixes if modes.get(prefix) == "120000"), None)
+        if link is None:
+            return path
+        target = _git_bytes(root, "show", f"{revision}:{link}", strict=True).decode("utf-8")
+        if not target:
+            raise ValueError(f"Committed symlink has an empty target: {link}.")
+        if target.startswith("/"):
+            raise ValueError(f"Committed symlink leaves the repository: {link}.")
+        path = posixpath.normpath(
+            posixpath.join(posixpath.dirname(link), target, *parts[len(link.split("/")) :])
+        )
+        if path == ".." or path.startswith("../"):
+            raise ValueError(f"Committed symlink leaves the repository: {link}.")
 
 
 def _committed_source_files(
@@ -1702,8 +1735,13 @@ def _committed_source_files(
                 CoverageGap(relative_path, "skipped_dependency_manifest", "Dependency lockfile.")
             )
             continue
-        mode = modes.get(relative_path)
+        blob_path = _resolve_committed_path(root, revision, relative_path, modes)
+        mode = modes.get(blob_path)
         if mode == "160000":
+            if blob_path != relative_path:
+                raise ValueError(
+                    f"Committed symlink cannot resolve to a submodule: {relative_path}."
+                )
             gaps.append(
                 CoverageGap(
                     relative_path,
@@ -1712,11 +1750,18 @@ def _committed_source_files(
                 )
             )
             continue
+        if mode == "040000":
+            gaps.append(
+                CoverageGap(
+                    relative_path, "unscanned_directory", "Directory symlink is not a file surface."
+                )
+            )
+            continue
         if mode not in {"100644", "100755"}:
             raise ValueError(
-                f"Committed authority path {relative_path} must be a regular file; use full-audit for local symlink analysis."
+                f"Committed authority path {relative_path} does not resolve to an available regular file."
             )
-        size = int(_git_output(root, "cat-file", "-s", f"{revision}:{relative_path}", strict=True))
+        size = int(_git_output(root, "cat-file", "-s", f"{revision}:{blob_path}", strict=True))
         if size > MAX_SCANNED_FILE_BYTES:
             gaps.append(
                 CoverageGap(
@@ -1726,7 +1771,7 @@ def _committed_source_files(
                 )
             )
             continue
-        content = _git_bytes(root, "show", f"{revision}:{relative_path}", strict=True)
+        content = _git_bytes(root, "show", f"{revision}:{blob_path}", strict=True)
         if _looks_binary(content):
             gaps.append(
                 CoverageGap(
@@ -1751,12 +1796,13 @@ def _committed_source_files(
                 head_blob_sha=_git_output(
                     root,
                     "rev-parse",
-                    f"{revision}:{relative_path}",
+                    f"{revision}:{blob_path}",
                     strict=True,
                 ),
                 index_blob_sha="",
                 worktree_sha256="",
                 committed_text=text,
+                resolved_git_path=blob_path if blob_path != relative_path else None,
             )
         )
     return files, gaps

@@ -297,10 +297,14 @@ fail closed. The scan ignores dirty and untracked files. It compares the two
 supplied snapshots exactly, rather than calculating a merge base: a PR behind
 its base can report authority absent from the newer base but present in its head.
 The reusable gate maps PR, merge-group and push events to their explicit commit
-pairs; zero-SHA comparisons and events without a mapping fail closed. Use the
-CLI with an explicit pair, or full-audit, for other events. Audited symlink paths
-are refused: use regular committed files for gate verification, or full-audit
-for local symlink analysis. Submodule contents are a reported coverage gap
+pairs and fetches a missing named commit from the checked-out repository; zero-SHA comparisons and events without a mapping fail closed. Use the
+CLI with an explicit pair, or full-audit, for other events. Reusable callers
+should select pull_request and merge_group, or push updates with two existing
+commits. Branch/tag creation has no valid before commit and must use the PR path
+for changed-file verification; no default-branch fallback is invented. Audited symlinks
+resolve only within the committed tree and are classified under the link path;
+links outside that tree or through submodules fail closed. Use in-repository
+links or regular committed files for verification, or full-audit for local analysis. Submodule contents are a reported coverage gap
 because they belong to another repository. Allowed docs, tests, schema examples, Launchplane self-bootstrap wiring,
 admin-supplied inputs, and thin connector mechanics keep explicit allow
 reasons and do not fail the default gate. Runner mechanic selectors use the same

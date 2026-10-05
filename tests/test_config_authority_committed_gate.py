@@ -132,13 +132,18 @@ class CommittedConfigAuthorityGateTests(unittest.TestCase):
             runtime = root / "runtime.env"
             runtime.symlink_to("tests/fixtures/runtime.env")
             _commit_all(root)
-            with self.assertRaisesRegex(ValueError, "regular file"):
-                build_config_authority_audit(
-                    control_plane_root=root,
-                    mode="changed-files-gate",
-                    base_sha=base,
-                    head_sha=_git(root, "rev-parse", "HEAD"),
-                )
+            linked = build_config_authority_audit(
+                control_plane_root=root,
+                mode="changed-files-gate",
+                base_sha=base,
+                head_sha=_git(root, "rev-parse", "HEAD"),
+            )
+            self.assertEqual(
+                evaluate_config_authority_gate(linked, profile="product-repo")["status"], "fail"
+            )
+            linked_files = linked["source_files"]
+            assert isinstance(linked_files, list)
+            self.assertEqual(linked_files[0]["resolved_git_path"], "tests/fixtures/runtime.env")
             runtime.unlink()
             runtime.write_bytes(fixture.read_bytes())
             _commit_all(root)
@@ -151,3 +156,46 @@ class CommittedConfigAuthorityGateTests(unittest.TestCase):
             self.assertEqual(
                 evaluate_config_authority_gate(payload, profile="product-repo")["status"], "fail"
             )
+
+    def test_symlink_chains_resolve_in_committed_tree_and_unsafe_links_refuse(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _init_repo(root)
+            (root / "AGENTS.md").write_text("# Guidance\n")
+            _commit_all(root)
+            base = _git(root, "rev-parse", "HEAD")
+            link = root / "CLAUDE.md"
+            link.symlink_to("AGENTS.md")
+            _commit_all(root)
+            payload = build_config_authority_audit(
+                control_plane_root=root,
+                mode="changed-files-gate",
+                base_sha=base,
+                head_sha=_git(root, "rev-parse", "HEAD"),
+            )
+            self.assertEqual(evaluate_config_authority_gate(payload)["status"], "pass")
+            link.unlink()
+            (root / "alias.md").symlink_to("AGENTS.md")
+            (root / "guide").symlink_to(".")
+            link.symlink_to("guide/alias.md")
+            _commit_all(root)
+            chained = build_config_authority_audit(
+                control_plane_root=root,
+                mode="changed-files-gate",
+                base_sha=base,
+                head_sha=_git(root, "rev-parse", "HEAD"),
+            )
+            self.assertEqual(evaluate_config_authority_gate(chained)["status"], "pass")
+            link.unlink()
+            for target in ("../outside.md", "/outside.md", "CLAUDE.md"):
+                with self.subTest(target=target):
+                    link.symlink_to(target)
+                    _commit_all(root)
+                    with self.assertRaises(ValueError):
+                        build_config_authority_audit(
+                            control_plane_root=root,
+                            mode="changed-files-gate",
+                            base_sha=base,
+                            head_sha=_git(root, "rev-parse", "HEAD"),
+                        )
+                    link.unlink()
