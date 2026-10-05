@@ -23,6 +23,8 @@ from control_plane.contracts.privileged_operation import (
     ORDINARY_AGENT_DELIVERY_ACTIVATION_READ_ACTION,
     ORDINARY_AGENT_DELIVERY_ACTIVATION_REVOKE_ACTION,
     ManagedAuthzPolicySetProposalInput,
+    AUTHZ_POLICY_OPERATION_PROPOSE_ACTION,
+    MERGE_TRAIN_POLICY_OPERATION_PROPOSE_ACTION,
     OrdinaryAgentDeliveryPolicyIntent,
 )
 from control_plane.contracts.ordinary_agent import (
@@ -90,7 +92,18 @@ _AGENT_PRODUCT_SETUP_RULE_SHAPES: Final = (
     ("testing-target", "testing", (DOKPLOY_TARGET_LANE_SETUP_ACTION,)),
 )
 
+AGENT_POLICY_PROPOSER_CANDIDATE_ID: Final = "agent-policy-proposer"
+AGENT_POLICY_PROPOSER_MANAGED_SET_ID = "operator.agent-policy-proposer"
+AGENT_POLICY_PROPOSER_MANAGED_RULE_ID = "proposer"
+AGENT_POLICY_PROPOSER_ACTIONS = (
+    AUTHZ_POLICY_OPERATION_PROPOSE_ACTION,
+    MERGE_TRAIN_POLICY_OPERATION_PROPOSE_ACTION,
+)
+AGENT_POLICY_PROPOSER_REASON = "Prepare agent policy proposals for Director review."
+AGENT_POLICY_PROPOSER_RELATED_ISSUE = "#2586"
+
 AuthorizationCandidateId = Literal[
+    "agent-policy-proposer",
     "ordinary-agent-delivery-administration",
     "administrator-product-evidence-read",
     "ordinary-agent-enrollment-requester",
@@ -1148,6 +1161,137 @@ def agent_product_setup_request_grants(
     return _agent_product_setup_grants(rules)
 
 
+def _agent_policy_proposer_rule(identity: LocalOperatorIdentity) -> LocalOperatorPolicyRule:
+    return LocalOperatorPolicyRule(
+        managed_set_id=AGENT_POLICY_PROPOSER_MANAGED_SET_ID,
+        managed_rule_id=AGENT_POLICY_PROPOSER_MANAGED_RULE_ID,
+        subjects=(identity.subject,),
+        token_labels=(identity.token_label,),
+        products=("launchplane",),
+        contexts=(LAUNCHPLANE_SERVICE_CONTEXT,),
+        actions=AGENT_POLICY_PROPOSER_ACTIONS,
+    )
+
+
+def agent_policy_proposer_request_matches(
+    request: ManagedAuthzPolicySetProposalInput,
+    *,
+    identity: LocalOperatorIdentity | None,
+    intent: AuthorizationCandidateIntent,
+) -> bool:
+    policy = request.desired_policy
+    if (
+        request.managed_set_id != AGENT_POLICY_PROPOSER_MANAGED_SET_ID
+        or request.schema_migration != "reject"
+        or request.administrator_quorum_change is not None
+        or request.reason != AGENT_POLICY_PROPOSER_REASON
+        or request.related_issue != AGENT_POLICY_PROPOSER_RELATED_ISSUE
+        or policy.github_actions
+        or policy.github_humans
+        or policy.terminal_agents
+        or policy.local_admins
+        or policy.ordinary_agents
+    ):
+        return False
+    if intent == "remove":
+        return not policy.local_operators
+    return identity is not None and policy.local_operators == (
+        _agent_policy_proposer_rule(identity),
+    )
+
+
+def compile_agent_policy_proposer_candidate(
+    *,
+    current_policy: LaunchplaneAuthzPolicy,
+    identity: LocalOperatorIdentity | None,
+    intent: AuthorizationCandidateIntent,
+) -> tuple[Literal["planned", "already_satisfied"], ManagedAuthzPolicySetProposalInput | None]:
+    if current_policy.schema_version not in (2, 3):
+        raise AuthorizationCandidatePreparationError(
+            "candidate_set_conflict", "Agent proposals require authorization policy version 2 or 3."
+        )
+    owned = tuple(
+        (kind, rule)
+        for kind, rule in _rules(current_policy)
+        if getattr(rule, "managed_set_id", None) == AGENT_POLICY_PROPOSER_MANAGED_SET_ID
+    )
+    if intent == "add" and (
+        identity is None
+        or not identity.subject
+        or not identity.token_label
+        or any(character in identity.subject + identity.token_label for character in "*?[]")
+    ):
+        raise AuthorizationCandidatePreparationError(
+            "candidate_principal_unavailable",
+            "No exact configured local_operator identity is available.",
+        )
+    if owned:
+        if (
+            len(owned) != 1
+            or owned[0][0] != "local_operators"
+            or not isinstance(owned[0][1], LocalOperatorPolicyRule)
+        ):
+            raise AuthorizationCandidatePreparationError(
+                "candidate_set_conflict", "The agent proposer set is occupied by another shape."
+            )
+        existing = owned[0][1]
+        if len(existing.subjects) != 1 or len(existing.token_labels) != 1:
+            raise AuthorizationCandidatePreparationError(
+                "candidate_set_conflict", "The agent proposer identity is ambiguous."
+            )
+        stored_identity = LocalOperatorIdentity(
+            subject=existing.subjects[0], token_label=existing.token_labels[0]
+        )
+        if any(
+            character in stored_identity.subject + stored_identity.token_label
+            for character in "*?[]"
+        ) or existing != _agent_policy_proposer_rule(stored_identity):
+            raise AuthorizationCandidatePreparationError(
+                "candidate_set_conflict", "The agent proposer set has an unexpected shape."
+            )
+        if intent == "add" and stored_identity != identity:
+            raise AuthorizationCandidatePreparationError(
+                "candidate_set_conflict", "The agent proposer set belongs to another identity."
+            )
+    if intent == "add":
+        assert identity is not None
+        if any(
+            rule.managed_set_id != AGENT_POLICY_PROPOSER_MANAGED_SET_ID
+            and any(
+                rule.allows(
+                    identity=identity,
+                    action=action,
+                    product="launchplane",
+                    context=LAUNCHPLANE_SERVICE_CONTEXT,
+                    target=AuthorizationTarget(scope="global"),
+                    schema_version=current_policy.schema_version,
+                )
+                for action in AGENT_POLICY_PROPOSER_ACTIONS
+            )
+            for rule in current_policy.local_operators
+        ):
+            raise AuthorizationCandidatePreparationError(
+                "candidate_action_overlap", "Proposal authority overlaps another rule."
+            )
+        if owned:
+            return "already_satisfied", None
+        desired_rules: tuple[LocalOperatorPolicyRule, ...] = (
+            _agent_policy_proposer_rule(identity),
+        )
+    else:
+        if not owned:
+            return "already_satisfied", None
+        desired_rules = ()
+    return "planned", ManagedAuthzPolicySetProposalInput(
+        managed_set_id=AGENT_POLICY_PROPOSER_MANAGED_SET_ID,
+        desired_policy=LaunchplaneAuthzPolicy(
+            schema_version=current_policy.schema_version, local_operators=desired_rules
+        ),
+        reason=AGENT_POLICY_PROPOSER_REASON,
+        related_issue=AGENT_POLICY_PROPOSER_RELATED_ISSUE,
+    )
+
+
 def compile_authorization_candidate(
     *,
     candidate_id: AuthorizationCandidateId,
@@ -1159,6 +1303,12 @@ def compile_authorization_candidate(
     configured_local_operator_identity: LocalOperatorIdentity | None = None,
     products: tuple[str, ...] = (),
 ) -> tuple[Literal["planned", "already_satisfied"], ManagedAuthzPolicySetProposalInput | None]:
+    if candidate_id == AGENT_POLICY_PROPOSER_CANDIDATE_ID:
+        return compile_agent_policy_proposer_candidate(
+            current_policy=current_policy,
+            identity=configured_local_operator_identity,
+            intent=intent,
+        )
     if candidate_id == AGENT_PRODUCT_SETUP_CANDIDATE_ID:
         return compile_agent_product_setup_candidate(
             current_policy=current_policy,
@@ -1226,6 +1376,10 @@ def authorization_candidate_request_matches(
     configured_local_operator_identity: LocalOperatorIdentity | None = None,
     record_store: object = None,
 ) -> bool:
+    if candidate_id == AGENT_POLICY_PROPOSER_CANDIDATE_ID:
+        return not products and agent_policy_proposer_request_matches(
+            request, identity=configured_local_operator_identity, intent=intent
+        )
     if candidate_id == AGENT_PRODUCT_SETUP_CANDIDATE_ID:
         grants = agent_product_setup_request_grants(request, intent=intent)
         if grants is None:

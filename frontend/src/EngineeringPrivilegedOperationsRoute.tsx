@@ -260,6 +260,17 @@ function AccessPolicyComposer({
         alreadyRemovedMessage="Project evidence access is already removed."
         refresh={refresh}
       />
+      <AuthorizationCandidateCard
+        candidateId="agent-policy-proposer"
+        headingId="agent-policy-proposer-heading"
+        title="Prepare agent proposal access"
+        description="Let your configured agent prepare access-policy and merge-train policy plans for your review. Every plan remains pending until you approve it while signed in. The agent cannot approve or apply a plan. This access remains until a separately approved removal."
+        addLabel="Prepare proposal access"
+        removeLabel="Prepare proposal removal"
+        alreadyAddedMessage="Agent proposal access is already installed."
+        alreadyRemovedMessage="Agent proposal access is already removed."
+        refresh={refresh}
+      />
       <AgentProductSetupCandidateCard fixtureMode={fixtureMode} refresh={refresh} />
     </div>
   );

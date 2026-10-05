@@ -1191,3 +1191,106 @@ class AgentProductSetupCandidateCompilerTests(unittest.TestCase):
                 record_store=store,
             )
         )
+
+
+class AgentPolicyProposerCandidateTests(unittest.TestCase):
+    def test_compiler_add_remove_and_replay_keep_the_reviewed_identity(self) -> None:
+        from control_plane.authz_candidate_preparation import (
+            compile_agent_policy_proposer_candidate,
+            agent_policy_proposer_request_matches,
+        )
+
+        identity = LocalOperatorIdentity(subject="operator-agent", token_label="write")
+        policy = _policy()
+        state, request = compile_agent_policy_proposer_candidate(
+            current_policy=policy, identity=identity, intent="add"
+        )
+        self.assertEqual(state, "planned")
+        assert request is not None
+        self.assertTrue(
+            agent_policy_proposer_request_matches(request, identity=identity, intent="add")
+        )
+        self.assertFalse(
+            agent_policy_proposer_request_matches(
+                request,
+                identity=LocalOperatorIdentity(subject="other", token_label="write"),
+                intent="add",
+            )
+        )
+        installed = policy.model_copy(
+            update={"local_operators": request.desired_policy.local_operators}
+        )
+        self.assertEqual(
+            compile_agent_policy_proposer_candidate(
+                current_policy=installed, identity=identity, intent="add"
+            ),
+            ("already_satisfied", None),
+        )
+        state, removal = compile_agent_policy_proposer_candidate(
+            current_policy=installed, identity=None, intent="remove"
+        )
+        self.assertEqual(state, "planned")
+        assert removal is not None
+        self.assertFalse(removal.desired_policy.local_operators)
+        self.assertEqual(removal.managed_set_id, request.managed_set_id)
+        self.assertEqual(
+            compile_agent_policy_proposer_candidate(
+                current_policy=policy, identity=None, intent="remove"
+            ),
+            ("already_satisfied", None),
+        )
+        self.assertEqual(installed.github_humans, policy.github_humans)
+
+    def test_compiler_refuses_missing_globbed_colliding_or_overlapping_principals(self) -> None:
+        from control_plane.authz_candidate_preparation import (
+            compile_agent_policy_proposer_candidate,
+        )
+
+        identity = LocalOperatorIdentity(subject="operator-agent", token_label="write")
+        policy = _policy()
+        _, request = compile_agent_policy_proposer_candidate(
+            current_policy=policy, identity=identity, intent="add"
+        )
+        assert request is not None
+        rule = request.desired_policy.local_operators[0]
+        for current, principal in (
+            (policy, None),
+            (policy, LocalOperatorIdentity(subject="*", token_label="write")),
+            (
+                policy.model_copy(
+                    update={"local_operators": (rule.model_copy(update={"subjects": ("other",)}),)}
+                ),
+                identity,
+            ),
+            (
+                policy.model_copy(
+                    update={
+                        "local_operators": (
+                            rule.model_copy(
+                                update={
+                                    "actions": (*rule.actions, "authz_policy_operation.approve")
+                                }
+                            ),
+                        )
+                    }
+                ),
+                identity,
+            ),
+            (
+                policy.model_copy(
+                    update={
+                        "local_operators": (
+                            rule.model_copy(update={"managed_set_id": "other.set"}),
+                        )
+                    }
+                ),
+                identity,
+            ),
+        ):
+            with (
+                self.subTest(principal=principal),
+                self.assertRaises(AuthorizationCandidatePreparationError),
+            ):
+                compile_agent_policy_proposer_candidate(
+                    current_policy=current, identity=principal, intent="add"
+                )

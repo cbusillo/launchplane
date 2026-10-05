@@ -15,6 +15,8 @@ from control_plane.contracts.privileged_operation import (
     PrivilegedOperationApproval,
     PrivilegedOperationActor,
     PrivilegedOperationAgentActor,
+    PrivilegedOperationLocalOperatorActor,
+    local_operator_principal_sha256,
     PrivilegedOperationConflictError,
     PrivilegedOperationDescriptorId,
     PrivilegedOperationEventRecord,
@@ -1500,12 +1502,12 @@ def register_privileged_operation_routes(
         record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
     ) -> PrivilegedPolicyOperationAgentProposalResponse:
         trace_id = dependencies.common.next_trace_id()
-        if not isinstance(identity, TerminalAgentIdentity):
+        if not isinstance(identity, TerminalAgentIdentity | LocalOperatorIdentity):
             raise dependencies.common.http_error(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="Only terminal agents can propose agent policy operations.",
+                message="Only authorized local operators or terminal agents can propose policy operations.",
             )
         require_managed_rule(
             identity=identity,
@@ -1513,12 +1515,48 @@ def register_privileged_operation_routes(
             trace_id=trace_id,
             descriptor_id=envelope.descriptor_id,
         )
-        actor = PrivilegedOperationAgentActor(
-            principal_sha256=terminal_agent_principal_sha256(
-                subject=identity.subject,
-                token_label=identity.token_label,
-            ),
-        )
+        actor: PrivilegedOperationAgentActor | PrivilegedOperationLocalOperatorActor
+        if isinstance(identity, LocalOperatorIdentity):
+            if identity != dependencies.read_configured_local_operator_identity():
+                raise dependencies.common.http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Only the configured local operator can propose policy operations.",
+                )
+            active_record = read_active_policy_record(trace_id=trace_id)
+            try:
+                if active_record.status != "active":
+                    raise ManagedRuleAuthorizationError("Authorization policy is not active.")
+                for policy in (dependencies.policy_reader(), active_record.policy):
+                    require_single_explicit_action_managed_rule_identity(
+                        policy=policy,
+                        identity=identity,
+                        action=descriptor_action(envelope.descriptor_id, "plan_action"),
+                        product="launchplane",
+                        context="launchplane",
+                        target=AuthorizationTarget(scope="global"),
+                    )
+            except ManagedRuleAuthorizationError as error:
+                raise dependencies.common.http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Identity has no current explicit managed proposal grant.",
+                ) from error
+            actor = PrivilegedOperationLocalOperatorActor(
+                principal_sha256=local_operator_principal_sha256(
+                    subject=identity.subject,
+                    token_label=identity.token_label,
+                ),
+            )
+        else:
+            actor = PrivilegedOperationAgentActor(
+                principal_sha256=terminal_agent_principal_sha256(
+                    subject=identity.subject,
+                    token_label=identity.token_label,
+                ),
+            )
         try:
             result = create_typed_privileged_operation_plan(
                 record_store=record_store,

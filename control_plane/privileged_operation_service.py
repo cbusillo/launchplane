@@ -46,6 +46,7 @@ from control_plane.contracts.privileged_operation import (
     privileged_operation_request_digest_candidates,
 )
 from control_plane.authz_candidate_preparation import (
+    agent_policy_proposer_request_matches,
     agent_product_setup_request_grants,
     is_administrator_product_evidence_read_request,
     is_legacy_administrator_product_evidence_read_request,
@@ -213,8 +214,8 @@ def _semantic_review_activity(
 
 def _semantic_review_requester_kind(
     record: PrivilegedOperationRecord,
-) -> Literal["github_human", "terminal_agent"]:
-    if record.requested_by.identity_type in {"github_human", "terminal_agent"}:
+) -> Literal["github_human", "terminal_agent", "local_operator"]:
+    if record.requested_by.identity_type in {"github_human", "terminal_agent", "local_operator"}:
         return record.requested_by.identity_type
     raise PrivilegedOperationSemanticReviewError(
         "Privileged-operation semantic review requester variant drifted."
@@ -562,7 +563,20 @@ def _build_privileged_operation_semantic_review(
         )
         adds_candidate_access = bool(record.request.desired_policy.github_humans)
         authz_review_title: PrivilegedOperationSemanticReviewTitle
-        if is_agent_product_setup or is_agent_product_setup_removal:
+        if agent_policy_proposer_request_matches(record.request, identity=operator, intent="add"):
+            authz_review_title = "Managed authorization policy review"
+            authz_change_summary = (
+                "Allow the Director's configured agent to propose access-policy and merge-train "
+                "policy plans only. Every plan stays pending until the signed-in Director approves it. "
+                "The agent cannot approve or apply plans. This standing access remains until "
+                "a separately governed removal; the Approve-by deadline only bounds this plan."
+            )
+        elif agent_policy_proposer_request_matches(
+            record.request, identity=operator, intent="remove"
+        ):
+            authz_review_title = "Managed authorization policy review"
+            authz_change_summary = "Remove this managed set's agent proposal access. Separately granted read access remains unchanged."
+        elif is_agent_product_setup or is_agent_product_setup_removal:
             authz_review_title = (
                 "Review agent product setup access"
                 if is_agent_product_setup
@@ -1104,7 +1118,11 @@ def create_typed_privileged_operation_plan(
         <= MAX_PRIVILEGED_OPERATION_TTL_SECONDS
     ):
         raise ValueError("Privileged-operation plan expiry must be between 300 and 86400 seconds.")
-    expected_source_kind = "agent_api" if actor.identity_type == "terminal_agent" else "browser_api"
+    expected_source_kind = (
+        "agent_api"
+        if actor.identity_type in {"terminal_agent", "local_operator"}
+        else "browser_api"
+    )
     if source_kind != expected_source_kind:
         raise ValueError("Privileged-operation plan source does not match requester identity.")
     store = require_privileged_operation_store(record_store)
