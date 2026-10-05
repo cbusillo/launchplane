@@ -2000,6 +2000,7 @@ def plan_managed_authz_policy_reconcile(
     *,
     record_store: AuthzPolicyRecordStore,
     request: AuthzManagedPolicyReconcileEnvelope,
+    authorized_policy_sha256: str = "",
 ) -> tuple[
     LaunchplaneAuthzPolicy,
     LaunchplaneAuthzPolicyRecord,
@@ -2012,6 +2013,10 @@ def plan_managed_authz_policy_reconcile(
     if len(active_records) > 1:
         raise AuthzPolicyConflictError("Multiple active Launchplane authz policy records found.")
     current_record = active_records[0]
+    _require_expected_authz_policy(
+        current_record=current_record,
+        expected_policy_sha256=authorized_policy_sha256,
+    )
     current_policy = current_record.policy
     base_policy = _resolve_managed_authz_reconcile_base(
         current_policy=current_policy,
@@ -2269,6 +2274,7 @@ def execute_managed_authz_policy_reconcile(
         plan_managed_authz_policy_reconcile(
             record_store=record_store,
             request=request,
+            authorized_policy_sha256=authorized_policy_sha256,
         )
     )
     _require_expected_authz_policy(

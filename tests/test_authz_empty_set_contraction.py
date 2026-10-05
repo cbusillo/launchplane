@@ -248,7 +248,17 @@ class EmptySetContractionHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_policy_drift_after_authorization_keeps_drift_diagnosis(self) -> None:
         policy = _policy()
+        active = _active_record_for_policy(policy)
         changed = _active_record_for_policy(policy.model_copy(update={"administrator_quorum": 2}))
+        _, _, _, reviewed = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((active,)),
+            request=_request(desired_policy={"schema_version": policy.schema_version}),
+        )
+        request = _request(
+            mode="apply",
+            desired_policy={"schema_version": policy.schema_version},
+            reviewed_plan_sha256=reviewed.plan_sha256,
+        )
         with (
             TemporaryDirectory() as directory,
             closing(
@@ -258,23 +268,30 @@ class EmptySetContractionHttpTests(unittest.IsolatedAsyncioTestCase):
             ) as store,
         ):
             store.ensure_schema()
-            with patch.object(store, "list_authz_policy_records", return_value=(changed,)):
-                app = create_launchplane_fastapi_app(
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=policy,
-                    record_store_factory=lambda: store,
-                )
-                async with lifespan_client(app) as client:
-                    response = await client.post(
-                        "/v1/authz-policies/managed-rule-sets/reconcile",
-                        headers={"Authorization": "Bearer valid-token"},
-                        json=_request().model_dump(mode="json"),
+            for observed_records in (((changed,),), ((active,), (changed,))):
+                with (
+                    self.subTest(observed_records=observed_records),
+                    patch.object(store, "list_authz_policy_records", side_effect=observed_records),
+                ):
+                    app = create_launchplane_fastapi_app(
+                        verifier=_StubVerifier(_identity()),
+                        authz_policy=policy,
+                        record_store_factory=lambda: store,
                     )
-                self.assertEqual(response.status_code, 409, response.text)
-                error = response.json()["error"]
-                self.assertEqual(error["code"], "authz_policy_conflict")
-                self.assertIn("changed", error["message"])
-                self.assertNotIn(changed.policy_sha256, response.text)
+                    async with lifespan_client(app) as client:
+                        response = await client.post(
+                            "/v1/authz-policies/managed-rule-sets/reconcile",
+                            headers={
+                                "Authorization": "Bearer valid-token",
+                                "Idempotency-Key": "drift-after-authorization",
+                            },
+                            json=request.model_dump(mode="json"),
+                        )
+                    self.assertEqual(response.status_code, 409, response.text)
+                    error = response.json()["error"]
+                    self.assertEqual(error["code"], "authz_policy_conflict")
+                    self.assertIn("changed", error["message"])
+                    self.assertNotIn(changed.policy_sha256, response.text)
 
     async def test_schema_mismatch_reports_incompatibility_without_retry_advice(self) -> None:
         policy = _policy()
