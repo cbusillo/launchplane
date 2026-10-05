@@ -18,7 +18,7 @@ import type { DevFixtureMode } from "./dev-fixture-loader";
 import { formatTime } from "./format";
 import { ProductOwnerPanel } from "./ProductOwnerPanel";
 import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
-import { environmentOperationalTone, type SignalTone } from "./product-environment-signal";
+import { environmentOperationalTone, expireProductEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
   type ResourceState,
@@ -61,7 +61,7 @@ export function ProductIndexRoute({
   resource: ResourceState<ProductSiteOverview[]>;
   onRetry: () => void;
 }) {
-  const products = resource.data ?? [];
+  const products = (resource.data ?? []).map(product => expireProductEvidence(product));
   useEvidenceExpiry(products.flatMap(product => product.environments));
   const loading = resource.status === "idle" || resource.status === "loading";
   const viewState =
@@ -262,7 +262,7 @@ export function ProductWorkspaceRoute({
   return (
     <ProductWorkspace
       fixtureMode={fixtureMode}
-      product={resource.data}
+      product={expireProductEvidence(resource.data)}
       refreshError={resource.status === "error" ? resource.error : ""}
       route={{ kind: "product-workspace", product: productKey }}
       traceId={resource.status === "error" ? resource.traceId : ""}

@@ -1,21 +1,39 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { environmentOperationalTone } from "../src/product-environment-signal.ts";
+import { environmentOperationalTone, expireProductEvidence } from "../src/product-environment-signal.ts";
+
+const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+Object.defineProperty(globalThis, "window", { configurable: true, value: { location: { search: "" } } });
+const { productsForFixture } = await import("../src/dev-fixtures.ts");
+if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+else Reflect.deleteProperty(globalThis, "window");
 
 function environment() {
-  return {
-    trust_state: "recorded", provenance: { freshness_status: "verified" }, warnings: [],
-    topology: { warnings: [], observed: { tls_domains: [] } },
-    health_monitoring: { checks: [{ probe_effective: true, status: "pass", trust_state: "verified", incident_status: "" }] },
-  };
+  const lane = structuredClone(productsForFixture("products")[0].environments.find(lane => lane.environment === "testing"));
+  lane.trust_state = "recorded";
+  lane.provenance.freshness_status = "verified";
+  lane.provenance.stale_after = new Date(Date.now() + 60_000).toISOString();
+  lane.warnings = [];
+  lane.topology.warnings = [];
+  lane.topology.observed.tls_domains = [];
+  lane.topology.observed.placement.runtime_identity_status = "unchecked";
+  lane.health_monitoring.checks = [structuredClone(lane.health_monitoring.checks[0])];
+  const check = lane.health_monitoring.checks[0];
+  check.probe_effective = true;
+  check.status = "pass";
+  check.trust_state = "verified";
+  check.incident_status = "";
+  check.provenance.stale_after = lane.provenance.stale_after;
+  return lane;
 }
 
-test("a fresh identity and health verification makes a monitored lane green", () => {
-  assert.equal(environmentOperationalTone(environment()), "verified");
-});
+test("a fresh identity and health verification makes a monitored lane green", () =>
+  assert.equal(environmentOperationalTone(environment()), "verified"));
 
 test("stale or unverified identity cannot show green with passing HTTP", () => {
-  for (const freshness_status of ["stale", "recorded", "missing"]) {
+  /** @type {import("../src/generated/openapi.ts").DataProvenance["freshness_status"][]} */
+  const statuses = ["stale", "recorded", "missing"];
+  for (const freshness_status of statuses) {
     const lane = environment();
     lane.provenance.freshness_status = freshness_status;
     assert.notEqual(environmentOperationalTone(lane), "verified");
@@ -32,10 +50,16 @@ test("health failure or a mismatch incident turns the lane red", () => {
 
 test("every effective check and topology warning still matters", () => {
   const lane = environment();
-  lane.health_monitoring.checks.push({ probe_effective: true, status: "missing", trust_state: "missing" });
+  const check = structuredClone(lane.health_monitoring.checks[0]);
+  check.status = "missing";
+  check.trust_state = "missing";
+  lane.health_monitoring.checks.push(check);
   assert.equal(environmentOperationalTone(lane), "warning");
   lane.health_monitoring.checks.pop();
-  lane.topology.warnings.push({ severity: "warning" });
+  const product = productsForFixture("products")[0];
+  const warning = structuredClone(product.environments.flatMap(environment => environment.topology.warnings)[0]);
+  warning.severity = "warning";
+  lane.topology.warnings.push(warning);
   assert.equal(environmentOperationalTone(lane), "warning");
 });
 
@@ -50,13 +74,23 @@ test("an open page cannot keep an expired verification green", () => {
 test("a recorded runtime mismatch stays red without an effective monitor check", () => {
   const lane = environment();
   lane.health_monitoring.checks = [];
-  lane.topology.observed.placement = { runtime_identity_status: "mismatch" };
+  lane.topology.observed.placement.runtime_identity_status = "mismatch";
   assert.equal(environmentOperationalTone(lane), "danger");
 });
 
 test("advisory missing runtime identity is unverified rather than a failure", () => {
   const lane = environment();
   lane.provenance.freshness_status = "recorded";
-  lane.topology.observed.placement = { runtime_identity_status: "missing" };
+  lane.topology.observed.placement.runtime_identity_status = "missing";
   assert.equal(environmentOperationalTone(lane), "warning");
+});
+
+test("product and lane badges expire together with the signal", () => {
+  const lane = environment();
+  const product = structuredClone(productsForFixture("products")[0]);
+  product.environments = [lane];
+  const expired = expireProductEvidence(product, Date.parse(lane.provenance.stale_after) + 1);
+  assert.equal(expired.trust_state, "stale");
+  assert.equal(expired.environments[0].trust_state, "stale");
+  assert.equal(environmentOperationalTone(expired.environments[0]), "warning");
 });

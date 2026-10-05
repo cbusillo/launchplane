@@ -465,6 +465,13 @@ test.describe("operator journeys", () => {
     await page.goto(
       "/ui/products/atlas-commerce/environments/prod?fixture=products&incident=empty",
     );
+    const recordedAt = await page.evaluate(async () => {
+      const modulePath = "/ui/src/dev-fixtures.ts";
+      const { environmentForFixture } = await import(modulePath);
+      return environmentForFixture("products", "atlas-commerce", "prod").provenance.refreshed_at;
+    });
+    await page.clock.install({ time: new Date(recordedAt) });
+    await page.reload();
 
     const incidentRegion = page.getByRole("region", {
       name: "Public ingress incidents",
