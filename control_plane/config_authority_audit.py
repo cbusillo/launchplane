@@ -1488,6 +1488,7 @@ def build_config_authority_audit(
 
     root = control_plane_root.resolve()
     repo_metadata = _repo_metadata(root)
+    repository_package = _repository_package_name(root)
     git_file_state = _git_file_state(root)
     changed_file_merge_base = _git_merge_base(root) if mode == "changed-files-gate" else ""
     changed_file_status_entries = _git_status_entries(root) if mode == "changed-files-gate" else []
@@ -1496,6 +1497,7 @@ def build_config_authority_audit(
             root,
             merge_base=changed_file_merge_base,
             status_entries=changed_file_status_entries,
+            repository_package=repository_package,
         )
         if mode == "changed-files-gate"
         else Counter()
@@ -1511,7 +1513,9 @@ def build_config_authority_audit(
     findings: list[ConfigAuthorityFinding] = []
     raw_findings: list[dict[str, object]] = []
     for source_file in source_files:
-        file_findings, file_gaps = _scan_source_file(source_file)
+        file_findings, file_gaps = _scan_source_file(
+            source_file, repository_package=repository_package
+        )
         if baseline_fingerprint_counts:
             file_findings = _mark_preexisting_changed_file_findings(
                 file_findings,
@@ -1802,7 +1806,7 @@ def _explicit_scan_paths(*, root: Path, path: Path) -> Iterable[Path]:
 
 
 def _scan_source_file(
-    source_file: AuditSourceFile,
+    source_file: AuditSourceFile, *, repository_package: str = ""
 ) -> tuple[list[ConfigAuthorityFinding], list[CoverageGap]]:
     try:
         text = source_file.path.read_text(encoding="utf-8")
@@ -1814,7 +1818,9 @@ def _scan_source_file(
                 detail=str(error),
             )
         ]
-    return _scan_source_text(source_file=source_file, text=text)
+    return _scan_source_text(
+        source_file=source_file, text=text, repository_package=repository_package
+    )
 
 
 def _mark_preexisting_changed_file_findings(
@@ -1862,6 +1868,7 @@ def _changed_file_baseline_fingerprint_counts(
     *,
     merge_base: str,
     status_entries: Sequence[tuple[str, str]],
+    repository_package: str = "",
 ) -> Counter[tuple[str, str, str, str]]:
     if not merge_base:
         return Counter()
@@ -1884,7 +1891,9 @@ def _changed_file_baseline_fingerprint_counts(
             index_blob_sha="",
             worktree_sha256="",
         )
-        findings, _ = _scan_source_text(source_file=source_file, text=baseline_text)
+        findings, _ = _scan_source_text(
+            source_file=source_file, text=baseline_text, repository_package=repository_package
+        )
         fingerprints.update(finding.fingerprint for finding in findings)
     return fingerprints
 
@@ -1914,7 +1923,7 @@ def _changed_files_gate_base_finding() -> ConfigAuthorityFinding:
 
 
 def _scan_source_text(
-    *, source_file: AuditSourceFile, text: str
+    *, source_file: AuditSourceFile, text: str, repository_package: str = ""
 ) -> tuple[list[ConfigAuthorityFinding], list[CoverageGap]]:
     parser = _parser_name(source_file.path)
     candidates: list[tuple[int, str, object]] = []
@@ -1960,6 +1969,8 @@ def _scan_source_text(
         path=source_file.relative_path,
         candidates=candidates,
     )
+    if repository_package:
+        allow_context = {**allow_context, "repository_package": repository_package}
     if (
         source_file.relative_path == LAUNCHPLANE_CONFIG_AUTHORITY_WORKFLOW_PATH
         and not allow_context.get("launchplane_config_authority_binding_valid")
@@ -2943,6 +2954,19 @@ def _allow_reason(
         value=value,
     ):
         return ALLOW_REASON_THIN_CONNECTOR_INPUT
+    if (
+        normalized == ".github/workflows/publish-image.yml"
+        and key == "password"
+        and _string_value(value).strip() == "${{ github.token }}"
+    ):
+        return ALLOW_REASON_THIN_CONNECTOR_INPUT
+    if (
+        normalized == ".github/workflows/cleanup-ghcr.yml"
+        and key == "inputs.package_names.default"
+        and allow_context.get("repository_package")
+        and _string_value(value).strip() == allow_context["repository_package"]
+    ):
+        return ALLOW_REASON_THIN_CONNECTOR_INPUT
     if normalized.startswith(".github/workflows/") and _is_workflow_image_artifact_mechanic(
         path=normalized,
         key=key,
@@ -3887,6 +3911,16 @@ def _owner_repo_reference_matches(value: str) -> Iterable[re.Match[str]]:
 
 def _contains_owner_repo_reference(value: str) -> bool:
     return next(iter(_owner_repo_reference_matches(value)), None) is not None
+
+
+def _repository_package_name(root: Path) -> str:
+    origin = _git_output(root, "remote", "get-url", "origin")
+    match = re.fullmatch(
+        r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
+        r"[A-Za-z0-9_.-]+/(?P<name>[A-Za-z0-9_.-]+?)(?:\.git)?/?",
+        origin,
+    )
+    return match.group("name").lower() if match is not None else ""
 
 
 def _repo_metadata(root: Path) -> dict[str, object]:
