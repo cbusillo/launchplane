@@ -245,6 +245,9 @@ from control_plane.http_routes.ordinary_agent import (
     OrdinaryAgentRouteDependencies,
     register_ordinary_agent_routes,
 )
+from control_plane.http_routes.generic_web_promotion_recovery import (
+    register_promotion_recovery_routes,
+)
 from control_plane.generic_web_deploy_recovery_http import (
     GENERIC_WEB_DEPLOY_RECOVERY_PROVIDER_EVIDENCE_ROUTE,
     GenericWebDeployRecoveryDependencies,
@@ -28134,6 +28137,9 @@ def create_launchplane_fastapi_app(
     register_product_path_check_read_routes(
         app,
         dependencies=product_read_route_dependencies,
+    )
+    register_promotion_recovery_routes(
+        app, dependencies=generic_web_write_route_dependencies, read_identity=read_identity
     )
     app.add_exception_handler(HTTPException, launchplane_http_exception_handler)
     app.add_exception_handler(

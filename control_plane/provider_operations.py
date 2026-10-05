@@ -124,6 +124,12 @@ class ProviderOperationLease(Protocol):
 
 
 @runtime_checkable
+class ProviderEvidenceLease(Protocol):
+    def evidence_reservation(self) -> LaunchplaneIdempotencyRecord:
+        """Snapshot the lease identity for a transactionally fenced evidence write."""
+
+
+@runtime_checkable
 class DurableProviderMutationAdapter(Protocol):
     def target_key(self) -> str:
         """Return the stable key used to fence concurrent mutations of one target."""
@@ -317,6 +323,10 @@ class _ReservationHeartbeat:
     def assert_current(self) -> None:
         with self._lock:
             self._renew_locked()
+
+    def evidence_reservation(self) -> LaunchplaneIdempotencyRecord:
+        with self._lock:
+            return self._reservation
 
     def checkpoint_effect(self, phase: str) -> None:
         normalized_phase = phase.strip()

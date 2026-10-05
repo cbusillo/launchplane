@@ -30899,6 +30899,18 @@
             "default": "",
             "title": "Target Deployment Record Id",
             "type": "string"
+          },
+          "target_promoted_from_instance": {
+            "default": "",
+            "title": "Target Promoted From Instance",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
+          "target_promotion_record_id": {
+            "default": "",
+            "title": "Target Promotion Record Id",
+            "type": "string",
+            "x-launchplane-optional-response": true
           }
         },
         "title": "RollbackExecutionEvidence",
