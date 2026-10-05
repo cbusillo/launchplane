@@ -1461,6 +1461,12 @@ def _run_preview_operation(
         ):
             raise _PullRequestMovedError
 
+    def execute_apply(**kwargs: object) -> dict[str, object]:
+        # Only the fenced runner invokes this callback. Record the attempt before
+        # execution so a raised error is accounted for as well as a returned result.
+        plan["preview_mutation_attempted"] = True
+        return preview_hooks.execute_apply(**kwargs)
+
     try:
         inputs = preview_hooks.build_inputs(
             control_plane_root=control_plane_root,
@@ -1517,16 +1523,12 @@ def _run_preview_operation(
             idempotency_key=plan_id,
             request_fingerprint=_fingerprint({"operation_key": operation_key}),
             trace_id=f"{RECONCILE_SOURCE}-{uuid4().hex}",
-            execute_apply=preview_hooks.execute_apply,
+            execute_apply=execute_apply,
             observe_apply=preview_hooks.observe_apply,
             pre_mutation_guard=pre_mutation_guard,
             allow_reconciled_retry=operation != "destroy" or allow_retry,
         )
         plan["preview_operation_status"] = result.status
-        if result.record is not None:
-            plan["preview_mutation_attempted"] = (
-                reservation is None or result.record.attempt > reservation.attempt
-            )
         if result.status in {"in_progress", "target_busy"}:
             plan["deferred"] = "preview_operation_busy"
             return ReconcileOutcome(plan, deferred=True)

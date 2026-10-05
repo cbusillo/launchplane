@@ -1672,15 +1672,19 @@ class _MinuteClock(datetime):
 
 
 class ProductReconcilePreviewTests(ProductReconcileTestCase):
-    def install_refused_domain_provider(self) -> list[str]:
+    def install_refused_domain_provider(
+        self, refused_path: str = "/api/domain.delete"
+    ) -> list[str]:
         calls: list[str] = []
 
         def provider_request(*, path: str, **_kwargs: object) -> object:
             calls.append(path)
             if path == "/api/domain.byComposeId":
                 return [{"domainId": "preview-domain", "host": "pr-5.example.test"}]
+            if path == refused_path:
+                raise click.ClickException("Persistent delete refusal")
             if path == "/api/domain.delete":
-                raise click.ClickException("Persistent domain delete refusal")
+                return None
             if path == "/api/compose.one":
                 return {"composeId": "cm-odoo-preview-pr-5"}
             raise AssertionError(path)
@@ -1745,12 +1749,6 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(reservation.provider_effect_phase, "domain_delete")
         self.assertEqual(self.store.list_preview_records()[0].state, "active")
 
-        # A process can die before marking the checkpointed attempt unknown.
-        self.store.write_idempotency_record(
-            reservation.model_copy(
-                update={"state": "running", "lease_expires_at": reservation.updated_at}
-            )
-        )
         # Completion is still adopted after the automatic mutation budget is spent.
         self.request("preview", 5)
         with patch(
@@ -1809,6 +1807,45 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
                 )
         self.assertEqual(reads.call_count, PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1)
         self.assertEqual(calls.count("/api/domain.delete"), 1)
+
+    def test_unresolved_compose_destroy_is_observed_without_consuming_attempts(self) -> None:
+        calls = self.install_refused_domain_provider("/api/compose.delete")
+        self.request("preview", 5)
+        with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+            first = self.run_once()
+        # A later phase with a present compose returns unknown without retrying.
+        for _attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1):
+            self.request("preview", 5)
+            with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                observed = self.run_once()
+            self.assertEqual(
+                observed.last_plan["destroy_failed_attempts"],
+                first.last_plan["destroy_failed_attempts"],
+            )
+        self.assertEqual(calls.count("/api/compose.delete"), 1)
+        self.assertEqual(calls.count("/api/compose.one"), PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1)
+
+    def test_raised_failure_after_safe_destroy_retry_consumes_attempts(self) -> None:
+        self.install_refused_domain_provider()
+        self.request("preview", 5)
+        with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+            self.run_once()
+        original = self.provider.execute_apply
+
+        def raised_apply(
+            *, issued_plan: OdooPreviewApplyInputsResult, **kwargs: object
+        ) -> dict[str, object]:
+            original(issued_plan=issued_plan, **kwargs)
+            raise RuntimeError("execution failed after the domain checkpoint")
+
+        with patch.object(self.provider, "execute_apply", raised_apply):
+            for attempt in range(1, PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS):
+                self.request("preview", 5)
+                with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                    failed = self.run_once()
+                self.assertEqual(failed.last_plan["destroy_failed_attempts"], attempt + 1)
+        self.request("preview", 5)
+        self.assertEqual(self.run_once().last_plan["reason"], "preview_destroy_retry_limit")
 
     def setUp(self) -> None:
         super().setUp()
