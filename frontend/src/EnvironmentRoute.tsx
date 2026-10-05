@@ -367,6 +367,7 @@ export function ProductEnvironmentRoute({
       fixtureMode={fixtureMode}
       onConfigApplied={() => setRetryToken((current) => current + 1)}
       promotionResource={promotionResource}
+      readinessRefreshToken={refreshToken + retryToken}
       view={view}
     />
   );
@@ -383,6 +384,7 @@ function EnvironmentPage({
   fixtureMode,
   onConfigApplied,
   promotionResource,
+  readinessRefreshToken,
   view,
 }: {
   configResource: ResourceState<ProductEnvironmentConfigStatus>;
@@ -395,6 +397,7 @@ function EnvironmentPage({
   fixtureMode: DevFixtureMode;
   onConfigApplied: () => void;
   promotionResource: ResourceState<ProductPromotionStatus>;
+  readinessRefreshToken: number;
   view: EnvironmentView;
 }) {
   const externalUrl = safeExternalUrl(detail.base_url);
@@ -481,6 +484,7 @@ function EnvironmentPage({
           fixtureMode={fixtureMode}
           onRefresh={onConfigApplied}
           promotionResource={promotionResource}
+          refreshToken={readinessRefreshToken}
         />
       ) : null}
       {view === "runtime-settings" ? (

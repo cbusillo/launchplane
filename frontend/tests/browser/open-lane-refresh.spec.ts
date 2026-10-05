@@ -17,6 +17,8 @@ for (const environmentView of [false, true]) {
     let responseMode: "old" | "delay" | "fail" | "unverified" | "fresh" = "old";
     let reads = 0;
     let inventoryReads = 0;
+    let delayInventory = false;
+    let releaseInventory: (() => void) | undefined;
     let releaseRead: (() => void) | undefined;
     const mutations: string[] = [];
     page.on("request", request => {
@@ -39,8 +41,9 @@ for (const environmentView of [false, true]) {
     };
     await page.route("**/v1/**", route => route.fulfill({ status: 403, json: { status: "error", trace_id: "unused-read", error: { code: "authorization_denied", message: "Fixture read unavailable" } } }));
     await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: "csrf", identity: fixtures.identity } }));
-    await page.route("**/v1/products", route => {
+    await page.route("**/v1/products", async route => {
       inventoryReads++;
+      if (delayInventory) await new Promise<void>(resolve => { releaseInventory = resolve; });
       return route.fulfill({ json: { status: "ok", trace_id: "products", products: responseMode === "fresh" ? currentProof(fixtures.products) : fixtures.products } });
     });
     const productUrl = `**/v1/products/${fixtures.product.product}`;
@@ -111,6 +114,15 @@ for (const environmentView of [false, true]) {
     await page.clock.runFor(60_000);
     await expect(page.locator('.rail-product-link[data-active="true"] [data-lane="testing"]')).toHaveAttribute("data-trust", "verified");
     await page.screenshot({ path: `../tmp/browser-smoke/open-${environmentView ? "environment" : "workspace"}-recovered-${testInfo.project.name}.png`, fullPage: true });
+    delayInventory = true;
+    await page.clock.runFor(60_000);
+    await expect.poll(() => Boolean(releaseInventory)).toBe(true);
+    const manualRefresh = page.getByRole("button", { name: "Refresh current evidence" });
+    await expect(manualRefresh).toBeEnabled();
+    delayInventory = false;
+    await manualRefresh.click();
+    releaseInventory!();
+    await expect(manualRefresh.locator("svg")).not.toHaveClass(/spin/);
     responseMode = "delay";
     releaseRead = undefined;
     await page.clock.runFor(60_000);
@@ -125,6 +137,79 @@ for (const environmentView of [false, true]) {
     await page.evaluate(() => window.dispatchEvent(new Event("focus")));
     expect(reads).toBe(observedReads);
     expect(inventoryReads).toBe(observedInventoryReads);
+    expect(mutations).toEqual([]);
+  });
+}
+
+for (const view of ["actions", "runtime-settings", "managed-secrets"]) {
+  test(`automatic detail reads preserve ${view} state`, async ({ page }) => {
+    await page.goto("/ui/products?fixture=products");
+    const fixtures = await page.evaluate(async () => {
+      const modulePath = "/ui/src/dev-fixtures.ts";
+      const module = await import(modulePath);
+      const products = module.productsForFixture("products");
+      const product = products[0];
+      const detail = module.environmentForFixture("products", product.product, "testing");
+      const config = module.configStatusForFixture("products", product.product, "testing");
+      const action = detail.available_actions.find((item: { authz_action: string }) => item.authz_action);
+      return { products, product, detail, config, identity: module.fixtureIdentity,
+        readiness: module.operationalReadinessForFixture("products", detail, action) };
+    });
+    await page.clock.install({ time: new Date(fixtures.detail.provenance.refreshed_at) });
+    let detailReads = 0;
+    let configReads = 0;
+    let readinessReads = 0;
+    const mutations: string[] = [];
+    page.on("request", request => {
+      if (request.url().includes("/v1/") && request.method() !== "GET") mutations.push(request.url());
+    });
+    await page.route("**/v1/**", route => route.fulfill({ status: 403, json: { error: { code: "authorization_denied", message: "Unused fixture read" } } }));
+    await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "csrf", identity: fixtures.identity } }));
+    await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", products: fixtures.products } }));
+    const detailUrl = `**/v1/products/${fixtures.product.product}/environments/testing`;
+    await page.route(detailUrl, route => {
+      detailReads++;
+      return route.fulfill({ json: { status: "ok", environment: fixtures.detail } });
+    });
+    await page.route(`${detailUrl}/config-status`, route => {
+      configReads++;
+      return route.fulfill({ json: { status: "ok", config_status: fixtures.config } });
+    });
+    await page.route("**/operational-readiness?*", route => {
+      readinessReads++;
+      const requestedAction = new URL(route.request().url()).searchParams.get("action");
+      return route.fulfill({ json: { status: "ok", readiness: { ...fixtures.readiness,
+        action: { ...fixtures.readiness.action, requested_action: requestedAction } } } });
+    });
+    await page.goto(`/ui/products/${fixtures.product.product}/environments/testing/${view}`);
+    if (view === "actions") {
+      await expect(page.getByLabel("Inspect exact action")).toBeVisible();
+      await expect(page.getByRole("button", { name: "Refresh readiness" })).toBeEnabled();
+    } else {
+      const field = page.locator('.product-config-field').first();
+      await field.getByRole("checkbox").check();
+      await field.getByLabel(view === "runtime-settings" ? "New value" : "Write-only value").fill("local-fixture-draft");
+      await page.getByLabel(/Change reason/).fill("Preserve my draft");
+    }
+    const observedDetailReads = detailReads;
+    const observedConfigReads = configReads;
+    const observedReadinessReads = readinessReads;
+    const selectedAction = view === "actions" ? await page.getByLabel("Inspect exact action").inputValue() : "";
+    await page.clock.runFor(60_000);
+    await expect.poll(() => detailReads).toBe(observedDetailReads + 1);
+    await expect(page.getByText("Refreshing evidence", { exact: true })).not.toBeVisible();
+    expect(configReads).toBe(observedConfigReads);
+    expect(readinessReads).toBe(observedReadinessReads);
+    if (view === "actions") {
+      await expect(page.getByLabel("Inspect exact action")).toHaveValue(selectedAction);
+      await page.getByRole("button", { name: "Refresh current evidence" }).click();
+      await expect.poll(() => readinessReads).toBeGreaterThan(observedReadinessReads);
+      await expect(page.getByLabel("Inspect exact action")).toHaveValue(selectedAction);
+    } else {
+      await expect(page.locator('.product-config-field').first()
+        .getByLabel(view === "runtime-settings" ? "New value" : "Write-only value")).toHaveValue("local-fixture-draft");
+      await expect(page.getByLabel(/Change reason/)).toHaveValue("Preserve my draft");
+    }
     expect(mutations).toEqual([]);
   });
 }
