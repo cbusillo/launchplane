@@ -259,6 +259,60 @@ class OutboxWorkerTests(unittest.TestCase):
         self.assertEqual(loaded.payload["run_conclusion"], "")
         self.assertEqual([method for method, _path in requests], ["GET"])
 
+    def test_missing_or_temporary_mint_failure_keeps_existing_dispatch_reconcilable(self) -> None:
+        from control_plane.launchplane_github_delivery import DeliveryGitHubTokenUnavailable
+        from control_plane.workflows.generic_web_promotion_workflow import (
+            dispatch_generic_web_promotion_workflow_delivery,
+        )
+
+        temporary = DeliveryGitHubTokenUnavailable("Temporary provider outage")
+        temporary.__cause__ = RuntimeError("provider outage")
+        for unavailable in ("", temporary):
+            with self.subTest(unavailable=type(unavailable).__name__):
+                record = _workflow_delivery().model_copy(
+                    update={
+                        "state": "reconcile_required",
+                        "provider_id": "github",
+                        "provider_operation_key": "github_workflow_dispatch:example/repo:deploy.yml:main:2026-07-13T00:00:00Z:bump=patch|dry_run=false",
+                    }
+                )
+
+                def started(*_args: object, **_kwargs: object) -> None:
+                    self.fail("A dispatched marker must not dispatch again")
+
+                with (
+                    patch(
+                        "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
+                        side_effect=[unavailable, "token"],
+                    ),
+                    patch(
+                        "control_plane.workflows.generic_web_promotion_workflow.github_api_request",
+                        return_value={
+                            "workflow_runs": [
+                                {
+                                    "id": 101,
+                                    "html_url": "https://github.example/actions/runs/101",
+                                    "status": "queued",
+                                    "created_at": "2026-07-13T00:00:00Z",
+                                }
+                            ]
+                        },
+                    ) as provider,
+                ):
+                    retried = dispatch_generic_web_promotion_workflow_delivery(
+                        record=record, control_plane_root=Path("."), mark_provider_started=started
+                    )
+                    self.assertEqual(retried.state, "pending")
+                    self.assertEqual(retried.provider_operation_key, record.provider_operation_key)
+                    provider.assert_not_called()
+                    reconciled = dispatch_generic_web_promotion_workflow_delivery(
+                        record=retried, control_plane_root=Path("."), mark_provider_started=started
+                    )
+                self.assertEqual(reconciled.state, "delivered")
+                self.assertEqual(reconciled.external_id, "101")
+                self.assertEqual(provider.call_count, 1)
+                self.assertEqual(provider.call_args.kwargs.get("method", "GET"), "GET")
+
     def test_provider_marker_without_visible_run_never_resends_dispatch(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(

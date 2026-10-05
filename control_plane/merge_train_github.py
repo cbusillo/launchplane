@@ -3281,7 +3281,11 @@ def _required_checks_status(
 
 def _owner_review_advisory_app_id(store: object | None) -> int | None:
     """Read only the service's configured non-secret App selector."""
-    from control_plane.github_app_identity import ADVISORY_GITHUB_APP_ID_ENV_KEY
+    from control_plane.github_app_configuration import (
+        advisory_app_id_from_values,
+        service_github_app_values,
+    )
+    from control_plane.runtime_environments import build_runtime_environment_definition_from_records
 
     list_records = getattr(store, "list_runtime_environment_records", None)
     if not callable(list_records):
@@ -3289,7 +3293,7 @@ def _owner_review_advisory_app_id(store: object | None) -> int | None:
     try:
         records = tuple(
             record
-            for record in list_records(scope="context", context_name="launchplane")
+            for record in list_records(context_name="launchplane")
             if isinstance(record, RuntimeEnvironmentRecord)
             and record.scope == "context"
             and record.context == "launchplane"
@@ -3297,8 +3301,18 @@ def _owner_review_advisory_app_id(store: object | None) -> int | None:
         )
         if len(records) != 1:
             return None
-        value = str(records[0].env.get(ADVISORY_GITHUB_APP_ID_ENV_KEY, "")).strip()
-        return int(value) if value.isdecimal() and int(value) > 0 else None
+        shared = tuple(
+            record
+            for record in list_records()
+            if isinstance(record, RuntimeEnvironmentRecord)
+            and record.scope == "global"
+            and not record.context
+            and not record.instance
+        )
+        if len(shared) > 1:
+            return None
+        definition = build_runtime_environment_definition_from_records((*shared, *records))
+        return advisory_app_id_from_values(service_github_app_values(definition))
     except Exception:
         return None
 

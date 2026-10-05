@@ -4014,13 +4014,18 @@ The operation requests only its needed permissions:
 
 An installation may have other grants, but each issued token must match the
 requested subset and exactly one repository. Missing accepted grants never
-cause a permission change or a token fallback. Only already accepted capabilities
+cause a permission change or a token fallback. Temporary provider/rate-limit
+failures remain retryable; an existing workflow dispatch marker stays eligible
+for reconciliation and cannot be resent merely because credentials are unavailable. Only already accepted capabilities
 may run; this PR grants none. Promotion-status polling checks configuration and
 tracked inventory without minting a write token; the actual operation verifies
 the accepted grants when it mints its token.
 
 The Advisory Checks App remains separately configured with
-`LAUNCHPLANE_ADVISORY_GITHUB_APP_ID` and its managed private key. It publishes the
+`LAUNCHPLANE_ADVISORY_GITHUB_APP_ID` and its managed private key. Both publisher
+and train resolve this non-secret selector from the same global/context runtime
+record layers, with service-context values taking precedence; secret overlays
+are never App-selector authority. It publishes the
 `launchplane/owner-review` check run with Checks write only. The Delivery App
 publishes decision comments and release-record issues. Decision comment replay
 matches the Delivery App's numeric `performed_via_github_app.id`, rather than
@@ -4030,7 +4035,10 @@ After shipment, Chris configures the Delivery selector through the supported
 service path and confirms the next `launchplane/owner-review` check, decision/preview comment
 and release-record issue have the intended App identity. Verify Advisory
 installation coverage and accepted operation grants wherever those paths run;
-source tests are not live installation evidence. Only after these receipts and
+source tests are not live installation evidence. Apply the selector promptly
+after deployment and resend feedback for queued Client-labelled PRs through the
+existing product-review feedback retry route, so their current-head checks are
+republished. Only after these receipts and
 remaining-consumer checks should Chris delete the obsolete per-context
 `GITHUB_TOKEN` secrets and revoke the old PAT. Other-token migrations keep their
 separate issue scopes; the hold on the shared Odoo Docker token still applies.

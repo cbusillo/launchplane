@@ -181,6 +181,8 @@ def dispatch_generic_web_promotion_workflow_delivery(
             purpose="workflow_dispatch",
         )
         if not token:
+            if record.provider_operation_key:
+                return retry_outbox_delivery(record, error_code="missing_managed_github_token")
             return _failed_outbox_delivery(record, "missing_managed_github_token")
         reconciling_existing_marker = bool(record.provider_operation_key)
         previous_run_ids = _int_set(payload.get("previous_run_ids"))

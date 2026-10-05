@@ -3,6 +3,21 @@ from collections.abc import Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+import click
+from urllib.error import HTTPError
+from email.message import Message
+from types import SimpleNamespace
+from control_plane.runtime_environments import (
+    RuntimeEnvironmentDefinition,
+    RuntimeEnvironmentContextDefinition,
+    build_runtime_environment_definition_from_records,
+)
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.github_app_identity import (
+    resolve_advisory_github_app_identity,
+    ADVISORY_GITHUB_APP_ID_ENV_KEY,
+)
+from control_plane.merge_train_github import _owner_review_advisory_app_id
 from unittest.mock import patch
 
 from cryptography.hazmat.primitives import serialization
@@ -20,6 +35,7 @@ from control_plane.launchplane_github_delivery import (
     resolve_delivery_github_app_identity,
     resolve_delivery_github_token,
     delivery_github_credentials_ready,
+    DeliveryGitHubTokenUnavailable,
 )
 from control_plane.merge_train_github_token import resolve_merge_train_github_token
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -62,6 +78,7 @@ class DeliveryGitHubTokenTests(unittest.TestCase):
         self.token_repository = "example/site"
         self.extra_token_permissions: dict[str, str] = {}
         self.revoked = False
+        self.provider_error: HTTPError | None = None
         self.now = datetime.now(UTC)
         self.identity = GitHubAppIdentity(app_id=76, private_key=self.key)
         database = patch(
@@ -73,6 +90,8 @@ class DeliveryGitHubTokenTests(unittest.TestCase):
     def provider(self, **kwargs: object) -> object:
         path = kwargs["path"]
         if path == "/app":
+            if self.provider_error is not None:
+                raise click.ClickException("Provider unavailable") from self.provider_error
             return {"id": self.identity.app_id}
         if path == "/repos/example/site/installation":
             return {
@@ -149,6 +168,67 @@ class DeliveryGitHubTokenTests(unittest.TestCase):
                     self.requested[-1], {"repository_ids": [7001], "permissions": permissions}
                 )
 
+    def test_temporary_provider_failure_is_retryable_and_does_not_become_missing_configuration(
+        self,
+    ) -> None:
+        headers = Message()
+        headers["X-RateLimit-Remaining"] = "0"
+        for code in (503, 429, 403):
+            with self.subTest(code=code):
+                self.provider_error = HTTPError(
+                    "https://api.example/app", code, "provider error", headers, None
+                )
+                with self.assertRaises(DeliveryGitHubTokenUnavailable):
+                    self.resolve("workflow_dispatch")
+        self.provider_error = HTTPError(
+            "https://api.example/app", 404, "not installed", Message(), None
+        )
+        self.assertEqual(self.resolve("workflow_dispatch"), "")
+        self.assertEqual(self.requested, [])
+
+    def test_advisory_publisher_and_train_share_global_and_context_metadata(self) -> None:
+        for context_id, expected in ((None, 77), ("88", 88)):
+            with self.subTest(context_id=context_id):
+                shared = RuntimeEnvironmentRecord(
+                    scope="global",
+                    env={ADVISORY_GITHUB_APP_ID_ENV_KEY: "77"},
+                    updated_at="2026-10-05T14:00:00Z",
+                )
+                context = RuntimeEnvironmentRecord(
+                    scope="context",
+                    context="launchplane",
+                    env={"SERVICE_DESCRIPTION": "test"}
+                    if context_id is None
+                    else {ADVISORY_GITHUB_APP_ID_ENV_KEY: context_id},
+                    updated_at=shared.updated_at,
+                )
+                store = SimpleNamespace(
+                    list_runtime_environment_records=lambda **kwargs: (
+                        (context,) if kwargs.get("context_name") else (shared, context)
+                    )
+                )
+                with (
+                    patch(
+                        "control_plane.github_app_identity.runtime_environments.load_runtime_environment_definition",
+                        return_value=build_runtime_environment_definition_from_records(
+                            (shared, context)
+                        ),
+                    ),
+                    patch(
+                        "control_plane.github_app_identity.control_plane_secrets.resolve_launchplane_service_secret",
+                        return_value=self.key,
+                    ),
+                    patch(
+                        "control_plane.runtime_environments.control_plane_secrets.overlay_runtime_environment_secret_values",
+                        side_effect=AssertionError(
+                            "App selectors must not decrypt a secret overlay"
+                        ),
+                    ),
+                ):
+                    identity = resolve_advisory_github_app_identity(control_plane_root=self.root)
+                    self.assertEqual(identity.app_id, expected)
+                    self.assertEqual(_owner_review_advisory_app_id(store), identity.app_id)
+
     def test_missing_accepted_grant_cannot_mint_or_use_a_pat(self) -> None:
         self.installation_permissions["issues"] = "read"
         self.assertEqual(self.resolve("release_record"), "")
@@ -201,12 +281,21 @@ class DeliveryGitHubTokenTests(unittest.TestCase):
     def test_identity_reuses_exact_managed_binding_selected_in_runtime_records(self) -> None:
         with (
             patch(
-                "control_plane.launchplane_github_delivery.runtime_environments.resolve_runtime_context_values",
-                return_value={
-                    DELIVERY_GITHUB_APP_ID_KEY: "76",
-                    DELIVERY_GITHUB_APP_INTEGRATION_KEY: "existing-delivery-key",
-                    "GITHUB_TOKEN": "old-pat",
-                },
+                "control_plane.launchplane_github_delivery.runtime_environments.load_runtime_environment_definition",
+                return_value=RuntimeEnvironmentDefinition(
+                    schema_version=1,
+                    shared_env={},
+                    contexts={
+                        "launchplane": RuntimeEnvironmentContextDefinition(
+                            shared_env={
+                                DELIVERY_GITHUB_APP_ID_KEY: "76",
+                                DELIVERY_GITHUB_APP_INTEGRATION_KEY: "existing-delivery-key",
+                                "GITHUB_TOKEN": "old-pat",
+                            },
+                            instances={},
+                        )
+                    },
+                ),
             ),
             patch(
                 "control_plane.launchplane_github_delivery.secrets.resolve_context_secret_value",
@@ -224,8 +313,16 @@ class DeliveryGitHubTokenTests(unittest.TestCase):
     def test_legacy_pat_setting_or_secret_never_resolves_without_app_identity(self) -> None:
         with (
             patch(
-                "control_plane.launchplane_github_delivery.runtime_environments.resolve_runtime_context_values",
-                return_value={"GITHUB_TOKEN": "old-pat"},
+                "control_plane.launchplane_github_delivery.runtime_environments.load_runtime_environment_definition",
+                return_value=RuntimeEnvironmentDefinition(
+                    schema_version=1,
+                    shared_env={},
+                    contexts={
+                        "launchplane": RuntimeEnvironmentContextDefinition(
+                            shared_env={"GITHUB_TOKEN": "old-pat"}, instances={}
+                        )
+                    },
+                ),
             ),
             patch(
                 "control_plane.launchplane_github_delivery.secrets.resolve_context_secret_value"
