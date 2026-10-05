@@ -523,6 +523,19 @@ def _record_standing_acceptance(
             backoff.blocked.pop(profile.product, None)
 
 
+def client_release_promotion_request(
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    backup_record_id: str,
+) -> GenericWebProdPromotionRequest:
+    return GenericWebProdPromotionRequest(
+        product=profile.product,
+        artifact_id=decision.checklist.candidate.artifact_id,
+        source_git_ref=decision.checklist.candidate.source_commit,
+        backup_record_id=backup_record_id,
+    )
+
+
 def _run_generic_web_promotion(
     store: PostgresRecordStore,
     control_plane_root: Path,
@@ -531,12 +544,7 @@ def _run_generic_web_promotion(
     step: ClientReleaseStep,
     backup_record_id: str,
 ) -> str:
-    request = GenericWebProdPromotionRequest(
-        product=profile.product,
-        artifact_id=decision.checklist.candidate.artifact_id,
-        source_git_ref=decision.checklist.candidate.source_commit,
-        backup_record_id=backup_record_id,
-    )
+    request = client_release_promotion_request(profile, decision, backup_record_id)
     lane = next(lane for lane in profile.lanes if lane.instance == "prod")
     grant = client_release_grant(
         decision=decision,

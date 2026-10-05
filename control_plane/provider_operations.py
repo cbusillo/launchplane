@@ -124,6 +124,12 @@ class ProviderOperationLease(Protocol):
 
 
 @runtime_checkable
+class ProviderEvidenceLease(Protocol):
+    def evidence_reservation(self) -> LaunchplaneIdempotencyRecord:
+        """Snapshot the lease identity for a transactionally fenced evidence write."""
+
+
+@runtime_checkable
 class DurableProviderMutationAdapter(Protocol):
     def target_key(self) -> str:
         """Return the stable key used to fence concurrent mutations of one target."""
@@ -318,6 +324,10 @@ class _ReservationHeartbeat:
         with self._lock:
             self._renew_locked()
 
+    def evidence_reservation(self) -> LaunchplaneIdempotencyRecord:
+        with self._lock:
+            return self._reservation
+
     def checkpoint_effect(self, phase: str) -> None:
         normalized_phase = phase.strip()
         if not normalized_phase:
@@ -403,7 +413,13 @@ def run_durable_provider_operation(
     lease_seconds: int = 300,
     heartbeat_interval_seconds: float | None = None,
     target_supersession: ProviderTargetSupersession | None = None,
+    allow_mutation: bool = True,
 ) -> DurableProviderOperationResult:
+    """Run or observe a fenced operation.
+
+    ``allow_mutation=False`` keeps observation and completion adoption,
+    but forbids applying either a fresh or reacquired reservation.
+    """
     resolved_heartbeat_interval = _resolve_heartbeat_interval(
         lease_seconds=lease_seconds,
         heartbeat_interval_seconds=heartbeat_interval_seconds,
@@ -437,7 +453,8 @@ def run_durable_provider_operation(
     reservation = reservation_result.record
 
     if (
-        decision == "target_busy"
+        allow_mutation
+        and decision == "target_busy"
         and reservation.state == "reconcile_required"
         and target_supersession is not None
         and target_supersession.quiescence_check(reservation)
@@ -487,9 +504,21 @@ def run_durable_provider_operation(
             lease_owner=lease_owner,
             lease_seconds=lease_seconds,
             heartbeat_interval_seconds=resolved_heartbeat_interval,
+            allow_mutation=allow_mutation,
         )
     if decision != "acquired":
         raise RuntimeError(f"Unsupported mutation reservation decision: {decision}")
+    if reservation is None:
+        raise RuntimeError("An acquired provider operation requires its reservation.")
+    if not allow_mutation:
+        release = store.release_reserved_mutation(reservation=reservation)
+        if release.status == "released":
+            return DurableProviderOperationResult(
+                "reconcile_required", None, 409, _reconcile_required_payload()
+            )
+        return _mark_reconcile_required(
+            store=store, reservation=reservation, reconciliation_key=reconciliation_key
+        )
 
     provider_operation_key = build_provider_operation_key(
         scope=scope,
@@ -750,6 +779,7 @@ def _reconcile(
     lease_owner: str,
     lease_seconds: int,
     heartbeat_interval_seconds: float,
+    allow_mutation: bool,
 ) -> DurableProviderOperationResult:
     bound_reconciliation_key = (
         fallback_record.reconciliation_key
@@ -785,7 +815,11 @@ def _reconcile(
     provider_effect_started = bool(
         fallback_record is not None and fallback_record.provider_effect_started_at
     )
-    if observation.outcome == "absent" and (not provider_effect_started or observation.retry_safe):
+    if (
+        allow_mutation
+        and observation.outcome == "absent"
+        and (not provider_effect_started or observation.retry_safe)
+    ):
         if fallback_record is None:
             return DurableProviderOperationResult(
                 "reconcile_required",
