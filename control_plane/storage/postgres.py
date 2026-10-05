@@ -19521,6 +19521,53 @@ class PostgresRecordStore(HumanSessionStore):
             )
         )
 
+    def create_release_review_decision_record_if_absent(
+        self, record: ReleaseReviewDecisionRecord
+    ) -> ReleaseReviewDecisionRecord:
+        """Insert once; a competing replica receives the stored decision unchanged."""
+        with self._session_factory() as session:
+            row = LaunchplaneReleaseReviewDecisionRow(
+                record_id=record.record_id,
+                product=record.product,
+                decided_at=record.decided_at,
+                payload=self._payload_dict(record),
+            )
+            session.add(row)
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                existing = session.get(LaunchplaneReleaseReviewDecisionRow, record.record_id)
+                if existing is None:
+                    raise
+                return ReleaseReviewDecisionRecord.model_validate(existing.payload)
+            session.refresh(row)
+            return ReleaseReviewDecisionRecord.model_validate(row.payload)
+
+    def record_release_review_decision_publication(
+        self, *, record_id: str, release_issue_url: str
+    ) -> ReleaseReviewDecisionRecord:
+        """Publish an existing decision once, preserving its audit and any stored URL."""
+        if not release_issue_url.strip():
+            raise ValueError("Release decision publication requires an issue URL.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            statement = select(LaunchplaneReleaseReviewDecisionRow).where(
+                LaunchplaneReleaseReviewDecisionRow.record_id == record_id
+            )
+            if self.database_dialect_name != "sqlite":
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(record_id)
+            stored = ReleaseReviewDecisionRecord.model_validate(row.payload)
+            if stored.release_issue_url:
+                return stored
+            published = stored.model_copy(update={"release_issue_url": release_issue_url})
+            row.payload = self._payload_dict(published)
+            session.commit()
+            return published
+
     def list_release_review_decision_records(
         self, *, product: str, limit: int | None = None
     ) -> tuple[ReleaseReviewDecisionRecord, ...]:
