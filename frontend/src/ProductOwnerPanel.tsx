@@ -1,5 +1,5 @@
 import { Eye, LoaderCircle, RotateCcw, Save, UserCheck, UserX } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { applyProductImageRepository, applyProductProductionUse, applyProductOwner, LaunchplaneApiError, readProductProfile, readProductProfileMutationReceipt } from "./api";
 import { recoverBrowserOperationState, type BrowserOperationFailureCertainty } from "./browser-operation";
@@ -285,8 +285,9 @@ export function ProductOwnerPanel({
           ) : null}
           {applyOperation.state.requiresIdempotencyContinuity && !plannedDraft ? (
             <ProfileMutationRecovery product={product} fixtureMode={fixtureMode} field="owner" operation={applyOperation}
-              onCompleted={async () => {
-                const { profile } = await readProductProfile(product);
+              onCompleted={async (signal) => {
+                const { profile } = await readProductProfile(product, signal);
+                if (signal.aborted) return;
                 setResource({ error: "", owner: productOwnerFromRecord(profile.owner), status: "ready" });
                 clearPlan();
               }} />
@@ -600,8 +601,9 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
       {applyOperation.state.requiresIdempotencyContinuity && !reviewed ? (
         <ProfileMutationRecovery product={product} fixtureMode={fixtureMode}
           field={field === "image" ? "image-repository" : "production-use"}
-          operation={applyOperation} onCompleted={async () => {
-            const next = await readValue();
+          operation={applyOperation} onCompleted={async (signal) => {
+            const next = await readValue(signal);
+            if (signal.aborted) return;
             setCurrent(next.value); setValue(next.suggested); setReason("");
             setReviewed(null);
           }} />
@@ -638,30 +640,39 @@ function ProfileMutationRecovery({ product, fixtureMode, field, operation, onCom
   fixtureMode: DevFixtureMode;
   field: "owner" | "image-repository" | "production-use";
   operation: BrowserOperationController<never, AcceptedEvidenceResponse>;
-  onCompleted: () => Promise<void>;
+  onCompleted: (signal: AbortSignal) => Promise<void>;
 }) {
+  const abortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => abortRef.current?.abort(), []);
   const [checking, setChecking] = useState(false);
   const [message, setMessage] = useState("");
   async function check() {
     const identity = operation.state.identity;
     if (!identity || checking || fixtureMode) return;
+    const controller = new AbortController();
+    abortRef.current = controller;
     setChecking(true); setMessage("");
     try {
-      const receipt = await readProductProfileMutationReceipt(product, field, identity.idempotencyKey);
+      const receipt = await readProductProfileMutationReceipt(product, field, identity.idempotencyKey, controller.signal);
+      if (controller.signal.aborted) return;
       if (receipt.state !== "completed" || receipt.product !== product || receipt.field !== field ||
           receipt.idempotency_key !== identity.idempotencyKey || !receipt.original_trace_id) {
         setMessage("Launchplane cannot yet prove the original operation completed. Keep this tab and key; check again later. Another change remains locked.");
         return;
       }
       // Refresh first: a failed read keeps the recovery action available.
-      await onCompleted();
+      await onCompleted(controller.signal);
+      if (controller.signal.aborted) return;
       if (!operation.reconcile(identity, { trace_id: receipt.trace_id,
         original_trace_id: receipt.original_trace_id, replayed: true })) {
         setMessage("The retained operation changed while checking. Keep its key and check again.");
       }
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "The original operation could not be checked. Keep this tab and key.");
-    } finally { setChecking(false); }
+      if (!controller.signal.aborted) setMessage(error instanceof Error ? error.message : "The original operation could not be checked. Keep this tab and key.");
+    } finally {
+      if (abortRef.current === controller) abortRef.current = null;
+      if (!controller.signal.aborted) setChecking(false);
+    }
   }
   return <div>
     <button className="button" disabled={checking || Boolean(fixtureMode)} onClick={() => void check()} type="button">

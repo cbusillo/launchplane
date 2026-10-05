@@ -299,7 +299,8 @@ test("a late legacy receipt cannot replace another product's Client", async ({ p
   await expect(other).toBeVisible();
   await held!.fulfill({ json: { trace_id: "late-read", product: "atlas-commerce", field: "owner",
     idempotency_key: "navigation-original", state: "completed", original_trace_id: "original-save" } }).catch(() => {});
-  await expect.poll(() => page.evaluate(() => sessionStorage.getItem("launchplane.browser-operation.atlas-commerce-owner-apply"))).toBeNull();
+  await expect.poll(() => held!.request().failure() !== null).toBe(true);
+  expect(await page.evaluate(() => JSON.parse(sessionStorage.getItem("launchplane.browser-operation.atlas-commerce-owner-apply")!).identity.idempotencyKey)).toBe("navigation-original");
   await expect(other.getByLabel("GitHub login")).toBeEnabled();
   await expect(page.getByRole("region", { name: "example-owner (id 9001)", exact: true })).toHaveCount(0);
 });
@@ -316,4 +317,71 @@ test("legacy fixture recovery never reads a service receipt", async ({ page }) =
   await expect(page.getByRole("button", { name: "Check original operation", exact: true })).toBeDisabled();
   await expect(page.getByText("Receipts are unavailable in fixtures.", { exact: false })).toBeVisible();
   expect(receipts).toEqual([]);
+});
+
+test("an old receipt check cannot erase a newer uncertain Save after returning to the product", async ({ page }) => {
+  await mockProduct(page);
+  await page.goto("/ui/products/atlas-commerce");
+  await page.evaluate(() => sessionStorage.setItem("launchplane.browser-operation.atlas-commerce-owner-apply", JSON.stringify({
+    phase: "uncertain", requiresIdempotencyContinuity: true,
+    identity: { idempotencyKey: "old-key", requestFingerprint: "old-request" },
+  })));
+  let oldCheck: Route | null = null;
+  let checks = 0;
+  await page.route("**/mutation-receipts/owner?*", async route => {
+    checks += 1;
+    if (checks === 1) { oldCheck = route; return; }
+    await route.fulfill({ json: { trace_id: "second-check", product: "atlas-commerce", field: "owner",
+      idempotency_key: "old-key", state: "completed", original_trace_id: "old-completion" } });
+  });
+  await page.route("**/v1/product-profiles/atlas-commerce/owner", async route => {
+    if (route.request().postDataJSON().mode === "apply") await route.abort();
+    else await respondWithPlan(route);
+  });
+  await page.reload();
+  const panel = page.getByRole("region", { name: "example-owner (id 9001)", exact: true });
+  await panel.getByRole("button", { name: "Check original operation", exact: true }).click();
+  await expect.poll(() => oldCheck !== null).toBe(true);
+  await page.getByRole("link", { name: "Product Ops", exact: true }).click();
+  await page.locator(".product-directory-row").filter({ hasText: "Atlas Commerce" }).click();
+  await panel.getByRole("button", { name: "Check original operation", exact: true }).click();
+  await expect(panel.getByLabel("GitHub login")).toBeEnabled();
+  await panel.getByLabel("GitHub login").fill("newer-client");
+  await panel.getByLabel("Change reason").fill("A new reviewed Save.");
+  await panel.getByRole("button", { name: "Preview change", exact: true }).click();
+  await panel.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(panel.getByRole("button", { name: "Retry save", exact: true })).toBeEnabled();
+  const key = await page.evaluate(() => JSON.parse(sessionStorage.getItem("launchplane.browser-operation.atlas-commerce-owner-apply")!).identity.idempotencyKey);
+  expect(key).not.toBe("old-key");
+  await oldCheck!.fulfill({ json: { trace_id: "late-old-check", product: "atlas-commerce", field: "owner",
+    idempotency_key: "old-key", state: "completed", original_trace_id: "old-completion" } }).catch(() => {});
+  // Wait for either late clearance or the next browser turn without trusting only an immediate assertion.
+  await expect(panel.getByRole("button", { name: "Retry save", exact: true })).toBeEnabled();
+  await page.reload();
+  await expect(panel.getByLabel("GitHub login")).toBeDisabled();
+  expect(await page.evaluate(() => JSON.parse(sessionStorage.getItem("launchplane.browser-operation.atlas-commerce-owner-apply")!).identity.idempotencyKey)).toBe(key);
+  expect(await page.evaluate(() => JSON.parse(sessionStorage.getItem("launchplane:product-profile-draft:atlas-commerce:owner")!).request.github_login)).toBe("newer-client");
+});
+
+test("leaving during receipt profile refresh preserves the retained key", async ({ page }) => {
+  await mockProduct(page);
+  await page.goto("/ui/products/atlas-commerce");
+  await page.evaluate(() => sessionStorage.setItem("launchplane.browser-operation.atlas-commerce-owner-apply", JSON.stringify({
+    phase: "uncertain", requiresIdempotencyContinuity: true,
+    identity: { idempotencyKey: "refresh-key", requestFingerprint: "refresh-request" },
+  })));
+  await page.route("**/mutation-receipts/owner?*", route => route.fulfill({ json: {
+    trace_id: "read", product: "atlas-commerce", field: "owner", idempotency_key: "refresh-key",
+    state: "completed", original_trace_id: "original-save",
+  } }));
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Check original operation", exact: true })).toBeVisible();
+  let refresh: Route | null = null;
+  await page.route("**/v1/product-profiles/atlas-commerce", route => { refresh = route; });
+  await page.getByRole("button", { name: "Check original operation", exact: true }).click();
+  await expect.poll(() => refresh !== null).toBe(true);
+  await page.getByRole("link", { name: "Product Ops", exact: true }).click();
+  await expect.poll(() => refresh!.request().failure() !== null).toBe(true);
+  expect(await page.evaluate(() => JSON.parse(sessionStorage.getItem("launchplane.browser-operation.atlas-commerce-owner-apply")!).identity.idempotencyKey)).toBe("refresh-key");
+  await refresh!.abort().catch(() => {});
 });

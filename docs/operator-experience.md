@@ -670,7 +670,7 @@ that original `operation_key`. This is a read, not a retry or reset. The existin
 original caller's idempotency scope and the allowlisted profile write route.
 Only a completed, atomically persisted applied response for that product allows
 the panel to refresh the current profile and unlock a new preview. The original
-trace remains visible; the current profile does not stand in for the receipt.
+trace remains visible until reload; the current profile does not stand in for the receipt.
 Missing, running, reconciliation-required, denied or unavailable evidence leaves
 the original key locked. Keep the tab and check again later. Switching caller
 identity cannot recover another caller's receipt. No new key or guessed request
@@ -682,3 +682,7 @@ sent or failed before its atomic profile write. Checking again cannot settle
 those keys. They stay locked; this read-only recovery does not fence a delayed
 original request or discard its key. The recovery control is disabled in local
 fixture mode, which cannot supply authoritative service evidence.
+
+Leaving the panel cancels its receipt check and profile refresh. A late response
+from an unmounted panel cannot reconcile or clear a later operation's stored key
+or reviewed request. Return to the product to check the retained original again.

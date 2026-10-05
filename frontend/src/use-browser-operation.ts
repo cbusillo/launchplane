@@ -173,6 +173,7 @@ export function useBrowserOperationController<
   }
 
   function reconcile(identity: BrowserOperationIdentity, envelope: BrowserOperationEnvelope) {
+    if (!mountedRef.current || scopeRef.current !== scope) return false;
     try {
       updateState(reconcileBrowserOperation(stateRef.current, identity, envelope));
       return true;
