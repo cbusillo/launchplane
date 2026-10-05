@@ -43,8 +43,12 @@ for (const environmentView of [false, true]) {
     await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: "csrf", identity: fixtures.identity } }));
     await page.route("**/v1/products", async route => {
       inventoryReads++;
-      if (delayInventory) await new Promise<void>(resolve => { releaseInventory = resolve; });
-      return route.fulfill({ json: { status: "ok", trace_id: "products", products: responseMode === "fresh" ? currentProof(fixtures.products) : fixtures.products } });
+      const products = responseMode === "fresh" ? currentProof(fixtures.products) : structuredClone(fixtures.products);
+      if (delayInventory) {
+        products[0].display_name = "Obsolete delayed inventory";
+        await new Promise<void>(resolve => { releaseInventory = resolve; });
+      }
+      return route.fulfill({ json: { status: "ok", trace_id: "products", products } });
     });
     const productUrl = `**/v1/products/${fixtures.product.product}`;
     const detailUrl = `${productUrl}/environments/testing`;
@@ -92,22 +96,27 @@ for (const environmentView of [false, true]) {
     await expect(page.getByText("Evidence read unavailable", { exact: false }).first()).toBeVisible();
     await expect(signal).toContainText("Stale");
     await page.screenshot({ path: `../tmp/browser-smoke/open-${environmentView ? "environment" : "workspace"}-failed-${testInfo.project.name}.png`, fullPage: true });
-    responseMode = "unverified";
+    // Immediate failures with the same status must keep retrying even if React
+    // batches loading and error into one render.
     await page.clock.runFor(60_000);
     await expect.poll(() => reads).toBe(initialReads + 2);
+    await expect(signal).toContainText("Stale");
+    responseMode = "unverified";
+    await page.clock.runFor(60_000);
+    await expect.poll(() => reads).toBe(initialReads + 3);
     await expect(signal).toHaveAttribute("data-tone", "warning");
     await expect(signal).toContainText("Recorded");
     responseMode = "fresh";
     await page.evaluate(() => Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" }));
     await page.clock.runFor(60_000);
-    expect(reads).toBe(initialReads + 2);
+    expect(reads).toBe(initialReads + 3);
     await page.evaluate(() => {
       Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
       document.dispatchEvent(new Event("visibilitychange"));
       window.dispatchEvent(new Event("focus"));
       window.dispatchEvent(new Event("focus"));
     });
-    await expect.poll(() => reads).toBe(initialReads + 3);
+    await expect.poll(() => reads).toBe(initialReads + 4);
     await expect(signal).toHaveAttribute("data-tone", environmentView ? "pass" : "verified");
     await expect(signal).not.toContainText("Stale");
     // Inventory has its own read lifecycle, including the rail's lane evidence.
@@ -120,9 +129,12 @@ for (const environmentView of [false, true]) {
     const manualRefresh = page.getByRole("button", { name: "Refresh current evidence" });
     await expect(manualRefresh).toBeEnabled();
     delayInventory = false;
+    const delayedInventoryReads = inventoryReads;
     await manualRefresh.click();
+    await expect.poll(() => inventoryReads).toBe(delayedInventoryReads + 1);
     releaseInventory!();
     await expect(manualRefresh.locator("svg")).not.toHaveClass(/spin/);
+    await expect(page.locator(".rail-products")).not.toContainText("Obsolete delayed inventory");
     responseMode = "delay";
     releaseRead = undefined;
     await page.clock.runFor(60_000);
@@ -159,6 +171,7 @@ for (const view of ["actions", "runtime-settings", "managed-secrets"]) {
     let detailReads = 0;
     let configReads = 0;
     let readinessReads = 0;
+    let expectedArtifact = "";
     const mutations: string[] = [];
     page.on("request", request => {
       if (request.url().includes("/v1/") && request.method() !== "GET") mutations.push(request.url());
@@ -177,7 +190,9 @@ for (const view of ["actions", "runtime-settings", "managed-secrets"]) {
     });
     await page.route("**/operational-readiness?*", route => {
       readinessReads++;
-      const requestedAction = new URL(route.request().url()).searchParams.get("action");
+      const query = new URL(route.request().url()).searchParams;
+      const requestedAction = query.get("action");
+      expectedArtifact = query.get("expected_current_artifact_id") ?? "";
       return route.fulfill({ json: { status: "ok", readiness: { ...fixtures.readiness,
         action: { ...fixtures.readiness.action, requested_action: requestedAction } } } });
     });
@@ -195,6 +210,8 @@ for (const view of ["actions", "runtime-settings", "managed-secrets"]) {
     const observedConfigReads = configReads;
     const observedReadinessReads = readinessReads;
     const selectedAction = view === "actions" ? await page.getByLabel("Inspect exact action").inputValue() : "";
+    // Wall-clock corrections must not stop the monotonic refresh timer.
+    await page.clock.setSystemTime(new Date(Date.parse(fixtures.detail.provenance.refreshed_at) - 3600_000));
     await page.clock.runFor(60_000);
     await expect.poll(() => detailReads).toBe(observedDetailReads + 1);
     await expect(page.getByText("Refreshing evidence", { exact: true })).not.toBeVisible();
@@ -205,6 +222,11 @@ for (const view of ["actions", "runtime-settings", "managed-secrets"]) {
       await page.getByRole("button", { name: "Refresh current evidence" }).click();
       await expect.poll(() => readinessReads).toBeGreaterThan(observedReadinessReads);
       await expect(page.getByLabel("Inspect exact action")).toHaveValue(selectedAction);
+      const afterManualReadinessReads = readinessReads;
+      fixtures.detail.target.expected_runtime_identity.artifact_id = "fixture-next-expected-artifact";
+      await page.clock.runFor(60_000);
+      await expect.poll(() => readinessReads).toBe(afterManualReadinessReads + 1);
+      expect(expectedArtifact).toBe("fixture-next-expected-artifact");
     } else {
       await expect(page.locator('.product-config-field').first()
         .getByLabel(view === "runtime-settings" ? "New value" : "Write-only value")).toHaveValue("local-fixture-draft");

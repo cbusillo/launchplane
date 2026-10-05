@@ -21,9 +21,9 @@ export function useEvidenceRefresh<T>(
 
     let timer: number;
     let requested = false;
-    const dueAt = Date.now() + READ_REFRESH_INTERVAL_MS;
+    const dueAt = performance.now() + READ_REFRESH_INTERVAL_MS;
     const update = () => {
-      if (requested || document.visibilityState !== "visible" || Date.now() < dueAt) return;
+      if (requested || document.visibilityState !== "visible" || performance.now() < dueAt) return;
       requested = true;
       window.clearTimeout(timer);
       refreshRef.current();
@@ -36,5 +36,5 @@ export function useEvidenceRefresh<T>(
       window.removeEventListener("focus", update);
       document.removeEventListener("visibilitychange", update);
     };
-  }, [enabled, key, resource.status, resource.statusCode]);
+  }, [enabled, key, resource]);
 }
