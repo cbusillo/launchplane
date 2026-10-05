@@ -8,6 +8,7 @@ from control_plane.contracts.artifact_identity import ArtifactAddonSource
 
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.release_review import build_release_review
+from control_plane.release_review_record import publish_release_decision
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -23,6 +24,38 @@ from tests.test_release_review import github_read, profile, seed
 
 
 class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_accept_publishes_saved_decision_through_storage_lock(self) -> None:
+        from tests.test_release_review_record import FakeReleaseIssues
+
+        github = FakeReleaseIssues()
+        with (
+            patch(
+                "control_plane.http_app.publish_release_decision", wraps=publish_release_decision
+            ),
+            patch(
+                "control_plane.release_review_record.resolve_launchplane_github_token",
+                return_value="test-token",
+            ),
+            patch(
+                "control_plane.release_review_record.github_api_request", side_effect=github.request
+            ),
+            patch.object(
+                self.store,
+                "release_review_publication_lock",
+                wraps=self.store.release_review_publication_lock,
+            ) as publication_lock,
+        ):
+            response = await self.post()
+        self.assertEqual(response.status_code, 200, response.text)
+        saved = self.store.list_release_review_decision_records(product="example-site")[0]
+        publication_lock.assert_called_once_with(record_id=saved.record_id)
+        self.assertEqual(len(github.issues), 1)
+        self.assertEqual(
+            response.json()["review"]["latest_decision"]["release_issue_url"],
+            saved.release_issue_url,
+        )
+        self.assertTrue(response.json()["review"]["approved"])
+
     async def test_client_can_accept_again_after_a_stopped_release(self) -> None:
         from control_plane.client_release import ClientReleaseRunView
 
