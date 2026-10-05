@@ -91,7 +91,14 @@ class _GitHubTokenResolver:
     def __init__(self) -> None:
         self.calls: list[tuple[Path, str]] = []
 
-    def __call__(self, *, control_plane_root: Path, context_name: str) -> str:
+    def __call__(
+        self,
+        *,
+        control_plane_root: Path,
+        context_name: str,
+        repository: str = "",
+        purpose: str = "repository_read",
+    ) -> str:
         self.calls.append((control_plane_root, context_name))
         return "managed-token"
 

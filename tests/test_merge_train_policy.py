@@ -121,6 +121,14 @@ class MergeTrainPolicyTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             MergeTrainPolicy.model_validate(payload)
         token_source["env_var"] = ""
+        with self.assertRaisesRegex(ValidationError, "runtime_context token source is retired"):
+            MergeTrainPolicy.model_validate(payload)
+        token_source.pop("runtime_context")
+        token_source["github_app"] = {
+            "app_id": 42,
+            "repository_id": 123,
+            "private_key_context": "test",
+        }
         managed = MergeTrainPolicy.model_validate(payload)
         self.assertNotEqual(managed.policy_sha256, historical.policy_sha256)
         self.assertEqual(
@@ -301,7 +309,9 @@ class MergeTrainPolicyTests(unittest.TestCase):
         excluded_change_payload = repository_policy.model_dump(mode="json")
         excluded_change_payload["merge_identity"]["name"] = "replacement-identity"
         excluded_change_payload["service_authz"]["context"] = "replacement-context"
-        excluded_change_payload["github_token"]["runtime_context"] = "replacement_context"
+        excluded_change_payload["github_token"]["github_app"]["private_key_context"] = (
+            "replacement_context"
+        )
         excluded_change_payload["scheduler"]["enabled"] = True
         excluded_change = MergeTrainRepositoryPolicy.model_validate(excluded_change_payload)
         selected_change_payload = repository_policy.model_dump(mode="json")
@@ -341,7 +351,7 @@ class MergeTrainPolicyTests(unittest.TestCase):
         self.assertEqual(codex_skills_policy.blocked_label, "merge-blocked")
         self.assertEqual(codex_skills_policy.stack_child_disposition_label, "stack-landed")
         self.assertEqual(codex_skills_policy.merge_method, "merge")
-        self.assertEqual(codex_skills_policy.github_token.runtime_context, "example_context")
+        self.assertIsNotNone(codex_skills_policy.github_token.github_app)
         self.assertEqual(codex_skills_policy.service_authz.action, "merge_train.run_once")
         self.assertEqual(codex_skills_policy.service_authz.product, "launchplane")
         self.assertEqual(codex_skills_policy.service_authz.context, "launchplane")
@@ -915,10 +925,12 @@ failure_policy = "pause_train"
 label_required = true
 allowed_actor_roles = ["repo_owner", "repo_admin"]
 [policies.merge_identity]
-kind = "github_actions_oidc"
-name = "launchplane"
-[policies.github_token]
-runtime_context = "example_context"
+kind = "github_app"
+name = "test-delivery-app"
+[policies.github_token.github_app]
+app_id = 42
+repository_id = 123
+private_key_context = "example_context"
 """,
             )
         ),

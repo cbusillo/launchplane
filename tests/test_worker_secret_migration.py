@@ -20,7 +20,6 @@ from control_plane.storage.worker_secret_migration import (
     remove_copied_secrets,
     set_integration_status,
 )
-from control_plane.workflows.launchplane import resolve_launchplane_github_token
 
 RUNTIME = control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
 
@@ -114,7 +113,11 @@ class WorkerSecretMigrationTests(unittest.TestCase):
         )
 
     def github_token(self, context: str) -> str:
-        return resolve_launchplane_github_token(control_plane_root=self.root, context_name=context)
+        return control_plane_secrets.resolve_launchplane_service_secret(
+            context_name=context, binding_key="GITHUB_TOKEN"
+        ) or runtime_environments.resolve_runtime_context_values(
+            control_plane_root=self.root, context_name=context
+        ).get("GITHUB_TOKEN", "")
 
     def app_values(self) -> dict[str, str]:
         return runtime_environments.resolve_runtime_environment_values(

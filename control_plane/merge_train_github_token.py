@@ -13,7 +13,6 @@ from control_plane.github_app_identity import (
     GitHubAppPermissionError,
     mint_merge_train_installation_token,
 )
-from control_plane.workflows.launchplane import resolve_launchplane_github_token
 
 MERGE_TRAIN_GITHUB_APP_SECRET_INTEGRATION = "merge_train_github_app"
 _LOGGER = logging.getLogger(__name__)
@@ -52,13 +51,5 @@ def resolve_merge_train_github_token(
                 "Merge train App credentials unavailable: resolution_failed (%s)",
                 type(error).__name__,
             )
-            return ""
-    if source.runtime_context:
-        try:
-            return resolve_launchplane_github_token(
-                control_plane_root=control_plane_root,
-                context_name=source.runtime_context,
-            )
-        except (click.ClickException, SQLAlchemyError, OSError, ValueError):
             return ""
     return ""

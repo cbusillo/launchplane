@@ -2306,7 +2306,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("GITHUB_TOKEN", applied_environment)
         self.assertNotIn("GH_TOKEN", applied_environment)
         self.assertEqual(applied_environment["ODOO_DB_PASSWORD"], "template-db-secret")
-        self.assertEqual(launchplane_comment_token, "context-record-comment-token")
+        self.assertEqual(launchplane_comment_token, "")
 
     async def test_odoo_preview_blanks_copied_integration_credentials_without_a_preview_rule(
         self,
@@ -2358,6 +2358,29 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                 (lane_shopify, lane_smtp_pass),
                 (unrelated_rule,),
                 ["SHOPIFY_API_TOKEN", "SMTP_PASS"],
+                [],
+            ),
+            (
+                "map_media_push_and_data_credentials",
+                {},
+                (
+                    ("context_instance", "MAPBOX_API_KEY"),
+                    ("context_instance", "UNSPLASH_ACCESS_TOKEN"),
+                    ("context_instance", "TENOR_API_KEY"),
+                    ("context_instance", "WEB_PUSH_VAPID_PRIVATE_KEY"),
+                    (
+                        "context_instance",
+                        "ODOO_OVERRIDE_SECRET__CONFIG_PARAM__CM_DATA__DB__PASSWORD",
+                    ),
+                ),
+                (unrelated_rule,),
+                [
+                    "MAPBOX_API_KEY",
+                    "UNSPLASH_ACCESS_TOKEN",
+                    "TENOR_API_KEY",
+                    "WEB_PUSH_VAPID_PRIVATE_KEY",
+                    "ODOO_OVERRIDE_SECRET__CONFIG_PARAM__CM_DATA__DB__PASSWORD",
+                ],
                 [],
             ),
             (

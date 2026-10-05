@@ -8,11 +8,11 @@ Launchplane projects engineering review into the `launchplane/engineering-review
 GitHub check as a neutral advisory observation. GitHub is a visibility and routing
 surface; this projection grants no merge, promotion, or deployment authority.
 
-Client preview review uses the `launchplane/owner-review` commit status described
+Client preview review uses the `launchplane/owner-review` check run described
 in [preview-workflow-contract.md](preview-workflow-contract.md#client-review-request).
 The exact-binding `launchplane/owner-acceptance` check is retired. When Launchplane
 next publishes current review feedback, it neutralizes any old App-owned check
-on that head with the title "Retired" and a pointer to the current status. It
+on that head with the title "Retired" and a pointer to the current check. It
 never creates an old check for cleanup and never reads it as merge authority.
 
 ## GitHub App Identity
@@ -47,7 +47,7 @@ pull request, head, and tree evidence.
 
 The retired `/v1/owner-acceptance/project` route and
 `/ui/engineering/owner-acceptance` workbench have been removed. Current preview
-review uses `/ui/owner-review` and the `launchplane/owner-review` commit status.
+review uses `/ui/owner-review` and the `launchplane/owner-review` check run.
 `OwnerReviewStatusPublisher` can neutralize an old `launchplane/owner-acceptance`
 check on the same pull request; it does not evaluate or write old Client events.
 See [`owner-acceptance.md`](owner-acceptance.md).
@@ -65,3 +65,24 @@ failed.
 The retired Client projection is never a required check or merge authority.
 Current product review and release checklist decisions are separate Launchplane
 records, and the release checklist remains the production Client gate.
+
+## Client review check
+
+The same Advisory Checks App publishes `launchplane/owner-review` on the marked
+pull request's exact current head. A waiting review is `in_progress`; acceptance
+is completed with `success`, and requested changes with `failure`. The saved
+Launchplane decision remains authoritative. The check writer verifies repository,
+App, head, output and replay identity; repeated publication reuses the matching
+run. It creates a new in-progress run when an already completed run must wait
+again. The short-lived Checks-only token is revoked after each attempt.
+
+This check is excluded from technical-check aggregation just like engineering
+review. The train's existing separately labelled Client-review gate reads the
+current-head check pinned to the service's configured Advisory App ID; it does
+not accept another App or a legacy commit status. That preserves the existing
+Client veto and does not grant enqueue, merge or deployment power. Historical
+PAT-authored statuses are left as history; the service no
+longer writes commit statuses to neutralize a retired manager signal.
+
+Delivery App credentials for feedback and release-record issues are described in
+[GitHub delivery identity](operations.md#github-delivery-identity).

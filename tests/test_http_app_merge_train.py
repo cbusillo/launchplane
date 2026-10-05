@@ -15,6 +15,7 @@ from control_plane.contracts.merge_train_controller_state import (
     build_merge_train_controller_state_record,
 )
 from control_plane.contracts.merge_train_policy import (
+    MergeTrainGitHubTokenSource,
     MergeTrainPolicy,
     MergeTrainPolicyRecord,
     parse_merge_train_policy_toml,
@@ -2341,9 +2342,8 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 TemporaryDirectory() as temporary_directory_name,
                 patch.dict("os.environ", {"GH_TOKEN": "unrelated-bootstrap-token"}, clear=True),
                 patch(
-                    "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                    "control_plane.http_app.resolve_merge_train_github_token",
                     return_value=managed_token if isinstance(managed_token, str) else "",
-                    side_effect=managed_token if isinstance(managed_token, Exception) else None,
                 ) as resolve_token,
                 patch("control_plane.http_app.UrllibMergeTrainGitHubTransport") as transport,
                 patch(
@@ -2353,7 +2353,13 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             ):
                 state_dir = Path(temporary_directory_name) / "state"
                 policy = build_test_merge_train_policy_with_codex_skills().model_dump(mode="json")
-                policy["policies"][0]["github_token"] = {"runtime_context": "example_context"}
+                policy["policies"][0]["github_token"] = {
+                    "github_app": {
+                        "app_id": 42,
+                        "repository_id": 123,
+                        "private_key_context": "example_context",
+                    }
+                }
                 _seed_merge_train_policy(
                     state_dir,
                     policy=MergeTrainPolicyRecord(
@@ -2381,7 +2387,10 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status_code, expected_status, response.text)
                 resolve_token.assert_called_once_with(
                     control_plane_root=Path(temporary_directory_name),
-                    context_name="example_context",
+                    source=MergeTrainGitHubTokenSource.model_validate(
+                        policy["policies"][0]["github_token"]
+                    ),
+                    repository=policy["policies"][0]["repository"],
                 )
                 self.assertNotIn("managed-test-token", response.text)
                 self.assertNotIn("unrelated-bootstrap-token", response.text)

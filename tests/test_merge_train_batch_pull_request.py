@@ -26,6 +26,8 @@ from control_plane.merge_train_github import (
 from control_plane.release_review_github import owner_test_notes
 from tests.test_merge_train_github import (
     _combined_status,
+    _owner_review_check,
+    _advisory_runtime_records,
     _conversation_rule,
     _review_threads,
     _git_commit,
@@ -300,14 +302,14 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
         original = self.provider.request
 
         def request(*, method: str, path: str, body: dict[str, object] | None = None) -> object:
-            if method == "GET" and "/status?" in path and self.provider.heads[2] in path:
+            if method == "GET" and "/check-runs?" in path and self.provider.heads[2] in path:
                 self.provider.requests.append((method, path, body))
                 statuses: tuple[dict[str, object], ...] = (
                     ()
                     if state["value"] == "missing"
-                    else ({"context": "launchplane/owner-review", "state": state["value"]},)
+                    else (_owner_review_check(state["value"], head_sha=self.provider.heads[2]),)
                 )
-                return _combined_status(statuses=statuses)
+                return {"check_runs": list(statuses)}
             response = original(method=method, path=path, body=body)
             if method == "GET" and path.endswith("/pulls/2") and isinstance(response, dict):
                 response["labels"] = [{"name": "client-check"}]
@@ -321,7 +323,10 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
             repository=self.provider.repository_name,
             owner=SimpleNamespace(review_label="client-check"),
         )
-        store = SimpleNamespace(list_product_profile_records=lambda: (profile,))
+        store = SimpleNamespace(
+            list_product_profile_records=lambda: (profile,),
+            list_runtime_environment_records=_advisory_runtime_records,
+        )
         self.client = GitHubMergeTrainClient(
             transport=self.provider, branch_refresh_store=cast(Any, store)
         )

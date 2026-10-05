@@ -5588,10 +5588,12 @@ failure_policy = "pause_train"
 label_required = true
 allowed_actor_roles = ["repo_owner", "repo_admin"]
 [policies.merge_identity]
-kind = "github_actions_oidc"
-name = "launchplane-merge-train"
-[policies.github_token]
-runtime_context = "example_context"
+kind = "github_app"
+name = "test-delivery-app"
+[policies.github_token.github_app]
+app_id = 42
+repository_id = 123
+private_key_context = "example_context"
 """.strip(),
                 encoding="utf-8",
             )
@@ -5650,10 +5652,12 @@ failure_policy = "pause_train"
 label_required = true
 allowed_actor_roles = ["repo_owner", "repo_admin"]
 [policies.merge_identity]
-kind = "github_actions_oidc"
-name = "launchplane-merge-train"
-[policies.github_token]
-runtime_context = "example_context"
+kind = "github_app"
+name = "test-delivery-app"
+[policies.github_token.github_app]
+app_id = 42
+repository_id = 123
+private_key_context = "example_context"
 """.strip(),
                 encoding="utf-8",
             )
@@ -5723,10 +5727,12 @@ failure_policy = "pause_train"
 label_required = true
 allowed_actor_roles = ["repo_owner"]
 [policies.merge_identity]
-kind = "github_actions_oidc"
-name = "launchplane-merge-train"
-[policies.github_token]
-runtime_context = "example_context"
+kind = "github_app"
+name = "test-delivery-app"
+[policies.github_token.github_app]
+app_id = 42
+repository_id = 123
+private_key_context = "example_context"
 """.strip(),
                 encoding="utf-8",
             )
