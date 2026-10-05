@@ -98,27 +98,34 @@ class MergeTrainPolicyTests(unittest.TestCase):
             MergeTrainPolicy.model_validate({**payload, "policies": [payload["policies"][0], twin]})
 
     def test_token_source_preserves_stored_policy_and_requires_explicit_selection(self) -> None:
-        legacy = build_test_merge_train_policy()
-        payload = legacy.model_dump(mode="json")
-        legacy_digest = legacy.policy_sha256
-        token_source = payload["policies"][0]["github_token"]
-        self.assertNotIn("runtime_context", token_source)
-        self.assertNotIn("github_app", token_source)
-        token_source["runtime_context"] = ""
-        token_source["github_app"] = None
-        restored = MergeTrainPolicy.model_validate(payload)
-        self.assertEqual(restored.policy_sha256, legacy_digest)
-        self.assertEqual(restored.model_dump(mode="json"), legacy.model_dump(mode="json"))
+        payload = build_test_merge_train_policy().model_dump(mode="json")
+        payload["policies"][0]["github_token"] = {"env_var": "GH_TOKEN"}
+        historical = MergeTrainPolicyRecord.model_validate(
+            {
+                "record_id": "historical-env-token",
+                "source": "test",
+                "updated_at": "2026-05-13T21:00:00Z",
+                "policy": payload,
+            }
+        )
+        restored = MergeTrainPolicyRecord.model_validate(historical.model_dump(mode="json"))
+        self.assertEqual(restored.policy_sha256, historical.policy_sha256)
+        self.assertEqual(restored.model_dump(mode="json"), historical.model_dump(mode="json"))
+        with self.assertRaisesRegex(ValidationError, "env_var token source is retired"):
+            MergeTrainPolicy.model_validate(payload)
+        with self.assertRaisesRegex(ValueError, "env_var token source is retired"):
+            historical.policy.require_supported_token_sources()
 
+        token_source = payload["policies"][0]["github_token"]
         token_source["runtime_context"] = "example_context"
         with self.assertRaises(ValidationError):
             MergeTrainPolicy.model_validate(payload)
         token_source["env_var"] = ""
         managed = MergeTrainPolicy.model_validate(payload)
-        self.assertNotEqual(managed.policy_sha256, legacy_digest)
+        self.assertNotEqual(managed.policy_sha256, historical.policy_sha256)
         self.assertEqual(
             merge_train_repository_policy_delivery_semantics_sha256(managed.policies[0]),
-            merge_train_repository_policy_delivery_semantics_sha256(legacy.policies[0]),
+            merge_train_repository_policy_delivery_semantics_sha256(historical.policy.policies[0]),
         )
 
     def test_provider_delivery_expectation_normalizes_exact_provider_semantics(self) -> None:
@@ -294,7 +301,7 @@ class MergeTrainPolicyTests(unittest.TestCase):
         excluded_change_payload = repository_policy.model_dump(mode="json")
         excluded_change_payload["merge_identity"]["name"] = "replacement-identity"
         excluded_change_payload["service_authz"]["context"] = "replacement-context"
-        excluded_change_payload["github_token"]["env_var"] = "REPLACEMENT_TOKEN"
+        excluded_change_payload["github_token"]["runtime_context"] = "replacement_context"
         excluded_change_payload["scheduler"]["enabled"] = True
         excluded_change = MergeTrainRepositoryPolicy.model_validate(excluded_change_payload)
         selected_change_payload = repository_policy.model_dump(mode="json")
@@ -334,7 +341,7 @@ class MergeTrainPolicyTests(unittest.TestCase):
         self.assertEqual(codex_skills_policy.blocked_label, "merge-blocked")
         self.assertEqual(codex_skills_policy.stack_child_disposition_label, "stack-landed")
         self.assertEqual(codex_skills_policy.merge_method, "merge")
-        self.assertEqual(codex_skills_policy.github_token.env_var, "GH_TOKEN")
+        self.assertEqual(codex_skills_policy.github_token.runtime_context, "example_context")
         self.assertEqual(codex_skills_policy.service_authz.action, "merge_train.run_once")
         self.assertEqual(codex_skills_policy.service_authz.product, "launchplane")
         self.assertEqual(codex_skills_policy.service_authz.context, "launchplane")
@@ -427,43 +434,16 @@ class MergeTrainPolicyTests(unittest.TestCase):
         legacy_sha256 = hashlib.sha256(
             json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
-        policy = parse_merge_train_policy_toml(
-            textwrap.dedent(
-                """
-                schema_version = 1
-
-                [[policies]]
-                repository = "example/app"
-                base_branch = "main"
-                enqueue_label = "ready-to-merge"
-                blocked_label = "merge-blocked"
-                stack_child_disposition_label = "stack-landed"
-                merge_method = "merge"
-                failure_policy = "pause_train"
-                [policies.enqueue]
-                label_required = true
-                allowed_actor_roles = ["repo_owner"]
-                [policies.merge_identity]
-                kind = "github_app"
-                name = "launchplane"
-                [policies.service_authz]
-                action = "merge_train.run_once"
-                product = "launchplane"
-                context = "launchplane"
-                [policies.github_token]
-                env_var = "GH_TOKEN"
-                """
-            ).strip()
+        record = MergeTrainPolicyRecord.model_validate(
+            {
+                "record_id": "merge-train-policy-legacy",
+                "source": "test",
+                "updated_at": "2026-05-13T21:00:00Z",
+                "policy_sha256": legacy_sha256,
+                "policy": legacy_payload,
+            }
         )
-
-        self.assertEqual(merge_train_policy_sha256(policy), legacy_sha256)
-        record = MergeTrainPolicyRecord(
-            record_id="merge-train-policy-legacy",
-            source="test",
-            updated_at="2026-05-13T21:00:00Z",
-            policy_sha256=merge_train_policy_sha256(policy),
-            policy=policy,
-        )
+        self.assertEqual(merge_train_policy_sha256(record.policy), legacy_sha256)
         self.assertFalse(record.policy.policies[0].scheduler.enabled)
 
     def test_policy_record_rejects_timezone_naive_updated_at(self) -> None:
@@ -938,7 +918,7 @@ allowed_actor_roles = ["repo_owner", "repo_admin"]
 kind = "github_actions_oidc"
 name = "launchplane"
 [policies.github_token]
-env_var = "GH_TOKEN"
+runtime_context = "example_context"
 """,
             )
         ),

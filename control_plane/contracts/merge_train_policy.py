@@ -152,6 +152,7 @@ class MergeTrainGitHubAppSource(BaseModel):
 class MergeTrainGitHubTokenSource(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # Retained only for historical payload serialization and digest verification.
     env_var: str = ""
     runtime_context: str = Field(
         default="",
@@ -385,6 +386,7 @@ class MergeTrainPolicy(BaseModel):
     def _validate_policy(self, info: ValidationInfo) -> "MergeTrainPolicy":
         if not (info.context and info.context.get("historical_policy_record")):
             self.require_advisory_review()
+            self.require_supported_token_sources()
         if not self.policies:
             raise ValueError("merge train policy requires at least one repository policy")
         seen_keys: set[str] = set()
@@ -399,6 +401,12 @@ class MergeTrainPolicy(BaseModel):
     def require_advisory_review(self) -> None:
         if any(policy.engineering_review_mode != "advisory" for policy in self.policies):
             raise ValueError("Required engineering-review merge mode is retired; use advisory")
+
+    def require_supported_token_sources(self) -> None:
+        if any(policy.github_token.env_var for policy in self.policies):
+            raise ValueError(
+                "Merge train env_var token source is retired; use github_app or runtime_context"
+            )
 
     @property
     def policy_sha256(self) -> str:

@@ -1,7 +1,6 @@
 """Resolve only the credential source declared by a merge-train policy."""
 
 import logging
-import os
 from pathlib import Path
 
 import click
@@ -62,6 +61,4 @@ def resolve_merge_train_github_token(
             )
         except (click.ClickException, SQLAlchemyError, OSError, ValueError):
             return ""
-    if source.env_var:
-        return os.environ.get(source.env_var, "").strip()
     return ""
