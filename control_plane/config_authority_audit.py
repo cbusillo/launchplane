@@ -1768,7 +1768,7 @@ def _committed_changed_source_paths(
     changed_paths: Sequence[str],
 ) -> list[str]:
     changed = set(changed_paths) - {""}
-    selected = changed.intersection(head_modes)
+    selected = {path for path in changed if head_modes.get(path) not in {None, "040000"}}
     for path, mode in head_modes.items():
         if mode != "120000" or path in selected or not _is_text_scan_candidate(root / path):
             continue

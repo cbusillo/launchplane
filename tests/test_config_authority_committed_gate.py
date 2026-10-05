@@ -123,6 +123,54 @@ class CommittedConfigAuthorityGateTests(unittest.TestCase):
             )
             self.assertEqual(evaluate_config_authority_gate(payload)["status"], "pass")
 
+    def test_submodule_bump_refuses_an_unchanged_link_through_the_gitlink(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _init_repo(root)
+            (root / "README.md").write_text("# First\n")
+            _commit_all(root)
+            first = _git(root, "rev-parse", "HEAD")
+            (root / "README.md").write_text("# Second\n")
+            _commit_all(root)
+            second = _git(root, "rev-parse", "HEAD")
+            (root / "runtime.env").symlink_to("vendor/shared/runtime.env")
+            _git(root, "update-index", "--add", "--cacheinfo", f"160000,{first},vendor/shared")
+            _git(root, "add", "runtime.env")
+            _git(root, "commit", "-m", "linked gitlink")
+            base = _git(root, "rev-parse", "HEAD")
+            _git(root, "update-index", "--cacheinfo", f"160000,{second},vendor/shared")
+            _git(root, "commit", "-m", "bumped gitlink")
+            with self.assertRaisesRegex(ValueError, "cannot resolve through a submodule"):
+                build_config_authority_audit(
+                    control_plane_root=root,
+                    mode="changed-files-gate",
+                    base_sha=base,
+                    head_sha=_git(root, "rev-parse", "HEAD"),
+                )
+
+    def test_file_replaced_by_directory_reports_only_its_new_files(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _init_repo(root)
+            path = root / "settings.env"
+            path.write_text("# safe\n")
+            _commit_all(root)
+            base = _git(root, "rev-parse", "HEAD")
+            path.unlink()
+            path.mkdir()
+            (path / "safe.env").write_text("# safe\n")
+            _commit_all(root)
+            payload = build_config_authority_audit(
+                control_plane_root=root,
+                mode="changed-files-gate",
+                base_sha=base,
+                head_sha=_git(root, "rev-parse", "HEAD"),
+            )
+            self.assertEqual(evaluate_config_authority_gate(payload)["status"], "pass")
+            coverage = payload["coverage"]
+            assert isinstance(coverage, dict)
+            self.assertFalse(coverage["gaps"])
+
     def test_full_audit_refuses_commit_arguments(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

@@ -310,8 +310,9 @@ a target or intermediate path in their committed resolution changes, including
 deleted targets. Both snapshots supply dependency paths; findings remain
 classified under the logical link path, and unchanged findings retain their
 base-side exemption. An unrelated preexisting broken link is outside the diff.
-Use in-repository
-links or regular committed files for verification, or full-audit for local analysis. Submodule contents are a reported coverage gap
+A changed gitlink selects dependent text symlinks too; those links refuse under
+the existing submodule boundary. Use regular committed files or in-repository
+links for verification, or full-audit for local analysis. Submodule contents are a reported coverage gap
 because they belong to another repository. Allowed docs, tests, schema examples, Launchplane self-bootstrap wiring,
 admin-supplied inputs, and thin connector mechanics keep explicit allow
 reasons and do not fail the default gate.
