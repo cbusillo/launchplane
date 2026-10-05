@@ -975,10 +975,9 @@ use the native reviewed policy path for any separately authorized contraction.
 See [Client acceptance](owner-acceptance.md).
 
 The `manager-preview-approval` and `manager-preview-approval-retirement`
-selectors and wrapper jobs,
-including the
-`LAUNCHPLANE_AUTHZ_MANAGER_PREVIEW_APPROVAL_MANAGED_SET_JSON` reference are
-removed after the reviewed `operator.manager-preview-approval` contraction
+selectors and wrapper jobs are removed, along with the
+`LAUNCHPLANE_AUTHZ_MANAGER_PREVIEW_APPROVAL_MANAGED_SET_JSON` reference,
+after the reviewed `operator.manager-preview-approval` contraction
 and independent empty-set readback recorded on #2006. Source retirement does
 not itself mutate authorization records or delete GitHub secrets. The Director
 deletes the unused managed-set secret by hand after the wiring removal lands.

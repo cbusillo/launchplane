@@ -95,7 +95,8 @@ empty-set readback are recorded on #2006. Its dedicated
 `manager-preview-approval-retirement` wrapper selection is removed after that
 operation; it is no longer a dispatch path.
 
-That workflow is transitional compatibility infrastructure. The database remains
+The `authz-policy-reconcile.yml` workflow is transitional compatibility
+infrastructure. The database remains
 the live decision authority, but GitHub-hosted desired sets still make GitHub
 part of the effective administration chain. Do not interpret the workflow's
 existence, its protected environment, or its listing in repository metadata as
@@ -678,11 +679,11 @@ For each selected product the isolated `operator.agent-product-setup` managed
 set holds exactly three `local_operators` rules, all for one subject and token
 label and the product's one lane context:
 
-| Rule id | Product | Lane | Actions |
-|---|---|---|---|
-| `<product>.testing-config` | the product | `testing` | `product_config.plan`, `product_config.apply` |
-| `<product>.prod-backup-policy` | the product | `prod` | `production_backup_authority.write` |
-| `<product>.testing-target` | the product | `testing` | `dokploy_target.lane_setup` |
+| Rule id                        | Product     | Lane      | Actions                                       |
+| ------------------------------ | ----------- | --------- | --------------------------------------------- |
+| `<product>.testing-config`     | the product | `testing` | `product_config.plan`, `product_config.apply` |
+| `<product>.prod-backup-policy` | the product | `prod`    | `production_backup_authority.write`           |
+| `<product>.testing-target`     | the product | `testing` | `dokploy_target.lane_setup`                   |
 
 The set deliberately leaves out:
 
