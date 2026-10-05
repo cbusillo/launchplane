@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest import TestCase
 
-from control_plane.first_party_action_pins import build_action_pin_report
 from tests.support.workflows import SAME_REPO_PULL_REQUEST_IF
 from tests.support.workflows import load_workflow
 
@@ -431,17 +430,6 @@ def _container_references() -> Iterator[ContainerReference]:
 
 
 class GitHubActionsSecurityTests(TestCase):
-    def test_launchplane_request_action_pins_are_content_current(self) -> None:
-        report = build_action_pin_report(Path("."))
-
-        self.assertEqual(
-            [],
-            [
-                f"{violation.location} [{violation.code}]: {violation.message}"
-                for violation in report.violations
-            ],
-        )
-
     def test_local_launchplane_request_actions_use_trusted_same_repo_checkout(self) -> None:
         violations: list[str] = []
         workflow_root = Path(".github/workflows")

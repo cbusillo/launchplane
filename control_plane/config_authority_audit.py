@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ast
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
@@ -1415,9 +1415,11 @@ class AuditSourceFile:
     head_blob_sha: str
     index_blob_sha: str
     worktree_sha256: str
+    committed_text: str | None = None
+    resolved_git_path: str | None = None
 
     def as_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "path": self.relative_path,
             "size": self.size,
             "mtime_ns": self.mtime_ns,
@@ -1427,6 +1429,10 @@ class AuditSourceFile:
             "index_blob_sha": self.index_blob_sha,
             "worktree_sha256": self.worktree_sha256,
         }
+
+        if self.resolved_git_path is not None:
+            payload["resolved_git_path"] = self.resolved_git_path
+        return payload
 
 
 @dataclass(frozen=True)
@@ -1479,35 +1485,65 @@ def build_config_authority_audit(
     *,
     control_plane_root: Path,
     mode: str = "full-audit",
+    base_sha: str | None = None,
+    head_sha: str | None = None,
     include_untracked: bool = False,
     include_ignored: bool = False,
     paths: Sequence[Path] = (),
 ) -> dict[str, object]:
     if mode not in SCAN_MODES:
         raise ValueError(f"Unsupported config authority audit mode: {mode}")
+    if mode != "changed-files-gate" and (base_sha is not None or head_sha is not None):
+        raise ValueError("Commit arguments require changed-files-gate mode.")
 
     root = control_plane_root.resolve()
-    repo_metadata = _repo_metadata(root)
-    git_file_state = _git_file_state(root)
-    changed_file_merge_base = _git_merge_base(root) if mode == "changed-files-gate" else ""
-    changed_file_status_entries = _git_status_entries(root) if mode == "changed-files-gate" else []
-    baseline_fingerprint_counts = (
-        _changed_file_baseline_fingerprint_counts(
+    repo_metadata: dict[str, object]
+    baseline_fingerprint_counts: Counter[tuple[str, str, str, str]] = Counter()
+    if mode == "changed-files-gate":
+        if not base_sha or not head_sha:
+            raise ValueError("Changed-files gate requires explicit base_sha and head_sha.")
+        if not all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (base_sha, head_sha)):
+            raise ValueError("base_sha and head_sha must be full lowercase commit SHAs.")
+        if paths or include_untracked or include_ignored:
+            raise ValueError(
+                "Changed-files gate scans committed changes only; use full-audit for local paths."
+            )
+        base_sha = _git_output(root, "rev-parse", "--verify", f"{base_sha}^{{commit}}", strict=True)
+        head_sha = _git_output(root, "rev-parse", "--verify", f"{head_sha}^{{commit}}", strict=True)
+        changed_paths = _git_output(
             root,
-            merge_base=changed_file_merge_base,
-            status_entries=changed_file_status_entries,
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--diff-filter=ACMT",
+            base_sha,
+            head_sha,
+            "--",
+            strict=True,
+        ).split("\0")
+        source_files, coverage_gaps = _committed_source_files(root, head_sha, changed_paths)
+        base_paths = {
+            path
+            for path, file_mode in _git_file_modes(root, base_sha).items()
+            if file_mode in {"100644", "100755", "120000"}
+        }
+        baseline_files, _ = _committed_source_files(
+            root, base_sha, [path for path in changed_paths if path in base_paths], baseline=True
         )
-        if mode == "changed-files-gate"
-        else Counter()
-    )
-    source_files, coverage_gaps = _discover_source_files(
-        root=root,
-        mode=mode,
-        include_untracked=include_untracked,
-        include_ignored=include_ignored,
-        paths=paths,
-        git_file_state=git_file_state,
-    )
+        for source_file in baseline_files:
+            baseline_findings, _ = _scan_source_file(source_file)
+            baseline_fingerprint_counts.update(finding.fingerprint for finding in baseline_findings)
+        repo_metadata = {"base_sha": base_sha, "commit": head_sha}
+    else:
+        repo_metadata = _repo_metadata(root)
+        source_files, coverage_gaps = _discover_source_files(
+            root=root,
+            include_untracked=include_untracked,
+            include_ignored=include_ignored,
+            paths=paths,
+            git_file_state=_git_file_state(root),
+        )
     findings: list[ConfigAuthorityFinding] = []
     raw_findings: list[dict[str, object]] = []
     for source_file in source_files:
@@ -1520,22 +1556,6 @@ def build_config_authority_audit(
         findings.extend(file_findings)
         coverage_gaps.extend(file_gaps)
         raw_findings.extend(_raw_finding_payload(finding) for finding in file_findings)
-    if (
-        mode == "changed-files-gate"
-        and not paths
-        and not changed_file_merge_base
-        and not changed_file_status_entries
-    ):
-        gap = CoverageGap(
-            path=".",
-            reason="merge_base_unavailable",
-            detail="Changed-files gate could not resolve origin/main or main and found no dirty files to compare against HEAD.",
-        )
-        finding = _changed_files_gate_base_finding()
-        coverage_gaps.append(gap)
-        findings.append(finding)
-        raw_findings.append(_raw_finding_payload(finding))
-
     findings = sorted(findings, key=lambda item: (item.path, item.line, item.rule_id, item.key))
     finding_payloads = [finding.as_payload() for finding in findings]
     source_payloads = [source_file.as_payload() for source_file in source_files]
@@ -1548,6 +1568,8 @@ def build_config_authority_audit(
     if mode == "changed-files-gate":
         scanner_payload["changed_files_gate"] = {
             "preexisting_findings_are_report_only": True,
+            "base_sha": base_sha,
+            "head_sha": head_sha,
         }
 
     payload: dict[str, object] = {
@@ -1662,10 +1684,166 @@ def render_config_authority_markdown(payload: Mapping[str, object]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _git_file_modes(root: Path, revision: str) -> dict[str, str]:
+    entries = _git_output(root, "ls-tree", "-r", "-t", "-z", revision, strict=True).split("\0")
+    return {".": "040000"} | {
+        entry.split("\t", 1)[1]: entry.split(" ", 1)[0] for entry in entries if entry
+    }
+
+
+MAX_COMMITTED_SYMLINK_HOPS = 40
+
+
+class _CommittedPathUnavailable(ValueError):
+    pass
+
+
+def _resolve_committed_path(root: Path, revision: str, path: str, modes: Mapping[str, str]) -> str:
+    pending = deque(path.split("/"))
+    resolved: list[str] = []
+    hops = 0
+    while pending:
+        part = pending.popleft()
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not resolved:
+                raise _CommittedPathUnavailable(f"Committed symlink leaves the repository: {path}.")
+            resolved.pop()
+            continue
+        candidate = "/".join([*resolved, part])
+        mode = modes.get(candidate)
+        if mode == "120000":
+            hops += 1
+            if hops > MAX_COMMITTED_SYMLINK_HOPS:
+                raise _CommittedPathUnavailable(f"Too many committed symlink hops at {path}.")
+            content = _git_bytes(root, "show", f"{revision}:{candidate}", strict=True)
+            try:
+                target = content.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise _CommittedPathUnavailable(
+                    f"Committed symlink target is not UTF-8: {candidate}."
+                ) from error
+            if not target or target.startswith("/"):
+                raise _CommittedPathUnavailable(
+                    f"Committed symlink target is outside the tree or empty: {candidate}."
+                )
+            pending.extendleft(reversed(target.split("/")))
+            continue
+        if mode == "160000" and (pending or hops):
+            raise _CommittedPathUnavailable(
+                f"Committed symlink cannot resolve through a submodule: {path}."
+            )
+        if mode is None or (pending and mode != "040000"):
+            raise _CommittedPathUnavailable(f"Committed path does not resolve in the tree: {path}.")
+        resolved.append(part)
+    return "/".join(resolved) or "."
+
+
+def _committed_source_files(
+    root: Path,
+    revision: str,
+    relative_paths: Sequence[str],
+    *,
+    baseline: bool = False,
+) -> tuple[list[AuditSourceFile], list[CoverageGap]]:
+    files: list[AuditSourceFile] = []
+    gaps: list[CoverageGap] = []
+    modes = _git_file_modes(root, revision)
+    for relative_path in sorted(set(relative_paths) - {""}):
+        path = root / relative_path
+        if not _is_text_scan_candidate(path):
+            gaps.append(
+                CoverageGap(relative_path, "unscanned_file_class", "Unsupported file extension.")
+            )
+            continue
+        if path.name in SKIPPED_DEPENDENCY_MANIFEST_NAMES:
+            gaps.append(
+                CoverageGap(relative_path, "skipped_dependency_manifest", "Dependency lockfile.")
+            )
+            continue
+        try:
+            blob_path = _resolve_committed_path(root, revision, relative_path, modes)
+        except _CommittedPathUnavailable as error:
+            if not baseline:
+                raise
+            gaps.append(CoverageGap(relative_path, "unavailable_baseline_path", str(error)))
+            continue
+        mode = modes.get(blob_path)
+        if mode == "160000":
+            if blob_path != relative_path:
+                raise ValueError(
+                    f"Committed symlink cannot resolve to a submodule: {relative_path}."
+                )
+            gaps.append(
+                CoverageGap(
+                    relative_path,
+                    "unscanned_gitlink",
+                    "Submodule contents belong to another repository.",
+                )
+            )
+            continue
+        if mode == "040000":
+            gaps.append(
+                CoverageGap(
+                    relative_path, "unscanned_directory", "Directory symlink is not a file surface."
+                )
+            )
+            continue
+        if mode not in {"100644", "100755"}:
+            raise ValueError(
+                f"Committed authority path {relative_path} does not resolve to an available regular file."
+            )
+        size = int(_git_output(root, "cat-file", "-s", f"{revision}:{blob_path}", strict=True))
+        if size > MAX_SCANNED_FILE_BYTES:
+            gaps.append(
+                CoverageGap(
+                    relative_path,
+                    "skipped_large_file",
+                    "Committed file exceeds scanner size limit.",
+                )
+            )
+            continue
+        content = _git_bytes(root, "show", f"{revision}:{blob_path}", strict=True)
+        if _looks_binary(content):
+            gaps.append(
+                CoverageGap(
+                    relative_path, "skipped_binary_file", "Committed file contains NUL bytes."
+                )
+            )
+            continue
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError as error:
+            gaps.append(CoverageGap(relative_path, "decode_failure", str(error)))
+            continue
+        digest = hashlib.sha256(content).hexdigest()
+        files.append(
+            AuditSourceFile(
+                path=path,
+                relative_path=relative_path,
+                size=len(content),
+                mtime_ns=0,
+                sha256=digest,
+                git_status="committed",
+                head_blob_sha=_git_output(
+                    root,
+                    "rev-parse",
+                    f"{revision}:{blob_path}",
+                    strict=True,
+                ),
+                index_blob_sha="",
+                worktree_sha256="",
+                committed_text=text,
+                resolved_git_path=blob_path if blob_path != relative_path else None,
+            )
+        )
+    return files, gaps
+
+
 def _discover_source_files(
     *,
     root: Path,
-    mode: str,
     include_untracked: bool,
     include_ignored: bool,
     paths: Sequence[Path],
@@ -1673,7 +1851,6 @@ def _discover_source_files(
 ) -> tuple[list[AuditSourceFile], list[CoverageGap]]:
     candidate_paths = _candidate_paths(
         root=root,
-        mode=mode,
         include_untracked=include_untracked,
         include_ignored=include_ignored,
         paths=paths,
@@ -1753,7 +1930,6 @@ def _discover_source_files(
 def _candidate_paths(
     *,
     root: Path,
-    mode: str,
     include_untracked: bool,
     include_ignored: bool,
     paths: Sequence[Path],
@@ -1769,8 +1945,6 @@ def _candidate_paths(
                 )
             }
         )
-    if mode == "changed-files-gate":
-        return _git_changed_files(root)
     if include_ignored:
         discovered: list[Path] = []
         for directory, dir_names, file_names in os.walk(root):
@@ -1805,7 +1979,9 @@ def _scan_source_file(
     source_file: AuditSourceFile,
 ) -> tuple[list[ConfigAuthorityFinding], list[CoverageGap]]:
     try:
-        text = source_file.path.read_text(encoding="utf-8")
+        text = source_file.committed_text
+        if text is None:
+            text = source_file.path.read_text(encoding="utf-8")
     except UnicodeDecodeError as error:
         return [], [
             CoverageGap(
@@ -1854,62 +2030,6 @@ def _mark_preexisting_changed_file_finding(
         allow_reason="preexisting_changed_file_finding",
         parser=finding.parser,
         git_status=finding.git_status,
-    )
-
-
-def _changed_file_baseline_fingerprint_counts(
-    root: Path,
-    *,
-    merge_base: str,
-    status_entries: Sequence[tuple[str, str]],
-) -> Counter[tuple[str, str, str, str]]:
-    if not merge_base:
-        return Counter()
-    fingerprints: Counter[tuple[str, str, str, str]] = Counter()
-    baseline_paths = set(_git_branch_changed_relative_paths(root))
-    baseline_paths.update(relative_path for _, relative_path in status_entries)
-    for relative_path in sorted(baseline_paths):
-        baseline_text = _git_output(root, "show", f"{merge_base}:{relative_path}")
-        if not baseline_text:
-            continue
-        path = root / relative_path
-        source_file = AuditSourceFile(
-            path=path,
-            relative_path=relative_path,
-            sha256=_stable_hash(baseline_text),
-            size=len(baseline_text.encode("utf-8")),
-            mtime_ns=0,
-            git_status="baseline",
-            head_blob_sha="",
-            index_blob_sha="",
-            worktree_sha256="",
-        )
-        findings, _ = _scan_source_text(source_file=source_file, text=baseline_text)
-        fingerprints.update(finding.fingerprint for finding in findings)
-    return fingerprints
-
-
-def _changed_files_gate_base_finding() -> ConfigAuthorityFinding:
-    value_hash = _stable_hash("merge_base_unavailable")
-    return ConfigAuthorityFinding(
-        finding_id=_finding_id(
-            path=".",
-            line=0,
-            rule_id="changed_files_gate_base_unavailable",
-            key="changed_files_gate.merge_base",
-            value_hash=value_hash,
-        ),
-        path=".",
-        line=0,
-        rule_id="changed_files_gate_base_unavailable",
-        severity="medium",
-        key="changed_files_gate.merge_base",
-        value_hash=value_hash,
-        evidence="origin/main or main merge base unavailable",
-        classification="needs_classification",
-        allow_reason="",
-        parser="git",
-        git_status="unknown",
     )
 
 
@@ -3922,31 +4042,6 @@ def _git_tracked_relative_paths(root: Path) -> list[str]:
     return sorted(line for line in output.splitlines() if line.strip())
 
 
-def _git_changed_files(root: Path) -> list[Path]:
-    changed = set(_git_branch_changed_relative_paths(root))
-    changed.update(relative_path for _, relative_path in _git_status_entries(root))
-    return sorted(
-        root / relative_path for relative_path in changed if (root / relative_path).is_file()
-    )
-
-
-def _git_branch_changed_relative_paths(root: Path) -> list[str]:
-    merge_base = _git_merge_base(root)
-    if not merge_base:
-        return []
-    output = _git_output(root, "diff", "--name-only", "--diff-filter=ACMRT", merge_base, "HEAD")
-    if not output:
-        return []
-    return [line for line in output.splitlines() if line]
-
-
-def _git_merge_base(root: Path) -> str:
-    merge_base = _git_output(root, "merge-base", "HEAD", "origin/main")
-    if merge_base:
-        return merge_base
-    return _git_output(root, "merge-base", "HEAD", "main")
-
-
 def _git_untracked_relative_paths(root: Path) -> list[str]:
     output = _git_output(root, "ls-files", "--others", "--exclude-standard")
     return sorted(line for line in output.splitlines() if line.strip())
@@ -3966,21 +4061,28 @@ def _git_status_entries(root: Path) -> list[tuple[str, str]]:
     return entries
 
 
-def _git_output(root: Path, *args: str) -> str:
+def _git_output(root: Path, *args: str, strict: bool = False) -> str:
+    return _git_bytes(root, *args, strict=strict).decode("utf-8").rstrip("\n")
+
+
+def _git_bytes(root: Path, *args: str, strict: bool = False) -> bytes:
     try:
         result = subprocess.run(
             ("git", *args),
             cwd=root,
             check=False,
             capture_output=True,
-            text=True,
             timeout=10,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
+    except (OSError, subprocess.TimeoutExpired) as error:
+        if strict:
+            raise ValueError(f"Config authority git read failed: {args[0]}") from error
+        return b""
     if result.returncode != 0:
-        return ""
-    return result.stdout.rstrip("\n")
+        if strict:
+            raise ValueError(f"Config authority git read failed: {args[0]}")
+        return b""
+    return result.stdout
 
 
 def _is_text_scan_candidate(path: Path) -> bool:

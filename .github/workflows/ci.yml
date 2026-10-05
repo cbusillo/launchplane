@@ -22,6 +22,26 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'push' || (startsWith(github.ref, 'refs/heads/launchplane/train/') && !github.event.created && !github.event.forced) }}
 
 jobs:
+  repository_pins:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install uv for pin verification
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - name: Verify committed repository pins
+        env:
+          PIN_REPOSITORY: ${{ github.repository }}
+          PIN_REVISION: ${{ github.sha }}
+        run: >-
+          uv run --extra dev python scripts/verify_repository_pins.py
+          --repo-root . --revision "$PIN_REVISION" --repository "$PIN_REPOSITORY"
+
   audit_policy:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -691,7 +711,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -822,7 +842,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -888,6 +908,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs:
+      - repository_pins
       - audit_policy
       - verified_tree
       - static_checks
@@ -962,12 +983,17 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
           TEST_FORK_RESULT: ${{ needs.test_fork.result }}
           POSTGRES_INTEGRATION_RESULT: ${{ needs.postgres_integration.result }}
+          REPOSITORY_PINS_RESULT: ${{ needs.repository_pins.result }}
           AUDIT_POLICY_RESULT: ${{ needs.audit_policy.result }}
           VERIFIED_TREE: ${{ needs.verified_tree.outputs.verified }}
         run: |
           set -euo pipefail
           if [ "${AUDIT_POLICY_RESULT}" != "success" ]; then
             echo "audit_policy concluded with: ${AUDIT_POLICY_RESULT}" >&2
+            exit 1
+          fi
+          if [ "${REPOSITORY_PINS_RESULT}" != "success" ]; then
+            echo "repository_pins concluded with: ${REPOSITORY_PINS_RESULT}" >&2
             exit 1
           fi
           if [ "${VERIFIED_TREE}" = "true" ]; then

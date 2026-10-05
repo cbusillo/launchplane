@@ -166,6 +166,7 @@ merge once the local baseline is clean:
 uv run launchplane service audit-config-authority \
   --control-plane-root . \
   --mode changed-files-gate \
+  --base-sha "$BASE_SHA" --head-sha "$HEAD_SHA" \
   --fail-on-findings \
   --gate-profile product-repo
 ```
@@ -173,11 +174,10 @@ uv run launchplane service audit-config-authority \
 The gate prints the same redacted audit report as the full scanner, adds a JSON
 `gate` summary when enforcement is enabled, then exits non-zero for new findings
 that still need classification. In changed-file mode, findings that already
-existed at the merge base stay visible in the report with
+existed at the explicit base commit stay visible in the report with
 `preexisting_changed_file_finding`, but they do not block unrelated edits to the
-same file. Configure product-repo checkouts with enough history for the gate to
-resolve `origin/main` or `main`; when no merge base or dirty local comparison is
-available, the gate fails closed rather than silently passing. Docs, tests,
+same file. Supply the pull request base and head SHAs and fetch both commits.
+Missing commits and git read failures fail closed; local edits are ignored. Docs, tests,
 schema fixtures, bootstrap wiring, and explicitly allowed thin connector
 mechanics are reported with allow reasons instead of blocking the default gate.
 Repository review metadata such as CODEOWNERS and `.github/github.json`
@@ -204,6 +204,7 @@ When a product repository runs the gate from GitHub Actions, use a dedicated
 Launchplane-owned reusable gate:
 
 ```yaml
+on: [pull_request, merge_group]
 jobs:
   launchplane-config-authority:
     uses: cbusillo/launchplane/.github/workflows/reusable-product-repo-config-authority.yml@<launchplane-sha>

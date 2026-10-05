@@ -103,42 +103,56 @@ class ActionPinReport:
         return {key: value for key, value in self.as_dict().items() if key != "references"}
 
 
-def discover_action_pin_sites(repo_root: Path) -> tuple[ActionPinSite, ...]:
-    action_source = launchplane_request_action_source(repo_root)
+def discover_action_pin_sites(
+    repo_root: Path,
+    *,
+    target_revision: str,
+    repository: str,
+) -> tuple[ActionPinSite, ...]:
+    action_source = _explicit_action_source(repository)
+    revision = _resolve_commit(repo_root, target_revision)
+    result = _git(
+        repo_root, "ls-tree", "-r", "--name-only", "-z", revision, "--", ".github/workflows"
+    )
+    if result.returncode:
+        raise ActionPinError("Could not list committed workflows.")
     pin_line_pattern = _pin_line_pattern(action_source)
-    workflow_root = repo_root / ".github" / "workflows"
-    workflow_paths = sorted((*workflow_root.glob("*.yml"), *workflow_root.glob("*.yaml")))
     sites: list[ActionPinSite] = []
-    for path in workflow_paths:
-        relative_path = path.relative_to(repo_root)
-        for line_number, line in enumerate(
-            path.read_text(encoding="utf-8").split("\n"),
-            start=1,
-        ):
+    for relative_path in sorted(result.stdout.split("\0")):
+        path = Path(relative_path)
+        if path.parent != Path(".github/workflows") or path.suffix not in {".yml", ".yaml"}:
+            continue
+        content = _git(repo_root, "show", f"{revision}:{relative_path}")
+        if content.returncode:
+            raise ActionPinError(f"Could not read committed workflow {relative_path}.")
+        for line_number, line in enumerate(content.stdout.splitlines(), start=1):
             match = pin_line_pattern.match(line)
-            if match is None:
-                continue
-            sites.append(
-                ActionPinSite(
-                    path=relative_path,
-                    line_number=line_number,
-                    revision=match.group("revision"),
-                    provenance=match.group("provenance"),
+            if match is not None:
+                sites.append(
+                    ActionPinSite(
+                        path, line_number, match.group("revision"), match.group("provenance")
+                    )
                 )
-            )
     return tuple(sites)
+
+
+def _explicit_action_source(repository: str) -> str:
+    if GITHUB_REPOSITORY_PATTERN.fullmatch(repository) is None:
+        raise ActionPinError("repository must be an explicit owner/repository name.")
+    return f"{repository}/{LAUNCHPLANE_REQUEST_ACTION_PATH.as_posix()}"
 
 
 def build_action_pin_report(
     repo_root: Path,
     *,
-    target_revision: str = "HEAD",
+    target_revision: str,
+    repository: str,
 ) -> ActionPinReport:
     root = repo_root.resolve()
-    action_source = launchplane_request_action_source(root)
+    action_source = _explicit_action_source(repository)
     head_sha = _resolve_commit(root, target_revision)
     head_action_tree = _subtree_oid(root, head_sha, LAUNCHPLANE_REQUEST_ACTION_PATH)
-    references = discover_action_pin_sites(root)
+    references = discover_action_pin_sites(root, target_revision=head_sha, repository=repository)
     violations: list[ActionPinViolation] = []
 
     if not references:

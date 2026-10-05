@@ -78,13 +78,31 @@ jobs:
       - name: Run Launchplane config authority gate
         working-directory: launchplane
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.event.after }}
           FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
         run: |
           set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request|merge_group|push) ;;
+            *) echo "No explicit commit-pair mapping for ${EVENT_NAME}; use the CLI with an explicit pair or full-audit." >&2; exit 1 ;;
+          esac
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ || ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ || "$BASE_SHA" =~ ^0+$ || "$HEAD_SHA" =~ ^0+$ ]]; then
+            echo "Comparison requires two full, nonzero commit SHAs." >&2
+            exit 1
+          fi
+          for revision in "$BASE_SHA" "$HEAD_SHA"; do
+            if ! git -C ../product-repo cat-file -e "${revision}^{commit}"; then
+              git -C ../product-repo fetch --no-tags origin "$revision"
+            fi
+          done
           args=(
             uv run launchplane service audit-config-authority
             --control-plane-root ../product-repo
             --mode changed-files-gate
+            --base-sha "$BASE_SHA"
+            --head-sha "$HEAD_SHA"
             --gate-profile product-repo
           )
           if [ "$FAIL_ON_FINDINGS" = "true" ]; then

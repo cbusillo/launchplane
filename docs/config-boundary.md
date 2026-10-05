@@ -282,6 +282,7 @@ review workflows:
 uv run launchplane service audit-config-authority \
   --control-plane-root . \
   --mode changed-files-gate \
+  --base-sha "$BASE_SHA" --head-sha "$HEAD_SHA" \
   --fail-on-findings \
   --gate-profile product-repo
 ```
@@ -289,11 +290,25 @@ uv run launchplane service audit-config-authority \
 `--fail-on-findings` preserves the JSON or Markdown report, adds a JSON `gate`
 summary when enforcement is enabled, and then exits non-zero when the selected
 gate profile rejects a finding. In changed-file mode, findings that already
-existed at the merge base remain in the report as
+existed at the explicit base commit remain in the report as
 `preexisting_changed_file_finding`, but only new unclassified findings block the
-gate. If the gate cannot resolve `origin/main` or `main` and has no dirty files
-to compare against `HEAD`, it fails closed instead of returning an empty green
-report. Allowed docs, tests, schema examples, Launchplane self-bootstrap wiring,
+gate. Both commit SHAs must be supplied; missing commits or failed git reads
+fail closed. The scan ignores dirty and untracked files. It compares the two
+supplied snapshots exactly, rather than calculating a merge base: a PR behind
+its base can report authority absent from the newer base but present in its head.
+The reusable gate maps PR, merge-group and push events to their explicit commit
+pairs and fetches a missing named commit from the checked-out repository; zero-SHA comparisons and events without a mapping fail closed. Use the
+CLI with an explicit pair, or full-audit, for other events. Reusable callers
+should select pull_request and merge_group, or push updates with two existing
+commits. Branch/tag creation has no valid before commit and must use the PR path
+for changed-file verification; no default-branch fallback is invented. Changed symlink paths
+resolve only within the committed tree and are classified under the link path;
+links outside that tree or through submodules fail closed. Link hops are bounded,
+and a broken base-side link supplies no preexisting finding exemption, so a PR
+can repair it. The changed-file scan does not discover unchanged links that
+depend on a changed target; that wider dependency gap remains in the test audit. Use in-repository
+links or regular committed files for verification, or full-audit for local analysis. Submodule contents are a reported coverage gap
+because they belong to another repository. Allowed docs, tests, schema examples, Launchplane self-bootstrap wiring,
 admin-supplied inputs, and thin connector mechanics keep explicit allow
 reasons and do not fail the default gate. Runner mechanic selectors use the same
 allowed labels in scalar, JSON, and YAML flow-list forms (for example,

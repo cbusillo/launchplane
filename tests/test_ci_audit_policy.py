@@ -150,3 +150,23 @@ class AuditPolicyWorkflowTests(unittest.TestCase):
             text=True,
         )
         self.assertNotEqual(result.returncode, 0)
+
+    def test_verified_tree_still_requires_pin_verification(self) -> None:
+        step = load_workflow(".github/workflows/ci.yml").step_named(
+            "ci_gate", "Require successful CI path"
+        )
+        assert step is not None
+        for pins, expected_exit in (("success", 0), ("failure", 1), ("skipped", 1)):
+            with self.subTest(pins=pins):
+                result = subprocess.run(
+                    ["bash", "-c", step.run],
+                    env=os.environ
+                    | {
+                        "AUDIT_POLICY_RESULT": "success",
+                        "VERIFIED_TREE": "true",
+                        "REPOSITORY_PINS_RESULT": pins,
+                    },
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, expected_exit, result.stderr)
