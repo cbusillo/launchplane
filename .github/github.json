@@ -1,12 +1,17 @@
 {
   "defaultBranch": "main",
   "projectType": "control-plane",
-  "pullRequests": {
+  "prWorkflow": {
     "preferredMergeMethod": "merge",
-    "allowedMergeMethods": ["merge"]
+    "allowedMergeMethods": ["merge"],
+    "requiredStatusChecks": ["ci-gate", "security-gate"],
+    "mergePath": "launchplane.mergeTrain",
+    "readyComment": "Ready for the merge train",
+    "watchSkill": "babysit-pr"
   },
   "docs": {
     "index": "docs/README.md",
+    "direction": "DIRECTION.md",
     "architecture": "docs/architecture.md",
     "configBoundary": "docs/config-boundary.md",
     "authorizationAuthority": "docs/authorization-authority.md",
@@ -14,15 +19,12 @@
     "dokployServiceDeployments": "docs/dokploy-service-deployments.md",
     "driverDescriptors": "docs/driver-descriptors.md",
     "driverDevelopment": "docs/driver-development.md",
-    "previewWorkflowContract": "docs/preview-workflow-contract.md",
     "productRepoContract": "docs/product-repo-contract.md",
     "newProductRepo": "docs/new-product-repo.md",
     "operatorExperience": "docs/operator-experience.md",
     "postV2Audit": "docs/post-v2-audit.md",
     "uiStandards": "docs/ui-standards.md",
-    "workGraphReadModel": "docs/work-graph-read-model.md",
     "mergeTrainPolicy": "docs/merge-train-policy.md",
-    "providerDeliveryInspection": "docs/provider-delivery-inspection.md",
     "mergeReadiness": "docs/merge-readiness.md",
     "governanceEvidence": "docs/governance-evidence.md",
     "mergeTrainStructuralProvenance": "docs/merge-train-structural-provenance.md",
@@ -30,18 +32,15 @@
     "historicalMergeCompletion": "docs/merge-train-historical-completion.md",
     "runnerLaneBaseline": "docs/runner-lane-baseline.md",
     "runnerHostHygiene": "docs/runner-host-hygiene.md",
-    "productOwnerPolicy": "docs/product-owner-policy.md",
     "ownerAcceptance": "docs/owner-acceptance.md",
     "ownerControlChannel": "docs/owner-control-channel.md",
     "privilegedOperations": "docs/privileged-operations.md",
-    "changeImpactPolicy": "docs/change-impact-policy.md",
     "agentContextBoundary": "docs/agent-context-boundary.md",
     "agentOperatorContract": "docs/agent-operator-contract.md",
     "engineeringReviewRuns": "docs/engineering-review-runs.md",
     "engineeringReviewDecisions": "docs/engineering-review-decisions.md",
     "operations": "docs/operations.md",
     "records": "docs/records.md",
-    "everyCodeFeedbackResume": "docs/every-code-feedback-resume.md",
     "secrets": "docs/secrets.md",
     "githubActionsSecurity": "docs/github-actions-security.md",
     "dependencyHealthContract": "docs/dependency-health-contract.md",
@@ -162,6 +161,7 @@
     "Odoo Website Bootstrap Override",
     "Reusable Odoo Website Bootstrap Override",
     "Odoo Stable Bootstrap",
+    "Reusable Stable Lane Repair",
     "Reusable Odoo Artifact Publish",
     "Reusable Tracked Target Logs",
     "Reusable Odoo Preview",
@@ -220,18 +220,8 @@
     "Reusable Product Prelaunch Rebuild Policy",
     "Reusable Product Repo Config Authority",
     "Provider Target Operations",
-    "Tracked Target Logs",
-    "Work Graph Snapshot Validate"
+    "Tracked Target Logs"
   ],
-  "requiredStatusChecks": ["ci-gate", "security-gate"],
-  "codeScanningMergeProtection": {
-    "ruleset": "Require code scanning results",
-    "tool": "CodeQL",
-    "alertsThreshold": "errors",
-    "securityAlertsThreshold": "high_or_higher"
-  },
-  "qaLabels": [],
-  "deployLabels": [],
   "relatedRepos": [
     "cbusillo/sellyouroutboard",
     "cbusillo/verireel",
@@ -243,6 +233,46 @@
     "cbusillo/odoo-tenant-opw",
     "cbusillo/disable_odoo_online"
   ],
+  "launchplane": {
+    "enabled": true,
+    "service": {
+      "contextUrlEnv": "LAUNCHPLANE_CONTEXT_URL",
+      "operatorUrlEnv": "LAUNCHPLANE_OPERATOR_URL",
+      "localConfigExample": "launchplane/references/launchplane-operator.local.example.json"
+    },
+    "context": {
+      "enabled": true,
+      "helper": "launchplane/scripts/launchplane-context.py"
+    },
+    "operator": {
+      "enabled": true,
+      "helper": "launchplane/scripts/launchplane-write-action.py",
+      "requiresPrivateConfig": true
+    },
+    "mergeTrain": {
+      "enabled": true,
+      "controller": true,
+      "readyLabel": "ready-to-merge",
+      "baseBranch": "main",
+      "githubActionsRunner": {
+        "repo": "cbusillo/launchplane",
+        "workflow": "merge-train-runner.yml",
+        "ref": "main",
+        "runnerMode": "controller",
+        "mutateDefault": false,
+        "revisionEvidenceFields": {
+          "runnerWorkflow": "workflow_run.head_sha",
+          "candidate": "result.candidate.candidate_sha",
+          "landing": "result.landing_plan.entries[].merge_commit_sha"
+        }
+      }
+    }
+  },
+  "githubSettings": {
+    "expected": {
+      "deleteBranchOnMerge": true
+    }
+  },
   "githubSignals": {
     "postMerge": {
       "waitForActions": true,
