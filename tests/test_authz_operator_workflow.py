@@ -74,7 +74,6 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                 reviewed_digest = "a" * 64 if mode == "apply" else ""
                 result = subprocess.run(
                     ["bash", "-ceu", render_step.run],
-                    check=False,
                     capture_output=True,
                     env={
                         **os.environ,
@@ -210,7 +209,6 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
             output_file = Path(temporary_directory) / "github-output"
             result = subprocess.run(
                 ["bash", "-ceu", render_step.run],
-                check=False,
                 capture_output=True,
                 env={
                     **os.environ,
@@ -265,7 +263,6 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory:
             result = subprocess.run(
                 ["bash", "-ceu", render_step.run],
-                check=False,
                 capture_output=True,
                 env={
                     **os.environ,
@@ -307,7 +304,6 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory:
             result = subprocess.run(
                 ["bash", "-ceu", render_step.run],
-                check=False,
                 capture_output=True,
                 env={
                     **os.environ,
@@ -346,7 +342,6 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory:
             result = subprocess.run(
                 ["bash", "-ceu", render_step.run],
-                check=False,
                 capture_output=True,
                 env={
                     **os.environ,

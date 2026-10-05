@@ -974,7 +974,8 @@ Client identity directly. Do not introduce new GitHub-secret/workflow grants;
 use the native reviewed policy path for any separately authorized contraction.
 See [Client acceptance](owner-acceptance.md).
 
-The manager-preview and manager-preview-retirement selectors and wrapper jobs,
+The `manager-preview-approval` and `manager-preview-approval-retirement`
+selectors and wrapper jobs,
 including the
 `LAUNCHPLANE_AUTHZ_MANAGER_PREVIEW_APPROVAL_MANAGED_SET_JSON` reference are
 removed after the reviewed `operator.manager-preview-approval` contraction

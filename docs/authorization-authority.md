@@ -90,20 +90,10 @@ downgrade. Nonempty incompatible fragments still return HTTP 409
 `authz_policy_schema_conflict` with the deterministic schema incompatibility;
 refreshing and retrying the same request does not resolve it.
 
-For the approved manager-set retirement, select
-`managed_set=manager-preview-approval-retirement` in
-`authz-policy-reconcile.yml`. This sends an explicit empty desired fragment
-through the existing pinned protected worker without reading or changing a
-managed-set secret. Dispatch and watch through the installed
-`github_workflow_babysit.py` helper. First use `mode=dry_run`; review the exact
-set, removal-only diff, preserved schema/quorum and safety eligibility. Apply
-with the returned `reviewed_plan_sha256` and the identical reason and issue
-reference. The worker supplies apply idempotency; current-policy CAS and the
-schema-v3 authenticated maintenance evidence remain required. Independently
-read `/v1/authz-policies/active` afterward and prove the exact set absent from
-the complete managed-set summary. Source landing neither runs this operation
-nor proves live contraction; #2006 records its separate receipt/readback before
-the retirement wiring can be removed.
+The approved `operator.manager-preview-approval` contraction and independent
+empty-set readback are recorded on #2006. Its dedicated
+`manager-preview-approval-retirement` wrapper selection is removed after that
+operation; it is no longer a dispatch path.
 
 That workflow is transitional compatibility infrastructure. The database remains
 the live decision authority, but GitHub-hosted desired sets still make GitHub
