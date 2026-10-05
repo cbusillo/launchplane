@@ -47,6 +47,8 @@ from control_plane.contracts.private_health_endpoint_record import (
     private_health_endpoint_record_sha256,
 )
 from control_plane.contracts.public_ingress_monitoring import (
+    MONITOR_CADENCE_CHECK_PREFIX,
+    monitored_check_identity,
     PUBLIC_TLS_EXPIRING_DAYS,
     PUBLIC_TLS_STALE_AFTER_SECONDS,
     PublicIngressCheckKind,
@@ -748,6 +750,72 @@ def run_public_ingress_monitor_once(
     )
 
 
+def record_monitor_cadence(
+    *,
+    record_store: PublicIngressMonitorStore,
+    missed: bool,
+    observed_at: str,
+    notification_drivers: PublicIngressNotificationDrivers | None = None,
+) -> None:
+    """Separate scheduler incidents, delivered only to each check's existing destinations."""
+    for target in discover_public_ingress_monitor_targets(record_store):
+        if not target.incident_eligible:
+            continue
+        check_name = f"{MONITOR_CADENCE_CHECK_PREFIX}{target.check_kind}:{target.check_name}"
+        if not missed and not record_store.list_public_ingress_incident_records(
+            product=target.product,
+            context_name=target.context,
+            instance_name=target.instance,
+            check_name=check_name,
+            status="open",
+        ):
+            continue
+        summary = (
+            "Health monitor missed its scheduled completion deadline; site health is unknown."
+            if missed
+            else "Health monitor completed its scheduled run."
+        )
+        observation = PublicIngressObservationRecord(
+            record_id=build_public_ingress_observation_id(
+                product=target.product,
+                context=target.context,
+                instance=target.instance,
+                observed_at=observed_at,
+                check_name=check_name,
+            ),
+            product=target.product,
+            repository=target.repository,
+            driver_id=target.driver_id,
+            context=target.context,
+            instance=target.instance,
+            check_name=check_name,
+            check_kind="provider",
+            monitoring_intent=target.monitoring_intent,
+            observed_at=observed_at,
+            status="fail" if missed else "pass",
+            failure_code="monitor_run_missed" if missed else None,
+            targets=(
+                PublicIngressTargetObservation(
+                    target="provider",
+                    url="provider://launchplane/health-monitor-scheduler",
+                    status="fail" if missed else "pass",
+                    failure_code="monitor_run_missed" if missed else None,
+                    summary=summary,
+                ),
+            ),
+            summary=summary,
+        )
+        _store_monitor_observation(
+            record_store=record_store,
+            record=observation,
+            incident_eligible=True,
+            expected_profile_sha256=target.profile_sha256,
+            recovery_observation_threshold=1,
+            notify=True,
+            notification_drivers=notification_drivers,
+        )
+
+
 def _store_monitor_observation(
     *,
     record_store: PublicIngressMonitorStore,
@@ -897,6 +965,16 @@ def _monitoring_reconciliation_observations(
             )
             for incident in open_incidents:
                 target_key = _incident_target_key(incident)
+                monitored = monitored_check_identity(incident.check_name)
+                if monitored is not None:
+                    kind, name = monitored
+                    target_key = (
+                        incident.product,
+                        incident.context,
+                        incident.instance,
+                        canonical_health_check_record_token(name),
+                        kind,
+                    )
                 if target_key in eligible_target_keys:
                     continue
                 reconciliations.append(
