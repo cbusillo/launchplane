@@ -5,10 +5,15 @@ Treat this file as the launch checklist for each engineering session in
 
 ## Start Here
 
-- Use the documentation index in `docs/README.md` before reading deeper files.
-- Read `DIRECTION.md` first. It is the current direction, roles, and stop
-  boundaries, and it wins over any issue, milestone, or older doc. Issues are a
-  work list, not instructions.
+- Read the Director's [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md),
+  then this repository's [DIRECTION.md](DIRECTION.md). They own purpose, roles,
+  stop boundaries, retired concepts, and milestone order; overall direction
+  takes precedence. Issues are a work list, not instructions. Escalate a
+  disagreement that requires changing direction instead of editing DIRECTION.md.
+- Read [README.md](README.md), then use [docs/README.md](docs/README.md) before
+  reading deeper files.
+- AGENTS.md is the only agent-instruction filename; use nested AGENTS.md files
+  when a directory needs additional guidance.
 - Before changing code, open the matching style page in `docs/style/`.
 - Keep prompts lean and prefer linking repo docs over pasting large excerpts.
 
@@ -37,16 +42,16 @@ Treat this file as the launch checklist for each engineering session in
 
 ## Delivery Boundary
 
-- The merge train is the delivery path. The ordinary-agent delegated-delivery
-  design is retired; do not extend `ordinary_agent_*` code or its docs.
-- Product repositories never call Launchplane. Docs that describe reusable
-  Launchplane workflows, `launchplane-request`, or workflow-identity grants for
-  product repositories describe the retired call-in path; do not extend it. See
-  `docs/event-driven-deploys.md` and `docs/artifact-provenance.md`.
-- `docs/owner-acceptance.md` and `docs/release-review.md` describe current
-  Client review and the release checklist. The Client's release acceptance
-  starts the gated promotion when an admin has not held the product's releases;
-  Client decisions grant no other operational power.
+- Follow [DIRECTION.md](DIRECTION.md) for delivery authority and retired designs.
+  After required checks pass and review findings are accounted for, comment
+  `Ready for the merge train` on the PR and hand it off for train routing.
+  An executing agent does not merge by hand or operate the train without
+  explicit authority for that task.
+- Use [event-driven deploys](docs/event-driven-deploys.md) and
+  [artifact provenance](docs/artifact-provenance.md) for the product build handoff,
+  and [Client review](docs/owner-acceptance.md) and
+  [release review](docs/release-review.md) for the release contract. Consult
+  DIRECTION.md before extending a legacy workflow or compatibility surface.
 - Keep Launchplane merge/delivery provider-neutral. GitHub is the current source-
   control adapter and Dokploy is the current application deployment provider.
 
@@ -96,6 +101,11 @@ Treat this file as the launch checklist for each engineering session in
 
 - Use `.github/github.json` for the current test, lint,
   typecheck, build, inspection, and docs-freshness gates.
+- Changes to agent instructions, execution guidance, approval or safety rules,
+  credential handling, or destructive helpers need review by another model
+  before delivery. Use the `model-review` skill and its finding-disposition
+  rules; record the provider/model and how findings were handled in the PR.
+  Reviewer approval is not a merge or completion gate.
 - Add targeted tests whenever contract or storage behavior changes. Broaden to
   integration or full-suite proof when the changed behavior, a failure, or the
   configured review/CI gate justifies it.
