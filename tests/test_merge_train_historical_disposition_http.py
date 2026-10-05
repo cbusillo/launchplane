@@ -54,7 +54,7 @@ class HistoricalDispositionHttpTests(unittest.IsolatedAsyncioTestCase):
                 transport = _ReadOnlyTransport(responses=_provider_responses())
                 with (
                     patch(
-                        "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                        "control_plane.http_app.resolve_merge_train_github_token",
                         return_value="test-token",
                     ),
                     patch(
@@ -92,7 +92,7 @@ class HistoricalDispositionHttpTests(unittest.IsolatedAsyncioTestCase):
             transport = _ReadOnlyTransport(responses=_provider_responses() + _provider_responses())
             with (
                 patch(
-                    "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                    "control_plane.http_app.resolve_merge_train_github_token",
                     return_value="test-token",
                 ),
                 patch(TRANSPORT, return_value=transport),

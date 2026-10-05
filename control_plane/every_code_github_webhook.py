@@ -82,7 +82,14 @@ class _LaunchplaneAnchorRepoContextResolver(Protocol):
 
 
 class _LaunchplaneGitHubTokenResolver(Protocol):
-    def __call__(self, *, control_plane_root: Path, context_name: str) -> str: ...
+    def __call__(
+        self,
+        *,
+        control_plane_root: Path,
+        context_name: str,
+        repository: str = "",
+        purpose: str = "repository_read",
+    ) -> str: ...
 
 
 def _webhook_secret_from_env() -> str:
@@ -935,6 +942,8 @@ def _handle_every_code_preview_validation_webhook(
         token = dependencies.github_token(
             control_plane_root=control_plane_root_path,
             context_name=context_name,
+            repository=f"{owner}/{repo}",
+            purpose="pull_request_feedback",
         )
         result = handle_every_code_preview_validation_comment(
             record_store=every_code_store,

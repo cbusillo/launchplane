@@ -320,7 +320,12 @@ def pull_request_has_label(
     normalized_label = label.strip().casefold()
     github_reference = github_pull_request_reference(pr_url=anchor_pr_url)
     github_token = resolve_launchplane_github_token(
-        control_plane_root=control_plane_root, context_name=context
+        control_plane_root=control_plane_root,
+        context_name=context,
+        repository=f"{github_reference['owner']}/{github_reference['repo']}"
+        if github_reference
+        else "",
+        purpose="pull_request_feedback",
     )
     if not normalized_label or github_reference is None or not github_token:
         return False
@@ -1070,11 +1075,15 @@ def build_preview_pr_feedback_record(
     github_token = resolve_launchplane_github_token(
         control_plane_root=control_plane_root,
         context_name=context,
+        repository=f"{github_reference['owner']}/{github_reference['repo']}"
+        if github_reference
+        else "",
+        purpose="pull_request_feedback",
     )
     if github_reference is None:
         error_message = "anchor_pr_url must be a GitHub pull request URL"
     elif not github_token:
-        error_message = "Launchplane runtime records do not expose GITHUB_TOKEN for this context"
+        error_message = "Launchplane Delivery App credentials are unavailable for this repository"
     else:
         try:
             existing_comment = _find_preview_pr_feedback_comment(

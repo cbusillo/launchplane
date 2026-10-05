@@ -1,19 +1,23 @@
-"""The one Client-review signal Launchplane shows on a pull request.
+"""Project saved Client decisions through the Delivery and Advisory GitHub Apps.
 
-A marked pull request gets the commit status ``launchplane/owner-review`` on its
-current head. Delivery is best-effort: a recorded decision and a delivered preview
-comment never depend on the source-control provider accepting the status.
+Delivery is best-effort: saved decisions and comments do not depend on GitHub
+accepting the owner-review check run.
 """
 
 from collections.abc import Callable
 from dataclasses import dataclass
 import logging
+import hashlib
 from pathlib import Path
 from typing import Final, Literal
 from urllib.parse import quote, urlencode, urlsplit
 
-from control_plane.contracts.advisory_check_projection import OWNER_ACCEPTANCE_CHECK_NAME
-from control_plane.contracts.advisory_check_projection import MANAGER_PREVIEW_APPROVAL_CHECK_NAME
+from control_plane.advisory_check_projection import write_advisory_check_projection
+from control_plane.contracts.advisory_check_projection import (
+    AdvisoryCheckProjection,
+    OWNER_ACCEPTANCE_CHECK_NAME,
+    OWNER_REVIEW_CHECK_NAME,
+)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductOwnerProfile,
@@ -24,7 +28,7 @@ from control_plane.github_app_identity import (
     revoke_installation_token,
 )
 from control_plane.product_review import ProductReviewStore
-from control_plane.github_payload import json_object, required_positive_int
+from control_plane.launchplane_github_delivery import resolve_delivery_github_app_id
 from control_plane.product_review_carry import carry_owner_acceptance, record_decision_base
 from control_plane.product_review_feedback import publish_owner_feedback
 from control_plane.workflows.launchplane import (
@@ -32,12 +36,12 @@ from control_plane.workflows.launchplane import (
     resolve_launchplane_github_token,
 )
 
-OWNER_REVIEW_STATUS_CONTEXT: Final = "launchplane/owner-review"
+OWNER_REVIEW_STATUS_CONTEXT: Final = OWNER_REVIEW_CHECK_NAME
 NO_OWNER_DESCRIPTION: Final = "No Client set for this product"
 RETIRED_MANAGER_STATUS_DESCRIPTION: Final = "Retired. Client review is recorded in Launchplane."
 RETIRED_OWNER_ACCEPTANCE_TITLE: Final = "Retired"
 RETIRED_OWNER_ACCEPTANCE_SUMMARY: Final = (
-    f"Client review for this pull request is shown by the `{OWNER_REVIEW_STATUS_CONTEXT}` status."
+    f"Client review for this pull request is shown by the `{OWNER_REVIEW_STATUS_CONTEXT}` check."
 )
 
 OwnerReviewStatusState = Literal["pending", "success", "failure"]
@@ -115,6 +119,7 @@ class OwnerReviewStatusPublisher:
     github_token: GitHubTokenResolver = resolve_launchplane_github_token
     api_request: GitHubApiRequest = github_api_request
     github_app_token: GitHubAppTokenMinter | None = None
+    github_feedback_app_id: Callable[..., int] = resolve_delivery_github_app_id
 
     def publish(
         self,
@@ -132,6 +137,8 @@ class OwnerReviewStatusPublisher:
             token = self.github_token(
                 control_plane_root=self.control_plane_root,
                 context_name=context.strip() or profile.preview.context,
+                repository=repository,
+                purpose="pull_request_feedback",
             ).strip()
             if not token or "/" not in repository:
                 _LOGGER.info(
@@ -185,7 +192,7 @@ class OwnerReviewStatusPublisher:
                 extra={"repository": repository, "pull_request_number": pull_request_number},
             )
         if retire_leftovers:
-            for retire in (self._retire_manager_status, self._retire_owner_acceptance_check):
+            for retire in (self._retire_owner_acceptance_check,):
                 try:
                     retire(repository=repository, facts=facts, token=token)
                 except Exception:
@@ -220,14 +227,7 @@ class OwnerReviewStatusPublisher:
             return
         if not self.public_origin:
             raise ValueError("Client feedback needs the public review origin.")
-        actor = json_object(
-            self.api_request(path="/user", token=token),
-            "GitHub feedback actor",
-            error_type=ValueError,
-        )
-        actor_id = required_positive_int(
-            actor.get("id"), "GitHub feedback actor requires id.", error_type=ValueError
-        )
+        app_id = self.github_feedback_app_id(control_plane_root=self.control_plane_root)
         for decision in reversed(pending):
             try:
                 feedback_url = publish_owner_feedback(
@@ -239,7 +239,7 @@ class OwnerReviewStatusPublisher:
                         decision_id=decision.record_id,
                     ),
                     token=token,
-                    actor_id=actor_id,
+                    app_id=app_id,
                     api_request=self.api_request,
                 )
                 store.write_product_review_decision_record(
@@ -332,66 +332,39 @@ class OwnerReviewStatusPublisher:
             ),
             base_branch=facts.base_branch,
         )
-        body: dict[str, object] = {
-            "state": status.state,
-            "description": status.description,
-            "context": OWNER_REVIEW_STATUS_CONTEXT,
-        }
-        if self.public_origin:
-            body["target_url"] = owner_review_reference_url(
+        if self.github_app_token is None or not facts.repository_id or not self.public_origin:
+            raise ValueError("Client review check requires the Advisory App and public origin.")
+        projection = AdvisoryCheckProjection(
+            name=OWNER_REVIEW_CHECK_NAME,
+            repository=profile.repository,
+            repository_id=facts.repository_id,
+            head_sha=facts.head_sha,
+            external_id=hashlib.sha256(
+                f"{profile.repository}:{pull_request_number}:{facts.head_sha}".encode()
+            ).hexdigest(),
+            details_url=owner_review_reference_url(
                 public_origin=self.public_origin,
                 repository=profile.repository,
                 pull_request_number=pull_request_number,
+            ),
+            title=status.description,
+            summary="Client review is recorded in Launchplane; this check grants no merge or deployment authority.",
+            check_status="in_progress" if status.state == "pending" else "completed",
+            conclusion=None if status.state == "pending" else status.state,
+        )
+        installation_token = self.github_app_token(profile.repository, facts.repository_id)
+        try:
+            write_advisory_check_projection(
+                projection=projection,
+                installation_token=installation_token,
+                api_request=self.api_request,
             )
-        self._post_status(
-            repository=profile.repository, head_sha=facts.head_sha, token=token, body=body
-        )
+        finally:
+            revoke_installation_token(
+                installation_token=installation_token,
+                api_request=self.api_request,
+            )
         return status
-
-    def _post_status(
-        self, *, repository: str, head_sha: str, token: str, body: dict[str, object]
-    ) -> None:
-        self.api_request(
-            path=f"/repos/{_repository_path(repository)}/statuses/{quote(head_sha, safe='')}",
-            token=token,
-            method="POST",
-            body=body,
-        )
-
-    def _retire_manager_status(
-        self, *, repository: str, facts: _PullRequestFacts, token: str
-    ) -> None:
-        payload = self.api_request(
-            path=(
-                f"/repos/{_repository_path(repository)}/commits/"
-                f"{quote(facts.head_sha, safe='')}/statuses?per_page=100"
-            ),
-            token=token,
-        )
-        if not isinstance(payload, list):
-            raise ValueError("Commit statuses response must be a list.")
-        # The provider lists statuses newest first; the first match is the visible one.
-        current = next(
-            (
-                item
-                for item in payload
-                if isinstance(item, dict)
-                and item.get("context") == MANAGER_PREVIEW_APPROVAL_CHECK_NAME
-            ),
-            None,
-        )
-        if current is None or current.get("description") == RETIRED_MANAGER_STATUS_DESCRIPTION:
-            return
-        self._post_status(
-            repository=repository,
-            head_sha=facts.head_sha,
-            token=token,
-            body={
-                "state": "success",
-                "description": RETIRED_MANAGER_STATUS_DESCRIPTION,
-                "context": MANAGER_PREVIEW_APPROVAL_CHECK_NAME,
-            },
-        )
 
     def _retire_owner_acceptance_check(
         self, *, repository: str, facts: _PullRequestFacts, token: str

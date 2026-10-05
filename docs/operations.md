@@ -3962,3 +3962,69 @@ open until its handoff criteria are complete.
 **Preserved history:** the Phase 1 read-only UI description applied before the
 Phase 2 worker deployment and is not current operating guidance. See
 `docs/privileged-operations.md`.
+
+## GitHub delivery identity
+
+Launchplane's service no longer reads the per-context `GITHUB_TOKEN` for review,
+release, preview feedback, companion PRs, repository evidence or generic-web
+GitHub operations. Each operation mints a short-lived token for the repository's
+current tracked inventory ID. Missing or ambiguous inventory, an absent key,
+missing accepted permissions, or a mismatched token fails closed. Neither a
+context PAT nor a merge-train credential is a fallback. The event reconciler's
+existing merge-train App paths are separate; this switch does not rewrite live
+merge policy.
+
+In the Launchplane service's DB-backed `launchplane` context, the administrator
+sets the non-secret `LAUNCHPLANE_DELIVERY_GITHUB_APP_ID` and
+`LAUNCHPLANE_DELIVERY_GITHUB_APP_INTEGRATION`. The latter selects the integration
+of the existing Delivery App key, with exactly one configured, context-scoped,
+write-only `private_key` binding in that same context. This lets the existing key
+stay in its managed-secret record: no new key, copied value or agent credential
+is needed. An integration name retained from an older store is only a key
+selector; it does not activate the retired ordinary-agent delivery machinery.
+Use the signed-in administrator's
+`POST /v1/service/github-delivery/configuration` dry-run/apply path for these
+two non-secret runtime values. It requires existing `product_config.plan` /
+`product_config.apply` authority on the service context plus a human administrator
+session; it does not need a product profile. Submit `app_id`, `integration` and
+`reason` with `mode: dry-run`, then apply with `expected_plan_digest` from that
+response and an `Idempotency-Key`. It preserves other settings, compares the
+reviewed runtime and key-binding metadata, and writes the settings and replay
+receipt atomically. It does not decrypt, copy, create or rotate a key, mint a
+token, or change grants. The
+service's runtime-settings GET reads them back. Do not put them in host env or
+checked-in config. No live settings change is part of the source PR.
+
+The operation requests only its needed permissions:
+
+| Operation | Token permissions beyond Metadata read |
+| --- | --- |
+| Repository and release-checklist reads | Contents read, Pull requests read |
+| PR feedback and remediation | Contents read, Pull requests write |
+| Release-record issue | Issues write |
+| Generic-web workflow dispatch/reconciliation | Actions write |
+| Generic-web release publication | Contents write |
+| Retained tenant admission reads | Administration, Checks, Contents, Pull requests and Commit statuses read |
+| Retained tenant admission merge | Administration, Checks, Pull requests and Commit statuses read; Contents write |
+| Retained tenant status projection | Checks, Contents and Pull requests read; Commit statuses write |
+
+An installation may have other grants, but each issued token must match the
+requested subset and exactly one repository. Missing accepted grants never
+cause a permission change or a token fallback. Only already accepted capabilities
+may run; this PR grants none.
+
+The Advisory Checks App remains separately configured with
+`LAUNCHPLANE_ADVISORY_GITHUB_APP_ID` and its managed private key. It publishes the
+`launchplane/owner-review` check run with Checks write only. The Delivery App
+publishes decision comments and release-record issues. Decision comment replay
+matches the Delivery App's numeric `performed_via_github_app.id`, rather than
+calling the user-only `/user` endpoint with an installation token.
+
+After shipment, Chris configures the Delivery selector through the supported
+service path and confirms the next owner-review check, decision/preview comment
+and release-record issue have the intended App identity. Verify Advisory
+installation coverage and accepted operation grants wherever those paths run;
+source tests are not live installation evidence. Only after these receipts and
+remaining-consumer checks should Chris delete the obsolete per-context
+`GITHUB_TOKEN` secrets and revoke the old PAT. Other-token migrations keep their
+separate issue scopes; the hold on the shared Odoo Docker token still applies.

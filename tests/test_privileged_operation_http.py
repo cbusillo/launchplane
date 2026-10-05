@@ -2333,10 +2333,9 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                     "/v1/privileged-operations/merge-train-targets/prepare", json=payload
                 )
                 payload["intent"]["merge_method"] = "merge"  # type: ignore[index]
-                payload["intent"]["merge_identity"] = {  # type: ignore[index]
-                    "kind": "github_actions_oidc",
-                    "name": "launchplane-merge-train",
-                }
+                cast(dict[str, object], payload["intent"])["merge_identity"] = (
+                    fixture.policy.policies[0].merge_identity.model_dump(mode="json")
+                )
                 satisfied = await client.post(
                     "/v1/privileged-operations/merge-train-targets/prepare", json=payload
                 )

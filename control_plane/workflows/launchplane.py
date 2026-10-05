@@ -11,7 +11,6 @@ from urllib.request import Request, urlopen
 import click
 
 from control_plane import runtime_environments as control_plane_runtime_environments
-from control_plane import secrets as control_plane_secrets
 from control_plane import release_tuples as control_plane_release_tuples
 from control_plane.contracts.github_pull_request_event import (
     GitHubPullRequestEvent,
@@ -43,7 +42,6 @@ from control_plane.github_request_timing import timed_github_request
 
 RECENT_GENERATION_LIMIT = 3
 LAUNCHPLANE_PREVIEW_BASE_URL_ENV_KEYS = ("LAUNCHPLANE_PREVIEW_BASE_URL",)
-LAUNCHPLANE_GITHUB_TOKEN_ENV_KEY = "GITHUB_TOKEN"
 DEFAULT_LAUNCHPLANE_BASELINE_CHANNEL = "testing"
 GITHUB_PULL_REQUEST_URL_PATTERN = re.compile(
     r"^/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)/?$"
@@ -453,15 +451,18 @@ def _resolve_companion_sources(
         return tuple(snapshot_sources), tuple(snapshot_summaries)
 
     github_owner = github_pr_owner(pr_url=anchor_pr_url)
-    github_token = resolve_launchplane_github_token(
-        control_plane_root=control_plane_root,
-        context_name=context_name,
-    )
-    if not github_owner or not github_token:
+    if not github_owner:
         return None, None
     sources: list[PreviewSourceRecord] = []
     summaries: list[PreviewPullRequestSummary] = []
     for companion in metadata.companions:
+        github_token = resolve_launchplane_github_token(
+            control_plane_root=control_plane_root,
+            context_name=context_name,
+            repository=f"{github_owner}/{companion.repo}",
+        )
+        if not github_token:
+            return None, None
         try:
             companion_head_sha, companion_pr_url = fetch_github_pull_request_head(
                 owner=github_owner,
@@ -489,21 +490,23 @@ def _resolve_companion_sources(
     return tuple(sources), tuple(summaries)
 
 
-def resolve_launchplane_github_token(*, control_plane_root: Path, context_name: str) -> str:
-    try:
-        token = control_plane_secrets.resolve_launchplane_service_secret(
-            context_name=context_name, binding_key=LAUNCHPLANE_GITHUB_TOKEN_ENV_KEY
-        )
-        if token:
-            return token
-        # A token kept as a plain context setting stays readable until it moves.
-        context_values = control_plane_runtime_environments.resolve_runtime_context_values(
-            control_plane_root=control_plane_root,
-            context_name=context_name,
-        )
-    except click.ClickException:
-        return ""
-    return context_values.get(LAUNCHPLANE_GITHUB_TOKEN_ENV_KEY, "").strip()
+def resolve_launchplane_github_token(
+    *,
+    control_plane_root: Path,
+    context_name: str,
+    repository: str = "",
+    purpose: str = "repository_read",
+) -> str:
+    """Resolve a repository-scoped Delivery App token; never a context PAT."""
+    # The identity module uses this module's provider transport.
+    from control_plane.launchplane_github_delivery import resolve_delivery_github_token
+
+    return resolve_delivery_github_token(
+        control_plane_root=control_plane_root,
+        context_name=context_name,
+        repository=repository,
+        purpose=purpose,
+    )
 
 
 def fetch_github_pull_request_head(

@@ -69,7 +69,7 @@ class PreviewDesiredStateTests(unittest.TestCase):
 
         self.assertEqual(record.status, "fail")
         self.assertEqual(record.desired_count, 0)
-        self.assertIn("GITHUB_TOKEN", record.error_message)
+        self.assertIn("Delivery App", record.error_message)
 
     def test_lists_every_open_pull_request_draft_or_not_whatever_its_labels(self) -> None:
         page = [

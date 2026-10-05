@@ -379,8 +379,10 @@ action = "merge_train.run_once"
 product = "launchplane"
 context = "launchplane"
 
-[policies.github_token]
-runtime_context = "example_context"
+[policies.github_token.github_app]
+app_id = 42
+repository_id = 123
+private_key_context = "example_context"
 """
     )
 

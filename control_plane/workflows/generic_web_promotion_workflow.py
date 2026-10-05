@@ -89,10 +89,12 @@ def dispatch_generic_web_promotion_workflow(
     token = resolve_launchplane_github_token(
         control_plane_root=control_plane_root,
         context_name=request.context,
+        repository=profile.repository,
+        purpose="workflow_dispatch",
     )
     if not token:
         raise click.ClickException(
-            "Launchplane runtime records do not expose GITHUB_TOKEN for this context"
+            "Launchplane Delivery App credentials are unavailable for this repository"
         )
     workflow = profile.promotion_workflow
     workflow_id = workflow.workflow_id.strip()
@@ -175,6 +177,8 @@ def dispatch_generic_web_promotion_workflow_delivery(
         token = resolve_launchplane_github_token(
             control_plane_root=control_plane_root,
             context_name=credential_context,
+            repository=f"{owner}/{repo}",
+            purpose="workflow_dispatch",
         )
         if not token:
             return _failed_outbox_delivery(record, "missing_managed_github_token")

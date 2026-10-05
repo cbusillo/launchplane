@@ -104,7 +104,7 @@ class ProductReadRouteDependencies:
     common: ReadRouteDependencies
     read_product_profile_list_identity: Callable[..., LaunchplaneIdentity | None]
     work_graph_planning_facts_provider: WorkGraphPlanningFactsProvider | None
-    workflow_credentials_ready: Callable[[str], bool]
+    workflow_credentials_ready: Callable[[str, str], bool]
     control_plane_root: FileSystemPath
     github_token: Callable[..., str]
 
@@ -615,6 +615,8 @@ def _tenant_admission_agent_context_section(
         token = dependencies.github_token(
             control_plane_root=dependencies.control_plane_root,
             context_name=candidate.context,
+            repository=candidate.repository,
+            purpose="admission_read",
         ).strip()
     except click.ClickException:
         return AgentContextSection(

@@ -208,6 +208,32 @@ def mint_repository_installation_token(
     )
 
 
+def mint_delivery_installation_token(
+    *,
+    identity: GitHubAppIdentity,
+    repository: str,
+    repository_id: str,
+    permissions: Mapping[str, str],
+    api_request: GitHubApiRequest = github_api_request,
+    now: datetime | None = None,
+) -> GitHubAppInstallationToken:
+    """Mint exactly the permissions one Launchplane delivery operation needs."""
+    allowed = {"metadata": "read", **permissions}
+    return _mint_repository_installation_token(
+        identity=identity,
+        repository=repository,
+        repository_id=repository_id,
+        requested_permissions=dict(permissions),
+        required_installation_permissions=allowed,
+        allowed_installation_permissions=None,
+        allowed_token_permissions=allowed,
+        identity_label="Launchplane delivery GitHub App",
+        permission_boundary_label="delivery operation",
+        api_request=api_request,
+        now=now,
+    )
+
+
 def mint_build_provenance_installation_token(
     *,
     identity: GitHubAppIdentity,

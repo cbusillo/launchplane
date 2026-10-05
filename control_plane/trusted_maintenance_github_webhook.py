@@ -48,7 +48,14 @@ TrustedMaintenanceWebhookStatus = Literal[
 
 
 class _GitHubTokenResolver(Protocol):
-    def __call__(self, *, control_plane_root: Path, context_name: str) -> str: ...
+    def __call__(
+        self,
+        *,
+        control_plane_root: Path,
+        context_name: str,
+        repository: str = "",
+        purpose: str = "repository_read",
+    ) -> str: ...
 
 
 class _GitHubApiRequest(Protocol):
@@ -210,6 +217,8 @@ def handle_trusted_maintenance_github_webhook(
         token = resolved_dependencies.github_token(
             control_plane_root=control_plane_root,
             context_name=authority.classification.context,
+            repository=signed.repository,
+            purpose="admission_read",
         )
     except click.ClickException:
         return _retryable("github_token_unavailable")

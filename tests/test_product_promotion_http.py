@@ -254,7 +254,7 @@ def _status(
         product="atlas-commerce",
         destination_environment="prod",
         action_allowed=lambda _action, _product, _context, _instances: True,
-        workflow_credentials_ready=lambda _context: True,
+        workflow_credentials_ready=lambda _context, _repository: True,
         now=NOW,
     )
 
@@ -639,7 +639,7 @@ class ProductPromotionStatusTests(unittest.TestCase):
             product="atlas-commerce",
             destination_environment="prod",
             action_allowed=lambda _action, _product, _context, _instances: False,
-            workflow_credentials_ready=lambda _context: True,
+            workflow_credentials_ready=lambda _context, _repository: True,
             now=NOW,
         )
 
@@ -676,7 +676,7 @@ class ProductPromotionStatusTests(unittest.TestCase):
             product="atlas-commerce",
             destination_environment="prod",
             action_allowed=action_allowed,
-            workflow_credentials_ready=lambda _context: True,
+            workflow_credentials_ready=lambda _context, _repository: True,
             now=NOW,
         )
 
@@ -1364,7 +1364,7 @@ class FastApiProductPromotionTests(unittest.IsolatedAsyncioTestCase):
                 product="atlas-commerce",
                 destination_environment="prod",
                 action_allowed=lambda _action, _product, _context, _instances: True,
-                workflow_credentials_ready=lambda _context: True,
+                workflow_credentials_ready=lambda _context, _repository: True,
             )
             workflow_request = ProductPromotionWorkflowDispatchEnvelope(
                 dry_run=False,

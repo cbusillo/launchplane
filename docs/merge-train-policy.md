@@ -95,13 +95,7 @@ policy. These inputs identify an existing managed binding; the workflow does
 not create a key, credential, or access grant. Full-policy revisions can also
 use the service's managed-policy import path.
 
-Supported sources are:
-- `github_token.runtime_context` resolves `LAUNCHPLANE_GITHUB_TOKEN` through the
-  named DB-backed runtime context, including global shared values and global
-  secret bindings that the runtime-context contract intentionally includes.
-  Selecting a context selects its resolved credential for GitHub operations;
-  this is a credential-authority decision for the policy reviewer. It does not
-  create a credential or expand its provider permissions.
+The supported source is:
 - `github_token.github_app` names an `app_id`, immutable `repository_id`, and
   `private_key_context`. The key comes from the managed secret integration
   `merge_train_github_app`, binding key `private_key`, in that exact context.
@@ -127,11 +121,12 @@ Supported sources are:
   installation approval with this service capability: an older service with an
   installation permission ceiling will refuse a broader shared installation.
 
+Legacy `env_var` and `runtime_context` payload fields remain readable for stored
+policy history and digest verification, but cannot be imported or executed.
 The sources cannot be combined. If all are empty, the target remains
 unconfigured. If the selected source cannot resolve a token, the service
 refuses the operation; it never tries a service-host bootstrap token, a different
-context, or an agent's local credential. Configured global runtime values are
-part of the selected context, not an alternate source. Controller, phase-specific operations, historical proof and
+context, or an agent's local credential. Controller, phase-specific operations, historical proof and
 current governance readiness use the same resolver. The controller's landing
 admission reads pull-request evidence with that same policy credential, so
 enrolling a repository never also requires the service-wide
@@ -727,7 +722,7 @@ allowed_actor_roles = ["repo_owner", "repo_admin"]
 trusted_automation_github_user_ids = []
 
 [policies.merge_identity]
-kind = "github_actions_oidc"
+kind = "github_app"
 name = "launchplane-merge-train"
 
 [policies.service_authz]
@@ -735,8 +730,10 @@ action = "merge_train.run_once"
 product = "launchplane"
 context = "launchplane"
 
-[policies.github_token]
-runtime_context = "example_context"
+[policies.github_token.github_app]
+app_id = 123
+repository_id = 456
+private_key_context = "example_context"
 
 [policies.scheduler]
 enabled = true
@@ -758,7 +755,7 @@ allowed_actor_roles = ["repo_owner", "repo_admin"]
 trusted_automation_github_user_ids = [123456789]
 
 [policies.merge_identity]
-kind = "github_actions_oidc"
+kind = "github_app"
 name = "launchplane-merge-train"
 
 [policies.service_authz]
@@ -766,8 +763,10 @@ action = "merge_train.run_once"
 product = "launchplane"
 context = "launchplane"
 
-[policies.github_token]
-runtime_context = "example_context"
+[policies.github_token.github_app]
+app_id = 123
+repository_id = 456
+private_key_context = "example_context"
 ```
 
 ## Admin Changes
@@ -910,8 +909,7 @@ GH_TOKEN=... uv run launchplane work-graph merge-train-run-once \
 
 This local rehearsal command reads its explicit `--github-token-env` option
 (default `GH_TOKEN`) independently of the policy's managed credential source.
-The deployed merge train resolves the policy's `github_app` or
-`runtime_context` source instead. The work-graph read credential remains a
+The deployed merge train resolves the policy's `github_app` source instead. The work-graph read credential remains a
 separate consumer of `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN`.
 
 Passing `--mutate` applies exactly one ordered-queue worker transition from that

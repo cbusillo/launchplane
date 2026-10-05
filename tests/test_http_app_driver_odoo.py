@@ -2306,7 +2306,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("GITHUB_TOKEN", applied_environment)
         self.assertNotIn("GH_TOKEN", applied_environment)
         self.assertEqual(applied_environment["ODOO_DB_PASSWORD"], "template-db-secret")
-        self.assertEqual(launchplane_comment_token, "context-record-comment-token")
+        self.assertEqual(launchplane_comment_token, "")
 
     async def test_odoo_preview_blanks_copied_integration_credentials_without_a_preview_rule(
         self,
