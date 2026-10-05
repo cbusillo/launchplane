@@ -1,4 +1,4 @@
-"""Project saved Client decisions through the Delivery and Advisory GitHub Apps.
+"""Publish Client feedback with its context credential and Advisory App checks.
 
 Delivery is best-effort: saved decisions and comments do not depend on GitHub
 accepting the owner-review check run.
@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Final, Literal
 from urllib.parse import quote, urlencode, urlsplit
 
+import click
+
+from control_plane import secrets
 from control_plane.advisory_check_projection import write_advisory_check_projection
 from control_plane.contracts.advisory_check_projection import (
     AdvisoryCheckProjection,
@@ -30,13 +33,10 @@ from control_plane.github_app_identity import (
     revoke_installation_token,
 )
 from control_plane.product_review import ProductReviewStore
-from control_plane.launchplane_github_delivery import resolve_delivery_github_app_id
+from control_plane.github_payload import json_object, required_positive_int
 from control_plane.product_review_carry import carry_owner_acceptance, record_decision_base
 from control_plane.product_review_feedback import publish_owner_feedback
-from control_plane.workflows.launchplane import (
-    github_api_request,
-    resolve_launchplane_github_token,
-)
+from control_plane.workflows.launchplane import github_api_request
 
 OWNER_REVIEW_STATUS_CONTEXT: Final = OWNER_REVIEW_CHECK_NAME
 NO_OWNER_DESCRIPTION: Final = "No Client set for this product"
@@ -52,6 +52,24 @@ GitHubTokenResolver = Callable[..., str]
 GitHubAppTokenMinter = Callable[[str, str], GitHubAppInstallationToken]
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _resolve_review_github_token(*, control_plane_root: Path, context_name: str) -> str:
+    """Restore the existing Client-review credential until its App migration resumes.
+
+    This explicit rollback does not try the Delivery App or downgrade after an
+    App failure. Other service consumers remain on the App-only resolver.
+    """
+    del control_plane_root
+    try:
+        return (
+            secrets.resolve_launchplane_service_secret(
+                context_name=context_name, binding_key="GITHUB_TOKEN"
+            )
+            or ""
+        )
+    except click.ClickException:
+        return ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,14 +132,13 @@ def owner_review_status(
 
 @dataclass(frozen=True, slots=True)
 class OwnerReviewStatusPublisher:
-    """Project Client review through independently scoped Delivery and Advisory Apps."""
+    """Keep Client feedback available while its Delivery App activation is pending."""
 
     control_plane_root: Path
     public_origin: str | None = None
-    github_token: GitHubTokenResolver = resolve_launchplane_github_token
+    github_token: GitHubTokenResolver = _resolve_review_github_token
     api_request: GitHubApiRequest = github_api_request
     github_app_token: GitHubAppTokenMinter | None = None
-    github_feedback_app_id: Callable[..., int] = resolve_delivery_github_app_id
 
     def publish(
         self,
@@ -139,8 +156,6 @@ class OwnerReviewStatusPublisher:
             token = self.github_token(
                 control_plane_root=self.control_plane_root,
                 context_name=context.strip() or profile.preview.context,
-                repository=repository,
-                purpose="pull_request_feedback",
             ).strip()
             if not token or "/" not in repository:
                 _LOGGER.info(
@@ -229,7 +244,14 @@ class OwnerReviewStatusPublisher:
             return
         if not self.public_origin:
             raise ValueError("Client feedback needs the public review origin.")
-        app_id = self.github_feedback_app_id(control_plane_root=self.control_plane_root)
+        actor = json_object(
+            self.api_request(path="/user", token=token),
+            "GitHub feedback actor",
+            error_type=ValueError,
+        )
+        actor_id = required_positive_int(
+            actor.get("id"), "GitHub feedback actor requires id.", error_type=ValueError
+        )
         for decision in reversed(pending):
             try:
                 feedback_url = publish_owner_feedback(
@@ -241,7 +263,7 @@ class OwnerReviewStatusPublisher:
                         decision_id=decision.record_id,
                     ),
                     token=token,
-                    app_id=app_id,
+                    actor_id=actor_id,
                     api_request=self.api_request,
                 )
                 store.write_product_review_decision_record(

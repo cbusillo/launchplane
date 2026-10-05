@@ -16,6 +16,7 @@ from control_plane.contracts.product_review import (
 from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.product_review import ProductReviewPreview, record_product_review_decision
+from control_plane.product_review_feedback import owner_feedback_comment
 from control_plane.product_review_status import (
     OwnerReviewStatusPublisher,
     owner_review_reference_url,
@@ -78,7 +79,9 @@ class _GitHub:
         body = kwargs.get("body")
         repository_path = f"/repos/{self.repository}"
         if path == "/user":
-            raise AssertionError("Installation tokens cannot resolve a user identity.")
+            if kwargs["token"] != "feedback-token":
+                raise AssertionError("Only the context feedback credential resolves its user.")
+            return {"login": "fixture-service", "id": 99}
         if path == "/installation/token" and method == "DELETE":
             self.revoked_app_tokens += 1
             return None
@@ -116,7 +119,6 @@ class _GitHub:
                 "id": len(self.comments) + 1,
                 "body": body["body"],
                 "user": {"login": "fixture-service", "id": 99},
-                "performed_via_github_app": {"id": 99},
                 "created_at": "2026-09-26T12:00:00Z",
             }
             self.comments.append(comment)
@@ -185,7 +187,6 @@ def _publisher(github: _GitHub) -> OwnerReviewStatusPublisher:
         github_token=lambda **_: "feedback-token",
         api_request=github,
         github_app_token=_app_token,
-        github_feedback_app_id=lambda **_: 99,
     )
 
 
@@ -232,6 +233,82 @@ class OwnerReviewStatusTests(unittest.TestCase):
             pull_request_number=_PULL_REQUEST,
             retire_leftovers=retire_leftovers,
         )
+
+    def test_saved_feedback_delivers_with_context_credential_before_app_activation(self) -> None:
+        github = _GitHub()
+        decision = _decision(decision="accepted", decided_at="2026-09-26T12:00:00Z")
+        self.store.write_product_review_decision_record(decision)
+        publisher = OwnerReviewStatusPublisher(
+            control_plane_root=self.store.state_dir.parent,
+            public_origin=_PUBLIC_ORIGIN,
+            api_request=github,
+            github_app_token=_app_token,
+        )
+        with (
+            patch(
+                "control_plane.launchplane_github_delivery.resolve_delivery_github_app_identity",
+                side_effect=ValueError("Delivery App has not been selected."),
+            ),
+            patch(
+                "control_plane.secrets.resolve_launchplane_service_secret",
+                return_value="feedback-token",
+            ),
+        ):
+            publisher.publish(
+                store=self.store, profile=_profile(), pull_request_number=_PULL_REQUEST
+            )
+        saved = self.store.list_product_review_decision_records(
+            repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+        )
+        self.assertEqual(len(github.comments), 1)
+        self.assertTrue(saved[0].feedback_url)
+        self.assertEqual(saved[0].model_copy(update={"feedback_url": ""}), decision)
+        self.assertEqual(github.check_runs[0]["app"], {"id": _APP_ID})
+
+    def test_missing_context_credential_keeps_saved_feedback_pending(self) -> None:
+        github = _GitHub()
+        decision = _decision(decision="accepted", decided_at="2026-09-26T12:00:00Z")
+        self.store.write_product_review_decision_record(decision)
+        publisher = OwnerReviewStatusPublisher(
+            control_plane_root=self.store.state_dir.parent,
+            public_origin=_PUBLIC_ORIGIN,
+            api_request=github,
+            github_app_token=_app_token,
+        )
+        with patch("control_plane.secrets.resolve_launchplane_service_secret", return_value=None):
+            publisher.publish(
+                store=self.store, profile=_profile(), pull_request_number=_PULL_REQUEST
+            )
+        self.assertEqual(github.writes, [])
+        self.assertEqual(
+            self.store.list_product_review_decision_records(
+                repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+            ),
+            (decision,),
+        )
+
+    def test_copied_marker_from_another_user_is_not_a_feedback_receipt(self) -> None:
+        github = _GitHub()
+        decision = _decision(decision="accepted", decided_at="2026-09-26T12:00:00Z")
+        self.store.write_product_review_decision_record(decision)
+        copied_body = owner_feedback_comment(decision, review_url=_REVIEW_URL)
+        github.comments.append(
+            {
+                "id": 1,
+                "body": copied_body,
+                "user": {"id": 100},
+                "performed_via_github_app": {"id": 99},
+            }
+        )
+
+        self._publish(github)
+
+        self.assertEqual(len(github.comments), 2)
+        self.assertEqual(github.comments[0]["body"], copied_body)
+        saved = self.store.list_product_review_decision_records(
+            repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+        )[0]
+        self.assertTrue(saved.feedback_url.endswith("#issuecomment-2"))
 
     def test_default_publisher_projects_with_the_advisory_app(self) -> None:
         github = _GitHub()

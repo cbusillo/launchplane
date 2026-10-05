@@ -3965,9 +3965,9 @@ Phase 2 worker deployment and is not current operating guidance. See
 
 ## GitHub delivery identity
 
-Launchplane's service no longer reads the per-context `GITHUB_TOKEN` for review,
-release, preview feedback, companion PRs, repository evidence or generic-web
-GitHub operations. Each operation mints a short-lived token for the repository's
+Release records, preview feedback, companion PRs, repository evidence and
+generic-web GitHub operations use the Delivery App. The temporary Client-review
+feedback rollback is described below. Each App operation mints a short-lived token for the repository's
 current tracked inventory ID. Missing or ambiguous inventory, an absent key,
 missing accepted permissions, or a mismatched token fails closed. Neither a
 context PAT nor a merge-train credential is a fallback. The event reconciler's
@@ -4029,13 +4029,22 @@ and train resolve this non-secret selector from the same global/context runtime
 record layers, with service-context values taking precedence; secret overlays
 are never App-selector authority. It publishes the
 `launchplane/owner-review` check run with Checks write only. The Delivery App
-publishes decision comments and release-record issues. Decision comment replay
-matches the Delivery App's numeric `performed_via_github_app.id`, rather than
-calling the user-only `/user` endpoint with an installation token.
+publishes release-record issues and the other service feedback described above.
+Client-review decision comments temporarily retain their pre-migration managed
+context `GITHUB_TOKEN` credential under the Director-authorized partial rollback
+tracked by [#3064](https://github.com/cbusillo/launchplane/issues/3064), while the
+Delivery selector activation is pending. That publisher verifies the credential's
+numeric user id and reconciles its own comment receipt; it never uses `/user`
+with an installation token and has no automatic App-to-PAT fallback. The App-only
+resolver for every other service consumer remains unchanged. Missing feedback
+credentials leave the saved decision pending without changing it.
 
 After shipment, Chris configures the Delivery selector through the supported
-service path and confirms the next `launchplane/owner-review` check, decision/preview comment
-and release-record issue have the intended App identity. Verify Advisory
+service path. [#3020](https://github.com/cbusillo/launchplane/issues/3020) owns
+resuming the decision publisher's App migration after selection, including numeric
+`performed_via_github_app.id` receipt matching, before retiring its context token.
+Confirm the next `launchplane/owner-review` check, decision/preview comment and
+release-record issue have the intended App identity. Verify Advisory
 installation coverage and accepted operation grants wherever those paths run;
 source tests are not live installation evidence. Apply the selector promptly
 after deployment and resend feedback for queued Client-labelled PRs through the
