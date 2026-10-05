@@ -17150,6 +17150,13 @@ def create_launchplane_fastapi_app(
                 )
                 if replay_response is not None:
                     return replay_response
+            if isinstance(error, control_plane_authz_grant_service.AuthzPolicySchemaConflictError):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="authz_policy_schema_conflict",
+                    message=str(error),
+                ) from error
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,

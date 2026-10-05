@@ -873,6 +873,10 @@ class AuthzPolicyConflictError(ValueError):
     pass
 
 
+class AuthzPolicySchemaConflictError(AuthzPolicyConflictError):
+    pass
+
+
 class AuthzPolicySafetyError(AuthzPolicyConflictError):
     def __init__(self, *, code: str, message: str) -> None:
         super().__init__(message)
@@ -1904,7 +1908,7 @@ def _reconcile_managed_policy(
         )
 
     updated_policy = LaunchplaneAuthzPolicy.model_validate(
-        {"schema_version": desired_policy.schema_version, **updated_collections}
+        {"schema_version": current_policy.schema_version, **updated_collections}
     )
     changes: list[AuthzManagedRuleChange] = []
     unchanged_rule_count = 0
@@ -1959,9 +1963,12 @@ def _resolve_managed_authz_reconcile_base(
     current_policy: LaunchplaneAuthzPolicy,
     schema_migration: AuthzSchemaMigrationMode,
     desired_schema_version: Literal[1, 2, 3],
+    empty_set_contraction: bool = False,
 ) -> LaunchplaneAuthzPolicy:
     if current_policy.schema_version == 3 and desired_schema_version == 2:
-        raise AuthzPolicyConflictError(
+        if schema_migration == "reject" and empty_set_contraction:
+            return current_policy
+        raise AuthzPolicySchemaConflictError(
             "Managed authz policy schema downgrade from version 3 to version 2 is not supported."
         )
     transition = (
@@ -1979,7 +1986,7 @@ def _resolve_managed_authz_reconcile_base(
         )
     if transition == (3, "reject", 3):
         return current_policy
-    raise AuthzPolicyConflictError(
+    raise AuthzPolicySchemaConflictError(
         "Managed authz policy reconciliation requires an explicit schema_migration matching "
         "the active and desired policy schemas."
     )
@@ -2006,6 +2013,13 @@ def plan_managed_authz_policy_reconcile(
         current_policy=current_policy,
         schema_migration=request.schema_migration,
         desired_schema_version=request.desired_policy.schema_version,
+        empty_set_contraction=(
+            request.unmanaged_adoption == "reject"
+            and request.administrator_quorum_change is None
+            and not any(
+                rules for _, rules in _authz_policy_rule_collections(request.desired_policy)
+            )
+        ),
     )
     desired_collections = dict(_authz_policy_rule_collections(request.desired_policy))
     _validate_github_managed_workflow_transition(

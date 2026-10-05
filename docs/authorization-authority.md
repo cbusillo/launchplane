@@ -72,7 +72,7 @@ protected GitHub workflow currently reads desired managed sets from repository
 secrets and transports them to that endpoint through GitHub Actions OIDC.
 
 Reconciliation planning accepts schema-v2 and schema-v3 desired managed sets.
-It resolves only the explicit v1-to-v2, v2-to-v3, and same-schema transitions,
+It resolves explicit v1-to-v2, v2-to-v3, and same-schema transitions,
 preserves unrelated managed sets across all six policy collections, and reports
 ordinary-agent rules as structural policy content. Planning is read-only.
 Raw schema-v3 seeds, unbound replacements, deletion and downgrade remain fenced.
@@ -80,6 +80,30 @@ The separately mediated A5 transition described below requires exact reviewed
 operation and activation evidence under the storage locks; a planned candidate
 or compiled handler alone cannot enable a rule. Exact removal and unrelated
 schema-v3 maintenance preserve the documented post-stop boundary.
+
+An empty schema-v2 desired fragment can also contract one exact managed set
+against an active schema-v3 policy when `schema_migration` and
+`unmanaged_adoption` are both `reject` and no administrator-quorum change is
+requested. The candidate keeps the active schema, quorum and every unrelated
+rule, including ordinary-agent rules. This is a set removal, not a policy
+downgrade. Nonempty incompatible fragments still return HTTP 409
+`authz_policy_schema_conflict` with the deterministic schema incompatibility;
+refreshing and retrying the same request does not resolve it.
+
+For the approved manager-set retirement, select
+`managed_set=manager-preview-approval-retirement` in
+`authz-policy-reconcile.yml`. This sends an explicit empty desired fragment
+through the existing pinned protected worker without reading or changing a
+managed-set secret. Dispatch and watch through the installed
+`github_workflow_babysit.py` helper. First use `mode=dry_run`; review the exact
+set, removal-only diff, preserved schema/quorum and safety eligibility. Apply
+with the returned `reviewed_plan_sha256` and the identical reason and issue
+reference. The worker supplies apply idempotency; current-policy CAS and the
+schema-v3 authenticated maintenance evidence remain required. Independently
+read `/v1/authz-policies/active` afterward and prove the exact set absent from
+the complete managed-set summary. Source landing neither runs this operation
+nor proves live contraction; #2006 records its separate receipt/readback before
+the retirement wiring can be removed.
 
 That workflow is transitional compatibility infrastructure. The database remains
 the live decision authority, but GitHub-hosted desired sets still make GitHub

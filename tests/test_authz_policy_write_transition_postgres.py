@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import hashlib
@@ -14,6 +15,7 @@ from control_plane.authz_grant_service import (
     AuthzManagedPolicyRouteResult,
     execute_managed_authz_policy_reconcile,
 )
+from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.contracts.authz_policy_record import (
     AuthzPolicyCompareWriteResult,
     LaunchplaneAuthzPolicyRecord,
@@ -56,6 +58,11 @@ from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneAuthzPoli
 from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
 from tests.test_ordinary_agent_activation_worker import _active_policy, _approval
 from tests.test_postgres_integration import _store_for_fresh_head_database
+from tests.support.auth import _StubVerifier
+from tests.support.http import lifespan_client
+from tests.test_authz_empty_set_contraction import _policy as _contraction_policy
+from tests.test_authz_empty_set_contraction import _request as _contraction_request
+from tests.test_authz_grant_service import _identity as _workflow_identity
 
 
 TEST_NOW = datetime.now(UTC).replace(microsecond=0)
@@ -351,6 +358,66 @@ def _write_candidate(
         schema_v3_write_evidence=prepared.route.schema_v3_write_evidence,
         mutation=mutation,
     )
+
+
+class EmptySetContractionPostgresTests(unittest.IsolatedAsyncioTestCase):
+    async def test_protected_route_applies_replays_and_independently_reads_empty_set(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            initial_policy = _active_policy()
+            contraction_fixture = _contraction_policy()
+            initial_policy = initial_policy.model_copy(
+                update={
+                    "github_actions": contraction_fixture.github_actions,
+                    "github_humans": (
+                        *initial_policy.github_humans,
+                        contraction_fixture.github_humans[1],
+                    ),
+                }
+            )
+            with patch(f"{__name__}._active_policy", return_value=initial_policy):
+                prepared = _prepare_executed_activation(store)
+            mutation, _ = _mutation_with_confirmation(store, prepared, suffix="empty-set-setup")
+            self.assertEqual(_write_candidate(store, prepared, mutation).status, "written")
+            active = store.list_authz_policy_records(status="active", limit=1)[0]
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_workflow_identity()),
+                authz_policy=active.policy,
+                record_store_factory=lambda: store,
+            )
+            path = "/v1/authz-policies/managed-rule-sets/reconcile"
+            headers = {"Authorization": "Bearer valid-token"}
+            async with lifespan_client(app) as client:
+                dry_run = await client.post(
+                    path, headers=headers, json=_contraction_request().model_dump(mode="json")
+                )
+                self.assertEqual(dry_run.status_code, 202, dry_run.text)
+                self.assertEqual(
+                    store.list_authz_policy_records(status="active", limit=1)[0], active
+                )
+                request = _contraction_request(
+                    mode="apply",
+                    reviewed_plan_sha256=dry_run.json()["result"]["diff"]["plan_sha256"],
+                ).model_dump(mode="json")
+                missing_key = await client.post(path, headers=headers, json=request)
+                self.assertEqual(missing_key.status_code, 400)
+                self.assertEqual(missing_key.json()["error"]["code"], "idempotency_key_required")
+                apply_headers = {**headers, "Idempotency-Key": "empty-set-contraction"}
+                applied = await client.post(path, headers=apply_headers, json=request)
+                self.assertEqual(applied.status_code, 202, applied.text)
+                replayed = await client.post(path, headers=apply_headers, json=request)
+                self.assertEqual(replayed.status_code, 202, replayed.text)
+                self.assertEqual(replayed.json()["result"], applied.json()["result"])
+                stale = await client.post(
+                    path, headers={**headers, "Idempotency-Key": "stale-review"}, json=request
+                )
+                self.assertEqual(stale.status_code, 409, stale.text)
+            with closing(PostgresRecordStore(database_url=store.database_url)) as independent_store:
+                current = independent_store.list_authz_policy_records(status="active", limit=1)[0]
+            expected = active.policy.model_copy(
+                update={"github_humans": active.policy.github_humans[:1]}
+            )
+            self.assertEqual(current.policy, expected)
+            self.assertEqual(current.revision, active.revision + 1)
 
 
 class AuthzPolicyWriteTransitionPostgresTests(unittest.TestCase):
