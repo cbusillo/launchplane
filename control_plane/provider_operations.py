@@ -403,7 +403,14 @@ def run_durable_provider_operation(
     lease_seconds: int = 300,
     heartbeat_interval_seconds: float | None = None,
     target_supersession: ProviderTargetSupersession | None = None,
+    allow_reconciled_retry: bool = True,
 ) -> DurableProviderOperationResult:
+    """Run or observe a fenced operation.
+
+    ``allow_reconciled_retry=False`` keeps observation and completion adoption,
+    but forbids reacquiring an unknown operation for another mutation. Fresh
+    reservations still run; callers own admission of new operations.
+    """
     resolved_heartbeat_interval = _resolve_heartbeat_interval(
         lease_seconds=lease_seconds,
         heartbeat_interval_seconds=heartbeat_interval_seconds,
@@ -487,6 +494,7 @@ def run_durable_provider_operation(
             lease_owner=lease_owner,
             lease_seconds=lease_seconds,
             heartbeat_interval_seconds=resolved_heartbeat_interval,
+            allow_reconciled_retry=allow_reconciled_retry,
         )
     if decision != "acquired":
         raise RuntimeError(f"Unsupported mutation reservation decision: {decision}")
@@ -750,6 +758,7 @@ def _reconcile(
     lease_owner: str,
     lease_seconds: int,
     heartbeat_interval_seconds: float,
+    allow_reconciled_retry: bool,
 ) -> DurableProviderOperationResult:
     bound_reconciliation_key = (
         fallback_record.reconciliation_key
@@ -785,7 +794,11 @@ def _reconcile(
     provider_effect_started = bool(
         fallback_record is not None and fallback_record.provider_effect_started_at
     )
-    if observation.outcome == "absent" and (not provider_effect_started or observation.retry_safe):
+    if (
+        allow_reconciled_retry
+        and observation.outcome == "absent"
+        and (not provider_effect_started or observation.retry_safe)
+    ):
         if fallback_record is None:
             return DurableProviderOperationResult(
                 "reconcile_required",

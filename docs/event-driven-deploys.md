@@ -140,13 +140,20 @@ reservation. The webhook request never waits on a deploy.
     reconcile runs again.
   - A refused or failed destroy is attempted at most three times for the same
     preview lifecycle record, product-profile revision, context, and destroy
-    reason. Busy operations, unknown provider outcomes that still need
-    observation, retryable transport exceptions, transient storage errors, and
+    reason. Busy operations, observation-only passes for unknown provider outcomes,
+    retryable transport exceptions, transient storage errors, and
     moved PRs do not consume attempts. A generic-web terminal failure result still
     consumes an attempt even if its provider-side cause was an outage; the
     automatic limit does not reinterpret unstructured provider messages. Later events and sweeps record a held
     destroy with reason `preview_destroy_retry_limit` and complete the request
-    without calling the destroy path. The plan retains `destroy_failed_attempts`,
+    without attempting another provider mutation. Odoo destroy attempts that return
+    an unknown outcome consume the budget when the durable reservation's attempt
+    advances, including retries proved safe by provider observation. The runner
+    continues to observe the fenced operation after exhaustion and can adopt its
+    completion, but does not reacquire it for another automatic mutation. Temporary
+    preflight or destination refusals while that operation needs observation do
+    not consume attempts or prevent observation after the refusal is repaired.
+    The plan retains `destroy_failed_attempts`,
     `last_failed_error_code`, `last_failed_error_summary`, and
     `destroy_retry_stop_reason`; the preview is not marked destroyed or removed.
     A changed lifecycle record, product-profile revision, or destroy reason permits

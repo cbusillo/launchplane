@@ -122,6 +122,7 @@ from control_plane.odoo_preview_apply_execution import (
     run_odoo_preview_apply_operation,
 )
 from control_plane.odoo_preview_apply_http import (
+    ODOO_PREVIEW_APPLY_ROUTE,
     OdooPreviewApplyConfigError,
     OdooPreviewApplyEnvelope,
     OdooPreviewPlanProvenanceError,
@@ -1187,6 +1188,23 @@ def _plan_testing_target(
     return plan, desired
 
 
+def _hold_preview_destroy(
+    plan: dict[str, object], previous: dict[str, object], failed_attempts: int
+) -> ReconcileOutcome:
+    plan.update(
+        held=True,
+        reason="preview_destroy_retry_limit",
+        last_failed_error_code=previous.get("last_failed_error_code", "preview_apply_failed"),
+        last_failed_error_summary=previous.get("last_failed_error_summary", ""),
+        destroy_retry_stop_reason=(
+            f"Preview destroy failed {failed_attempts} times; Launchplane stops retrying "
+            "until the preview lifecycle record, product profile, or destroy reason changes. "
+            "The preview remains recorded; retirement requires an operator."
+        ),
+    )
+    return ReconcileOutcome(plan)
+
+
 def reconcile_preview_target(
     *,
     record_store: ProductReconcileStore,
@@ -1232,21 +1250,8 @@ def reconcile_preview_target(
             if isinstance(count, int) and not isinstance(count, bool):
                 failed_attempts = max(0, count)
         plan.update(destroy_retry_key=retry_key, destroy_failed_attempts=failed_attempts)
-        if failed_attempts >= PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS:
-            plan.update(
-                held=True,
-                reason="preview_destroy_retry_limit",
-                last_failed_error_code=previous.get(
-                    "last_failed_error_code", "preview_apply_failed"
-                ),
-                last_failed_error_summary=previous.get("last_failed_error_summary", ""),
-                destroy_retry_stop_reason=(
-                    f"Preview destroy failed {failed_attempts} times; Launchplane stops retrying "
-                    "until the preview lifecycle record, product profile, or destroy reason changes. "
-                    "The preview remains recorded; retirement requires an operator."
-                ),
-            )
-            return ReconcileOutcome(plan)
+        if failed_attempts >= PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS and not odoo:
+            return _hold_preview_destroy(plan, previous, failed_attempts)
     count_failure = True
     try:
         if not odoo:
@@ -1270,6 +1275,7 @@ def reconcile_preview_target(
                 pull_request_number=pull_request_number,
                 control_plane_root=control_plane_root,
                 preview_hooks=preview_hooks,
+                previous_plan=previous,
             )
     except Exception as error:
         if plan["action"] != "destroy" or (
@@ -1288,7 +1294,10 @@ def reconcile_preview_target(
         plan["action"] == "destroy"
         and outcome.error
         and count_failure
-        and plan.get("preview_operation_status") != "reconcile_required"
+        and (
+            plan.get("preview_operation_status") != "reconcile_required"
+            or plan.get("preview_mutation_attempted") is True
+        )
         and not plan.get("preview_transport_retryable")
     ):
         plan["destroy_failed_attempts"] = failed_attempts + 1
@@ -1386,6 +1395,12 @@ class _PullRequestMovedError(Exception):
     """The PR changed after the plan; nothing reached the provider."""
 
 
+class _PreviewReservationStore(Protocol):
+    def read_idempotency_record(
+        self, *, scope: str, route_path: str, idempotency_key: str
+    ) -> LaunchplaneIdempotencyRecord | None: ...
+
+
 def _run_preview_operation(
     *,
     record_store: ProductReconcileStore,
@@ -1395,6 +1410,7 @@ def _run_preview_operation(
     pull_request_number: int,
     control_plane_root: Path,
     preview_hooks: PreviewProviderHooks,
+    previous_plan: dict[str, object],
 ) -> ReconcileOutcome:
     """Issue the preview plan the inputs route would, then run it as the apply route does."""
     plan = decision.plan
@@ -1416,6 +1432,22 @@ def _run_preview_operation(
     reservation_scope = reconcile_reservation_scope(profile.product)
     plan_id = build_odoo_preview_plan_id(scope=reservation_scope, idempotency_key=operation_key)
     plan.update(preview_operation_key=operation_key, preview_plan_id=plan_id)
+    reservation = cast(_PreviewReservationStore, record_store).read_idempotency_record(
+        scope=reservation_scope, route_path=ODOO_PREVIEW_APPLY_ROUTE, idempotency_key=plan_id
+    )
+    unknown_destroy = (
+        operation == "destroy"
+        and reservation is not None
+        and reservation.state in {"running", "reconcile_required"}
+        and bool(reservation.reconciliation_key)
+    )
+    if unknown_destroy:
+        # Preserve the outstanding observation across a temporary planning refusal.
+        plan["preview_operation_status"] = "reconcile_required"
+    failed_attempts = cast(int, plan.get("destroy_failed_attempts", 0))
+    allow_retry = failed_attempts < PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS
+    if operation == "destroy" and not allow_retry and not unknown_destroy:
+        return _hold_preview_destroy(plan, previous_plan, failed_attempts)
     database_url = getattr(record_store, "database_url", None)
 
     def pre_mutation_guard() -> None:
@@ -1488,8 +1520,13 @@ def _run_preview_operation(
             execute_apply=preview_hooks.execute_apply,
             observe_apply=preview_hooks.observe_apply,
             pre_mutation_guard=pre_mutation_guard,
+            allow_reconciled_retry=operation != "destroy" or allow_retry,
         )
         plan["preview_operation_status"] = result.status
+        if result.record is not None:
+            plan["preview_mutation_attempted"] = (
+                reservation is None or result.record.attempt > reservation.attempt
+            )
         if result.status in {"in_progress", "target_busy"}:
             plan["deferred"] = "preview_operation_busy"
             return ReconcileOutcome(plan, deferred=True)
@@ -1498,6 +1535,8 @@ def _run_preview_operation(
         result_status = str(driver_result.get("status") or "")
         plan["preview_result_status"] = result_status
         if result.status in {"conflict", "reconcile_required"} or result_status != "pass":
+            if operation == "destroy" and not allow_retry and result.status == "reconcile_required":
+                return _hold_preview_destroy(plan, previous_plan, failed_attempts)
             return _preview_failure(
                 plan,
                 "reconcile_required"

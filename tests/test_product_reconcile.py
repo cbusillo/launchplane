@@ -72,6 +72,8 @@ from control_plane.launchplane_reconcile_authorization import (
 from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_ROUTE,
     OdooPreviewApplyConfigError,
+    OdooPreviewApplyEnvelope,
+    observe_odoo_preview_apply_result,
 )
 from control_plane.product_reconcile_read import product_reconcile_request_view
 from control_plane.product_review_status import OwnerReviewStatus, owner_review_reference_url
@@ -102,6 +104,7 @@ from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsRequest,
     OdooPreviewApplyInputsResult,
     OdooPreviewDokployDryRunPlan,
+    execute_odoo_preview_dokploy_apply,
 )
 from control_plane.workflows import odoo_stable_operation_worker
 from control_plane.workflows.odoo_stable_operation_worker import (
@@ -1669,6 +1672,144 @@ class _MinuteClock(datetime):
 
 
 class ProductReconcilePreviewTests(ProductReconcileTestCase):
+    def install_refused_domain_provider(self) -> list[str]:
+        calls: list[str] = []
+
+        def provider_request(*, path: str, **_kwargs: object) -> object:
+            calls.append(path)
+            if path == "/api/domain.byComposeId":
+                return [{"domainId": "preview-domain", "host": "pr-5.example.test"}]
+            if path == "/api/domain.delete":
+                raise click.ClickException("Persistent domain delete refusal")
+            if path == "/api/compose.one":
+                return {"composeId": "cm-odoo-preview-pr-5"}
+            raise AssertionError(path)
+
+        def execute(
+            *,
+            request: OdooPreviewApplyEnvelope,
+            provider_effect_checkpoint: Callable[[str], None],
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            return execute_odoo_preview_dokploy_apply(
+                control_plane_root=self.root,
+                request=request.apply,
+                provider_effect_checkpoint=provider_effect_checkpoint,
+            ).model_dump(mode="json")
+
+        for method, replacement in (
+            ("execute_apply", execute),
+            ("observe_apply", observe_odoo_preview_apply_result),
+        ):
+            patcher = patch.object(self.provider, method, replacement)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        for target, side_effect in (
+            ("control_plane.dokploy.api.dokploy_request", provider_request),
+            (
+                "control_plane.dokploy.source.read_dokploy_config",
+                lambda **_kwargs: ("https://dokploy.example.test", "fixture-token"),
+            ),
+        ):
+            provider_patcher = patch(target, side_effect=side_effect)
+            provider_patcher.start()
+            self.addCleanup(provider_patcher.stop)
+        self.write_preview()
+        self.github.pull_request["state"] = "closed"
+        return calls
+
+    def test_refused_domain_mutations_stop_but_unknown_destroy_is_observed(self) -> None:
+        calls = self.install_refused_domain_provider()
+        for attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS):
+            self.request("preview", 5)
+            with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                failed = self.run_once()
+            self.assertEqual(failed.last_plan["destroy_failed_attempts"], attempt + 1)
+        for _sweep in range(2):
+            self.request("preview", 5)
+            held = self.run_once()
+            self.assertEqual(held.last_plan["reason"], "preview_destroy_retry_limit")
+            self.assertEqual(held.state, "done")
+        self.assertEqual(calls.count("/api/domain.delete"), PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS)
+        self.assertEqual(
+            calls.count("/api/compose.one"), PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS - 1 + 2
+        )
+        self.assertNotIn("/api/compose.delete", calls)
+        reservation = self.store.read_idempotency_record(
+            scope=reconcile_reservation_scope("site"),
+            route_path=ODOO_PREVIEW_APPLY_ROUTE,
+            idempotency_key=str(held.last_plan["preview_plan_id"]),
+        )
+        assert reservation is not None
+        self.assertEqual(reservation.state, "reconcile_required")
+        self.assertEqual(reservation.provider_effect_phase, "domain_delete")
+        self.assertEqual(self.store.list_preview_records()[0].state, "active")
+
+        # A process can die before marking the checkpointed attempt unknown.
+        self.store.write_idempotency_record(
+            reservation.model_copy(
+                update={"state": "running", "lease_expires_at": reservation.updated_at}
+            )
+        )
+        # Completion is still adopted after the automatic mutation budget is spent.
+        self.request("preview", 5)
+        with patch(
+            "control_plane.dokploy.api.fetch_dokploy_target_payload",
+            side_effect=click.ClickException("Dokploy request failed (404): missing compose"),
+        ):
+            completed = self.run_once()
+        self.assertEqual(completed.last_plan["preview_operation_status"], "adopted")
+        self.assertEqual(completed.last_plan["preview_result_status"], "pass")
+        self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
+        self.assertEqual(calls.count("/api/domain.delete"), PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS)
+
+    def test_unknown_destroy_survives_preflight_refusals_without_exhausting_observation(
+        self,
+    ) -> None:
+        calls = self.install_refused_domain_provider()
+        self.request("preview", 5)
+        with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+            first = self.run_once()
+        first_attempts = first.last_plan["destroy_failed_attempts"]
+        assert isinstance(first_attempts, int)
+        for _attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1):
+            self.request("preview", 5)
+            with patch.object(self.provider, "build_inputs", side_effect=ValueError("refused")):
+                with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                    failed = self.run_once()
+            self.assertEqual(
+                failed.last_plan["destroy_failed_attempts"],
+                first_attempts,
+            )
+        self.request("preview", 5)
+        with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+            resumed = self.run_once()
+        self.assertEqual(calls.count("/api/compose.one"), 1)
+        self.assertEqual(
+            resumed.last_plan["destroy_failed_attempts"],
+            first_attempts + 1,
+        )
+
+    def test_observer_read_failures_do_not_consume_unknown_destroy_mutation_budget(self) -> None:
+        calls = self.install_refused_domain_provider()
+        self.request("preview", 5)
+        with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+            first = self.run_once()
+        with patch(
+            "control_plane.dokploy.api.fetch_dokploy_target_payload",
+            side_effect=click.ClickException("Provider read unavailable"),
+        ) as reads:
+            for _attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1):
+                self.request("preview", 5)
+                with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                    observed = self.run_once()
+                self.assertEqual(
+                    observed.last_plan["destroy_failed_attempts"],
+                    first.last_plan["destroy_failed_attempts"],
+                )
+        self.assertEqual(reads.call_count, PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1)
+        self.assertEqual(calls.count("/api/domain.delete"), 1)
+
     def setUp(self) -> None:
         super().setUp()
         clock = patch("control_plane.odoo_preview_apply_http.datetime", _MinuteClock)
@@ -1817,23 +1958,6 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
             busy = self.run_once()
         self.assertEqual(busy.state, "pending")
         self.assertEqual(busy.last_plan["destroy_failed_attempts"], 0)
-        self.assertEqual(self.reconcile()["preview_result_status"], "pass")
-
-    def test_unknown_destroy_keeps_observing_without_consuming_attempts(self) -> None:
-        self.write_preview()
-        self.github.pull_request["state"] = "closed"
-        with patch(
-            "control_plane.product_reconcile.run_odoo_preview_apply_operation",
-        ) as operation:
-            operation.return_value.status = "reconcile_required"
-            operation.return_value.response_payload = {}
-            for _attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1):
-                self.request("preview", 5)
-                with self.assertLogs("control_plane.product_reconcile", "WARNING"):
-                    unknown = self.run_once()
-                self.assertEqual(unknown.last_plan["destroy_failed_attempts"], 0)
-            self.assertEqual(operation.call_count, PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1)
-        self.request("preview", 5)
         self.assertEqual(self.reconcile()["preview_result_status"], "pass")
 
     def test_transport_failure_during_destroy_does_not_consume_attempts(self) -> None:

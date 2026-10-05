@@ -254,7 +254,9 @@ class OdooPreviewApplyOperation:
     target_supersession: ProviderTargetSupersession
     route_path: str = ODOO_PREVIEW_APPLY_ROUTE
 
-    def run(self, store: DurableProviderOperationStore) -> DurableProviderOperationResult:
+    def run(
+        self, store: DurableProviderOperationStore, *, allow_reconciled_retry: bool = True
+    ) -> DurableProviderOperationResult:
         return run_durable_provider_operation(
             store=store,
             scope=self.reservation_scope,
@@ -265,6 +267,7 @@ class OdooPreviewApplyOperation:
             response_trace_id=self.trace_id,
             adapter=self.adapter,
             target_supersession=self.target_supersession,
+            allow_reconciled_retry=allow_reconciled_retry,
         )
 
 
@@ -358,6 +361,7 @@ def run_odoo_preview_apply_operation(
         odoo_preview_supersession_is_quiescent
     ),
     pre_mutation_guard: OdooPreviewPreMutationGuard | None = None,
+    allow_reconciled_retry: bool = True,
 ) -> DurableProviderOperationResult:
     """Run a service-issued Odoo preview apply/destroy durably, in-process.
 
@@ -379,4 +383,4 @@ def run_odoo_preview_apply_operation(
         observe_apply=observe_apply,
         supersession_is_quiescent=supersession_is_quiescent,
         pre_mutation_guard=pre_mutation_guard,
-    ).run(store)
+    ).run(store, allow_reconciled_retry=allow_reconciled_retry)
