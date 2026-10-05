@@ -30903,12 +30903,14 @@
           "target_promoted_from_instance": {
             "default": "",
             "title": "Target Promoted From Instance",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "target_promotion_record_id": {
             "default": "",
             "title": "Target Promotion Record Id",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-optional-response": true
           }
         },
         "title": "RollbackExecutionEvidence",
@@ -30921,9 +30923,7 @@
           "snapshot_name",
           "started_at",
           "status",
-          "target_deployment_record_id",
-          "target_promoted_from_instance",
-          "target_promotion_record_id"
+          "target_deployment_record_id"
         ]
       },
       "RuntimeEnvironmentRecord": {

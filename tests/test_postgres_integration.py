@@ -6013,10 +6013,18 @@ class RealPostgresProviderOperationTests(unittest.TestCase):
             "test_atomic_adoption_refuses_late_record_change",
             "test_interrupted_rollback_health_is_verified_without_redeploying",
             "test_paused_original_worker_cannot_overwrite_recovered_evidence",
+            "test_failed_candidate_health_before_lost_final_write_remains_held",
+            "test_failed_rollback_health_before_lost_final_write_remains_held",
+            "test_identical_apply_that_loses_adoption_race_replays",
+            "test_interrupted_rollback_after_deploy_failure_preserves_skipped_health",
         ):
             with self.subTest(scenario=scenario), _store_for_fresh_head_database() as store:
                 with patch.object(release_fixtures, "PostgresRecordStore", return_value=store):
-                    PromotionRecoveryTests(scenario).debug()
+                    case = PromotionRecoveryTests(scenario)
+                    try:
+                        case.debug()
+                    finally:
+                        case.doCleanups()
 
     def test_expired_running_promotion_recovery_uses_postgres_clock(self) -> None:
         from tests import test_generic_web_client_release as release_fixtures
@@ -6031,16 +6039,24 @@ class RealPostgresProviderOperationTests(unittest.TestCase):
             try:
                 case.interrupt_completion(hold=False)
                 reservation = case.reservation()
-                expired = parse_launchplane_mutation_timestamp(
-                    reservation.created_at, field_name="created_at"
-                ) - timedelta(seconds=1)
+                # Move this isolated fixture's complete lease history back together,
+                # preserving the invariant that expiry follows its last update.
+                aged = reservation.model_copy(
+                    update={
+                        field: (
+                            parse_launchplane_mutation_timestamp(
+                                getattr(reservation, field), field_name=field
+                            )
+                            - timedelta(days=1)
+                        ).isoformat()
+                        for field in ("created_at", "updated_at", "lease_expires_at")
+                    }
+                )
+                aged = type(reservation).model_validate(aged.model_dump())
                 with store._session_factory() as session:
                     row = session.get(LaunchplaneIdempotencyRow, reservation.record_id)
                     assert row is not None
-                    store._sync_idempotency_row(
-                        row,
-                        reservation.model_copy(update={"lease_expires_at": expired.isoformat()}),
-                    )
+                    store._sync_idempotency_row(row, aged)
                     session.commit()
                 plan = case.dry_run()
                 self.assertEqual(plan["proposed_action"], "adopt_promotion")

@@ -184,6 +184,11 @@ def register_promotion_recovery_routes(
                 message="The promotion outcome remains held.",
             )
         authorized_store(product, identity, store, apply=True)
+        recovery_receipt = {
+            "recovery_digest": plan.recovery_digest,
+            "reason_digest": reason_digest,
+            "action": inspection.action,
+        }
         adoption = await asyncio.to_thread(
             store.adopt_reconciled_mutation,
             reservation=inspection.reservation,
@@ -194,17 +199,25 @@ def register_promotion_recovery_routes(
                 "trace_id": trace,
                 "records": {},
                 "result": inspection.result,
-                "recovery": {
-                    "recovery_digest": plan.recovery_digest,
-                    "reason_digest": reason_digest,
-                    "action": inspection.action,
-                },
+                "recovery": recovery_receipt,
             },
             expected_promotion_evidence=inspection.evidence,
             promotion_recovery_inventory=inspection.inventory,
             promotion_recovery_record=inspection.promotion,
-            promotion_recovery_deployment=inspection.deployment,
+            promotion_recovery_deployments=inspection.deployments,
         )
+        if (
+            adoption.status == "replayed"
+            and adoption.record is not None
+            and adoption.record.response_payload.get("recovery") == recovery_receipt
+        ):
+            return PromotionRecoveryApplied(
+                **{
+                    **plan.model_dump(),
+                    "reservation_state": "completed",
+                    "proposed_action": "replay_completed",
+                }
+            )
         if adoption.status != "adopted" or adoption.record is None:
             raise dependencies.http_error(
                 status_code=409,

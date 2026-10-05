@@ -193,6 +193,8 @@ release, an existing scoped admin can select the exact decision through
 `GET /v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}`.
 The response contains an opaque recovery reference, reservation state and
 checkpoint; it exposes neither the original key nor provider coordinates.
+Selection does not call the provider or run health checks; `hold_unknown` means
+the outcome still needs dry-run inspection.
 `POST` to that path's `/dry-run` with a written `reason` inspects the original
 accepted checklist, backup, reservation, target and durable promotion outcome.
 Both reads require the existing product-scoped `product_environment.read`
@@ -202,6 +204,8 @@ Separately reviewed `/apply` requires the same reason, `recovery_reference`,
 `expected_recovery_digest`, and current production-scoped
 `generic_web_prod_promotion.execute` authority. Browser writes use the existing
 session/CSRF protection; terminal-agent and workflow identities cannot apply.
+Scoped service/local administrators and local operators use this existing
+authority; Client decisions alone grant no recovery power.
 Recovery rechecks exact configured/running immutable images, operation deployment
 IDs and current-lane runtime-identity health. It can finish interrupted health
 checks on an exact, durably recorded successful deployment, or adopt a proven

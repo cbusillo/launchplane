@@ -50,6 +50,7 @@ from control_plane.workflows.generic_web_promotion import (
     _health_evidence_for_lane,
     _build_promotion_record,
     _mark_health_failed,
+    _mark_health_skipped,
 )
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.ship import utc_now_timestamp
@@ -68,7 +69,7 @@ class PromotionInspection:
     result: dict[str, object] = field(default_factory=dict)
     inventory: EnvironmentInventory | None = None
     promotion: PromotionRecord | None = None
-    deployment: DeploymentRecord | None = None
+    deployments: tuple[DeploymentRecord, ...] = ()
 
     def plan(self, product: str, reason: str) -> PromotionRecoveryPlan:
         digest = build_generic_web_deploy_recovery_digest(
@@ -237,6 +238,14 @@ def inspect_promotion(
             promotion.rollback.attempted and promotion.rollback.status in {"pending", "pass"}
         )
         if finishing_promotion:
+            if deployed.destination_health.status == "fail":
+                return inspection
+            try:
+                store.read_deployment_record(deployment_id + "-rollback")
+            except FileNotFoundError:
+                pass
+            else:
+                return inspection
             effective = deployed
             action: PromotionRecoveryAction = "adopt_promotion"
         elif finishing_rollback:
@@ -263,6 +272,7 @@ def inspect_promotion(
             return inspection
         if (
             effective.deploy.status != "pass"
+            or effective.destination_health.status == "fail"
             or effective.post_deploy_update.status not in {"pass", "skipped"}
             or effective.deployed_target != target.deployed_target
             or effective.runtime_identity is None
@@ -360,6 +370,7 @@ def inspect_promotion(
                     "status": "pass",
                     "detail": record_failure_summary("rollback_passed"),
                     "deployment_record_id": effective.record_id,
+                    "started_at": promotion.rollback.started_at or effective.deploy.started_at,
                     "finished_at": effective.deploy.finished_at,
                 }
             )
@@ -371,13 +382,23 @@ def inspect_promotion(
                     if deployed.deploy.status == "pass"
                     else "destination_deploy_failed"
                 )
+                failed_health = (
+                    deployed.destination_health
+                    if deployed.destination_health.status == "fail"
+                    else (
+                        _mark_health_failed(promotion.destination_health)
+                        if deployed.deploy.status == "pass"
+                        else _mark_health_skipped(promotion.destination_health)
+                    )
+                )
+                deployed = deployed.model_copy(update={"destination_health": failed_health})
                 promotion = _build_promotion_record(
                     request=promotion_request,
                     promotion_record_id=promotion.record_id,
                     context=lane.context,
                     source_health=promotion.source_health,
                     backup_gate=promotion.backup_gate,
-                    destination_health=_mark_health_failed(promotion.destination_health),
+                    destination_health=failed_health,
                     deployment_record=deployed,
                     deployment_status="fail",
                     target_name=deployed.deploy.target_name,
@@ -388,7 +409,7 @@ def inspect_promotion(
                 update={"rollback": rollback, "rollback_health": checked}
             )
         inspection.promotion = promotion
-        inspection.deployment = effective
+        inspection.deployments = (effective,) if finishing_promotion else (deployed, effective)
         inspection.inventory = build_environment_inventory(
             deployment_record=effective,
             updated_at=utc_now_timestamp(),

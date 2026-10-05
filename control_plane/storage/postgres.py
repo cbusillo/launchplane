@@ -8442,7 +8442,7 @@ class PostgresRecordStore(HumanSessionStore):
         expected_promotion_evidence: tuple[BaseModel, ...] = (),
         promotion_recovery_inventory: EnvironmentInventory | None = None,
         promotion_recovery_record: PromotionRecord | None = None,
-        promotion_recovery_deployment: DeploymentRecord | None = None,
+        promotion_recovery_deployments: tuple[DeploymentRecord, ...] = (),
     ) -> MutationReservationAdoptionResult:
         normalized_response_trace_id = response_trace_id.strip()
         if not reservation.reconciliation_key or not normalized_response_trace_id:
@@ -8567,7 +8567,7 @@ class PostgresRecordStore(HumanSessionStore):
                 evidence_row.artifact_id = promotion_recovery_record.artifact_identity.artifact_id
                 evidence_row.deploy_started_at = promotion_recovery_record.deploy.started_at
                 evidence_row.deploy_finished_at = promotion_recovery_record.deploy.finished_at
-            if promotion_recovery_deployment is not None:
+            for promotion_recovery_deployment in promotion_recovery_deployments:
                 deployment_row = session.get(
                     LaunchplaneDeploymentRow, promotion_recovery_deployment.record_id
                 )

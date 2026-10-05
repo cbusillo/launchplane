@@ -180,6 +180,21 @@ class PromotionRecoveryTests(unittest.TestCase):
         self.assertEqual(self.provider.deployed_artifacts, effects)
         self.assertEqual(self.case.advance(), ())
 
+    def test_identical_apply_that_loses_adoption_race_replays(self) -> None:
+        self.interrupt_completion()
+        plan = self.dry_run()
+        adopt = self.store.adopt_reconciled_mutation
+
+        def already_adopted(**kwargs: Any) -> Any:
+            self.assertEqual(adopt(**kwargs).status, "adopted")
+            return adopt(**kwargs)
+
+        with patch.object(self.store, "adopt_reconciled_mutation", side_effect=already_adopted):
+            status, response = self.apply(plan)
+        self.assertEqual(status, 202, response)
+        self.assertEqual(response["proposed_action"], "replay_completed")
+        self.assertEqual(self.reservation().state, "completed")
+
     def test_adopts_verified_rollback_and_preserves_failed_release(self) -> None:
         self.interrupt_completion(rollback=True)
         plan = self.dry_run()
@@ -388,10 +403,17 @@ class PromotionRecoveryTests(unittest.TestCase):
         self.assertEqual(self.reservation().state, "reconcile_required")
 
     def test_interrupted_rollback_health_is_verified_without_redeploying(self) -> None:
+        self.case.fail_health = True
+        self.recover_interrupted_rollback()
+
+    def test_interrupted_rollback_after_deploy_failure_preserves_skipped_health(self) -> None:
+        self.provider.fail_artifact = self.decision.checklist.candidate.artifact_id
+        self.recover_interrupted_rollback()
+
+    def recover_interrupted_rollback(self) -> None:
         class InterruptedRollback(BaseException):
             pass
 
-        self.case.fail_health = True
         verify = promotion_workflow._verify_health_evidence_with_identity
 
         def checked_crash(evidence: Any, **kwargs: Any) -> Any:
@@ -424,6 +446,12 @@ class PromotionRecoveryTests(unittest.TestCase):
         self.assertEqual(self.apply(plan)[0], 202)
         result = self.reservation().response_payload["result"]
         self.assertEqual((result["promotion_status"], result["rollback_status"]), ("fail", "pass"))
+        promotion = self.store.read_promotion_record(promotion.record_id)
+        expected_health = "skipped" if self.provider.fail_artifact else "fail"
+        self.assertEqual(promotion.destination_health.status, expected_health)
+        candidate = self.store.read_deployment_record(promotion.deployment_record_id)
+        self.assertEqual(candidate.destination_health.status, expected_health)
+        self.assertTrue(promotion.rollback.started_at)
         self.assertEqual(self.provider.deployed_artifacts, effects)
         inventory = self.store.read_environment_inventory(
             context_name=self.case.context, instance_name="prod"
@@ -447,6 +475,55 @@ class PromotionRecoveryTests(unittest.TestCase):
         plan = self.dry_run()
         self.assertEqual(plan["proposed_action"], "hold_unknown")
         self.assertEqual(self.apply(plan)[0], 409)
+        self.assertEqual(self.snapshot(), before)
+
+    def interrupt_final_promotion_write(self) -> None:
+        class LostFinalWrite(BaseException):
+            pass
+
+        write = self.store.write_promotion_record
+
+        def lose_final(record: Any) -> Any:
+            if record.deploy.status != "pending":
+                raise LostFinalWrite()
+            return write(record)
+
+        with patch.object(self.store, "write_promotion_record", side_effect=lose_final):
+            with self.assertRaises(LostFinalWrite):
+                self.case.advance()
+        held = self.reservation()
+        self.store.mark_mutation_reconcile_required(
+            reservation=held, reconciliation_key=held.reconciliation_key
+        )
+
+    def test_failed_candidate_health_before_lost_final_write_remains_held(self) -> None:
+        self.case.fail_health = True
+        with patch.object(
+            promotion_workflow,
+            "_resolve_rollback_target",
+            return_value=promotion_workflow._RollbackTarget(
+                unavailable_reason="production had no recorded deployment before this promotion"
+            ),
+        ):
+            self.interrupt_final_promotion_write()
+        self.assertFalse(self.reservation().provider_effect_phase.startswith("rollback_"))
+        self.case.fail_health = False
+        before = self.snapshot()
+        self.assertEqual(self.dry_run()["proposed_action"], "hold_unknown")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_failed_rollback_health_before_lost_final_write_remains_held(self) -> None:
+        import click
+
+        with patch.object(
+            promotion_workflow,
+            "_verify_health_evidence_with_identity",
+            side_effect=click.ClickException("Recorded health failure"),
+        ):
+            self.interrupt_final_promotion_write()
+        self.assertTrue(self.reservation().provider_effect_phase.startswith("rollback_"))
+        before = self.snapshot()
+        self.assertEqual(self.dry_run()["proposed_action"], "hold_unknown")
         self.assertEqual(self.snapshot(), before)
 
     def test_paused_original_worker_cannot_overwrite_recovered_evidence(self) -> None:

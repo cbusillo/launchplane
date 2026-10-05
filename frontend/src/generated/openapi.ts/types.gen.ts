@@ -3980,8 +3980,8 @@ export type RollbackExecutionEvidence = {
     started_at: string;
     status: 'pending' | 'pass' | 'fail' | 'skipped';
     target_deployment_record_id: string;
-    target_promoted_from_instance: string;
-    target_promotion_record_id: string;
+    target_promoted_from_instance?: string;
+    target_promotion_record_id?: string;
 };
 
 export type RuntimeEnvironmentRecord = {
