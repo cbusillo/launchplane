@@ -56,6 +56,20 @@ def _paused_creation(root: str, boundary: str, reached: Event, release: Event) -
 
 
 class FilesystemCreationTests(unittest.TestCase):
+    def test_long_valid_record_name_can_be_created_and_remains_insert_only(self) -> None:
+        event = _audit_event().model_copy(update={"event_id": "audit-" + "x" * 239})
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            path = store.create_product_retirement_secret_audit_event(event)
+            self.assertEqual(
+                SecretAuditEvent.model_validate_json(path.read_text(encoding="utf-8")), event
+            )
+            with self.assertRaisesRegex(ValueError, "append-only"):
+                store.create_product_retirement_secret_audit_event(
+                    event.model_copy(update={"actor": "contender"})
+                )
+            self.assertEqual(store.list_secret_audit_events(secret_id=event.secret_id), (event,))
+
     def test_failed_serialization_or_sync_leaves_absence_and_allows_retry(self) -> None:
         event = _audit_event()
         for failing_operation in ("json.dumps", "os.fsync", "os.replace"):

@@ -355,7 +355,7 @@ class FilesystemRecordStore:
         record_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_path = tempfile.mkstemp(
             dir=record_path.parent,
-            prefix=f".{record_path.name}.",
+            prefix=".record.",
             suffix=".tmp",
         )
         try:
