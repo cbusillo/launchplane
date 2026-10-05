@@ -513,7 +513,10 @@ raw context picker or checked-in product defaults.
 
 Every form request stays bound to the profile used to construct it through
 planning and commit. Conflicting profile snapshots refuse the request before
-configuration writes and require a fresh dry-run. Completed retries, including provider-key retirements
+configuration writes and require a fresh dry-run. Provider-key retirement validates
+declared application keys against the same profile snapshot checked by the request;
+a concurrent declaration edit cannot change that dry-run's key protection. Apply
+still checks the profile atomically before writing. Completed retries, including provider-key retirements
 and Client-supplied credentials, check current exclusive lane ownership before
 replaying a receipt; ambiguous ownership returns `product_config_lane_not_owned`
 without writing configuration. A replay still works after later retirements or
@@ -547,6 +550,12 @@ Client-login previews use the shared read-only browser operation path. A lost
 response or interrupted navigation permits a fresh preview with a revised login
 and reason, including after reload. Save remains a mutation: an uncertain result
 locks the draft and retains its request fingerprint and idempotency key.
+The reviewed Client request and reason are saved and read back in tab-local
+session storage before Save dispatches. Reload or in-app navigation restores
+that draft and offers Retry save with the original payload and key; another
+change stays locked until the Save settles. If the reviewed request cannot be
+stored and read back, Save sends nothing and asks the admin to restore session
+storage and retry. A confirmed Save removes the retained draft.
 
 ## Cleanup Safety
 

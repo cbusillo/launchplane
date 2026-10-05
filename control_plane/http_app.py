@@ -50,6 +50,7 @@ from control_plane.authz_candidate_preparation import (
 from control_plane.authz_scope import DOKPLOY_TARGET_LANE_SETUP_ACTION
 from control_plane.dokploy.target_source_setup import DokployComposeSourcePartialError
 from control_plane.dokploy_target_setup_http import (
+    DokployComposeDomainPartialError,
     DokployTargetSetupEnvelope,
     execute_dokploy_target_setup,
 )
@@ -15523,9 +15524,6 @@ def create_launchplane_fastapi_app(
         )
         if isinstance(retired_provider_keys, list) and retired_provider_keys:
             try:
-                retirement_profile = database_store.read_product_profile_record(
-                    product_config_request.product
-                )
                 # A site lane needs no declaration (#2568); an empty declaration
                 # still protects driver keys, and the sync rechecks site values.
                 application_keys = control_plane_live_target_runtime.product_lane_declared_keys(
@@ -15533,6 +15531,7 @@ def create_launchplane_fastapi_app(
                     product_name=product_config_request.product,
                     context_name=product_config_request.context,
                     instance_name=product_config_request.instance,
+                    profile=expected_product_profile,
                 )
                 control_plane_live_target_runtime.validate_provider_key_retirement(
                     retired_keys=set(retired_provider_keys), application_keys=application_keys
@@ -15547,15 +15546,6 @@ def create_launchplane_fastapi_app(
                     code="runtime_retirement_conflict",
                     message="Provider key retirement requires an exact product lane and cannot remove declared application or driver settings.",
                 ) from error
-            if expected_product_profile is None:
-                expected_product_profile = retirement_profile
-            elif expected_product_profile != retirement_profile:
-                raise _launchplane_http_error(
-                    status_code=409,
-                    trace_id=trace_id,
-                    code="runtime_retirement_changed",
-                    message="Product configuration changed; review a fresh dry run.",
-                )
         if expected_product_profile is not None:
             if (
                 authority_bundle.expected_product_profiles
@@ -24192,6 +24182,16 @@ def create_launchplane_fastapi_app(
                     (lane_owner, setup_request.context) if lane_scoped_only else None
                 ),
             )
+        except DokployComposeDomainPartialError as error:
+            raise LaunchplaneHTTPException(
+                status_code=502,
+                detail={
+                    "trace_id": trace_id,
+                    "code": "dokploy_domain_partial_outcome",
+                    "message": str(error),
+                    "records": {"domain_recovery": json.dumps(error.recovery)},
+                },
+            ) from error
         except DokployComposeSourcePartialError as error:
             raise _launchplane_http_error(
                 status_code=502,

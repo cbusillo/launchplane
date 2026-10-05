@@ -80,8 +80,9 @@ so a second Accept never replaces the acceptance a running release depends on. G
 approval; the saved Launchplane decision remains authoritative.
 The complete record uses one issue body. If GitHub rejects publication, the
 decision remains saved and promotion stays blocked; records are not split into
-comments. Retry recovery checks the complete issue body, so the issue keeps its
-`## Owner checklist` heading until recovery matches on the record marker instead. Multiple `Client test notes`
+comments. Retry recovery finds the earlier issue by the marker on its first
+line, `<!-- launchplane:release-decision:<record id> -->`, so a record written
+before a wording change is still found. Multiple `Client test notes`
 sections are collected together; CI checks presence, not their number or content.
 
 GitHub attributes commits landed through a merge-train batch pull request to

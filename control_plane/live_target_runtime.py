@@ -561,8 +561,10 @@ def product_lane_declared_keys(
     product_name: str,
     context_name: str,
     instance_name: str,
+    profile: LaunchplaneProductProfileRecord | None = None,
 ) -> set[str]:
-    profile = record_store.read_product_profile_record(product_name)
+    if profile is None:
+        profile = record_store.read_product_profile_record(product_name)
     if not any(
         lane.context == context_name and lane.instance == instance_name for lane in profile.lanes
     ):

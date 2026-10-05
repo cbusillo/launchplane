@@ -2,7 +2,7 @@ import { Eye, LoaderCircle, RotateCcw, Save, UserCheck, UserX } from "lucide-rea
 import { useEffect, useState } from "react";
 
 import { applyProductImageRepository, applyProductProductionUse, applyProductOwner, LaunchplaneApiError, readProductProfile } from "./api";
-import type { BrowserOperationFailureCertainty } from "./browser-operation";
+import { recoverBrowserOperationState, type BrowserOperationFailureCertainty } from "./browser-operation";
 import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
 import {
   productConfigFailureCertainty,
@@ -32,6 +32,45 @@ import type { AcceptedEvidenceResponse, ApplyProductImageRepositoryData, ApplyPr
 
 type ProductOwnerRequest = ApplyProductOwnerData["body"];
 
+interface ReviewedOwnerDraft {
+  plan: ProductOwnerPlan;
+  clear: boolean;
+  key: string;
+  request: ProductOwnerRequest;
+}
+
+function ownerDraftKey(login: string, clear: boolean, reason: string): string {
+  return JSON.stringify([productOwnerDraftKey(login, clear), reason.trim()]);
+}
+
+function preserveProfileDraft(storageKey: string, reviewed: object): boolean {
+  try {
+    const draft = JSON.stringify(reviewed);
+    sessionStorage.setItem(storageKey, draft);
+    return sessionStorage.getItem(storageKey) === draft;
+  } catch { return false; }
+}
+
+function recoverOwnerDraft(storageKey: string, scope: string): ReviewedOwnerDraft | null {
+  try {
+    if (!recoverBrowserOperationState(scope).requiresIdempotencyContinuity) {
+      sessionStorage.removeItem(storageKey);
+      return null;
+    }
+    const raw = sessionStorage.getItem(storageKey);
+    if (!raw) return null;
+    const draft = JSON.parse(raw) as ReviewedOwnerDraft;
+    if (draft.request.mode !== "apply" || draft.request.schema_version !== 1 ||
+        typeof draft.request.reason !== "string" || typeof draft.clear !== "boolean" ||
+        (draft.clear ? draft.request.clear !== true : typeof draft.request.github_login !== "string") ||
+        draft.key !== ownerDraftKey(draft.request.github_login ?? "", draft.clear, draft.request.reason) ||
+        typeof draft.plan.changed !== "boolean" || typeof draft.plan.applied !== "boolean" ||
+        typeof draft.plan.before.githubId !== "string" || typeof draft.plan.before.githubLogin !== "string" ||
+        typeof draft.plan.after.githubId !== "string" || typeof draft.plan.after.githubLogin !== "string") return null;
+    return draft;
+  } catch { return null; }
+}
+
 interface OwnerResource {
   error: string;
   owner: ProductOwnerIdentity;
@@ -50,11 +89,15 @@ export function ProductOwnerPanel({
     owner: NO_PRODUCT_OWNER,
     status: "loading",
   });
-  const [login, setLogin] = useState("");
-  const [reason, setReason] = useState("");
+  const storageKey = `launchplane:product-profile-draft:${product}:owner`;
+  const [recovered] = useState(() => recoverOwnerDraft(storageKey, `${product}:owner:apply`));
+  const [login, setLogin] = useState(recovered?.request.github_login ?? "");
+  const [reason, setReason] = useState(recovered?.request.reason ?? "");
   const [localError, setLocalError] = useState("");
-  const [plan, setPlan] = useState<ProductOwnerPlan | null>(null);
-  const [plannedDraft, setPlannedDraft] = useState<{ clear: boolean; key: string } | null>(null);
+  const [plan, setPlan] = useState<ProductOwnerPlan | null>(recovered?.plan ?? null);
+  const [plannedDraft, setPlannedDraft] = useState<Omit<ReviewedOwnerDraft, "plan"> | null>(
+    recovered ? { clear: recovered.clear, key: recovered.key, request: recovered.request } : null,
+  );
   const [saved, setSaved] = useState(false);
   const planOperation = useProductOwnerOperation(`${product}:owner:plan`, product, fixtureMode, true);
   const applyOperation = useProductOwnerOperation(`${product}:owner:apply`, product, fixtureMode);
@@ -63,7 +106,7 @@ export function ProductOwnerPanel({
   const planMatchesDraft = Boolean(
     plan &&
       plannedDraft &&
-      plannedDraft.key === productOwnerDraftKey(login, plannedDraft.clear),
+      plannedDraft.key === ownerDraftKey(login, plannedDraft.clear, reason),
   );
 
   useEffect(() => {
@@ -104,6 +147,7 @@ export function ProductOwnerPanel({
     setPlan(null);
     setPlannedDraft(null);
     setSaved(false);
+    try { sessionStorage.removeItem(storageKey); } catch { /* Save checks storage before dispatch. */ }
   }
 
   async function preview(clear: boolean) {
@@ -131,23 +175,34 @@ export function ProductOwnerPanel({
     }
     if (nextPlan) {
       setPlan(nextPlan);
-      setPlannedDraft({ clear, key: productOwnerDraftKey(login, clear) });
+      setPlannedDraft({ clear, key: ownerDraftKey(login, clear, reason), request: ownerRequest("apply", clear) });
     }
   }
 
   async function save() {
     setLocalError("");
     if (!plan || !plannedDraft || !planMatchesDraft) {
-      setLocalError("The login changed after the preview. Preview the change again.");
+      setLocalError("The draft changed after the preview. Preview the change again.");
       return;
     }
-    const response = await applyOperation.run(ownerRequest("apply", plannedDraft.clear));
+    if (!preserveProfileDraft(storageKey, { plan, ...plannedDraft })) {
+      setLocalError("The reviewed request could not be saved in this tab. Nothing was sent. Restore session storage and retry Save.");
+      return;
+    }
+    const response = await applyOperation.run(plannedDraft.request);
+    if (response) {
+      setPlannedDraft(null);
+      try { sessionStorage.removeItem(storageKey); } catch { /* Recovery ignores settled operations. */ }
+    }
     const appliedPlan = response ? productOwnerPlanFromResponse(response) : null;
     if (appliedPlan) {
       setResource({ error: "", owner: appliedPlan.after, status: "ready" });
       setPlan(appliedPlan);
       setSaved(true);
       setLogin("");
+    } else if (response) {
+      setPlan(null);
+      setLocalError("Save returned a response this page cannot read. Read the current Client and preview a new change.");
     }
   }
 
@@ -222,6 +277,9 @@ export function ProductOwnerPanel({
           </fieldset>
           <OperationNotice state={planOperation.state} label="Preview" />
           <OperationNotice state={applyOperation.state} label="Save" />
+          {applyOperation.state.requiresIdempotencyContinuity && !plannedDraft ? (
+            <InlineFormError message="An earlier Save is uncertain, but its reviewed request is unavailable. Keep this tab and operation key; reconcile the original operation before another change." />
+          ) : null}
           {localError ? <InlineFormError message={localError} /> : null}
           {plan && (saved || planMatchesDraft) ? (
             <p className="product-owner-plan" role="status">
@@ -290,12 +348,24 @@ function useProductOwnerOperation(scope: string, product: string, fixtureMode: D
     payload: ProductOwnerRequest,
     options: Parameters<typeof applyProductOwner>[2],
   ): Promise<AcceptedEvidenceResponse> {
+    const dispatchOptions = {
+      ...options,
+      onDispatch: () => {
+        options.onDispatch?.();
+        // The shared controller persists its key at dispatch. Verify it before
+        // the transport sends this mutation so reload cannot lose continuity.
+        if (payload.mode === "apply" &&
+            recoverBrowserOperationState(scope).identity?.idempotencyKey !== options.idempotencyKey) {
+          throw new Error("Save was not sent because this tab could not preserve its operation key. Restore session storage and retry Save.");
+        }
+      },
+    };
     if (fixtureMode) {
       const fixtures = await loadDevFixtures();
-      options.onDispatch?.();
+      dispatchOptions.onDispatch();
       return fixtures.applyProductOwnerForFixture(fixtureMode, product, payload, options.signal);
     }
-    return applyProductOwner(product, payload, options);
+    return applyProductOwner(product, payload, dispatchOptions);
   }
   return useBrowserOperationController({
     execute,
@@ -466,11 +536,7 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
   async function apply() {
     if (!reviewed || !matches) return;
     setError(""); setNotice("");
-    try {
-      const draft = JSON.stringify(reviewed);
-      sessionStorage.setItem(storageKey, draft);
-      if (sessionStorage.getItem(storageKey) !== draft) throw new Error("Draft read-back differs.");
-    } catch {
+    if (!preserveProfileDraft(storageKey, reviewed)) {
       setError("The reviewed request could not be saved in this tab. Nothing was sent. Restore session storage and retry Apply, or open this product in a new tab and dry-run again.");
       return;
     }

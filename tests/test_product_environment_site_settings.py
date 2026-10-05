@@ -244,6 +244,74 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(driver.status_code, 400, driver.text)
         self.assertEqual(driver.json()["error"]["code"], "runtime_retirement_conflict")
 
+    async def test_retirement_uses_the_checked_profile_during_a_declaration_edit(self) -> None:
+        original_read = self.store.read_product_profile_record
+        for key, declared in (("APP_THEME", False), ("LEGACY_TUNING", True)):
+            for mode in ("dry-run", "apply") if declared else ("dry-run",):
+                with self.subTest(key=key, mode=mode):
+                    profile = _profile()
+                    self.store.write_product_profile_record(profile)
+                    declarations = profile.expected_config.runtime_environment_keys
+                    edited_config = profile.expected_config.model_copy(
+                        update={
+                            "runtime_environment_keys": (
+                                (*declarations, declarations[0].model_copy(update={"key": key}))
+                                if declared
+                                else tuple(item for item in declarations if item.key != key)
+                            )
+                        }
+                    )
+                    if mode == "apply":
+                        review = await self._submit(
+                            {"mode": "dry-run", "retired_provider_keys": [key]}
+                        )
+                        self.assertEqual(review.status_code, 202, review.text)
+
+                    read_count = 0
+
+                    def edit_after_checked_profile(product: str) -> LaunchplaneProductProfileRecord:
+                        nonlocal read_count
+                        read_count += 1
+                        snapshot = original_read(product)
+                        if read_count == 3:
+                            self.store.write_product_profile_record(
+                                profile.model_copy(update={"expected_config": edited_config})
+                            )
+                        return snapshot
+
+                    with patch.object(
+                        self.store,
+                        "read_product_profile_record",
+                        side_effect=edit_after_checked_profile,
+                    ):
+                        response = await self._submit(
+                            {
+                                "mode": mode,
+                                "confirmation": "APPLY example-site/testing",
+                                "retired_provider_keys": [key],
+                            },
+                            idempotency_key=f"retirement-declaration-{key}-{mode}",
+                        )
+                    if not declared:
+                        self.assertEqual(response.status_code, 400, response.text)
+                        self.assertEqual(
+                            response.json()["error"]["code"], "runtime_retirement_conflict"
+                        )
+                    elif mode == "dry-run":
+                        self.assertEqual(response.status_code, 202, response.text)
+                    else:
+                        self.assertEqual(response.status_code, 409, response.text)
+                        self.assertEqual(
+                            response.json()["error"]["code"], "product_profile_conflict"
+                        )
+                    self.assertNotEqual(
+                        self.store.read_product_profile_record("example-site"), profile
+                    )
+                    self.assertEqual(
+                        self.store.list_runtime_environment_records(), (_runtime_record(),)
+                    )
+                    self.assertEqual(self.store.list_secret_records(), ())
+
     async def test_local_operator_cannot_record_undeclared_settings_on_a_live_product(
         self,
     ) -> None:

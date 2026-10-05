@@ -10,6 +10,7 @@ from click.testing import CliRunner
 from pydantic import ValidationError
 
 from control_plane.cli import main
+from control_plane.contracts.secret_record import SecretAuditEvent
 from control_plane.contracts.artifact_identity import (
     ArtifactAddonSelector,
     ArtifactAddonSource,
@@ -684,6 +685,53 @@ def _seed_existing_merge_train_policy_record(
 
 
 class FilesystemRecordStoreTests(unittest.TestCase):
+    def test_retirement_secret_audit_concurrent_create_preserves_winner(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = FilesystemRecordStore(root)
+            event = SecretAuditEvent(
+                event_id="product-retirement:fixture-plan:secret-disabled:fixture-secret",
+                secret_id="fixture-secret",
+                event_type="disabled",
+                recorded_at="2026-10-04T10:00:00Z",
+                actor="fixture-actor",
+                detail="Retirement evidence.",
+                metadata={"plan_sha256": "fixture-plan"},
+            )
+            candidates = (event, event.model_copy(update={"recorded_at": "2026-10-04T10:05:00Z"}))
+            barrier = threading.Barrier(2)
+
+            def create(candidate: SecretAuditEvent) -> SecretAuditEvent | None:
+                independent_store = FilesystemRecordStore(root)
+                barrier.wait(timeout=10)
+                try:
+                    independent_store.create_product_retirement_secret_audit_event(candidate)
+                except ValueError:
+                    return None
+                return candidate
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = tuple(executor.map(create, candidates))
+            winners = tuple(result for result in results if result is not None)
+            self.assertEqual(len(winners), 1)
+            winner = winners[0]
+            self.assertEqual(store.list_secret_audit_events(secret_id=event.secret_id), (winner,))
+            for update in (
+                {"recorded_at": "2026-10-04T10:10:00Z"},
+                {"actor": "changed-actor"},
+                {"secret_id": "changed-secret"},
+                {"event_type": "created"},
+                {"detail": "Changed detail."},
+                {"metadata": {"plan_sha256": "changed-plan"}},
+            ):
+                with self.subTest(update=update), self.assertRaises(ValueError):
+                    store.create_product_retirement_secret_audit_event(
+                        winner.model_copy(update=update)
+                    )
+                self.assertEqual(
+                    store.list_secret_audit_events(secret_id=event.secret_id), (winner,)
+                )
+
     def test_tenant_repository_classifications_are_immutable_revision_history(
         self,
     ) -> None:
