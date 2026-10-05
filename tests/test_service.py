@@ -6189,7 +6189,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertTrue(payload["result"]["diff"]["schema_migrated"])
         self.assertEqual(payload["result"]["diff"]["adopted_rule_count"], 1)
         self.assertEqual(conflict_status, 409)
-        self.assertEqual(conflict_payload["error"]["code"], "authz_policy_conflict")
+        self.assertEqual(conflict_payload["error"]["code"], "authz_policy_schema_conflict")
         self.assertEqual(active_status, 200)
         self.assertEqual(active_payload["policy"]["revision"], 2)
         self.assertEqual(active_payload["policy"]["managed_rule_count"], 1)

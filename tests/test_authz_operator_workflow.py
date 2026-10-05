@@ -41,7 +41,82 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                 job = self.dispatch_workflow.job(f"reconcile-{option}")
                 job_inputs = job["with"]
                 assert isinstance(job_inputs, dict)
-                self.assertEqual(job_inputs["expected_managed_set_id"], f"operator.{option}")
+                secrets = job["secrets"]
+                assert isinstance(secrets, dict)
+                configuration = str(secrets["managed_set_json"])
+                if configuration.startswith("{"):
+                    self.assertEqual(
+                        job_inputs["expected_managed_set_id"],
+                        json.loads(configuration)["managed_set_id"],
+                    )
+                else:
+                    self.assertEqual(job_inputs["expected_managed_set_id"], f"operator.{option}")
+
+    def test_retirement_configuration_runs_through_review_bound_worker(self) -> None:
+        job = self.dispatch_workflow.job("reconcile-manager-preview-approval-retirement")
+        job_inputs = job["with"]
+        secrets = job["secrets"]
+        assert isinstance(job_inputs, dict)
+        assert isinstance(secrets, dict)
+        configuration = secrets["managed_set_json"]
+        assert isinstance(configuration, str)
+        render_step = self.workflow.step_named(
+            "reconcile", "Validate and render managed authz request"
+        )
+        assert render_step is not None
+        for mode in ("dry_run", "apply"):
+            with self.subTest(mode=mode), TemporaryDirectory() as temporary_directory:
+                output_file = Path(temporary_directory) / "github-output"
+                reviewed_digest = "a" * 64 if mode == "apply" else ""
+                result = subprocess.run(
+                    ["bash", "-ceu", render_step.run],
+                    check=False,
+                    capture_output=True,
+                    env={
+                        **os.environ,
+                        "DEFAULT_BRANCH": "main",
+                        "GITHUB_EVENT_NAME": "workflow_dispatch",
+                        "GITHUB_OUTPUT": str(output_file),
+                        "GITHUB_REF": "refs/heads/main",
+                        "GITHUB_RUN_ATTEMPT": "1",
+                        "GITHUB_RUN_ID": "1234",
+                        "EXPECTED_MANAGED_SET_ID": str(job_inputs["expected_managed_set_id"]),
+                        "LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON": configuration,
+                        "MODE": mode,
+                        "REASON": "Retire the approved managed set.",
+                        "RELATED_ISSUE": "example/launchplane#1",
+                        "REVIEWED_PLAN_SHA256": reviewed_digest,
+                        "RUNNER_TEMP": temporary_directory,
+                    },
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                outputs = dict(
+                    line.split("=", 1)
+                    for line in output_file.read_text(encoding="utf-8").splitlines()
+                )
+                envelope = AuthzManagedPolicyReconcileEnvelope.model_validate_json(
+                    Path(outputs["request_file"]).read_text(encoding="utf-8")
+                )
+                self.assertEqual(envelope.managed_set_id, job_inputs["expected_managed_set_id"])
+                self.assertEqual(envelope.mode, mode)
+                self.assertEqual(envelope.reviewed_plan_sha256, reviewed_digest)
+                self.assertEqual(envelope.schema_migration, "reject")
+                self.assertEqual(envelope.unmanaged_adoption, "reject")
+                self.assertFalse(
+                    any(
+                        getattr(envelope.desired_policy, collection)
+                        for collection in (
+                            "github_actions",
+                            "github_humans",
+                            "terminal_agents",
+                            "local_operators",
+                            "local_admins",
+                            "ordinary_agents",
+                        )
+                    )
+                )
+                self.assertEqual(bool(outputs["idempotency_key"]), mode == "apply")
 
     def test_privileged_operation_bootstrap_is_exact_and_fails_closed(self) -> None:
         job = self.dispatch_workflow.job("reconcile-privileged-operation-bootstrap")

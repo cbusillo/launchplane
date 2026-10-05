@@ -728,7 +728,17 @@ class AuthzPolicySchemaV3CompatibilityTests(unittest.TestCase):
                         "product": "launchplane",
                         "managed_set_id": "test.empty",
                         "schema_migration": migration,
-                        "desired_policy": {"schema_version": desired_schema},
+                        "desired_policy": {
+                            "schema_version": desired_schema,
+                            "local_operators": [
+                                {
+                                    "managed_set_id": "test.empty",
+                                    "managed_rule_id": "reader",
+                                    "subjects": ["reader"],
+                                    "actions": ["product_profile.read"],
+                                }
+                            ],
+                        },
                     }
                 )
                 with self.assertRaises(AuthzPolicyConflictError):
@@ -841,7 +851,19 @@ class AuthzPolicySchemaV3StoreFenceTests(unittest.TestCase):
                     request=AuthzManagedPolicyReconcileEnvelope(
                         product="launchplane",
                         managed_set_id="test.empty",
-                        desired_policy=LaunchplaneAuthzPolicy(schema_version=2),
+                        desired_policy=LaunchplaneAuthzPolicy.model_validate(
+                            {
+                                "schema_version": 2,
+                                "local_operators": [
+                                    {
+                                        "managed_set_id": "test.empty",
+                                        "managed_rule_id": "reader",
+                                        "subjects": ["reader"],
+                                        "actions": ["product_profile.read"],
+                                    }
+                                ],
+                            }
+                        ),
                     ),
                 )
 

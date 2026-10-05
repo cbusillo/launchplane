@@ -23,6 +23,7 @@ name: Manage Launchplane Authorization
           - privileged-operation-bootstrap
           - generic-web-onboarding
           - manager-preview-approval
+          - manager-preview-approval-retirement
           - owner-acceptance
           - product-owner-policy-admin
           - product-health-monitoring
@@ -137,6 +138,22 @@ jobs:
       related_issue: ${{ inputs.related_issue }}
     secrets:
       managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_MANAGER_PREVIEW_APPROVAL_MANAGED_SET_JSON }}
+
+  reconcile-manager-preview-approval-retirement:
+    if: ${{ inputs.managed_set == 'manager-preview-approval-retirement' }}
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@39aecc250d6dee91204e24673725bd1ea1ca6bda # main
+    with:
+      mode: ${{ inputs.mode }}
+      expected_managed_set_id: operator.manager-preview-approval
+      reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
+      reason: ${{ inputs.reason }}
+      related_issue: ${{ inputs.related_issue }}
+    secrets:
+      managed_set_json: >-
+        {"schema_version":2,"product":"launchplane",
+        "managed_set_id":"operator.manager-preview-approval",
+        "schema_migration":"reject","unmanaged_adoption":"reject",
+        "desired_policy":{"schema_version":2}}
 
   reconcile-owner-acceptance:
     if: ${{ inputs.managed_set == 'owner-acceptance' }}
