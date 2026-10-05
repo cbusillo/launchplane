@@ -39,7 +39,10 @@ Client policies and grants are not used.
 
 The server resolves Odoo revisions from release tuples and artifact manifests;
 image-based products use deployed inventory runtime identities. GitHub compare
-and commit-associated pull-request reads are paginated. Divergent history,
+and commit-associated pull-request reads are paginated. Independent commit
+coverage reads run with bounded concurrency so promotion status does not wait
+for each network request in sequence; checklist aggregation remains in commit
+order. Divergent history,
 incomplete responses, unavailable source control, and missing lane evidence
 fail closed. Every successful production promotion writes production's
 environment record from the deployment it made, so the next review starts from

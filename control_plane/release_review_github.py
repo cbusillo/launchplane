@@ -2,6 +2,7 @@
 
 import re
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 
 from control_plane.contracts.release_review import ReleaseReviewItem
@@ -130,11 +131,25 @@ def read_release_changes(
     commit_set = set(commits)
     items: dict[int, ReleaseReviewItem] = {}
     covered: set[str] = set()
-    for sha in commits:
-        for page in range(1, 11):
-            pulls = read(f"/repos/{repository_path}/commits/{sha}/pulls?per_page=100&page={page}")
-            if not isinstance(pulls, list):
+
+    def read_commit_pulls(commit_sha: str) -> list[object]:
+        result: list[object] = []
+        for coverage_page in range(1, 11):
+            batch_pulls = read(
+                f"/repos/{repository_path}/commits/{commit_sha}/pulls"
+                f"?per_page=100&page={coverage_page}"
+            )
+            if not isinstance(batch_pulls, list):
                 raise ValueError("GitHub pull request coverage is unavailable.")
+            result.extend(batch_pulls)
+            if len(batch_pulls) < 100:
+                return result
+        raise ValueError("GitHub pull request coverage exceeds the supported size.")
+
+    # Coverage reads are independent network requests. Bound concurrency, then
+    # aggregate in commit order so validation and checklist digests stay stable.
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        for sha, pulls in zip(commits, executor.map(read_commit_pulls, commits), strict=True):
             for pull in pulls:
                 if not isinstance(pull, dict):
                     raise ValueError("GitHub returned an invalid pull request.")
@@ -169,10 +184,6 @@ def read_release_changes(
                     raise ValueError("Client test notes changed while compiling the release.")
                 items[item.pull_request_number] = item
                 covered.add(sha)
-            if len(pulls) < 100:
-                break
-        else:
-            raise ValueError("GitHub pull request coverage exceeds the supported size.")
     return (
         tuple(items[number] for number in sorted(items)),
         tuple(sha for sha in commits if sha not in covered),
