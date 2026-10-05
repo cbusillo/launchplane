@@ -102,6 +102,7 @@ __all__ = [
     "GitHubAppInstallationToken",
     "GitHubAppInstallationInspection",
     "mint_build_provenance_installation_token",
+    "mint_source_control_read_installation_token",
     "resolve_advisory_github_app_identity",
     "mint_repository_installation_token",
     "mint_merge_train_installation_token",
@@ -203,6 +204,33 @@ def mint_repository_installation_token(
         allowed_token_permissions=_ALLOWED_INSTALLATION_PERMISSIONS,
         identity_label="Launchplane advisory GitHub App",
         permission_boundary_label="advisory check projection",
+        api_request=api_request,
+        now=now,
+    )
+
+
+def mint_source_control_read_installation_token(
+    *,
+    identity: GitHubAppIdentity,
+    repository: str,
+    repository_id: str,
+    api_request: GitHubApiRequest = github_api_request,
+    now: datetime | None = None,
+) -> GitHubAppInstallationToken:
+    """Read commit/file/PR evidence using a subset of the existing train grants."""
+    permissions = {"contents": "read", "pull_requests": "read", "metadata": "read"}
+    return _mint_repository_installation_token(
+        identity=identity,
+        repository=repository,
+        repository_id=repository_id,
+        requested_permissions={
+            key: value for key, value in permissions.items() if key != "metadata"
+        },
+        required_installation_permissions=permissions,
+        allowed_installation_permissions=None,
+        allowed_token_permissions=permissions,
+        identity_label="Source control read GitHub App",
+        permission_boundary_label="source control read",
         api_request=api_request,
         now=now,
     )

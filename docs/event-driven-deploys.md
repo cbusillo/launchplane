@@ -394,7 +394,8 @@ these checks are not excluded from normal check readiness as advisory governance
 projections are. A missing projection credential/permission or failed projection
 is stored as unavailable, with the scan outcome preserved separately. No token
 fallback or access grant is created. Source reads use the repository's existing
-train App with its read-only build-provenance token; projection uses the existing
+train App with a contents/pull-requests read token (a subset of the train's
+existing permissions); projection uses the existing
 checks-only identity. Both installations and managed-key bindings need to be
 verified before activation. Requiring these check names is an Owner decision.
 

@@ -36,7 +36,7 @@ from control_plane.contracts.product_reconcile import GitHubAppWebhookDeliveryRe
 from control_plane.repository_inventory import get_repository_inventory_read_model
 from control_plane.github_app_identity import (
     GitHubAppIdentity,
-    mint_build_provenance_installation_token,
+    mint_source_control_read_installation_token,
     resolve_advisory_github_app_identity,
     mint_repository_installation_token,
 )
@@ -315,7 +315,7 @@ def run_product_config_authority_event(
         context_name=app.private_key_context,
         binding_key="private_key",
     )
-    token = mint_build_provenance_installation_token(
+    token = mint_source_control_read_installation_token(
         identity=GitHubAppIdentity(app_id=app.app_id, private_key=private_key),
         repository=inventory.repository,
         repository_id=inventory.repository_id,

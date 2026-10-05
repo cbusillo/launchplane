@@ -271,7 +271,7 @@ class ConfigAuthorityEventTests(unittest.TestCase):
                 }
             ).encode()
             with patch(
-                "control_plane.product_config_authority_events.mint_build_provenance_installation_token"
+                "control_plane.product_config_authority_events.mint_source_control_read_installation_token"
             ) as mint:
                 for ref, before, created in (
                     ("refs/heads/main", "0" * 40, True),
@@ -439,7 +439,7 @@ class ConfigAuthorityEventTests(unittest.TestCase):
                 return (restored,)
 
         with patch(
-            "control_plane.product_config_authority_events.mint_build_provenance_installation_token"
+            "control_plane.product_config_authority_events.mint_source_control_read_installation_token"
         ) as mint:
             self.assertEqual(
                 request_product_config_authority_event(Store(), _inventory(), "push", {}), {}

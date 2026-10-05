@@ -17,6 +17,7 @@ from control_plane.github_app_identity import (
     mint_ordinary_agent_installation_token,
     mint_provider_delivery_inspection_token,
     mint_repository_installation_token,
+    mint_source_control_read_installation_token,
     revoke_installation_token,
 )
 
@@ -74,6 +75,58 @@ class GitHubAppIdentityTests(unittest.TestCase):
         claims = jwt.decode(observed_jwts[0], options={"verify_signature": False})
         self.assertEqual(claims["iss"], "42")
         self.assertEqual(claims["exp"] - claims["iat"], 540)
+
+    def test_source_read_mint_needs_no_actions_grant_and_refuses_write_token(self) -> None:
+        for contents in ("read", "write"):
+            with self.subTest(contents=contents):
+
+                def api_request(**kwargs: object) -> object:
+                    if kwargs["path"] == "/app":
+                        return {"id": 42}
+                    if kwargs["path"] == "/repos/example/repo/installation":
+                        return {
+                            "id": 77,
+                            "app_id": 42,
+                            "permissions": {
+                                "contents": "write",
+                                "pull_requests": "write",
+                                "metadata": "read",
+                            },
+                        }
+                    self.assertEqual(
+                        kwargs["body"],
+                        {
+                            "repository_ids": [123],
+                            "permissions": {"contents": "read", "pull_requests": "read"},
+                        },
+                    )
+                    return {
+                        "token": "read-token",
+                        "expires_at": "2026-08-07T15:00:00Z",
+                        "permissions": {
+                            "contents": contents,
+                            "pull_requests": "read",
+                            "metadata": "read",
+                        },
+                        "repositories": [{"id": 123, "full_name": "example/repo"}],
+                    }
+
+                def mint() -> GitHubAppInstallationToken:
+                    return mint_source_control_read_installation_token(
+                        identity=GitHubAppIdentity(app_id=42, private_key=self.private_key),
+                        repository="example/repo",
+                        repository_id="123",
+                        api_request=api_request,
+                        now=datetime(2026, 8, 7, 14, 0, tzinfo=timezone.utc),
+                    )
+
+                if contents == "write":
+                    with self.assertRaises(GitHubAppIdentityError):
+                        mint()
+                else:
+                    self.assertTrue(
+                        all(permission.endswith(":read") for permission in mint().permissions)
+                    )
 
     def test_reconciliation_mint_attenuates_writes_and_rejects_provider_escalation(self) -> None:
         for returned_access in ("read", "write"):

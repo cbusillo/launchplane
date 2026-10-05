@@ -103,7 +103,6 @@ from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsResult,
     OdooPreviewDokployDryRunPlan,
 )
-from control_plane.workflows import odoo_stable_operation_worker
 from control_plane.workflows.odoo_stable_operation_worker import (
     OdooStableOperationWorkerResult,
     OdooStableOperationWorkerStore,
@@ -3125,14 +3124,34 @@ class ProductReconcileWorkerTests(ProductReconcileTestCase):
         self.assertEqual(result.status, "idle")
         operation_claims = {
             name
-            for member in vars(odoo_stable_operation_worker).values()
-            if isinstance(member, type)
+            for member in OdooStableOperationWorkerStore.__mro__
             for name in vars(member)
             if name.startswith("claim_next_") and name != "claim_next_product_reconcile_request"
         }
         self.assertTrue(operation_claims)
         self.assertEqual(store.claims[-1], "claim_next_product_reconcile_request")
         self.assertCountEqual(store.claims[:-1], operation_claims)
+
+    def test_source_scans_wait_behind_reconcile_and_skip_claims_when_disabled(self) -> None:
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                store = _ClaimOrderStore()
+                with patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.config_authority_events_enabled",
+                    return_value=enabled,
+                ):
+                    run_odoo_stable_operation_worker_once(
+                        record_store=cast(OdooStableOperationWorkerStore, store),
+                        control_plane_root_path=Path("."),
+                        lease_owner="worker",
+                    )
+                if enabled:
+                    self.assertLess(
+                        store.claims.index("claim_next_product_reconcile_request"),
+                        store.claims.index("claim_next_config_authority_delivery"),
+                    )
+                else:
+                    self.assertNotIn("claim_next_config_authority_delivery", store.claims)
 
     def test_worker_reports_a_reconcile_it_ran(self) -> None:
         self.request()
