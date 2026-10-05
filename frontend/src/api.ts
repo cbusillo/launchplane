@@ -1074,3 +1074,31 @@ export function disconnectOrdinaryAgent(principalId: string, sourceEventId: stri
 export function readOrdinaryAgentJob(principalId: string, requestId: string, signal?: AbortSignal): Promise<OrdinaryAgentJobView> {
   return requestJson(`/v1/ordinary-agent-jobs/${encodeURIComponent(principalId)}/${encodeURIComponent(requestId)}`, "GET", undefined, signal);
 }
+
+export function readServiceGitHubDelivery(signal?: AbortSignal): Promise<import("./generated/openapi.ts").ServiceGitHubDeliveryStatus> {
+  return requestJson("/v1/service/github-delivery", "GET", undefined, signal);
+}
+
+export function configureServiceGitHubDelivery(
+  body: import("./generated/openapi.ts").DeliveryGitHubAppConfigurationRequest,
+  options: BrowserOperationOptions,
+): Promise<import("./generated/openapi.ts").DeliveryGitHubAppConfigurationResponse> {
+  const request: import("./generated/openapi.ts").ConfigureLaunchplaneGithubDeliveryData = {
+    url: BROWSER_WRITE_ROUTES.serviceGitHubDeliveryConfigure,
+    body,
+    headers: { "Idempotency-Key": options.idempotencyKey },
+  };
+  return requestGeneratedPost(request, options.signal, options.onDispatch);
+}
+
+export function retireServiceGitHubTokens(
+  body: import("./generated/openapi.ts").ServiceTokenRetirementRequest,
+  options: BrowserOperationOptions,
+): Promise<import("./generated/openapi.ts").ServiceTokenRetirementResponse> {
+  const request: import("./generated/openapi.ts").RetireServiceGithubTokensData = {
+    url: BROWSER_WRITE_ROUTES.serviceGitHubTokenRetire,
+    body,
+    headers: { "Idempotency-Key": options.idempotencyKey },
+  };
+  return requestGeneratedPost(request, options.signal, options.onDispatch);
+}

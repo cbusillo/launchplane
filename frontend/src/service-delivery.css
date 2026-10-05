@@ -1,0 +1,26 @@
+.service-delivery-summary, .service-delivery-panel {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 20px;
+  background: var(--surface);
+  min-width: 0;
+}
+.service-delivery-summary dl { display: flex; flex-wrap: wrap; gap: 16px 32px; }
+.service-delivery-summary dt, .service-delivery-panel small { color: var(--muted); }
+.service-delivery-summary dd { margin: 4px 0 0; font-weight: 650; }
+.service-delivery-panel p, .service-delivery-summary p { margin: 12px 0; }
+.service-delivery-panel fieldset { border: 0; padding: 0; display: grid; gap: 16px; margin: 16px 0; }
+.service-delivery-panel label { display: grid; gap: 8px; font-size: 14px; }
+.service-delivery-panel input:not([type="checkbox"]), .service-delivery-panel select, .service-delivery-panel textarea {
+  border: 1px solid var(--border); background: var(--bg); color: var(--text-strong);
+  border-radius: 6px; padding: 10px; width: 100%; min-width: 0;
+}
+.service-delivery-panel textarea { min-height: 70px; resize: vertical; }
+.service-delivery-panel .service-delivery-check { display: flex; gap: 12px; align-items: flex-start; overflow-wrap: anywhere; }
+.service-delivery-check input { margin-top: 3px; flex-shrink: 0; }
+.service-delivery-check span { display: grid; gap: 4px; min-width: 0; }
+.service-delivery-review { background: var(--accent-soft); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin: 16px 0; }
+.service-delivery-review code { overflow-wrap: anywhere; }
+.service-delivery-panel fieldset:disabled { opacity: .65; }
+@media (max-width: 600px) { .service-delivery-panel, .service-delivery-summary { padding: 16px; } }
