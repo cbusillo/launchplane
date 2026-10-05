@@ -690,6 +690,8 @@ class PublicIngressMonitorTests(unittest.TestCase):
                     now=checked + timedelta(seconds=elapsed),
                 )
                 self.assertEqual(verification.provenance.freshness_status, expected)
+                assert verification.runtime_target is not None
+                self.assertEqual(verification.runtime_target.runtime_identity_status, "match")
 
     def test_current_verification_requires_identity_health_and_current_authority(self) -> None:
         identity = _identity()
@@ -756,6 +758,8 @@ class PublicIngressMonitorTests(unittest.TestCase):
                     now=now,
                 )
                 self.assertNotEqual(verification.provenance.freshness_status, "verified")
+                if label == "identity missing":
+                    self.assertIsNone(verification.runtime_target)
 
     def test_monitor_mismatch_replaces_prior_pass_and_opens_incident(self) -> None:
         identity = _identity()

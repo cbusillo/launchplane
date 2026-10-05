@@ -1,4 +1,36 @@
-import type { ProductEnvironmentSummary } from "./generated/openapi.ts";
+import type { DataProvenance, ProductEnvironmentDetail, ProductEnvironmentSummary } from "./generated/openapi.ts";
+
+function expireProvenance(provenance: DataProvenance, now: number): DataProvenance {
+  return ["verified", "recorded"].includes(provenance.freshness_status) && Date.parse(provenance.stale_after) < now
+    ? { ...provenance, freshness_status: "stale" } : provenance;
+}
+
+export function expireEnvironmentEvidence<T extends ProductEnvironmentSummary | ProductEnvironmentDetail>(environment: T, now = Date.now()): T {
+  const provenance = expireProvenance(environment.provenance, now);
+  const placement = environment.topology.observed.placement;
+  const placementProvenance = expireProvenance(placement.provenance, now);
+  const checks = environment.health_monitoring.checks.map(check => {
+    const provenance = expireProvenance(check.provenance, now);
+    return { ...check, provenance, trust_state: provenance.freshness_status };
+  });
+  return {
+    ...environment, provenance,
+    trust_state: provenance.freshness_status === "stale" ? "stale" : environment.trust_state,
+    health_monitoring: {
+      ...environment.health_monitoring,
+      checks,
+      trust_state: checks.some(check => check.probe_effective && check.trust_state === "stale")
+        ? "stale" : environment.health_monitoring.trust_state,
+    },
+    topology: {
+      ...environment.topology,
+      observed: {
+        ...environment.topology.observed,
+        placement: { ...placement, provenance: placementProvenance, trust_state: placementProvenance.freshness_status },
+      },
+    },
+  };
+}
 
 export type SignalTone = ProductEnvironmentSummary["trust_state"] | "warning" | "danger";
 
@@ -10,7 +42,7 @@ export function environmentOperationalTone(environment: ProductEnvironmentSummar
   ]);
   if (
     checks.some(check => check.status === "fail" || check.incident_status === "open") ||
-    ["mismatch", "missing", "malformed", "unverifiable"].includes(
+    ["mismatch", "malformed"].includes(
       environment.topology.observed.placement?.runtime_identity_status ?? "unchecked",
     ) ||
     environment.topology.warnings.some(warning => warning.severity === "error") ||

@@ -271,7 +271,7 @@ export function ProductWorkspaceRoute({
   );
 }
 
-function useEvidenceExpiry(environments: ProductEnvironmentSummary[]) {
+export function useEvidenceExpiry(environments: Pick<ProductEnvironmentSummary, "provenance" | "health_monitoring">[]) {
   const [tick, setTick] = useState(0);
   const nextExpiry = Math.min(...environments.flatMap(environment => [
     environment.provenance.stale_after,

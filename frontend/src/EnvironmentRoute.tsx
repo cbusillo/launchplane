@@ -36,8 +36,10 @@ import {
   evidenceTimestamp,
   humanize,
   trustLabel,
+  useEvidenceExpiry,
   type TrustState,
 } from "./ProductOps";
+import { expireEnvironmentEvidence } from "./product-environment-signal";
 import {
   EnvironmentViewNav,
   ProductWorkspaceNav,
@@ -87,6 +89,7 @@ export function ProductEnvironmentRoute({
   const [detailResource, setDetailResource] = useState<
     ResourceState<ProductEnvironmentDetail>
   >(emptyResource());
+  useEvidenceExpiry(detailResource.data ? [detailResource.data] : []);
   const [configResource, setConfigResource] = useState<
     ResourceState<ProductEnvironmentConfigStatus>
   >(emptyResource());
@@ -351,7 +354,7 @@ export function ProductEnvironmentRoute({
   return (
     <EnvironmentPage
       configResource={configResource}
-      detail={detailResource.data}
+      detail={expireEnvironmentEvidence(detailResource.data)}
       productOverview={productOverview}
       refreshError={detailResource.status === "error" ? detailResource.error : ""}
       route={route}

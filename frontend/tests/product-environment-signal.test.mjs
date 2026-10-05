@@ -53,3 +53,10 @@ test("a recorded runtime mismatch stays red without an effective monitor check",
   lane.topology.observed.placement = { runtime_identity_status: "mismatch" };
   assert.equal(environmentOperationalTone(lane), "danger");
 });
+
+test("advisory missing runtime identity is unverified rather than a failure", () => {
+  const lane = environment();
+  lane.provenance.freshness_status = "recorded";
+  lane.topology.observed.placement = { runtime_identity_status: "missing" };
+  assert.equal(environmentOperationalTone(lane), "warning");
+});

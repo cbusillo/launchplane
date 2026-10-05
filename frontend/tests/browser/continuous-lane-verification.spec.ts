@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("an open workspace stops showing green when monitor evidence expires", async ({ page }) => {
+for (const detail of [false, true]) test(`an open ${detail ? "environment" : "workspace"} expires monitor verification`, async ({ page }) => {
   await page.goto("/ui/products?fixture=products");
   const { product, expiry } = await page.evaluate(async () => {
     const modulePath = "/ui/src/dev-fixtures.ts";
@@ -10,10 +10,12 @@ test("an open workspace stops showing green when monitor evidence expires", asyn
     return { product: product.product, expiry: Date.parse(lane.provenance.stale_after) };
   });
   await page.clock.install({ time: new Date(expiry - 1000) });
-  await page.goto(`/ui/products/${product}?fixture=products`);
-  const signal = page.locator(".signal-tile").filter({ hasText: /^Testing/i });
-  await expect(signal).toHaveAttribute("data-tone", "verified");
+  await page.goto(`/ui/products/${product}${detail ? "/environments/testing" : ""}?fixture=products`);
+  const signal = detail
+    ? page.locator(".condition-tile").filter({ hasText: /^Runtime identity/i })
+    : page.locator(".signal-tile").filter({ hasText: /^Testing/i });
+  await expect(signal).toHaveAttribute("data-tone", detail ? "pass" : "verified");
   await page.clock.runFor(2000);
   await expect(signal).toHaveAttribute("data-tone", "warning");
-  await expect(signal).toContainText("Review warning");
+  await expect(signal).toContainText(detail ? "Stale" : "Review warning");
 });

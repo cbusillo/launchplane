@@ -1,8 +1,11 @@
 from dataclasses import dataclass
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
+from typing import cast
 
 from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -55,7 +58,7 @@ def monitor_observation_provenance(
         refreshed_at=observation.observed_at,
         freshness_status=status,
         stale_after=stale_at.isoformat().replace("+00:00", "Z") if stale_at else "",
-        detail="Launchplane monitor observation, current within its declared cadence.",
+        detail="Launchplane monitor observation; freshness follows its declared cadence.",
     )
 
 
@@ -109,8 +112,11 @@ def read_lane_runtime_verification(
             detail="Launchplane has no current monitor runtime-identity and health verification.",
         )
     )
-    if not callable(read_observations):
+    if read_observations is None or not callable(read_observations):
         return missing
+    read_observations = cast(
+        Callable[..., tuple[PublicIngressObservationRecord, ...]], read_observations
+    )
     checks = tuple(
         check
         for check in lane.health_monitoring.checks
@@ -156,9 +162,10 @@ def read_lane_runtime_verification(
         authority_times = [profile.updated_at, deployment_at]
         if check.private_endpoint_key:
             read_endpoint = getattr(record_store, "read_private_health_endpoint_record", None)
-            if not callable(read_endpoint):
+            if read_endpoint is None or not callable(read_endpoint):
                 results.append(missing)
                 continue
+            read_endpoint = cast(Callable[[str], PrivateHealthEndpointRecord], read_endpoint)
             try:
                 endpoint = read_endpoint(check.private_endpoint_key)
             except (FileNotFoundError, KeyError):
@@ -199,11 +206,24 @@ def read_lane_runtime_verification(
         )
         if provenance.freshness_status == "verified" and not passed:
             provenance = provenance.model_copy(update={"freshness_status": "recorded"})
-        results.append(
-            LaneRuntimeVerification(provenance, observation, target if current else None)
+        placement_target = (
+            target
+            if current
+            and target is not None
+            and (
+                target.runtime_identity_status in {"match", "mismatch", "malformed"}
+                or target.status == "fail"
+            )
+            else None
         )
+        results.append(LaneRuntimeVerification(provenance, observation, placement_target))
     # Every effective check must pass; never pick an older success over a failure.
-    provenance = min(results, key=lambda result: result.provenance.stale_after).provenance
+    provenance = min(
+        results,
+        key=lambda result: (
+            _timestamp(result.provenance.stale_after) or datetime.min.replace(tzinfo=timezone.utc)
+        ),
+    ).provenance
     for status in ("missing", "stale", "recorded", "unsupported"):
         failed = next(
             (result for result in results if result.provenance.freshness_status == status), None
