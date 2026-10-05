@@ -938,23 +938,26 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 provider_checkpoint=provider_checkpoint,
                 checkpoint=checkpoint,
             )
+        guard: GuardedMergeAdmission = admission_guard
         repository_path = _repository_path(landing_plan.repository)
         expected_base_sha = landing_plan.entries[0].expected_base_sha
         expected_base_tree_sha = landing_plan.entries[0].recorded_candidate_parent_tree_sha
         landed_entries: list[MergeTrainBatchLandingEntry] = []
 
         def update_progress(
-            progress_plan: MergeTrainBatchLandingPlan,
+            checkpoint_plan: MergeTrainBatchLandingPlan,
             progress_entry: MergeTrainBatchLandingEntry,
             phase: str,
         ) -> None:
             persisted_record = (
-                checkpoint(progress_plan, progress_entry, phase) if checkpoint is not None else None
+                checkpoint(checkpoint_plan, progress_entry, phase)
+                if checkpoint is not None
+                else None
             )
             if persisted_record is not None:
-                admission_guard.update_landing_plan_record(persisted_record)
+                guard.update_landing_plan_record(persisted_record)
             else:
-                admission_guard.update_landing_plan(progress_plan)
+                guard.update_landing_plan(checkpoint_plan)
 
         for entry_index, entry in enumerate(landing_plan.entries):
             current_base_sha, current_base_tree_sha = _base_branch_identity(
@@ -1377,7 +1380,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         payload = _json_object(
             self.transport.request(
                 method="GET",
-                path=(f"/repos/{repository_path}/compare/{normalized_commit_sha}...{branch_name}"),
+                path=f"/repos/{repository_path}/compare/{normalized_commit_sha}...{branch_name}",
             ),
             "GitHub compare response",
         )
@@ -1706,7 +1709,8 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 )
             },
         )
-        if self._branch_refresh_recorder is None:
+        recorder = self._branch_refresh_recorder
+        if recorder is None:
             return
         try:
             result = self._read_branch_refresh_result(
@@ -1721,7 +1725,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 )
                 return
             result_head_sha, merged_base_sha = result
-            self._branch_refresh_recorder(
+            recorder(
                 repository=repository,
                 pull_request_number=pull_request_number,
                 expected_head_sha=expected_head_sha,
@@ -3655,7 +3659,7 @@ def _required_branch_checks(
         required_checks[key]
         for key in sorted(
             required_checks,
-            key=lambda item: (item[0], item[1] if item[1] is not None else -1),
+            key=lambda binding: (binding[0], binding[1] if binding[1] is not None else -1),
         )
     )
 
@@ -3774,7 +3778,7 @@ def _list_check_runs(
         payload = _json_object(
             transport.request(
                 method="GET",
-                path=(f"/repos/{repository_path}/commits/{encoded_head_sha}/check-runs?{query}"),
+                path=f"/repos/{repository_path}/commits/{encoded_head_sha}/check-runs?{query}",
             ),
             "GitHub check runs response",
         )
@@ -3891,7 +3895,7 @@ def _github_request_route_template(path: str) -> str:
         "/repos/{owner}/{repo}/merges",
     )
     for template in templates:
-        pattern = re.sub(r"\{[^}]+\}", "[^/]+", template)
+        pattern = re.sub(r"\{[^}]+}", "[^/]+", template)
         if template.endswith("/{reference}"):
             pattern = pattern.rsplit("[^/]+", 1)[0] + ".+"
         if re.fullmatch(pattern, route):
