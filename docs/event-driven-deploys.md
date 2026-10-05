@@ -382,13 +382,15 @@ budget refuses verification. Scans have a four-minute read budget under a
 ten-minute lease; an expired lease is recovered and its older attempt cannot
 publish a check or stored result. Publication holds the database delivery fence
 through the provider write and completion; different deliveries for one
-repository are serialized. Deploy operations and product reconciliation keep
-priority over scans. With no branch opted in, idle polling skips the scan table. The source migration
+repository are serialized. A separate scan thread is admitted after deploy and
+reconcile polling; a slow source read does not hold up newly queued operations.
+With no branch opted in, idle polling skips the scan table. The source migration
 adds a PostgreSQL index on scan state and receipt time for enabled queue reads.
 
 Completed results are projected through the existing checks-only App as
-`launchplane/config-authority/pull-request`, `/push`, or `/merge-group`.
-Separate event names prevent a narrower push comparison from overwriting a PR's
+`launchplane/config-authority/<event>/<encoded-base-branch>`, with event
+`pull-request`, `push`, or `merge-group` and a URL-encoded branch name.
+Separate event and branch names prevent a narrower comparison from overwriting a PR's
 result on the same head. A failed gate or unavailable source produces failure;
 these checks are not excluded from normal check readiness as advisory governance
 projections are. A missing projection credential/permission or failed projection
@@ -404,10 +406,10 @@ state, commit pair, redacted gate findings, coverage gaps, hashes and projection
 receipt through `GET /v1/repository-inventory?repository_id=<id>&delivery_id=<id>`.
 The delivery must belong to that repository. Literal configuration values and
 file contents are absent. A rejected gate stays failed. Unavailable source or
-projection evidence retries three times with backoff (30 then 60 seconds); native
+projection evidence makes up to three attempts with backoff (30 then 60 seconds); native
 signed redelivery can retry an exhausted unavailable scan without repeating its
 deploy targets. Summaries stay within the check API's size limit, with full
-evidence in the reader. Interrupted workers recover through their expired lease.
+evidence in the reader and its delivery ID in the summary. Interrupted workers recover through their expired lease.
 
 Before removing the RepairShopr, VeriReel or SellYourOutboard workflow, verify
 runtime activation, event subscriptions, source reads and check projection for

@@ -48,7 +48,7 @@ from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, aliased, mapped_column, sessionmaker
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
@@ -19670,9 +19670,17 @@ class PostgresRecordStore(HumanSessionStore):
             self._begin_serialized_write(session)
             now = self._database_mutation_timestamp(session)
             row_model = LaunchplaneGitHubAppWebhookDeliveryRow
+            active_row = aliased(row_model)
             statement = (
                 select(row_model)
                 .where(
+                    ~select(active_row.delivery_id)
+                    .where(
+                        active_row.repository_id == row_model.repository_id,
+                        active_row.payload["config_authority_state"].as_string() == "running",
+                        active_row.payload["config_authority_lease_expires_at"].as_string() >= now,
+                    )
+                    .exists(),
                     or_(
                         and_(
                             row_model.payload["config_authority_state"].as_string() == "pending",
@@ -19689,7 +19697,7 @@ class PostgresRecordStore(HumanSessionStore):
                             row_model.payload["config_authority_lease_expires_at"].as_string()
                             < now,
                         ),
-                    )
+                    ),
                 )
                 .order_by(row_model.received_at, row_model.delivery_id)
                 .limit(20)

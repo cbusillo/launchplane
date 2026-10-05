@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Final, Literal
-from urllib.parse import urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -86,10 +86,14 @@ CONFIG_AUTHORITY_CHECK_NAME: Final = "launchplane/config-authority"
 class ConfigAuthorityCheckProjection(GitHubCheckProjection):
     @model_validator(mode="after")
     def _validate_source_name(self) -> "ConfigAuthorityCheckProjection":
-        if self.name not in {
-            f"{CONFIG_AUTHORITY_CHECK_NAME}/{scope}"
-            for scope in ("pull-request", "push", "merge-group")
-        }:
+        parts = self.name.split("/")
+        if (
+            len(parts) != 4
+            or "/".join(parts[:2]) != CONFIG_AUTHORITY_CHECK_NAME
+            or parts[2] not in {"pull-request", "push", "merge-group"}
+            or not parts[3]
+            or quote(unquote(parts[3]), safe="") != parts[3]
+        ):
             raise ValueError("Config-authority check uses an unreserved source name.")
         return self
 

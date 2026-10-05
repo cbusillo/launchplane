@@ -117,7 +117,7 @@ class ConfigAuthorityEventTests(unittest.TestCase):
             ),
         )
 
-    def test_three_consumers_share_exact_cli_gate_and_ignore_dirty_files(self) -> None:
+    def test_repository_names_share_cli_fixture_gate_and_ignore_dirty_files(self) -> None:
         for repository in (
             "cbusillo/repairshopr_api",
             "cbusillo/verireel",
@@ -402,6 +402,8 @@ class ConfigAuthorityEventTests(unittest.TestCase):
                             "event": event,
                             "base_sha": self.base,
                             "head_sha": self.head,
+                            "base_branch": "main",
+                            "delivery_id": "verified-delivery",
                         }
                         if status == "fail":
                             findings: list[JsonValue] = [{"key": "😀" * 70000}] * 300
@@ -415,7 +417,16 @@ class ConfigAuthorityEventTests(unittest.TestCase):
                             projection.conclusion, "success" if status == "pass" else "failure"
                         )
                         self.assertFalse(is_launchplane_projected_check(projection.name))
+                        self.assertIn(
+                            "repository_id=424242&delivery_id=verified-delivery", projection.summary
+                        )
                         names.add(projection.name)
+                        evidence["base_branch"] = "release/stable"
+                        publish_product_config_authority_evidence(_inventory(), evidence, Path("."))
+                        other = writer.call_args.kwargs["projection"]
+                        self.assertNotEqual(other.name, projection.name)
+                        self.assertNotEqual(other.external_id, projection.external_id)
+                        self.assertTrue(other.name.endswith("/release%2Fstable"))
         self.assertEqual(len(names), len(("pull_request", "push", "merge_group")))
 
     def test_disabled_policy_mints_no_token_and_preserves_old_digest(self) -> None:

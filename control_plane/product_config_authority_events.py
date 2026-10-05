@@ -56,6 +56,7 @@ class GitHubConfigAuthoritySource:
         self.repository_package = repository.split("/")[1].lower()
         self.prefix = "/repos/" + "/".join(quote(part, safe="") for part in repository.split("/"))
         self.trees: dict[str, dict[str, dict[str, object]]] = {}
+        self.blobs: dict[str, bytes] = {}
 
     def read(self, path: str) -> object:
         if time.monotonic() >= self.deadline:
@@ -134,6 +135,8 @@ class GitHubConfigAuthoritySource:
         size, sha = self.blob_size(revision, path), self.blob_sha(revision, path)
         if size > MAX_SCANNED_FILE_BYTES:
             raise ValueError("Source blob exceeds scanner size limit.")
+        if sha in self.blobs:
+            return self.blobs[sha]
         blob = _object(self.read(f"{self.prefix}/git/blobs/{sha}"))
         content = blob.get("content")
         if (
@@ -151,6 +154,7 @@ class GitHubConfigAuthoritySource:
         actual_sha = hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest()
         if len(data) != size or actual_sha != sha:
             raise ValueError("Source blob content does not match its immutable identity.")
+        self.blobs[sha] = data
         return data
 
 
@@ -373,6 +377,8 @@ def publish_product_config_authority_evidence(
             {
                 "repository_id": inventory.repository_id,
                 "base_sha": evidence.get("base_sha"),
+                "event": evidence.get("event"),
+                "base_branch": evidence.get("base_branch"),
                 "head_sha": head,
             },
             sort_keys=True,
@@ -403,9 +409,17 @@ def publish_product_config_authority_evidence(
         )
     )
     summary = summary.encode()[:60000].decode("utf-8", errors="ignore")
-    summary += "\nFull evidence: GET /v1/repository-inventory with repository_id and delivery_id."
+    summary += (
+        "\nFull evidence: GET /v1/repository-inventory?repository_id="
+        + quote(inventory.repository_id, safe="")
+        + "&delivery_id="
+        + quote(str(evidence["delivery_id"]), safe="")
+    )
     projection = ConfigAuthorityCheckProjection(
-        name=f"{CONFIG_AUTHORITY_CHECK_NAME}/{str(evidence.get('event')).replace('_', '-')}",
+        name=(
+            f"{CONFIG_AUTHORITY_CHECK_NAME}/{str(evidence.get('event')).replace('_', '-')}/"
+            + quote(str(evidence["base_branch"]), safe="")
+        ),
         repository=inventory.repository,
         repository_id=inventory.repository_id,
         head_sha=head,
@@ -479,6 +493,8 @@ def run_product_config_authority_once(
         # Provider errors can contain credentials; keep the refusal structured.
         evidence = {"status": "unavailable", "error_code": "source_evidence_unavailable"}
     evidence["event"] = claimed.event
+    evidence["base_branch"] = claimed.config_authority_request.get("base_branch")
+    evidence["delivery_id"] = claimed.delivery_id
 
     def project() -> None:
         if evidence.get("status") in {"disabled", "superseded"} or inventory is None:

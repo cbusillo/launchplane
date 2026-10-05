@@ -407,6 +407,26 @@ class GitHubAppWebhookTests(unittest.TestCase):
         self.assertEqual(repaired.config_authority["status"], "pass")
         self.assert_nothing_recorded()
 
+    def test_busy_repository_backlog_does_not_starve_another_repository(self) -> None:
+        from control_plane.contracts.product_reconcile import GitHubAppWebhookDeliveryRecord
+
+        busy = GitHubAppWebhookDeliveryRecord(
+            delivery_id="busy-00",
+            event="push",
+            repository_id=str(_REPOSITORY_ID),
+            received_at=self.clock,
+            config_authority_state="pending",
+        )
+        for index in range(25):
+            delivery = busy.model_copy(update={"delivery_id": f"busy-{index:02}"})
+            self.store.record_github_app_webhook_delivery(delivery, (), self.clock)
+        self.assertIsNotNone(self.store.claim_next_config_authority_delivery("busy", 600))
+        other = busy.model_copy(update={"delivery_id": "other", "repository_id": "99999"})
+        self.store.record_github_app_webhook_delivery(other, (), self.clock)
+        claim = self.store.claim_next_config_authority_delivery("free", 600)
+        assert claim is not None
+        self.assertEqual(claim.delivery_id, "other")
+
     def test_config_scan_lease_recovery_fences_old_attempt_even_with_same_worker(self) -> None:
         from control_plane.contracts.product_reconcile import (
             GitHubAppWebhookDeliveryRecord,

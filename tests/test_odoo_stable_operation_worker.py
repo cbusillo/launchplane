@@ -51,6 +51,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
 )
 from control_plane.workflows.odoo_stable_operation_worker import (
     OdooStableOperationWorkerLoopResult,
+    OdooStableOperationWorkerStore,
     _unexpected_error_code,
     build_odoo_stable_operation_worker_status,
     reconcile_stale_odoo_stable_operation_records,
@@ -290,6 +291,80 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
         self.assertTrue(polled.is_set())
         self.assertTrue(finished.is_set())
         self.assertEqual(result.status, "stopped")
+
+    def test_source_scan_does_not_block_new_deploy_poll_and_shutdown_joins_it(self) -> None:
+        started, release, finished, stop = Event(), Event(), Event(), Event()
+        polls = []
+
+        def scan(*_args: object, **_kwargs: object) -> None:
+            started.set()
+            if not release.wait(10):
+                raise AssertionError("Deploy poll was blocked by source scan")
+            finished.set()
+
+        def poll(**_kwargs: object) -> object:
+            polls.append(True)
+            if len(polls) == 2:
+                self.assertTrue(started.wait(10))
+                self.assertFalse(finished.is_set())
+                release.set()
+                stop.set()
+            return type("Idle", (), {"status": "idle"})()
+
+        class Store:
+            def claim_next_config_authority_delivery(self, *_args: object) -> None:
+                pass
+
+        with (
+            patch("control_plane.workflows.odoo_stable_operation_worker.advance_client_releases"),
+            patch(
+                "control_plane.workflows.odoo_stable_operation_worker.config_authority_events_enabled",
+                return_value=True,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_operation_worker.run_product_config_authority_once",
+                side_effect=scan,
+            ) as scanner,
+            patch(
+                "control_plane.workflows.odoo_stable_operation_worker.run_odoo_stable_operation_worker_once",
+                side_effect=poll,
+            ),
+        ):
+            run_odoo_stable_operation_worker_loop(
+                record_store=cast("OdooStableOperationWorkerStore", Store()),
+                control_plane_root_path=Path("."),
+                lease_owner="worker",
+                stop_event=stop,
+                poll_seconds=1,
+                max_iterations=2,
+            )
+        self.assertEqual(len(polls), 2)
+        self.assertTrue(finished.is_set())
+        scanner.assert_called_once()
+
+    def test_disabled_source_scans_never_poll_queue(self) -> None:
+        with (
+            patch("control_plane.workflows.odoo_stable_operation_worker.advance_client_releases"),
+            patch(
+                "control_plane.workflows.odoo_stable_operation_worker.config_authority_events_enabled",
+                return_value=False,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_operation_worker.run_product_config_authority_once"
+            ) as scan,
+            patch(
+                "control_plane.workflows.odoo_stable_operation_worker.run_odoo_stable_operation_worker_once",
+                return_value=type("Idle", (), {"status": "idle"})(),
+            ),
+        ):
+            run_odoo_stable_operation_worker_loop(
+                record_store=cast("OdooStableOperationWorkerStore", object()),
+                control_plane_root_path=Path("."),
+                lease_owner="worker",
+                max_iterations=1,
+                poll_seconds=1,
+            )
+        scan.assert_not_called()
 
     def setUp(self) -> None:
         self.authorization_policy_record = durable_operation_policy_record(
