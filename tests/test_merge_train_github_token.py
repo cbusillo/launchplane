@@ -94,6 +94,17 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
             control_plane_root=Path("/unused"),
         )
 
+    def test_historical_env_source_cannot_resolve_environment_token(self) -> None:
+        with patch.dict("os.environ", {"GH_TOKEN": "must-not-be-used"}):
+            self.assertEqual(
+                resolve_merge_train_github_token(
+                    source=MergeTrainGitHubTokenSource(env_var="GH_TOKEN"),
+                    control_plane_root=Path("."),
+                    repository="example/repo",
+                ),
+                "",
+            )
+
     def test_app_source_renews_exact_repository_tokens_from_managed_key(self) -> None:
         with (
             patch(

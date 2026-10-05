@@ -210,7 +210,7 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             TemporaryDirectory() as directory,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(directory) / "state"
             original_policy = _seed_merge_train_policy(state_dir)

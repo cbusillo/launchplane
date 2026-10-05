@@ -3,14 +3,16 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.parse import unquote
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.merge_train_stack_collapse import MergeTrainStackCollapsePlanRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
 from control_plane.merge_train_github import GitHubMergeTrainClient, MergeTrainGitHubError
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.http_app_test_support import _post_merge_train_controller_run_once
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.support.auth import _StubVerifier
 from tests.support.merge_train import (
     _FakeMergeTrainGitHubClient,
@@ -205,11 +207,34 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             TemporaryDirectory() as directory,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch.dict("os.environ", {}, clear=True),
+            patch(
+                "control_plane.merge_train_github_token.secrets.resolve_context_secret_value",
+                return_value="test-private-key",
+            ),
+            patch(
+                "control_plane.merge_train_github_token.mint_merge_train_installation_token",
+                return_value=Mock(token="token"),
+            ),
         ):
             state_dir = Path(directory) / "state"
-            original_policy = _seed_merge_train_policy(state_dir)
-            _seed_merge_train_stack_collapse_plan_record(state_dir, snapshot_reader=Reader)
+            payload = build_test_merge_train_policy_record().model_dump(mode="json")
+            target = payload["policy"]["policies"][0]
+            target["github_token"] = {
+                "github_app": {
+                    "app_id": 42,
+                    "repository_id": 123,
+                    "private_key_context": "example_context",
+                }
+            }
+            target["merge_identity"]["kind"] = "github_app"
+            payload["policy_sha256"] = ""
+            original_policy = _seed_merge_train_policy(
+                state_dir, policy=MergeTrainPolicyRecord.model_validate(payload)
+            )
+            _seed_merge_train_stack_collapse_plan_record(
+                state_dir, policy=original_policy.policy, snapshot_reader=Reader
+            )
             store = InterruptedStore(state_dir)
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_merge_train_service_identity()),

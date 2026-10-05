@@ -640,7 +640,7 @@ class FastApiMergeTrainBatchLandingRunOnceTests(unittest.IsolatedAsyncioTestCase
     async def test_plans_from_passed_candidate(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -683,7 +683,7 @@ class FastApiMergeTrainBatchLandingRunOnceTests(unittest.IsolatedAsyncioTestCase
     async def test_lands_existing_plan_and_cleans_candidate_ref(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -740,7 +740,7 @@ class FastApiMergeTrainBatchLandingRunOnceTests(unittest.IsolatedAsyncioTestCase
     async def test_records_stale_plan_before_returning_stale_github_state(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -796,7 +796,7 @@ class FastApiMergeTrainBatchLandingRunOnceTests(unittest.IsolatedAsyncioTestCase
         _CleanupFailingMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls = 0
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -861,7 +861,7 @@ class FastApiMergeTrainBatchLandingRunOnceTests(unittest.IsolatedAsyncioTestCase
     async def test_closes_stack_children_after_root_lands(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -934,7 +934,7 @@ class FastApiMergeTrainBatchLandingRunOnceTests(unittest.IsolatedAsyncioTestCase
     async def test_persists_root_merge_before_child_record_failure(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -1007,7 +1007,7 @@ class FastApiMergeTrainBatchLandingRunOnceTests(unittest.IsolatedAsyncioTestCase
     async def test_validates_stack_before_root_merge(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -1063,7 +1063,7 @@ class FastApiMergeTrainBatchLandingRunOnceTests(unittest.IsolatedAsyncioTestCase
     async def test_rejects_policy_digest_mismatch_before_root_merge(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -1132,7 +1132,7 @@ class FastApiMergeTrainBatchLandingRunOnceTests(unittest.IsolatedAsyncioTestCase
     async def test_replays_idempotent_plan_without_rewriting_landing_record(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -1177,7 +1177,7 @@ class FastApiMergeTrainBatchLandingRunOnceTests(unittest.IsolatedAsyncioTestCase
     async def test_rejects_missing_landing_storage(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -1225,7 +1225,7 @@ class FastApiMergeTrainStackCollapseRunOnceTests(unittest.IsolatedAsyncioTestCas
     async def test_executes_existing_plan_record(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -1275,7 +1275,7 @@ class FastApiMergeTrainStackCollapseRunOnceTests(unittest.IsolatedAsyncioTestCas
     async def test_admits_executed_root_only(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -1335,7 +1335,7 @@ class FastApiMergeTrainStackCollapseRunOnceTests(unittest.IsolatedAsyncioTestCas
     async def test_rejects_admit_when_root_head_moves(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -1384,7 +1384,7 @@ class FastApiMergeTrainStackCollapseRunOnceTests(unittest.IsolatedAsyncioTestCas
     async def test_rejects_admit_when_policy_digest_changes(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -1443,7 +1443,7 @@ class FastApiMergeTrainStackCollapseRunOnceTests(unittest.IsolatedAsyncioTestCas
     async def test_replays_idempotent_execute_without_reexecuting_stack(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -1487,7 +1487,7 @@ class FastApiMergeTrainStackCollapseRunOnceTests(unittest.IsolatedAsyncioTestCas
     async def test_rejects_missing_stack_collapse_storage(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -1514,7 +1514,7 @@ class FastApiMergeTrainStackCollapseRunOnceTests(unittest.IsolatedAsyncioTestCas
     async def test_rejects_missing_batch_candidate_storage_for_admit(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -1580,7 +1580,7 @@ class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
     async def test_returns_dry_run_from_policy_and_records_run(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             policy_record = _seed_merge_train_policy(state_dir)
@@ -1626,7 +1626,7 @@ class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
     async def test_mutates_one_worker_step_and_records_worker_result(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -1677,7 +1677,7 @@ class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
         }
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -1724,7 +1724,7 @@ class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
         }
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -1763,7 +1763,9 @@ class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
                 record_store_factory=lambda: store,
             )
-            with patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True):
+            with patch(
+                "control_plane.http_app.resolve_merge_train_github_token", return_value="token"
+            ):
                 response = await _post_merge_train_run_once(
                     app,
                     {
@@ -1888,7 +1890,7 @@ class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
     async def test_uses_configured_codex_skills_policy(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(
@@ -1931,7 +1933,7 @@ class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
     async def test_maps_stale_github_state(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -1962,7 +1964,7 @@ class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
     async def test_maps_github_request_failure(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -1993,7 +1995,7 @@ class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
     async def test_maps_mutating_worker_github_request_failure(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -2058,7 +2060,9 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             with (
                 self.subTest(phase=phase),
                 TemporaryDirectory() as directory,
-                patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+                patch(
+                    "control_plane.http_app.resolve_merge_train_github_token", return_value="token"
+                ),
             ):
                 closed: list[str] = []
                 fail = False
@@ -2160,7 +2164,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -2234,7 +2238,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -2293,7 +2297,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -2394,7 +2398,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -2468,7 +2472,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
     async def test_land_batch_binds_acquired_owner_before_live_observation(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -2528,7 +2532,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
     async def test_advances_unstacked_batch_flow(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -2596,7 +2600,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         repository = "cbusillo/Mixed_Case_Repo"
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(
@@ -2663,7 +2667,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -2746,7 +2750,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -2819,7 +2823,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
     async def test_admission_block_recovers_stuck_pre_provider_reconciliation(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -2907,7 +2911,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
     async def test_admission_block_returns_latest_persisted_landing_progress(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -2975,7 +2979,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
     async def test_reflows_failed_candidate_after_queue_changes(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -3056,7 +3060,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -3157,7 +3161,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -3219,7 +3223,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -3322,7 +3326,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -3374,7 +3378,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -3453,7 +3457,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -3535,7 +3539,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -3596,7 +3600,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
     async def test_candidate_build_stops_when_fresh_queue_cannot_be_read(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
             patch(
                 "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                 _UnavailableMergeTrainSnapshotReader,
@@ -3645,7 +3649,9 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             with (
                 self.subTest(candidate_status=candidate_status),
                 TemporaryDirectory() as temporary_directory_name,
-                patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+                patch(
+                    "control_plane.http_app.resolve_merge_train_github_token", return_value="token"
+                ),
                 patch(
                     "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     EmptyQueueSnapshotReader,
@@ -3716,7 +3722,10 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
                 with (
                     TemporaryDirectory() as temporary_directory_name,
-                    patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+                    patch(
+                        "control_plane.http_app.resolve_merge_train_github_token",
+                        return_value="token",
+                    ),
                 ):
                     state_dir = Path(temporary_directory_name) / "state"
                     _seed_merge_train_policy(state_dir)
@@ -3835,7 +3844,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -3893,7 +3902,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
     async def test_reflows_candidate_after_build_stale_state(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -3975,7 +3984,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
     async def test_reflows_unbuilt_failed_candidate_with_unchanged_queue(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -4032,7 +4041,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
     async def test_keeps_checked_failed_candidate_terminal_with_unchanged_queue(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -4088,7 +4097,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
     async def test_recovers_failed_candidate_when_rerun_checks_pass(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -4175,7 +4184,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -4248,7 +4257,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -4316,7 +4325,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -4431,7 +4440,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -4521,7 +4530,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -4578,7 +4587,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         _CleanupFailingMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls = 0
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -4632,7 +4641,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         _FakeMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls = 0
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -4732,7 +4741,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
     async def test_active_controller_lease_returns_conflict(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -4779,7 +4788,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
     async def test_merge_train_rejects_tenant_reconciliation_state_without_rewrite(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -4831,7 +4840,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
     async def test_release_failure_does_not_mask_github_failure(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -4891,7 +4900,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
     async def test_failure_before_first_action_preserves_valid_reconciliation_state(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -4974,7 +4983,7 @@ class FastApiMergeTrainMutationFenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_active_controller_lease_fences_all_legacy_mutation_routes(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
@@ -5052,7 +5061,7 @@ class FastApiMergeTrainMutationFenceTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
@@ -5125,7 +5134,7 @@ class FastApiMergeTrainMutationFenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_controller_records_idempotency_before_releasing_lease(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
@@ -5182,7 +5191,7 @@ class FastApiMergeTrainBatchCandidateRunOnceTests(unittest.IsolatedAsyncioTestCa
     async def test_plans_candidate_record(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             policy_record = _seed_merge_train_policy(state_dir)
@@ -5231,7 +5240,7 @@ class FastApiMergeTrainBatchCandidateRunOnceTests(unittest.IsolatedAsyncioTestCa
     async def test_plans_stack_collapse_first_without_candidate_record(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -5280,7 +5289,7 @@ class FastApiMergeTrainBatchCandidateRunOnceTests(unittest.IsolatedAsyncioTestCa
     async def test_reports_unsupported_stack_without_writing_record(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -5321,7 +5330,7 @@ class FastApiMergeTrainBatchCandidateRunOnceTests(unittest.IsolatedAsyncioTestCa
     async def test_builds_existing_candidate_record(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -5369,7 +5378,7 @@ class FastApiMergeTrainBatchCandidateRunOnceTests(unittest.IsolatedAsyncioTestCa
     async def test_observes_existing_candidate_record(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -5435,7 +5444,7 @@ class FastApiMergeTrainBatchCandidateRunOnceTests(unittest.IsolatedAsyncioTestCa
         }
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -5479,7 +5488,7 @@ class FastApiMergeTrainBatchCandidateRunOnceTests(unittest.IsolatedAsyncioTestCa
         }
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -5546,7 +5555,7 @@ class FastApiMergeTrainBatchCandidateRunOnceTests(unittest.IsolatedAsyncioTestCa
     async def test_build_rejects_unknown_candidate_record_without_leaking_detail(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -5586,7 +5595,9 @@ class FastApiMergeTrainBatchCandidateRunOnceTests(unittest.IsolatedAsyncioTestCa
                 authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
                 record_store_factory=lambda: store,
             )
-            with patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True):
+            with patch(
+                "control_plane.http_app.resolve_merge_train_github_token", return_value="token"
+            ):
                 response = await _post_merge_train_batch_candidate_run_once(
                     app,
                     {
@@ -5678,7 +5689,7 @@ class FastApiMergeTrainBatchCandidateRunOnceTests(unittest.IsolatedAsyncioTestCa
     async def test_maps_stale_github_state_without_writing_record(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -5712,7 +5723,7 @@ class FastApiMergeTrainBatchCandidateRunOnceTests(unittest.IsolatedAsyncioTestCa
     async def test_maps_build_github_request_failure_without_writing_record(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -5762,7 +5773,7 @@ class FastApiMergeTrainBatchCandidateRunOnceTests(unittest.IsolatedAsyncioTestCa
     async def test_rejects_missing_batch_candidate_storage(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -5807,7 +5818,7 @@ class FastApiMergeTrainPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_creates_managed_comment_and_records_evidence(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             policy_record = _seed_merge_train_policy(state_dir)
@@ -5868,7 +5879,7 @@ class FastApiMergeTrainPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_updates_managed_comment_and_records_evidence(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -5923,7 +5934,7 @@ class FastApiMergeTrainPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_rejects_comment_delivery_failure_but_records_evidence(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -5983,7 +5994,7 @@ class FastApiMergeTrainPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
         }
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -6045,7 +6056,7 @@ class FastApiMergeTrainPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
         }
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -6086,7 +6097,7 @@ class FastApiMergeTrainPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_preserves_same_second_updates(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -6158,7 +6169,9 @@ class FastApiMergeTrainPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
                 authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
                 record_store_factory=lambda: store,
             )
-            with patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True):
+            with patch(
+                "control_plane.http_app.resolve_merge_train_github_token", return_value="token"
+            ):
                 response = await _post_merge_train_pr_feedback(
                     app,
                     {

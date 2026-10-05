@@ -46,6 +46,18 @@ name: Merge Train Policy Import
         required: false
         default: ""
         type: string
+      github_app_id:
+        description: Immutable GitHub App ID used by the train
+        required: true
+        type: string
+      github_repository_id:
+        description: Immutable GitHub repository ID for the token scope
+        required: true
+        type: string
+      private_key_context:
+        description: Exact managed context containing the App private key binding
+        required: true
+        type: string
       source_label:
         description: Source label stored on the policy record
         required: true
@@ -86,6 +98,9 @@ jobs:
       POLICY_FAILURE_POLICY: ${{ inputs.failure_policy }}
       POLICY_TRUSTED_AUTOMATION_GITHUB_USER_IDS: >-
         ${{ inputs.trusted_automation_github_user_ids }}
+      POLICY_GITHUB_APP_ID: ${{ inputs.github_app_id }}
+      POLICY_GITHUB_REPOSITORY_ID: ${{ inputs.github_repository_id }}
+      POLICY_PRIVATE_KEY_CONTEXT: ${{ inputs.private_key_context }}
       POLICY_SOURCE_LABEL: ${{ inputs.source_label }}
       POLICY_REASON: ${{ inputs.reason }}
     steps:
@@ -155,6 +170,18 @@ jobs:
                   "stack_child_disposition_label must differ from enqueue_label "
                   "and blocked_label"
               )
+          app_values = {}
+          for name in ("GITHUB_APP_ID", "GITHUB_REPOSITORY_ID"):
+              try:
+                  value = int(os.environ[f"POLICY_{name}"])
+              except ValueError as error:
+                  raise SystemExit(f"{name} must be a positive integer") from error
+              if value <= 0:
+                  raise SystemExit(f"{name} must be a positive integer")
+              app_values[name] = value
+          private_key_context = os.environ["POLICY_PRIVATE_KEY_CONTEXT"].strip()
+          if not private_key_context or "\n" in private_key_context or "\r" in private_key_context:
+              raise SystemExit("private_key_context must be a nonempty single line")
           trusted_automation_ids_raw = os.environ[
               "POLICY_TRUSTED_AUTOMATION_GITHUB_USER_IDS"
           ].strip()
@@ -202,7 +229,7 @@ jobs:
           )
           print()
           print("[policies.merge_identity]")
-          print('kind = "github_actions_oidc"')
+          print('kind = "github_app"')
           print('name = "launchplane-merge-train"')
           print()
           print("[policies.service_authz]")
@@ -210,8 +237,10 @@ jobs:
           print('product = "launchplane"')
           print('context = "launchplane"')
           print()
-          print("[policies.github_token]")
-          print('env_var = "GH_TOKEN"')
+          print("[policies.github_token.github_app]")
+          print(f'app_id = {app_values["GITHUB_APP_ID"]}')
+          print(f'repository_id = {app_values["GITHUB_REPOSITORY_ID"]}')
+          print(f"private_key_context = {json.dumps(private_key_context)}")
           PY
           uv run launchplane work-graph merge-train-policy \
             --policy-file "$policy_file" \
