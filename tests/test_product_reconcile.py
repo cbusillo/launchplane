@@ -1712,12 +1712,14 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
             *,
             request: OdooPreviewApplyEnvelope,
             provider_effect_checkpoint: Callable[[str], None],
+            propagate_domain_lookup_error: bool = False,
             **_kwargs: object,
         ) -> dict[str, object]:
             return execute_odoo_preview_dokploy_apply(
                 control_plane_root=self.root,
                 request=request.apply,
                 provider_effect_checkpoint=provider_effect_checkpoint,
+                propagate_domain_lookup_error=propagate_domain_lookup_error,
             ).model_dump(mode="json")
 
         for method, replacement in (
@@ -1765,6 +1767,7 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
             with self.assertLogs("control_plane.product_reconcile", "WARNING"):
                 failed = self.run_once()
             self.assertEqual(failed.last_plan["destroy_failed_attempts"], attempt + 1)
+        held: ProductReconcileRequestRecord | None = None
         for _sweep in range(2):
             self.request("preview", 5)
             held = self.run_once()
@@ -1775,6 +1778,7 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
             calls.count("/api/compose.one"), 2 * (PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS - 1) + 2
         )
         self.assertNotIn("/api/compose.delete", calls)
+        assert held is not None
         reservation = self.store.read_idempotency_record(
             scope=reconcile_reservation_scope("site"),
             route_path=ODOO_PREVIEW_APPLY_ROUTE,
@@ -1970,6 +1974,28 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
 
         with patch.object(self.provider, "execute_apply", raised_apply):
             for attempt in range(1, PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS):
+                self.request("preview", 5)
+                with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                    failed = self.run_once()
+                self.assertEqual(failed.last_plan["destroy_failed_attempts"], attempt + 1)
+        self.request("preview", 5)
+        self.assertEqual(self.run_once().last_plan["reason"], "preview_destroy_retry_limit")
+
+    def test_connection_resets_after_domain_checkpoint_are_bounded(self) -> None:
+        self.install_refused_domain_provider()
+        original = self.provider.execute_apply
+
+        def reset_connection(
+            *, issued_plan: OdooPreviewApplyInputsResult, **kwargs: object
+        ) -> dict[str, object]:
+            with patch(
+                "control_plane.workflows.preview_resource_destroy._delete_domain",
+                side_effect=ConnectionResetError("Lost provider response"),
+            ):
+                return original(issued_plan=issued_plan, **kwargs)
+
+        with patch.object(self.provider, "execute_apply", reset_connection):
+            for attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS):
                 self.request("preview", 5)
                 with self.assertLogs("control_plane.product_reconcile", "WARNING"):
                     failed = self.run_once()

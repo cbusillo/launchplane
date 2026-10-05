@@ -386,6 +386,7 @@ def execute_odoo_preview_apply_result(
     provider_lease_check: Callable[[], None] | None = None,
     deployment_record_id: str,
     runtime_identity: RuntimeIdentity | None = None,
+    propagate_domain_lookup_error: bool = False,
 ) -> dict[str, object]:
     current_request = refresh_odoo_preview_issued_plan(
         control_plane_root=control_plane_root_path,
@@ -439,6 +440,7 @@ def execute_odoo_preview_apply_result(
         provider_effect_checkpoint=provider_effect_checkpoint,
         provider_lease_check=provider_lease_check,
         expected_runtime_identity=resolved_runtime_identity,
+        propagate_domain_lookup_error=propagate_domain_lookup_error,
     )
     return driver_result.model_dump(mode="json")
 

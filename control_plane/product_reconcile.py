@@ -219,6 +219,10 @@ class ProductReconcileError(Exception):
 
 
 class ProductReconcileStore(Protocol):
+    def read_idempotency_record(
+        self, *, scope: str, route_path: str, idempotency_key: str
+    ) -> LaunchplaneIdempotencyRecord | None: ...
+
     def claim_next_product_reconcile_request(
         self, lease_owner: str, lease_seconds: int
     ) -> ProductReconcileRequestRecord | None: ...
@@ -1295,7 +1299,7 @@ def reconcile_preview_target(
     if (
         plan["action"] == "destroy"
         and outcome.error
-        and count_failure
+        and (count_failure or plan.get("preview_mutation_attempted") is True)
         and (
             plan.get("preview_operation_status") != "reconcile_required"
             or plan.get("preview_mutation_attempted") is True
@@ -1398,12 +1402,6 @@ class _PullRequestMovedError(Exception):
     """The PR changed after the plan; nothing reached the provider."""
 
 
-class _PreviewReservationStore(Protocol):
-    def read_idempotency_record(
-        self, *, scope: str, route_path: str, idempotency_key: str
-    ) -> LaunchplaneIdempotencyRecord | None: ...
-
-
 def _run_preview_operation(
     *,
     record_store: ProductReconcileStore,
@@ -1435,7 +1433,7 @@ def _run_preview_operation(
     reservation_scope = reconcile_reservation_scope(profile.product)
     plan_id = build_odoo_preview_plan_id(scope=reservation_scope, idempotency_key=operation_key)
     plan.update(preview_operation_key=operation_key, preview_plan_id=plan_id)
-    reservation = cast(_PreviewReservationStore, record_store).read_idempotency_record(
+    reservation = record_store.read_idempotency_record(
         scope=reservation_scope, route_path=ODOO_PREVIEW_APPLY_ROUTE, idempotency_key=plan_id
     )
     unknown_destroy = (
@@ -1477,31 +1475,35 @@ def _run_preview_operation(
 
         try:
             return preview_hooks.execute_apply(
-                **{**kwargs, "provider_effect_checkpoint": checkpoint_effect}
+                **{
+                    **kwargs,
+                    "provider_effect_checkpoint": checkpoint_effect,
+                    "propagate_domain_lookup_error": True,
+                }
             )
-        except Exception as error:
-            if isinstance(error, DokployRequestFailed) and not error.retryable:
+        except Exception as execution_error:
+            if isinstance(execution_error, DokployRequestFailed) and not execution_error.retryable:
                 plan["preview_execution_refused"] = True
             raise
 
     def run_issued_plan(
-        issued_plan: OdooPreviewApplyInputsResult, *, allow_mutation: bool
+        operation_plan: OdooPreviewApplyInputsResult, *, allow_mutation: bool
     ) -> DurableProviderOperationResult:
         apply_request = validate_odoo_preview_issued_plan(
             plan_id=plan_id,
-            issued_plan=issued_plan,
+            issued_plan=operation_plan,
             request=OdooPreviewApplyEnvelope(
                 product=profile.product,
                 apply=OdooPreviewDokployApplyRequest(
-                    dry_run_plan=issued_plan.dry_run_plan,
-                    manifest=issued_plan.plan_request.manifest,
-                    image_reference=issued_plan.plan_request.image_reference,
+                    dry_run_plan=operation_plan.dry_run_plan,
+                    manifest=operation_plan.plan_request.manifest,
+                    image_reference=operation_plan.plan_request.image_reference,
                     timeout_seconds=PREVIEW_APPLY_TIMEOUT_SECONDS,
                 ),
             ),
         )
         validate_odoo_preview_profile_authority(
-            profile=profile, issued_plan=issued_plan, observation_only=not allow_mutation
+            profile=profile, issued_plan=operation_plan, observation_only=not allow_mutation
         )
         return run_odoo_preview_apply_operation(
             store=cast(DurableProviderOperationStore, record_store),
@@ -1509,7 +1511,7 @@ def _run_preview_operation(
             record_store=record_store,
             profile=profile,
             apply_request=apply_request,
-            issued_plan=issued_plan,
+            issued_plan=operation_plan,
             reservation_scope=reservation_scope,
             idempotency_key=plan_id,
             request_fingerprint=_fingerprint({"operation_key": operation_key}),
@@ -1521,30 +1523,35 @@ def _run_preview_operation(
         )
 
     def finish_result(
-        result: DurableProviderOperationResult, issued_plan: OdooPreviewApplyInputsResult
+        operation_result: DurableProviderOperationResult,
+        operation_plan: OdooPreviewApplyInputsResult,
     ) -> ReconcileOutcome:
-        plan["preview_operation_status"] = result.status
-        if result.status in {"in_progress", "target_busy"}:
+        plan["preview_operation_status"] = operation_result.status
+        if operation_result.status in {"in_progress", "target_busy"}:
             plan["deferred"] = "preview_operation_busy"
             return ReconcileOutcome(plan, deferred=True)
-        driver_result = result.response_payload.get("result")
+        driver_result = operation_result.response_payload.get("result")
         driver_result = driver_result if isinstance(driver_result, dict) else {}
         result_status = str(driver_result.get("status") or "")
         plan["preview_result_status"] = result_status
-        if result.status in {"conflict", "reconcile_required"} or result_status != "pass":
-            if operation == "destroy" and not allow_retry and result.status == "reconcile_required":
+        if operation_result.status in {"conflict", "reconcile_required"} or result_status != "pass":
+            if (
+                operation == "destroy"
+                and not allow_retry
+                and operation_result.status == "reconcile_required"
+            ):
                 return _hold_preview_destroy(plan, previous_plan, failed_attempts)
             return _preview_failure(
                 plan,
                 "reconcile_required"
-                if result.status == "reconcile_required"
+                if operation_result.status == "reconcile_required"
                 else "preview_apply_failed",
             )
-        records = result.response_payload.get("records")
+        records = operation_result.response_payload.get("records")
         validate_odoo_preview_lifecycle_response_current(
             record_store=record_store,
             profile=profile,
-            issued_plan=issued_plan,
+            issued_plan=operation_plan,
             records=records if isinstance(records, dict) else {},
         )
         return ReconcileOutcome(plan)

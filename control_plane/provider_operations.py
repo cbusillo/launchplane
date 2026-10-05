@@ -498,6 +498,8 @@ def run_durable_provider_operation(
         )
     if decision != "acquired":
         raise RuntimeError(f"Unsupported mutation reservation decision: {decision}")
+    if reservation is None:
+        raise RuntimeError("An acquired provider operation requires its reservation.")
     if not allow_mutation:
         release = store.release_reserved_mutation(reservation=reservation)
         if release.status == "released":
