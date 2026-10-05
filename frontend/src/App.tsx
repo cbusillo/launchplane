@@ -360,6 +360,7 @@ export function App() {
       ) : null}
       {route.kind === "engineering" ? (
         <EngineeringOpsRoute
+          actorId={authState.identity?.github_id ?? 0}
           fixtureMode={fixtureMode}
           key={`engineering:${route.view}:${fixtureMode}`}
           view={route.view}

@@ -6181,6 +6181,30 @@ class PostgresRecordStore(HumanSessionStore):
                     or SecretBinding.model_validate(binding_row.payload) != expected_source.binding
                 ):
                     raise SecretCopySourceConflictError("Secret copy source changed before commit.")
+            for expected_secret in bundle.expected_secret_records:
+                current_secret = session.scalar(
+                    select(LaunchplaneSecretRow)
+                    .where(LaunchplaneSecretRow.secret_id == expected_secret.secret_id)
+                    .with_for_update()
+                )
+                if (
+                    current_secret is None
+                    or SecretRecord.model_validate(current_secret.payload) != expected_secret
+                ):
+                    raise SecretRecordConflictError(
+                        "Managed secret metadata changed before commit."
+                    )
+            for expectation in bundle.runtime_environment_read_sets:
+                current_runtime = tuple(
+                    RuntimeEnvironmentRecord.model_validate(row.payload)
+                    for row in session.scalars(
+                        select(LaunchplaneRuntimeEnvironmentRow).with_for_update()
+                    ).all()
+                )
+                if not expectation.matches(current_runtime):
+                    raise RuntimeEnvironmentConflictError(
+                        "Runtime selectors changed before commit."
+                    )
             for secret_id in bundle.absent_secret_ids:
                 if (
                     session.scalar(
@@ -6193,6 +6217,21 @@ class PostgresRecordStore(HumanSessionStore):
                     raise SecretRecordConflictError(
                         "A secret adopted from the provider was recorded before commit."
                     )
+            for binding_expectation in bundle.secret_binding_sets:
+                current_bindings = tuple(
+                    SecretBinding.model_validate(row.payload)
+                    for row in session.scalars(
+                        select(LaunchplaneSecretBindingRow)
+                        .where(
+                            LaunchplaneSecretBindingRow.secret_id == binding_expectation.secret_id
+                        )
+                        .with_for_update()
+                    ).all()
+                )
+                if sorted(current_bindings, key=lambda item: item.binding_id) != sorted(
+                    binding_expectation.bindings, key=lambda item: item.binding_id
+                ):
+                    raise SecretCopySourceConflictError("Secret consumers changed before commit.")
             for delete_item in bundle.delete_runtime_environments:
                 row = session.scalar(
                     self._runtime_environment_statement(
@@ -37101,7 +37140,7 @@ class PostgresRecordStore(HumanSessionStore):
             return "deleted"
 
     def write_runtime_environment_record(self, record: RuntimeEnvironmentRecord) -> None:
-        self._write_row(self._runtime_environment_row(record))
+        self._write_bundled_metadata_row(self._runtime_environment_row(record))
 
     def delete_runtime_environment_record_with_event(
         self,
@@ -37439,7 +37478,15 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_secret_record(self, record: SecretRecord) -> None:
+        # Existing records are row-guarded; concurrent direct creates arbitrate by uniqueness.
         self._write_row(self._secret_row(record))
+
+    def _write_bundled_metadata_row(self, row: Base) -> None:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            session.merge(row)
+            session.commit()
 
     def read_secret_record(self, secret_id: str) -> SecretRecord:
         return self._read_model(
@@ -37523,7 +37570,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_secret_binding(self, binding: SecretBinding) -> None:
-        self._write_row(self._secret_binding_row(binding))
+        self._write_bundled_metadata_row(self._secret_binding_row(binding))
 
     def list_secret_bindings(
         self,
@@ -37632,7 +37679,11 @@ class PostgresRecordStore(HumanSessionStore):
                     raise FileNotFoundError(
                         f"No Launchplane secret record found for {rotation.record.secret_id!r}"
                     )
-                if current_row.current_version_id != rotation.expected_current_version_id:
+                if (
+                    current_row.current_version_id != rotation.expected_current_version_id
+                    or SecretRecord.model_validate(current_row.payload).status
+                    != rotation.record.status
+                ):
                     raise ValueError("Managed secret changed after rotation preflight.")
             for rotation in ordered_rotations:
                 version = rotation.version

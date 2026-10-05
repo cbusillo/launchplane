@@ -521,6 +521,34 @@ class FilesystemRecordStore:
                 raise SecretRecordConflictError(
                     "A secret adopted from the provider was recorded before commit."
                 )
+            for expectation in bundle.runtime_environment_read_sets:
+                current_runtime = self._list_models_locked(
+                    RuntimeEnvironmentRecord, "launchplane_runtime_environments"
+                )
+                if not expectation.matches(current_runtime):
+                    raise RuntimeEnvironmentConflictError(
+                        "Runtime selectors changed before commit."
+                    )
+            for expected_secret in bundle.expected_secret_records:
+                current_secret = self._read_model_locked(
+                    SecretRecord, "launchplane_secrets", expected_secret.secret_id
+                )
+                if current_secret != expected_secret:
+                    raise SecretRecordConflictError(
+                        "Managed secret metadata changed before commit."
+                    )
+            for binding_expectation in bundle.secret_binding_sets:
+                current_bindings = tuple(
+                    binding
+                    for binding in self._list_models_locked(
+                        SecretBinding, "launchplane_secret_bindings"
+                    )
+                    if binding.secret_id == binding_expectation.secret_id
+                )
+                if sorted(current_bindings, key=lambda item: item.binding_id) != sorted(
+                    binding_expectation.bindings, key=lambda item: item.binding_id
+                ):
+                    raise SecretCopySourceConflictError("Secret consumers changed before commit.")
             stage_id = f"{_utc_now_timestamp().replace(':', '').replace('-', '')}-{time.time_ns()}"
             stage_dir = self._product_authority_bundle_stage_root() / stage_id
             records_dir = stage_dir / "records"
@@ -3855,14 +3883,20 @@ class FilesystemRecordStore:
         idempotency_record: LaunchplaneIdempotencyRecord | None = None,
     ) -> None:
         ordered_rotations = tuple(sorted(rotations, key=lambda item: item.record.secret_id))
+        expected_records: list[SecretRecord] = []
         for rotation in ordered_rotations:
             current_record = self.read_secret_record(rotation.record.secret_id)
-            if current_record.current_version_id != rotation.expected_current_version_id:
+            if (
+                current_record.current_version_id != rotation.expected_current_version_id
+                or current_record.status != rotation.record.status
+            ):
                 raise ValueError("Managed secret changed after rotation preflight.")
+            expected_records.append(current_record)
         self.write_product_authority_bundle(
             ProductAuthorityBundle(
                 secret_versions=tuple(rotation.version for rotation in ordered_rotations),
                 secret_records=tuple(rotation.record for rotation in ordered_rotations),
+                expected_secret_records=tuple(expected_records),
                 secret_audit_events=tuple(rotation.audit_event for rotation in ordered_rotations),
                 idempotency_record=idempotency_record,
             )

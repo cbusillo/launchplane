@@ -23,9 +23,13 @@ import type {
   RetryProductReviewFeedbackData,
   WriteReleaseReviewDecisionData,
   SubmitOwnerSecretInputData,
+  ConfigureLaunchplaneGithubDeliveryData,
+  RetireServiceGithubTokensData,
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
+  serviceGitHubDeliveryConfigure: "/v1/service/github-delivery/configuration" satisfies ConfigureLaunchplaneGithubDeliveryData["url"],
+  serviceGitHubTokenRetire: "/v1/service/github-delivery/token-retirement" satisfies RetireServiceGithubTokensData["url"],
   ownerSecretSubmit: "/v1/owner-secret-inputs/submit" satisfies SubmitOwnerSecretInputData["url"],
   releaseReviewDecision: "/v1/release-review/decisions" satisfies WriteReleaseReviewDecisionData["url"],
   ordinaryAgentApprove: "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/approve" satisfies ApproveOrdinaryAgentOperationData["url"],

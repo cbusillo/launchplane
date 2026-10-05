@@ -23,6 +23,18 @@ from control_plane.storage.product_authority_bundle import (
 GITHUB_DELIVERY_CONFIGURATION_ROUTE = "/v1/service/github-delivery/configuration"
 
 
+class DeliveryGitHubAppConfigurationResponse(BaseModel):
+    status: Literal["ok"] = "ok"
+    actor: str
+    reason: str
+    mode: Literal["dry-run", "apply"]
+    app_id: int
+    integration: str
+    plan_digest: str
+    trace_id: str
+    runtime_environment: dict[str, object] | None
+
+
 class DeliveryGitHubAppConfigurationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -113,6 +125,8 @@ def plan_delivery_github_configuration(
             {
                 "app_id": request.app_id,
                 "integration": request.integration,
+                "reason": request.reason,
+                "actor": actor,
                 "baseline": baseline,
                 "secret_record": record.model_dump(mode="json"),
                 "binding": binding.model_dump(mode="json"),
