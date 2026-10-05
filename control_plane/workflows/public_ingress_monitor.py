@@ -96,6 +96,7 @@ from control_plane.contracts.runtime_identity import (
     health_payload_runtime_identity_status,
 )
 from control_plane.drivers.registry import read_driver_descriptor
+from control_plane.lane_runtime_verification import lane_expected_runtime_identity
 from control_plane.notifications import (
     post_discord_webhook,
     public_discord_url_error,
@@ -2633,11 +2634,7 @@ def _expected_runtime_identity(
         return None
     if not isinstance(lane_summary, LaunchplaneLaneSummary):
         return None
-    if lane_summary.inventory is not None:
-        return lane_summary.inventory.runtime_identity
-    if lane_summary.latest_deployment is not None:
-        return lane_summary.latest_deployment.runtime_identity
-    return None
+    return lane_expected_runtime_identity(lane_summary)
 
 
 def _open_incidents(

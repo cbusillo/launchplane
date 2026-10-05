@@ -36,8 +36,10 @@ import {
   evidenceTimestamp,
   humanize,
   trustLabel,
+  useEvidenceExpiry,
   type TrustState,
 } from "./ProductOps";
+import { expireEnvironmentEvidence } from "./product-environment-signal";
 import {
   EnvironmentViewNav,
   ProductWorkspaceNav,
@@ -87,6 +89,7 @@ export function ProductEnvironmentRoute({
   const [detailResource, setDetailResource] = useState<
     ResourceState<ProductEnvironmentDetail>
   >(emptyResource());
+  useEvidenceExpiry(detailResource.data ? [detailResource.data] : []);
   const [configResource, setConfigResource] = useState<
     ResourceState<ProductEnvironmentConfigStatus>
   >(emptyResource());
@@ -351,7 +354,7 @@ export function ProductEnvironmentRoute({
   return (
     <EnvironmentPage
       configResource={configResource}
-      detail={detailResource.data}
+      detail={expireEnvironmentEvidence(detailResource.data)}
       productOverview={productOverview}
       refreshError={detailResource.status === "error" ? detailResource.error : ""}
       route={route}
@@ -578,7 +581,7 @@ function EnvironmentOverview({
           label="Runtime identity"
           timestamp={evidenceTimestamp(observedPlacement.provenance)}
           tone={conditionTone(
-            runtimeIdentityTone(observedPlacement.runtime_identity_status),
+            runtimeIdentityTone(observedPlacement.runtime_identity_status, observedPlacement.trust_state),
             observedPlacement.trust_state,
           )}
           trustState={observedPlacement.trust_state}
@@ -1066,9 +1069,10 @@ function tlsTone(domain: ProductObservedTlsDomain | null): ConditionTone {
 
 function runtimeIdentityTone(
   status: ProductObservedPlacement["runtime_identity_status"],
+  trustState: TrustState,
 ): ConditionTone {
   if (status === "match") {
-    return "pass";
+    return trustState === "verified" ? "pass" : "warning";
   }
   if (status === "mismatch" || status === "malformed") {
     return "danger";
