@@ -296,8 +296,12 @@ gate. Both commit SHAs must be supplied; missing commits or failed git reads
 fail closed. The scan ignores dirty and untracked files. It compares the two
 supplied snapshots exactly, rather than calculating a merge base: a PR behind
 its base can report authority absent from the newer base but present in its head.
-The reusable changed-files gate explicitly skips non-PR events; use the CLI
-with an explicit commit pair, or full-audit, for those events. Allowed docs, tests, schema examples, Launchplane self-bootstrap wiring,
+The reusable gate maps PR, merge-group and push events to their explicit commit
+pairs; zero-SHA comparisons and events without a mapping fail closed. Use the
+CLI with an explicit pair, or full-audit, for other events. Audited symlink paths
+are refused: use regular committed files for gate verification, or full-audit
+for local symlink analysis. Submodule contents are a reported coverage gap
+because they belong to another repository. Allowed docs, tests, schema examples, Launchplane self-bootstrap wiring,
 admin-supplied inputs, and thin connector mechanics keep explicit allow
 reasons and do not fail the default gate. Runner mechanic selectors use the same
 allowed labels in scalar, JSON, and YAML flow-list forms (for example,

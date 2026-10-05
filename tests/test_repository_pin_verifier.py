@@ -86,7 +86,7 @@ class RepositoryPinVerifierTests(unittest.TestCase):
                 (),
             )
 
-    def test_reusable_gate_uses_exact_pr_pair_and_explicitly_skips_other_events(self) -> None:
+    def test_reusable_gate_uses_exact_event_pair_and_refuses_unmapped_events(self) -> None:
         from tests.support.workflows import load_workflow
         import subprocess
 
@@ -109,15 +109,7 @@ class RepositoryPinVerifierTests(unittest.TestCase):
                 "HEAD_SHA": head,
                 "FAIL_ON_FINDINGS": "true",
             }
-            result = subprocess.run(
-                ["bash", "-c", step.run], env=env, capture_output=True, text=True
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            arguments = capture.read_text().splitlines()
-            self.assertEqual(arguments[arguments.index("--base-sha") + 1], base)
-            self.assertEqual(arguments[arguments.index("--head-sha") + 1], head)
-            capture.unlink()
-            for event in ("push", "merge_group", "workflow_dispatch"):
+            for event in ("pull_request", "push", "merge_group"):
                 result = subprocess.run(
                     ["bash", "-c", step.run],
                     env=env | {"EVENT_NAME": event},
@@ -125,5 +117,52 @@ class RepositoryPinVerifierTests(unittest.TestCase):
                     text=True,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
+                arguments = capture.read_text().splitlines()
+                self.assertEqual(arguments[arguments.index("--base-sha") + 1], base)
+                self.assertEqual(arguments[arguments.index("--head-sha") + 1], head)
+                capture.unlink()
+            for event in ("workflow_dispatch", "pull_request_target", "schedule"):
+                result = subprocess.run(
+                    ["bash", "-c", step.run],
+                    env=env | {"EVENT_NAME": event},
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(capture.exists())
-                self.assertIn("skipping", result.stdout)
+            for key in ("BASE_SHA", "HEAD_SHA"):
+                result = subprocess.run(
+                    ["bash", "-c", step.run],
+                    env=env | {key: "0" * 40},
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(capture.exists())
+
+    def test_detached_type_agreement_and_product_mode_exception_are_preserved(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _initialize_repository(root)
+            worker = root / ".github/workflows/worker.yml"
+            worker.write_text(
+                '"on":\n  workflow_call:\n    inputs:\n      mode:\n        type: string\n        required: false\n        default: plan\n'
+            )
+            pin = _commit(root, "mode worker")
+            for path in WRAPPER_PATHS:
+                mode_type, default = (
+                    ("string", "plan") if "detached" in path else ("choice", "apply")
+                )
+                (root / path).write_text(
+                    '"on":\n  workflow_dispatch:\n    inputs:\n      mode:\n'
+                    f"        type: {mode_type}\n        required: false\n        default: {default}\n"
+                    "jobs:\n  retire:\n"
+                    f"    uses: example/launchplane/.github/workflows/worker.yml@{pin}\n"
+                    "    with:\n      mode: fixture\n"
+                )
+            _commit(root, "distinct wrapper mode contracts")
+            self.assertEqual(verify_worker_pins(root, "HEAD", "example/launchplane"), [])
+            detached = root / WRAPPER_PATHS[1]
+            detached.write_text(detached.read_text().replace("type: string", "type: choice"))
+            _commit(root, "wrong detached input type")
+            self.assertTrue(verify_worker_pins(root, "HEAD", "example/launchplane"))

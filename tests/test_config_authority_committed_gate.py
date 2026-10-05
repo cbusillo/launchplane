@@ -49,7 +49,7 @@ class CommittedConfigAuthorityGateTests(unittest.TestCase):
             _commit_all(root)
             head = _git(root, "rev-parse", "HEAD")
             original = subprocess.run
-            for operation in ("rev-parse", "diff", "ls-tree", "show"):
+            for operation in ("rev-parse", "diff", "ls-tree", "cat-file", "show"):
                 for failure in ("exit", "timeout", "oserror"):
                     with self.subTest(operation=operation, failure=failure):
 
@@ -118,4 +118,36 @@ class CommittedConfigAuthorityGateTests(unittest.TestCase):
             self.assertEqual(
                 {item["reason"] for item in coverage["gaps"]},
                 {"skipped_large_file", "skipped_binary_file", "decode_failure"},
+            )
+
+    def test_symlink_cannot_hide_runtime_authority_in_an_allowed_fixture(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _init_repo(root)
+            fixture = root / "tests/fixtures/runtime.env"
+            fixture.parent.mkdir(parents=True)
+            fixture.write_text("PRODUCT_DOMAIN=live.example\n")
+            _commit_all(root)
+            base = _git(root, "rev-parse", "HEAD")
+            runtime = root / "runtime.env"
+            runtime.symlink_to("tests/fixtures/runtime.env")
+            _commit_all(root)
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                build_config_authority_audit(
+                    control_plane_root=root,
+                    mode="changed-files-gate",
+                    base_sha=base,
+                    head_sha=_git(root, "rev-parse", "HEAD"),
+                )
+            runtime.unlink()
+            runtime.write_bytes(fixture.read_bytes())
+            _commit_all(root)
+            payload = build_config_authority_audit(
+                control_plane_root=root,
+                mode="changed-files-gate",
+                base_sha=base,
+                head_sha=_git(root, "rev-parse", "HEAD"),
+            )
+            self.assertEqual(
+                evaluate_config_authority_gate(payload, profile="product-repo")["status"], "fail"
             )

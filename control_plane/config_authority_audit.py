@@ -1516,11 +1516,11 @@ def build_config_authority_audit(
             strict=True,
         ).split("\0")
         source_files, coverage_gaps = _committed_source_files(root, head_sha, changed_paths)
-        base_paths = set(
-            _git_output(root, "ls-tree", "-r", "--name-only", "-z", base_sha, strict=True).split(
-                "\0"
-            )
-        )
+        base_paths = {
+            path
+            for path, file_mode in _git_file_modes(root, base_sha).items()
+            if file_mode in {"100644", "100755"}
+        }
         baseline_files, _ = _committed_source_files(
             root, base_sha, [path for path in changed_paths if path in base_paths]
         )
@@ -1677,6 +1677,11 @@ def render_config_authority_markdown(payload: Mapping[str, object]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _git_file_modes(root: Path, revision: str) -> dict[str, str]:
+    entries = _git_output(root, "ls-tree", "-r", "-z", revision, strict=True).split("\0")
+    return {entry.split("\t", 1)[1]: entry.split(" ", 1)[0] for entry in entries if entry}
+
+
 def _committed_source_files(
     root: Path,
     revision: str,
@@ -1684,6 +1689,7 @@ def _committed_source_files(
 ) -> tuple[list[AuditSourceFile], list[CoverageGap]]:
     files: list[AuditSourceFile] = []
     gaps: list[CoverageGap] = []
+    modes = _git_file_modes(root, revision)
     for relative_path in sorted(set(relative_paths) - {""}):
         path = root / relative_path
         if not _is_text_scan_candidate(path):
@@ -1696,8 +1702,22 @@ def _committed_source_files(
                 CoverageGap(relative_path, "skipped_dependency_manifest", "Dependency lockfile.")
             )
             continue
-        content = _git_bytes(root, "show", f"{revision}:{relative_path}", strict=True)
-        if len(content) > MAX_SCANNED_FILE_BYTES:
+        mode = modes.get(relative_path)
+        if mode == "160000":
+            gaps.append(
+                CoverageGap(
+                    relative_path,
+                    "unscanned_gitlink",
+                    "Submodule contents belong to another repository.",
+                )
+            )
+            continue
+        if mode not in {"100644", "100755"}:
+            raise ValueError(
+                f"Committed authority path {relative_path} must be a regular file; use full-audit for local symlink analysis."
+            )
+        size = int(_git_output(root, "cat-file", "-s", f"{revision}:{relative_path}", strict=True))
+        if size > MAX_SCANNED_FILE_BYTES:
             gaps.append(
                 CoverageGap(
                     relative_path,
@@ -1706,6 +1726,7 @@ def _committed_source_files(
                 )
             )
             continue
+        content = _git_bytes(root, "show", f"{revision}:{relative_path}", strict=True)
         if _looks_binary(content):
             gaps.append(
                 CoverageGap(

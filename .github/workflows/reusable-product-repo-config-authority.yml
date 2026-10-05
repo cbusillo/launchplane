@@ -79,14 +79,18 @@ jobs:
         working-directory: launchplane
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.event.after }}
           FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
         run: |
           set -euo pipefail
-          if [ "$EVENT_NAME" != "pull_request" ]; then
-            echo "Changed-files authority gate applies only to pull-request commit pairs; skipping ${EVENT_NAME}."
-            exit 0
+          case "$EVENT_NAME" in
+            pull_request|merge_group|push) ;;
+            *) echo "No explicit commit-pair mapping for ${EVENT_NAME}; use the CLI with an explicit pair or full-audit." >&2; exit 1 ;;
+          esac
+          if [[ "$BASE_SHA" =~ ^0+$ || "$HEAD_SHA" =~ ^0+$ ]]; then
+            echo "Cannot verify a zero-SHA comparison." >&2
+            exit 1
           fi
           args=(
             uv run launchplane service audit-config-authority
