@@ -52,14 +52,18 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                 else:
                     self.assertEqual(job_inputs["expected_managed_set_id"], f"operator.{option}")
 
-    def test_retirement_configuration_runs_through_review_bound_worker(self) -> None:
-        job = self.dispatch_workflow.job("reconcile-manager-preview-approval-retirement")
-        job_inputs = job["with"]
-        secrets = job["secrets"]
-        assert isinstance(job_inputs, dict)
-        assert isinstance(secrets, dict)
-        configuration = secrets["managed_set_json"]
-        assert isinstance(configuration, str)
+    def test_empty_configuration_runs_through_review_bound_worker(self) -> None:
+        managed_set_id = "operator.test-retirement"
+        configuration = json.dumps(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "managed_set_id": managed_set_id,
+                "schema_migration": "reject",
+                "unmanaged_adoption": "reject",
+                "desired_policy": {"schema_version": 2},
+            }
+        )
         render_step = self.workflow.step_named(
             "reconcile", "Validate and render managed authz request"
         )
@@ -70,7 +74,6 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                 reviewed_digest = "a" * 64 if mode == "apply" else ""
                 result = subprocess.run(
                     ["bash", "-ceu", render_step.run],
-                    check=False,
                     capture_output=True,
                     env={
                         **os.environ,
@@ -80,7 +83,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                         "GITHUB_REF": "refs/heads/main",
                         "GITHUB_RUN_ATTEMPT": "1",
                         "GITHUB_RUN_ID": "1234",
-                        "EXPECTED_MANAGED_SET_ID": str(job_inputs["expected_managed_set_id"]),
+                        "EXPECTED_MANAGED_SET_ID": managed_set_id,
                         "LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON": configuration,
                         "MODE": mode,
                         "REASON": "Retire the approved managed set.",
@@ -98,7 +101,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                 envelope = AuthzManagedPolicyReconcileEnvelope.model_validate_json(
                     Path(outputs["request_file"]).read_text(encoding="utf-8")
                 )
-                self.assertEqual(envelope.managed_set_id, job_inputs["expected_managed_set_id"])
+                self.assertEqual(envelope.managed_set_id, managed_set_id)
                 self.assertEqual(envelope.mode, mode)
                 self.assertEqual(envelope.reviewed_plan_sha256, reviewed_digest)
                 self.assertEqual(envelope.schema_migration, "reject")
@@ -206,7 +209,6 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
             output_file = Path(temporary_directory) / "github-output"
             result = subprocess.run(
                 ["bash", "-ceu", render_step.run],
-                check=False,
                 capture_output=True,
                 env={
                     **os.environ,
@@ -261,12 +263,11 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory:
             result = subprocess.run(
                 ["bash", "-ceu", render_step.run],
-                check=False,
                 capture_output=True,
                 env={
                     **os.environ,
                     "DEFAULT_BRANCH": "main",
-                    "EXPECTED_MANAGED_SET_ID": "operator.manager-preview-approval",
+                    "EXPECTED_MANAGED_SET_ID": "operator.unrelated-test-set",
                     "GITHUB_EVENT_NAME": "workflow_dispatch",
                     "GITHUB_OUTPUT": str(Path(temporary_directory) / "github-output"),
                     "GITHUB_REF": "refs/heads/main",
@@ -274,7 +275,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                     "GITHUB_RUN_ID": "1234",
                     "LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON": json.dumps(configuration),
                     "MODE": "dry_run",
-                    "REASON": "Review the manager preview authorization set.",
+                    "REASON": "Review an unrelated authorization set.",
                     "RELATED_ISSUE": "cbusillo/launchplane#1919",
                     "REVIEWED_PLAN_SHA256": "",
                     "RUNNER_TEMP": temporary_directory,
@@ -303,7 +304,6 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory:
             result = subprocess.run(
                 ["bash", "-ceu", render_step.run],
-                check=False,
                 capture_output=True,
                 env={
                     **os.environ,
@@ -342,7 +342,6 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory:
             result = subprocess.run(
                 ["bash", "-ceu", render_step.run],
-                check=False,
                 capture_output=True,
                 env={
                     **os.environ,
