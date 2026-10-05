@@ -6,7 +6,6 @@
     "allowedMergeMethods": ["merge"],
     "requiredStatusChecks": ["ci-gate", "security-gate"],
     "mergePath": "launchplane.mergeTrain",
-    "readyComment": "Ready for the merge train",
     "watchSkill": "babysit-pr"
   },
   "docs": {
@@ -19,12 +18,14 @@
     "dokployServiceDeployments": "docs/dokploy-service-deployments.md",
     "driverDescriptors": "docs/driver-descriptors.md",
     "driverDevelopment": "docs/driver-development.md",
+    "previewWorkflowContract": "docs/preview-workflow-contract.md",
     "productRepoContract": "docs/product-repo-contract.md",
     "newProductRepo": "docs/new-product-repo.md",
     "operatorExperience": "docs/operator-experience.md",
     "postV2Audit": "docs/post-v2-audit.md",
     "uiStandards": "docs/ui-standards.md",
     "mergeTrainPolicy": "docs/merge-train-policy.md",
+    "mergeTrainEvents": "docs/merge-train-events.md",
     "mergeReadiness": "docs/merge-readiness.md",
     "governanceEvidence": "docs/governance-evidence.md",
     "mergeTrainStructuralProvenance": "docs/merge-train-structural-provenance.md",
@@ -280,11 +281,11 @@
     },
     "capabilities": {
       "codeScanning": "available",
-      "secretScanning": "available",
+      "secretScanning": "unavailable",
       "dependencyGraph": "available",
       "dependabotAlerts": "available",
-      "ghcrPackage": "available_private",
-      "securityAdvisories": "unsupported"
+      "ghcrPackage": "unknown",
+      "securityAdvisories": "unknown"
     },
     "refreshWhen": [
       "repo visibility changes",
