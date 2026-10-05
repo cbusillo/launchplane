@@ -341,6 +341,7 @@ record directory, flushes and fsyncs the file, then renames it into place.
 Write failures or process termination before publication leave the final record
 absent; after publication it is complete. Retry preserves an existing record,
 including malformed files or dangling symlinks, rather than repairing it.
+Other errors checking the final path abort creation.
 Abandoned `.tmp` files are ignored by record listing and do not block creation.
 This is process-interruption recovery, not qualified power-loss durability:
 the writer does not fsync the parent directory after rename, and no real

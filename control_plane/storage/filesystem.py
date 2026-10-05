@@ -394,7 +394,11 @@ class FilesystemRecordStore:
         self, record_type: str, record_id: str, model: BaseModel
     ) -> bool:
         record_path = self._record_path(record_type, record_id)
-        if record_path.exists(follow_symlinks=False):
+        try:
+            record_path.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
             return False
         self._write_model_locked(record_type, record_id, model)
         return True

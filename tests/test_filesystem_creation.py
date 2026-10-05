@@ -1,5 +1,6 @@
 """Generic insert-only filesystem creation survives interrupted publication."""
 
+import errno
 import json
 import multiprocessing
 import os
@@ -56,6 +57,29 @@ def _paused_creation(root: str, boundary: str, reached: Event, release: Event) -
 
 
 class FilesystemCreationTests(unittest.TestCase):
+    def test_failed_existence_read_does_not_replace_an_existing_record(self) -> None:
+        event = _audit_event()
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            path = store.create_product_retirement_secret_audit_event(event)
+            original_stat = Path.stat
+
+            def interrupted_stat(
+                candidate: Path, *, follow_symlinks: bool = True
+            ) -> os.stat_result:
+                if candidate == path:
+                    raise OSError(errno.EIO, "injected transient stat I/O error")
+                return original_stat(candidate, follow_symlinks=follow_symlinks)
+
+            with (
+                patch.object(Path, "stat", autospec=True, side_effect=interrupted_stat),
+                self.assertRaisesRegex(OSError, "transient stat I/O error"),
+            ):
+                store.create_product_retirement_secret_audit_event(
+                    event.model_copy(update={"actor": "contender"})
+                )
+            self.assertEqual(store.list_secret_audit_events(secret_id=event.secret_id), (event,))
+
     def test_long_valid_record_name_can_be_created_and_remains_insert_only(self) -> None:
         event = _audit_event().model_copy(update={"event_id": "audit-" + "x" * 239})
         with TemporaryDirectory() as directory:
