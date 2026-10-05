@@ -521,6 +521,26 @@ class FilesystemRecordStore:
                 raise SecretRecordConflictError(
                     "A secret adopted from the provider was recorded before commit."
                 )
+            for expectation in bundle.runtime_environment_read_sets:
+                current_runtime = self._list_models_locked(
+                    RuntimeEnvironmentRecord, "launchplane_runtime_environments"
+                )
+                if not expectation.matches(current_runtime):
+                    raise RuntimeEnvironmentConflictError(
+                        "Runtime selectors changed before commit."
+                    )
+            for binding_expectation in bundle.secret_binding_sets:
+                current_bindings = tuple(
+                    binding
+                    for binding in self._list_models_locked(
+                        SecretBinding, "launchplane_secret_bindings"
+                    )
+                    if binding.secret_id == binding_expectation.secret_id
+                )
+                if sorted(current_bindings, key=lambda item: item.binding_id) != sorted(
+                    binding_expectation.bindings, key=lambda item: item.binding_id
+                ):
+                    raise SecretCopySourceConflictError("Secret consumers changed before commit.")
             stage_id = f"{_utc_now_timestamp().replace(':', '').replace('-', '')}-{time.time_ns()}"
             stage_dir = self._product_authority_bundle_stage_root() / stage_id
             records_dir = stage_dir / "records"

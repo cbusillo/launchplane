@@ -2082,7 +2082,7 @@ Current derived-state behavior:
   identity from generated testing runtime evidence, requires current
   testing/production evidence and the selected bump to match the accepted
   direct dry-run, resolves the repository/workflow from the DB-backed product
-  profile, and resolves the managed `GITHUB_TOKEN` from runtime records. The
+  profile, and uses the [GitHub delivery identity](#github-delivery-identity). The
   product workflow receives reviewed `artifact_id` and `source_git_ref` inputs
   and still owns release/tag creation and product-specific safeguards.
 - Promotion status requires digest-pinned testing and production artifacts,
@@ -3551,10 +3551,8 @@ resolve webhook URLs from managed secrets scoped to `launchplane` /
 `preview-feedback`, and attempt records live under
 `launchplane_preview_pr_feedback_notification_attempts` for DB-backed stores or
 `state/launchplane_preview_pr_feedback_notification_attempts/` for filesystem
-stores. Repair missing credentials by configuring the canonical product preview
-context's managed-secret-backed `GITHUB_TOKEN` in Launchplane runtime records;
-do not add repo-local defaults or service-host env fallbacks for product GitHub
-tokens.
+stores. Credential selection follows
+[GitHub delivery identity](#github-delivery-identity).
 
 ### Preview Feedback Remediation
 
@@ -3567,7 +3565,7 @@ confirmation phrase. Stop if the product profile, PR URL, token actor, marker
 author, or observation differs. An absent comment is reconciled as
 `already_absent` with `mutated=false`; it is not rewritten as a deletion.
 
-The route uses the context-scoped preview `GITHUB_TOKEN`, accepts only
+The route follows [GitHub delivery identity](#github-delivery-identity), accepts only
 `local_operator`/`local_admin` identities with `preview_pr_feedback_remediation.plan` or
 `.apply`, and never grants this mutation to preview workflow OIDC identities.
 Attach the remediation and companion feedback record ids to the governing issue.
@@ -3985,7 +3983,11 @@ write-only `private_key` binding in that same context. This lets the existing ke
 stay in its managed-secret record: no new key, copied value or agent credential
 is needed. An integration name retained from an older store is only a key
 selector; it does not activate the retired ordinary-agent delivery machinery.
-Use the signed-in administrator's
+In the Launchplane UI, open **Engineering Ops > GitHub delivery > Select
+Delivery App**. Enter the non-secret App id, choose **Existing managed key**,
+and enter **Selection reason**. Click **Dry run**, review the id and binding,
+confirm that the Director approves, then click **Apply**. The page reads back
+the selection. The UI uses the signed-in administrator's
 `POST /v1/service/github-delivery/configuration` dry-run/apply path for these
 two non-secret runtime values. It requires existing `product_config.plan` /
 `product_config.apply` authority on the service context plus a human administrator
@@ -3997,6 +3999,32 @@ receipt atomically. It does not decrypt, copy, create or rotate a key, mint a
 token, or change grants. The
 service's runtime-settings GET reads them back. Do not put them in host env or
 checked-in config. No live settings change is part of the source PR.
+
+**Retire obsolete service tokens** on the same page is bounded to individually
+selected `launchplane_service` `GITHUB_TOKEN` records at global or context scope,
+with no instance or unrelated binding. Global records are shared across service
+contexts: disabling one affects all inheriting contexts. Enter the Advisory
+check, Delivery comment, and Delivery release-issue receipt URLs, the remaining-
+consumer check evidence, and a reason. These are Director attestations; the
+service does not automatically verify the linked GitHub receipts. **Dry run**
+shows the exact selected record ids and scope. The Director confirms the numeric
+App identities, current PR commit, remaining consumers, and disablement, then
+clicks **Apply**. The UI reads back disabled record status. A draft edit requires
+another dry-run; an uncertain Apply retains its exact request and operation key
+across reload for **Retry Apply**. Session storage must work before apply dispatch.
+
+The metadata-only `GET /v1/service/github-delivery` and
+`POST /v1/service/github-delivery/token-retirement` require a signed-in human
+administrator and the existing service-context `product_config.plan` / `.apply`
+authority; no new grant is introduced. Retirement requires configured Delivery
+and Advisory selectors, the existing Delivery key metadata, receipt links,
+consumer evidence, explicit Director confirmation, a reviewed digest, and an
+actor-bound idempotency key. The database transaction compares the reviewed
+records, all their bindings, key metadata and runtime selector layers (including
+absence), disables only selected records/bindings, and appends audit evidence and
+the replay receipt together. Encrypted versions remain untouched; no secret value
+is read, created or copied. This control neither revokes a GitHub PAT nor retires
+a product. A conflict or scope refusal is reported rather than bypassed.
 
 The operation requests only its needed permissions:
 
@@ -4041,6 +4069,6 @@ source tests are not live installation evidence. Apply the selector promptly
 after deployment and resend feedback for queued Client-labelled PRs through the
 existing product-review feedback retry route, so their current-head checks are
 republished. Only after these receipts and
-remaining-consumer checks should Chris delete the obsolete per-context
-`GITHUB_TOKEN` secrets and revoke the old PAT. Other-token migrations keep their
+remaining-consumer checks should Chris disable the confirmed obsolete service
+`GITHUB_TOKEN` records through the controls above and revoke the old PAT. Other-token migrations keep their
 separate issue scopes; the hold on the shared Odoo Docker token still applies.

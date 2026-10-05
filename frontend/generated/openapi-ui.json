@@ -4038,6 +4038,66 @@
         "summary": "Read repository product mapping"
       }
     },
+    "/v1/service/github-delivery": {
+      "get": {
+        "operationId": "read_service_github_delivery_controls",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceGitHubDeliveryStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read service GitHub delivery selectors and managed binding metadata"
+      }
+    },
     "/v1/work-graph/github/issues": {
       "get": {
         "operationId": "read_work_graph_issue_inbox",
@@ -7092,6 +7152,166 @@
         ]
       }
     },
+    "/v1/service/github-delivery/configuration": {
+      "post": {
+        "operationId": "configure_launchplane_github_delivery",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeliveryGitHubAppConfigurationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliveryGitHubAppConfigurationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Configure the existing service Delivery App"
+      }
+    },
+    "/v1/service/github-delivery/token-retirement": {
+      "post": {
+        "operationId": "retire_service_github_tokens",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServiceTokenRetirementRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceTokenRetirementResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Disable individually selected obsolete service GITHUB_TOKEN records"
+      }
+    },
     "/v1/work-graph/rank": {
       "post": {
         "operationId": "rank_work_graph_snapshot",
@@ -8973,6 +9193,115 @@
         "title": "DataProvenance",
         "type": "object"
       },
+      "DeliveryGitHubAppConfigurationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "app_id": {
+            "exclusiveMinimum": 0,
+            "title": "App Id",
+            "type": "integer"
+          },
+          "expected_plan_digest": {
+            "default": "",
+            "title": "Expected Plan Digest",
+            "type": "string"
+          },
+          "integration": {
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,127}$",
+            "title": "Integration",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "app_id",
+          "integration",
+          "reason"
+        ],
+        "title": "DeliveryGitHubAppConfigurationRequest",
+        "type": "object"
+      },
+      "DeliveryGitHubAppConfigurationResponse": {
+        "properties": {
+          "actor": {
+            "title": "Actor",
+            "type": "string"
+          },
+          "app_id": {
+            "title": "App Id",
+            "type": "integer"
+          },
+          "integration": {
+            "title": "Integration",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "plan_digest": {
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "runtime_environment": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runtime Environment"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "actor",
+          "app_id",
+          "integration",
+          "mode",
+          "plan_digest",
+          "reason",
+          "runtime_environment",
+          "status",
+          "trace_id"
+        ],
+        "title": "DeliveryGitHubAppConfigurationResponse",
+        "type": "object"
+      },
       "DeployedTargetReference": {
         "additionalProperties": false,
         "properties": {
@@ -10633,6 +10962,34 @@
           "updated_at"
         ],
         "title": "EveryCodeWorkRequestSummary",
+        "type": "object"
+      },
+      "ExistingDeliveryKey": {
+        "properties": {
+          "binding_id": {
+            "title": "Binding Id",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "integration": {
+            "title": "Integration",
+            "type": "string"
+          },
+          "secret_id": {
+            "title": "Secret Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding_id",
+          "context",
+          "integration",
+          "secret_id"
+        ],
+        "title": "ExistingDeliveryKey",
         "type": "object"
       },
       "GenericWebProdPromotionRecords": {
@@ -16086,6 +16443,50 @@
           "status"
         ],
         "title": "MergeTrainStructuralCandidateResult",
+        "type": "object"
+      },
+      "ObsoleteServiceToken": {
+        "properties": {
+          "binding_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Binding Ids",
+            "type": "array"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "global",
+              "context"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "secret_id": {
+            "title": "Secret Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "configured",
+              "disabled"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding_ids",
+          "context",
+          "scope",
+          "secret_id",
+          "status"
+        ],
+        "title": "ObsoleteServiceToken",
         "type": "object"
       },
       "OdooAddonSettingOverride": {
@@ -31326,6 +31727,192 @@
           "recorded_by"
         ],
         "title": "SecretSharingReason",
+        "type": "object"
+      },
+      "ServiceGitHubDeliveryStatus": {
+        "properties": {
+          "advisory_app_id": {
+            "title": "Advisory App Id",
+            "type": "string"
+          },
+          "app_id": {
+            "title": "App Id",
+            "type": "string"
+          },
+          "existing_keys": {
+            "items": {
+              "$ref": "#/components/schemas/ExistingDeliveryKey"
+            },
+            "title": "Existing Keys",
+            "type": "array"
+          },
+          "integration": {
+            "title": "Integration",
+            "type": "string"
+          },
+          "obsolete_tokens": {
+            "items": {
+              "$ref": "#/components/schemas/ObsoleteServiceToken"
+            },
+            "title": "Obsolete Tokens",
+            "type": "array"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "advisory_app_id",
+          "app_id",
+          "existing_keys",
+          "integration",
+          "obsolete_tokens",
+          "status",
+          "trace_id"
+        ],
+        "title": "ServiceGitHubDeliveryStatus",
+        "type": "object"
+      },
+      "ServiceTokenRetirementRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "advisory_check_url": {
+            "maxLength": 1000,
+            "pattern": "^https://github\\.com/[^/]+/[^/]+/.*",
+            "title": "Advisory Check Url",
+            "type": "string"
+          },
+          "consumer_check_evidence": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Consumer Check Evidence",
+            "type": "string"
+          },
+          "delivery_comment_url": {
+            "maxLength": 1000,
+            "pattern": "^https://github\\.com/[^/]+/[^/]+/(pull|issues)/[0-9]+#issuecomment-[0-9]+$",
+            "title": "Delivery Comment Url",
+            "type": "string"
+          },
+          "delivery_release_issue_url": {
+            "maxLength": 1000,
+            "pattern": "^https://github\\.com/[^/]+/[^/]+/issues/[0-9]+$",
+            "title": "Delivery Release Issue Url",
+            "type": "string"
+          },
+          "director_confirmed": {
+            "default": false,
+            "title": "Director Confirmed",
+            "type": "boolean"
+          },
+          "expected_plan_digest": {
+            "default": "",
+            "title": "Expected Plan Digest",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "secret_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Secret Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "secret_ids",
+          "reason",
+          "advisory_check_url",
+          "delivery_comment_url",
+          "delivery_release_issue_url",
+          "consumer_check_evidence"
+        ],
+        "title": "ServiceTokenRetirementRequest",
+        "type": "object"
+      },
+      "ServiceTokenRetirementResponse": {
+        "properties": {
+          "actor": {
+            "title": "Actor",
+            "type": "string"
+          },
+          "advisory_app_id": {
+            "title": "Advisory App Id",
+            "type": "string"
+          },
+          "app_id": {
+            "title": "App Id",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "plan_digest": {
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "tokens": {
+            "items": {
+              "$ref": "#/components/schemas/ObsoleteServiceToken"
+            },
+            "title": "Tokens",
+            "type": "array"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "actor",
+          "advisory_app_id",
+          "app_id",
+          "mode",
+          "plan_digest",
+          "reason",
+          "status",
+          "tokens",
+          "trace_id"
+        ],
+        "title": "ServiceTokenRetirementResponse",
         "type": "object"
       },
       "StructuredHealthEvidence": {

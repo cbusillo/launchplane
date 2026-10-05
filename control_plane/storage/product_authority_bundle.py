@@ -65,6 +65,15 @@ class SecretCopySourceExpectation(BaseModel):
     binding: SecretBinding
 
 
+class SecretBindingSetExpectation(BaseModel):
+    """Guard all consumers of a secret before disabling its record."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    secret_id: str
+    bindings: tuple[SecretBinding, ...]
+
+
 class RuntimeEnvironmentWrite(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -85,6 +94,31 @@ class RuntimeEnvironmentWrite(BaseModel):
         ):
             raise ValueError("Runtime environment write expectation must identify the same route.")
         return self
+
+
+class RuntimeEnvironmentSetExpectation(BaseModel):
+    """Read-only snapshot guard, including absent records in the selected layers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    contexts: tuple[str, ...]
+    include_global: bool = False
+    records: tuple[RuntimeEnvironmentRecord, ...]
+
+    def includes(self, record: RuntimeEnvironmentRecord) -> bool:
+        return (self.include_global and record.scope == "global") or (
+            record.scope == "context" and record.context in self.contexts
+        )
+
+    def matches(self, current: Iterable[RuntimeEnvironmentRecord]) -> bool:
+        def payloads(records: Iterable[RuntimeEnvironmentRecord]) -> list[str]:
+            return sorted(
+                json.dumps(record.model_dump(mode="json", exclude_none=True), sort_keys=True)
+                for record in records
+                if self.includes(record)
+            )
+
+        return payloads(current) == payloads(self.records)
 
 
 def runtime_environment_records_match(
@@ -134,11 +168,13 @@ class ProductAuthorityBundle(BaseModel):
     provider_target_writes: tuple[ProviderTargetWrite, ...] = ()
     runtime_environments: tuple[RuntimeEnvironmentRecord, ...] = ()
     runtime_environment_writes: tuple[RuntimeEnvironmentWrite, ...] = ()
+    runtime_environment_read_sets: tuple[RuntimeEnvironmentSetExpectation, ...] = ()
     secret_records: tuple[SecretRecord, ...] = ()
     secret_versions: tuple[SecretVersion, ...] = ()
     secret_bindings: tuple[SecretBinding, ...] = ()
     secret_audit_events: tuple[SecretAuditEvent, ...] = ()
     secret_copy_sources: tuple[SecretCopySourceExpectation, ...] = ()
+    secret_binding_sets: tuple[SecretBindingSetExpectation, ...] = ()
     # Secret ids that must still be absent when the bundle commits: a secret
     # adopted from the provider is only ever created, never rotated.
     absent_secret_ids: tuple[str, ...] = ()

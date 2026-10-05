@@ -28,6 +28,7 @@ export type EngineeringView =
   | "merge-train"
   | "tenant-admission"
   | "governance-projection"
+  | "github-delivery"
   | "privileged-operations";
 
 export function productIndexPath(): string {
@@ -61,6 +62,9 @@ export function ownerReviewPath(): string {
 }
 
 export function engineeringViewLabel(view: EngineeringView): string {
+  if (view === "github-delivery") {
+    return "GitHub delivery";
+  }
   if (view === "work-graph") {
     return "Work graph";
   }
@@ -116,6 +120,7 @@ export function parseAppRoute(pathname: string): AppRoute {
         "merge-train",
         "tenant-admission",
         "governance-projection",
+        "github-delivery",
         "privileged-operations",
       ].includes(view)
     ) {
