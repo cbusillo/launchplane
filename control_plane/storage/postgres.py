@@ -19745,7 +19745,9 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_landing_authority(
-                session, f"launchplane:github-app-webhook-delivery:{claimed.delivery_id}"
+                session,
+                f"launchplane:config-authority-repository:{claimed.repository_id}",
+                f"launchplane:github-app-webhook-delivery:{claimed.delivery_id}",
             )
             statement = select(LaunchplaneGitHubAppWebhookDeliveryRow).where(
                 LaunchplaneGitHubAppWebhookDeliveryRow.delivery_id == claimed.delivery_id

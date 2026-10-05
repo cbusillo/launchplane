@@ -3386,7 +3386,39 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         old, {"status": "pass"}, publish=publisher
                     )
                 publisher.assert_not_called()
-                stores[1].complete_config_authority_delivery(recovered, {"status": "fail"})
+                publication_started, release_publication = threading.Event(), threading.Event()
+
+                def publish() -> None:
+                    publication_started.set()
+                    if not release_publication.wait(10):
+                        raise AssertionError("Publication test was not released.")
+
+                with ThreadPoolExecutor(max_workers=1) as worker:
+                    publication = worker.submit(
+                        stores[1].complete_config_authority_delivery,
+                        recovered,
+                        {"status": "fail"},
+                        publish,
+                    )
+                    try:
+                        self.assertTrue(publication_started.wait(10))
+                        # Even after this observer's clock crosses the lease, the
+                        # repository fence prevents another delivery's publication.
+                        after_expiry = (
+                            datetime.fromisoformat(
+                                recovered.config_authority_lease_expires_at.replace("Z", "+00:00")
+                            )
+                            + timedelta(seconds=1)
+                        ).isoformat()
+                        with patch.object(
+                            stores[0], "_database_mutation_timestamp", return_value=after_expiry
+                        ):
+                            self.assertIsNone(
+                                stores[0].claim_next_config_authority_delivery("another", 60)
+                            )
+                    finally:
+                        release_publication.set()
+                    publication.result(timeout=10)
                 self.assertEqual(
                     stores[0]
                     .read_github_app_webhook_delivery(delivery.delivery_id)
