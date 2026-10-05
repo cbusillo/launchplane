@@ -813,6 +813,7 @@ from control_plane.storage.product_authority_bundle import (
     ProductProfileConflictError,
     RuntimeEnvironmentConflictError,
 )
+from control_plane.health_monitor_scheduler import HealthMonitorScheduler
 from control_plane.storage.postgres import (
     DbOnlyMutationPreflightResult,
     DbOnlyMutationRequest,
@@ -4040,6 +4041,7 @@ def create_launchplane_fastapi_app(
     github_app_webhook_handler: GitHubAppWebhookHandler | None = None,
     engineering_review_target_resolver: EngineeringReviewTargetResolver | None = None,
     owner_review_status_publisher: OwnerReviewStatusPublisher | None = None,
+    health_monitor_scheduler: HealthMonitorScheduler | None = None,
 ) -> FastAPI:
     resolved_control_plane_root = (
         control_plane_root_path or FilePath(__file__).resolve().parent.parent
@@ -4115,8 +4117,12 @@ def create_launchplane_fastapi_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         try:
+            if health_monitor_scheduler is not None:
+                await run_in_threadpool(health_monitor_scheduler.start)
             yield
         finally:
+            if health_monitor_scheduler is not None:
+                await run_in_threadpool(health_monitor_scheduler.stop)
             if isinstance(shared_record_store, PostgresRecordStore):
                 shared_record_store.close()
 
