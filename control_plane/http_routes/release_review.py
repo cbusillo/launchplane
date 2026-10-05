@@ -44,7 +44,9 @@ class ReleaseReviewRouteDependencies:
     common: ReadRouteDependencies
     read_github_human_browser_mutation_identity: Callable[..., GitHubHumanIdentity]
     current_review: Callable[[object, LaunchplaneProductProfileRecord, str], ReleaseReviewStatus]
-    publish_decision: Callable[[LaunchplaneProductProfileRecord, ReleaseReviewDecisionRecord], str]
+    publish_decision: Callable[
+        [ReleaseReviewStore, LaunchplaneProductProfileRecord, ReleaseReviewDecisionRecord], str
+    ]
 
 
 class ReleaseReviewResponse(BaseModel):
@@ -268,7 +270,7 @@ def register_release_review_routes(
             issue_url = decision.release_issue_url
             if not issue_url:
                 try:
-                    issue_url = dependencies.publish_decision(profile, decision)
+                    issue_url = dependencies.publish_decision(store, profile, decision)
                 except (
                     AttributeError,
                     FileNotFoundError,

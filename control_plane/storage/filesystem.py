@@ -6973,6 +6973,11 @@ class FilesystemRecordStore:
                 ReleaseReviewDecisionRecord, record_type, record.record_id
             )
 
+    @contextmanager
+    def release_review_publication_lock(self, *, record_id: str) -> Iterator[None]:
+        with self._exclusive_record_lock("release-review-publication", record_id):
+            yield
+
     def record_release_review_decision_publication(
         self, *, record_id: str, release_issue_url: str
     ) -> ReleaseReviewDecisionRecord:
