@@ -204,8 +204,7 @@ Separately reviewed `/apply` requires the same reason, `recovery_reference`,
 `expected_recovery_digest`, and current production-scoped
 `generic_web_prod_promotion.execute` authority. Browser writes use the existing
 session/CSRF protection; terminal-agent and workflow identities cannot apply.
-Scoped service/local administrators and local operators use this existing
-authority; Client decisions alone grant no recovery power.
+Local admin tokens use the same scoped authority.
 Recovery rechecks exact configured/running immutable images, operation deployment
 IDs and current-lane runtime-identity health. It can finish interrupted health
 checks on an exact, durably recorded successful deployment, or adopt a proven
