@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Callable, Literal, Protocol, cast
+from typing import Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -18,7 +18,11 @@ from control_plane.merge_train import (
     build_merge_train_dry_run_result,
     merge_train_stack_child_readiness_check,
 )
-from control_plane.merge_train_batch_candidate import MergeTrainBatchCandidateRecordStore
+from control_plane.merge_train_batch_candidate import (
+    MergeTrainBatchCandidateRecordStore,
+    MergeTrainStackCollapsePlanRecordStore as MergeTrainStackCollapsePlanRecordStore,
+    require_merge_train_stack_collapse_plan_record_store as _require_stack_collapse_store,
+)
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     GitHubMergeTrainSnapshotReader,
@@ -62,29 +66,10 @@ class MergeTrainStackCollapseBatchCandidateStoreMissingError(RuntimeError):
     """Raised when admit mode lacks batch-candidate persistence."""
 
 
-class MergeTrainStackCollapsePlanRecordStore(Protocol):
-    def write_merge_train_stack_collapse_plan_record(
-        self, record: MergeTrainStackCollapsePlanRecord
-    ) -> object: ...
-
-    def list_merge_train_stack_collapse_plan_records(
-        self,
-        *,
-        repository: str = "",
-        base_branch: str = "",
-        status: str = "",
-        limit: int | None = None,
-    ) -> tuple[MergeTrainStackCollapsePlanRecord, ...]: ...
-
-
 def require_merge_train_stack_collapse_plan_record_store(
     record_store: object,
 ) -> MergeTrainStackCollapsePlanRecordStore:
-    if hasattr(record_store, "write_merge_train_stack_collapse_plan_record") and hasattr(
-        record_store, "list_merge_train_stack_collapse_plan_records"
-    ):
-        return cast(MergeTrainStackCollapsePlanRecordStore, record_store)
-    raise TypeError("record store does not support merge train stack collapse plans")
+    return _require_stack_collapse_store(record_store)
 
 
 @dataclass(frozen=True)
