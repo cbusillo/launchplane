@@ -100,7 +100,8 @@
     "audit": {
       "pythonDependencies": "uv run --with pip-audit pip-audit --ignore-vuln PYSEC-2025-183",
       "container": "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v \"${RUNNER_TEMP}/trivy-cache:/root/.cache\" ghcr.io/aquasecurity/trivy:0.70.0 image --scanners vulnerability --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1 launchplane-ci:test",
-      "configAuthority": "uv run launchplane service audit-config-authority --control-plane-root ."
+      "configAuthority": "uv run launchplane service audit-config-authority --control-plane-root .",
+      "repositoryPins": "uv run --extra dev python scripts/verify_repository_pins.py --repo-root . --revision {revision} --repository {repository}"
     },
     "inspection": {
       "tool": "jetbrains",

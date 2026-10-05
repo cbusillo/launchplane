@@ -78,6 +78,8 @@ jobs:
       - name: Run Launchplane config authority gate
         working-directory: launchplane
         env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
         run: |
           set -euo pipefail
@@ -85,6 +87,8 @@ jobs:
             uv run launchplane service audit-config-authority
             --control-plane-root ../product-repo
             --mode changed-files-gate
+            --base-sha "$BASE_SHA"
+            --head-sha "$HEAD_SHA"
             --gate-profile product-repo
           )
           if [ "$FAIL_ON_FINDINGS" = "true" ]; then

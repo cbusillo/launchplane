@@ -122,7 +122,7 @@ second runs:
 
 ```bash
 uv run launchplane action-pins update --release-sha <first-commit-sha>
-uv run launchplane action-pins check
+uv run launchplane action-pins check --repo-root . --revision "$REVISION" --repository "$REPOSITORY"
 ```
 
 The release SHA must be an ancestor of the pull-request head and contain the
@@ -172,3 +172,12 @@ Review each update PR as a supply-chain change: verify the repository, release
 or reviewed source commit, action provenance, and the workflow permissions that
 will execute it. This repository treats Dependabot updates as normal pull
 requests subject to code review, required checks, and branch protection.
+
+Committed pin verification takes an explicit repository root, revision and
+repository name; it does not infer authority from a fork remote or local edits.
+`action-pins check` and `report` read workflows and action content at the same
+revision. Only `update` reads and rewrites local workflows. CI runs
+`uv run --extra dev python scripts/verify_repository_pins.py --repo-root .
+--revision "$REVISION" --repository "$REPOSITORY"` in its full-history policy
+job to verify action content and retirement wrapper/pinned-worker input agreement.
+Unit tests use temporary repositories; unittest jobs use shallow checkouts.

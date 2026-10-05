@@ -1756,6 +1756,8 @@ def service_inspect_config_boundary(control_plane_root: Path | None) -> None:
     default="full-audit",
     show_default=True,
 )
+@click.option("--base-sha", default=None, help="Explicit base commit for changed-files-gate.")
+@click.option("--head-sha", default=None, help="Explicit head commit for changed-files-gate.")
 @click.option(
     "--format",
     "output_format",
@@ -1798,6 +1800,8 @@ def service_inspect_config_boundary(control_plane_root: Path | None) -> None:
 def service_audit_config_authority(
     control_plane_root: Path | None,
     mode: str,
+    base_sha: str | None,
+    head_sha: str | None,
     output_format: str,
     include_untracked: bool,
     include_ignored: bool,
@@ -1807,13 +1811,18 @@ def service_audit_config_authority(
 ) -> None:
     callbacks = _service_callbacks()
     launchplane_root = control_plane_root or _control_plane_root()
-    payload = callbacks.build_config_authority_audit(
-        control_plane_root=launchplane_root,
-        mode=mode,
-        include_untracked=include_untracked,
-        include_ignored=include_ignored,
-        paths=scan_paths,
-    )
+    try:
+        payload = callbacks.build_config_authority_audit(
+            control_plane_root=launchplane_root,
+            mode=mode,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            include_untracked=include_untracked,
+            include_ignored=include_ignored,
+            paths=scan_paths,
+        )
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
     gate = None
     if fail_on_findings:
         gate = callbacks.evaluate_config_authority_gate(payload, profile=gate_profile)

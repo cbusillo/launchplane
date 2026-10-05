@@ -346,6 +346,8 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             payload = build_config_authority_audit(
                 control_plane_root=root,
                 mode="changed-files-gate",
+                base_sha=_git(root, "rev-parse", "main"),
+                head_sha=_git(root, "rev-parse", "HEAD"),
             )
 
         finding_paths = {finding["path"] for finding in _findings(payload)}
@@ -4020,6 +4022,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     str(root),
                     "--mode",
                     "changed-files-gate",
+                    "--base-sha",
+                    _git(root, "rev-parse", "HEAD"),
+                    "--head-sha",
+                    _git(root, "rev-parse", "HEAD"),
                 ],
             )
             fail_on_findings_result = runner.invoke(
@@ -4268,6 +4274,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     str(root),
                     "--mode",
                     "changed-files-gate",
+                    "--base-sha",
+                    _git(root, "rev-parse", "main"),
+                    "--head-sha",
+                    _git(root, "rev-parse", "HEAD"),
                     "--fail-on-findings",
                     "--gate-profile",
                     "product-repo",
@@ -4325,6 +4335,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     str(root),
                     "--mode",
                     "changed-files-gate",
+                    "--base-sha",
+                    _git(root, "rev-parse", "main"),
+                    "--head-sha",
+                    _git(root, "rev-parse", "HEAD"),
                     "--fail-on-findings",
                     "--gate-profile",
                     "product-repo",
@@ -4340,58 +4354,23 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertEqual(finding["classification"], "allowed")
         self.assertEqual(finding["allow_reason"], "preexisting_changed_file_finding")
 
-    def test_cli_changed_files_gate_allows_preexisting_dirty_package_json_finding(
-        self,
-    ) -> None:
+    def test_cli_changed_files_gate_ignores_dirty_only_files(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             _init_repo(root)
-            package_json = root / "package.json"
-            package_json.write_text(
-                json.dumps(
-                    {
-                        "scripts": {"seo:submit-indexnow": "node scripts/seo/submit-indexnow.mjs"},
-                        "devDependencies": {"globals": "^17.6.0"},
-                    },
-                    indent=2,
-                )
-                + "\n",
-                encoding="utf-8",
-            )
+            (root / "tracked.env").write_text("# empty\n")
             _commit_all(root)
-            _git(root, "branch", "-M", "main")
-            package_json.write_text(
-                json.dumps(
-                    {
-                        "scripts": {"seo:submit-indexnow": "node scripts/seo/submit-indexnow.mjs"},
-                        "devDependencies": {"globals": "^17.7.0"},
-                    },
-                    indent=2,
-                )
-                + "\n",
-                encoding="utf-8",
+            sha = _git(root, "rev-parse", "HEAD")
+            (root / "tracked.env").write_text("PRODUCT_DOMAIN=dirty.example\n")
+            (root / "untracked.env").write_text("PRODUCT_DOMAIN=untracked.example\n")
+            payload = build_config_authority_audit(
+                control_plane_root=root,
+                mode="changed-files-gate",
+                base_sha=sha,
+                head_sha=sha,
             )
-
-            runner = CliRunner()
-            result = runner.invoke(
-                CLI_MAIN,
-                [
-                    "service",
-                    "audit-config-authority",
-                    "--control-plane-root",
-                    str(root),
-                    "--mode",
-                    "changed-files-gate",
-                    "--fail-on-findings",
-                    "--gate-profile",
-                    "product-repo",
-                ],
-            )
-
-        self.assertEqual(result.exit_code, 0, result.output)
-        payload = json.loads(result.output)
-        finding = _findings(payload)[0]
-        self.assertEqual(finding["allow_reason"], "preexisting_changed_file_finding")
+            self.assertEqual(_findings(payload), [])
+            self.assertEqual(payload["source_files"], [])
 
     def test_cli_changed_files_gate_rejects_new_package_json_finding(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -4428,6 +4407,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     str(root),
                     "--mode",
                     "changed-files-gate",
+                    "--base-sha",
+                    _git(root, "rev-parse", "main"),
+                    "--head-sha",
+                    _git(root, "rev-parse", "HEAD"),
                     "--fail-on-findings",
                     "--gate-profile",
                     "product-repo",
@@ -4472,6 +4455,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     str(root),
                     "--mode",
                     "changed-files-gate",
+                    "--base-sha",
+                    _git(root, "rev-parse", "main"),
+                    "--head-sha",
+                    _git(root, "rev-parse", "HEAD"),
                     "--fail-on-findings",
                     "--gate-profile",
                     "product-repo",
@@ -4486,19 +4473,14 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertEqual(findings[0]["allow_reason"], "preexisting_changed_file_finding")
         self.assertEqual(findings[1]["classification"], "needs_classification")
 
-    def test_cli_changed_files_gate_fails_closed_without_merge_base(self) -> None:
+    def test_cli_changed_files_gate_fails_closed_without_base_even_if_dirty(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             _init_repo(root)
-            package_json = root / "package.json"
-            package_json.write_text(
-                json.dumps({"devDependencies": {"globals": "^17.6.0"}}, indent=2) + "\n",
-                encoding="utf-8",
-            )
+            (root / "package.json").write_text("{}\n")
             _commit_all(root)
-
-            runner = CliRunner()
-            result = runner.invoke(
+            (root / "dirty.env").write_text("PRODUCT_DOMAIN=dirty.example\n")
+            result = CliRunner().invoke(
                 CLI_MAIN,
                 [
                     "service",
@@ -4507,18 +4489,15 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     str(root),
                     "--mode",
                     "changed-files-gate",
+                    "--base-sha",
+                    "f" * 40,
+                    "--head-sha",
+                    _git(root, "rev-parse", "HEAD"),
                     "--fail-on-findings",
-                    "--gate-profile",
-                    "product-repo",
                 ],
             )
-
-        self.assertNotEqual(result.exit_code, 0)
-        payload = json.loads(result.output.split("Error:", 1)[0])
-        gate = cast("dict[str, object]", payload["gate"])
-        self.assertEqual(gate["status"], "fail")
-        rejected = cast("list[dict[str, object]]", gate["rejected_findings"])
-        self.assertEqual(rejected[0]["rule_id"], "changed_files_gate_base_unavailable")
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("git read failed", result.output)
 
     def test_cli_product_repo_gate_rejects_launchplane_tool_checkout_without_binding(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -4568,6 +4547,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     str(root),
                     "--mode",
                     "changed-files-gate",
+                    "--base-sha",
+                    _git(root, "rev-parse", "main"),
+                    "--head-sha",
+                    _git(root, "rev-parse", "HEAD"),
                     "--fail-on-findings",
                     "--gate-profile",
                     "product-repo",
@@ -4623,6 +4606,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     str(root),
                     "--mode",
                     "changed-files-gate",
+                    "--base-sha",
+                    _git(root, "rev-parse", "main"),
+                    "--head-sha",
+                    _git(root, "rev-parse", "HEAD"),
                     "--fail-on-findings",
                     "--gate-profile",
                     "product-repo",
@@ -4676,6 +4663,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     str(root),
                     "--mode",
                     "changed-files-gate",
+                    "--base-sha",
+                    _git(root, "rev-parse", "main"),
+                    "--head-sha",
+                    _git(root, "rev-parse", "HEAD"),
                     "--fail-on-findings",
                     "--gate-profile",
                     "product-repo",
@@ -4777,6 +4768,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                             str(root),
                             "--mode",
                             "changed-files-gate",
+                            "--base-sha",
+                            _git(root, "rev-parse", "main"),
+                            "--head-sha",
+                            _git(root, "rev-parse", "HEAD"),
                             "--fail-on-findings",
                             "--gate-profile",
                             "product-repo",
@@ -4823,6 +4818,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     str(root),
                     "--mode",
                     "changed-files-gate",
+                    "--base-sha",
+                    _git(root, "rev-parse", "main"),
+                    "--head-sha",
+                    _git(root, "rev-parse", "HEAD"),
                     "--fail-on-findings",
                     "--gate-profile",
                     "product-repo",
@@ -4921,6 +4920,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     str(root),
                     "--mode",
                     "changed-files-gate",
+                    "--base-sha",
+                    _git(root, "rev-parse", "main"),
+                    "--head-sha",
+                    _git(root, "rev-parse", "HEAD"),
                     "--fail-on-findings",
                     "--gate-profile",
                     "product-repo",
@@ -5009,6 +5012,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     str(root),
                     "--mode",
                     "changed-files-gate",
+                    "--base-sha",
+                    _git(root, "rev-parse", "main"),
+                    "--head-sha",
+                    _git(root, "rev-parse", "HEAD"),
                     "--fail-on-findings",
                     "--gate-profile",
                     "product-repo",
@@ -5076,6 +5083,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     str(root),
                     "--mode",
                     "changed-files-gate",
+                    "--base-sha",
+                    _git(root, "rev-parse", "main"),
+                    "--head-sha",
+                    _git(root, "rev-parse", "HEAD"),
                     "--fail-on-findings",
                     "--gate-profile",
                     "product-repo",
@@ -5149,6 +5160,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     str(root),
                     "--mode",
                     "changed-files-gate",
+                    "--base-sha",
+                    _git(root, "rev-parse", "main"),
+                    "--head-sha",
+                    _git(root, "rev-parse", "HEAD"),
                     "--fail-on-findings",
                     "--gate-profile",
                     "product-repo",
@@ -5246,6 +5261,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                         str(root),
                         "--mode",
                         "changed-files-gate",
+                        "--base-sha",
+                        _git(root, "rev-parse", "main"),
+                        "--head-sha",
+                        _git(root, "rev-parse", "HEAD"),
                         "--fail-on-findings",
                         "--gate-profile",
                         "product-repo",
@@ -5308,6 +5327,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                         str(root),
                         "--mode",
                         "changed-files-gate",
+                        "--base-sha",
+                        _git(root, "rev-parse", "main"),
+                        "--head-sha",
+                        _git(root, "rev-parse", "HEAD"),
                         "--fail-on-findings",
                         "--gate-profile",
                         "product-repo",
@@ -5374,6 +5397,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                         str(root),
                         "--mode",
                         "changed-files-gate",
+                        "--base-sha",
+                        _git(root, "rev-parse", "main"),
+                        "--head-sha",
+                        _git(root, "rev-parse", "HEAD"),
                         "--fail-on-findings",
                         "--gate-profile",
                         "product-repo",
@@ -5419,6 +5446,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     str(root),
                     "--mode",
                     "changed-files-gate",
+                    "--base-sha",
+                    _git(root, "rev-parse", "main"),
+                    "--head-sha",
+                    _git(root, "rev-parse", "HEAD"),
                     "--fail-on-findings",
                     "--gate-profile",
                     "product-repo",
@@ -5468,6 +5499,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     str(root),
                     "--mode",
                     "changed-files-gate",
+                    "--base-sha",
+                    _git(root, "rev-parse", "main"),
+                    "--head-sha",
+                    _git(root, "rev-parse", "HEAD"),
                     "--fail-on-findings",
                     "--gate-profile",
                     "product-repo",
@@ -5514,6 +5549,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     str(root),
                     "--mode",
                     "changed-files-gate",
+                    "--base-sha",
+                    _git(root, "rev-parse", "main"),
+                    "--head-sha",
+                    _git(root, "rev-parse", "HEAD"),
                     "--fail-on-findings",
                     "--gate-profile",
                     "product-repo",
@@ -5567,6 +5606,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     str(root),
                     "--mode",
                     "changed-files-gate",
+                    "--base-sha",
+                    _git(root, "rev-parse", "main"),
+                    "--head-sha",
+                    _git(root, "rev-parse", "HEAD"),
                     "--fail-on-findings",
                     "--gate-profile",
                     "product-repo",
@@ -5606,6 +5649,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     str(root),
                     "--mode",
                     "changed-files-gate",
+                    "--base-sha",
+                    _git(root, "rev-parse", "main"),
+                    "--head-sha",
+                    _git(root, "rev-parse", "HEAD"),
                     "--fail-on-findings",
                     "--gate-profile",
                     "product-repo",
@@ -5655,6 +5702,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     str(root),
                     "--mode",
                     "changed-files-gate",
+                    "--base-sha",
+                    _git(root, "rev-parse", "main"),
+                    "--head-sha",
+                    _git(root, "rev-parse", "HEAD"),
                     "--fail-on-findings",
                     "--gate-profile",
                     "product-repo",
@@ -5692,6 +5743,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     str(root),
                     "--mode",
                     "changed-files-gate",
+                    "--base-sha",
+                    _git(root, "rev-parse", "main"),
+                    "--head-sha",
+                    _git(root, "rev-parse", "HEAD"),
                     "--fail-on-findings",
                     "--gate-profile",
                     "product-repo",

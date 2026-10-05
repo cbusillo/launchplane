@@ -282,6 +282,7 @@ review workflows:
 uv run launchplane service audit-config-authority \
   --control-plane-root . \
   --mode changed-files-gate \
+  --base-sha "$BASE_SHA" --head-sha "$HEAD_SHA" \
   --fail-on-findings \
   --gate-profile product-repo
 ```
@@ -289,11 +290,10 @@ uv run launchplane service audit-config-authority \
 `--fail-on-findings` preserves the JSON or Markdown report, adds a JSON `gate`
 summary when enforcement is enabled, and then exits non-zero when the selected
 gate profile rejects a finding. In changed-file mode, findings that already
-existed at the merge base remain in the report as
+existed at the explicit base commit remain in the report as
 `preexisting_changed_file_finding`, but only new unclassified findings block the
-gate. If the gate cannot resolve `origin/main` or `main` and has no dirty files
-to compare against `HEAD`, it fails closed instead of returning an empty green
-report. Allowed docs, tests, schema examples, Launchplane self-bootstrap wiring,
+gate. Both commit SHAs must be supplied; missing commits or failed git reads
+fail closed. The scan ignores dirty and untracked files. Allowed docs, tests, schema examples, Launchplane self-bootstrap wiring,
 admin-supplied inputs, and thin connector mechanics keep explicit allow
 reasons and do not fail the default gate. Runner mechanic selectors use the same
 allowed labels in scalar, JSON, and YAML flow-list forms (for example,

@@ -34,6 +34,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install uv for pin verification
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - name: Verify committed repository pins
+        env:
+          PIN_REPOSITORY: ${{ github.repository }}
+          PIN_REVISION: ${{ github.sha }}
+        run: >-
+          uv run --extra dev python scripts/verify_repository_pins.py
+          --repo-root . --revision "$PIN_REVISION" --repository "$PIN_REPOSITORY"
+
       - name: Classify audit inputs
         id: policy
         env:
@@ -691,7 +702,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -822,7 +833,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0

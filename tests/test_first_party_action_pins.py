@@ -28,7 +28,9 @@ class FirstPartyActionPinTests(unittest.TestCase):
             repo_root = Path(temporary_directory_name)
             release_sha = _initialize_repository(repo_root)
 
-            report = build_action_pin_report(repo_root)
+            report = build_action_pin_report(
+                repo_root, target_revision="HEAD", repository="example/launchplane"
+            )
 
         self.assertEqual(report.status, "pass")
         self.assertEqual(report.violations, ())
@@ -41,7 +43,9 @@ class FirstPartyActionPinTests(unittest.TestCase):
             (repo_root / "README.md").write_text("unrelated\n", encoding="utf-8")
             _commit(repo_root, "unrelated change")
 
-            report = build_action_pin_report(repo_root)
+            report = build_action_pin_report(
+                repo_root, target_revision="HEAD", repository="example/launchplane"
+            )
 
         self.assertEqual(report.violations, ())
 
@@ -52,7 +56,9 @@ class FirstPartyActionPinTests(unittest.TestCase):
             _write_action(repo_root, "console.log('v2');\n")
             _commit(repo_root, "change action")
 
-            report = build_action_pin_report(repo_root)
+            report = build_action_pin_report(
+                repo_root, target_revision="HEAD", repository="example/launchplane"
+            )
 
         self.assertIn(
             "action_pin_content_stale",
@@ -66,7 +72,9 @@ class FirstPartyActionPinTests(unittest.TestCase):
             _write_workflow(repo_root, "f" * 40)
             _commit(repo_root, "point at missing action commit")
 
-            report = build_action_pin_report(repo_root)
+            report = build_action_pin_report(
+                repo_root, target_revision="HEAD", repository="example/launchplane"
+            )
 
         self.assertIn(
             "action_pin_object_unavailable",
@@ -79,7 +87,10 @@ class FirstPartyActionPinTests(unittest.TestCase):
             release_sha = _initialize_repository(repo_root)
             _write_workflow(repo_root, release_sha, provenance="main")
 
-            report = build_action_pin_report(repo_root)
+            _commit(repo_root, "wrong provenance")
+            report = build_action_pin_report(
+                repo_root, target_revision="HEAD", repository="example/launchplane"
+            )
 
         self.assertIn(
             "action_pin_invalid_provenance",
@@ -92,7 +103,9 @@ class FirstPartyActionPinTests(unittest.TestCase):
             _initialize_repository(repo_root)
             _write_action(repo_root, "console.log('uncommitted');\n")
 
-            report = build_action_pin_report(repo_root)
+            report = build_action_pin_report(
+                repo_root, target_revision="HEAD", repository="example/launchplane"
+            )
 
         self.assertEqual(report.violations, ())
 
@@ -104,7 +117,9 @@ class FirstPartyActionPinTests(unittest.TestCase):
             workflow_path.rename(workflow_path.with_suffix(".yaml"))
             _commit(repo_root, "rename workflow extension")
 
-            report = build_action_pin_report(repo_root)
+            report = build_action_pin_report(
+                repo_root, target_revision="HEAD", repository="example/launchplane"
+            )
 
         self.assertEqual(report.violations, ())
         self.assertEqual(report.references[0].revision, release_sha)
@@ -123,7 +138,9 @@ class FirstPartyActionPinTests(unittest.TestCase):
             _write_workflow(repo_root, orphan_sha)
             _commit(repo_root, "point at unreachable action commit")
 
-            report = build_action_pin_report(repo_root)
+            report = build_action_pin_report(
+                repo_root, target_revision="HEAD", repository="example/launchplane"
+            )
 
         self.assertIn(
             "action_pin_unreachable",
@@ -203,8 +220,12 @@ class FirstPartyActionPinTests(unittest.TestCase):
             repo_root = Path(temporary_directory_name)
             _initialize_repository(repo_root)
 
-            first = build_action_pin_report(repo_root).as_dict()
-            second = build_action_pin_report(repo_root).as_dict()
+            first = build_action_pin_report(
+                repo_root, target_revision="HEAD", repository="example/launchplane"
+            ).as_dict()
+            second = build_action_pin_report(
+                repo_root, target_revision="HEAD", repository="example/launchplane"
+            ).as_dict()
 
         self.assertEqual(first, second)
 
