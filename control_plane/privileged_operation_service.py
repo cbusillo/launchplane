@@ -575,7 +575,7 @@ def _build_privileged_operation_semantic_review(
             record.request, identity=operator, intent="remove"
         ):
             authz_review_title = "Managed authorization policy review"
-            authz_change_summary = "Remove this managed set's agent proposal access. Separately granted read access remains unchanged."
+            authz_change_summary = "Remove every rule in this managed set, including unexpected rules. Separately granted access remains unchanged. Existing pending plans still require signed-in Director approval until they expire."
         elif is_agent_product_setup or is_agent_product_setup_removal:
             authz_review_title = (
                 "Review agent product setup access"

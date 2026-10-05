@@ -1936,9 +1936,18 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                         1,
                     )
                     # Even a supplied local identity with approval actions cannot be an immutable human approver.
+                    approval_rule = policy.local_operators[0].model_copy(
+                        update={
+                            "actions": (
+                                *policy.local_operators[0].actions,
+                                AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
+                                MERGE_TRAIN_POLICY_OPERATION_APPROVE_ACTION,
+                            )
+                        }
+                    )
                     denied_app = self._app(
                         store=store,
-                        policy=policy,
+                        policy=policy.model_copy(update={"local_operators": (approval_rule,)}),
                         mutation_human_reader=Mock(return_value=identity),
                     )
                     async with lifespan_client(denied_app) as client:

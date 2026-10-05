@@ -101,7 +101,11 @@ credentials or ordinary-agent enrollment, sessions or leases.
 Before first use, the Director prepares **agent proposal access** in the Access
 policy tab and approves that separate managed authorization plan. See
 [the proposer grant](authorization-authority.md#preparing-agent-proposal-access).
-Code landing does not install it. Stage 2 scheduler activation remains a separate
+Code landing does not install it. Removing proposer access does not cancel
+already pending plans; those still need separate Director approval before expiry.
+After the first `local_operator` requester record is persisted, rollback must
+retain a reader that supports that requester type. Older records remain readable.
+Stage 2 scheduler activation remains a separate
 later proposal and approval.
 
 ## Approval And Execution Boundary

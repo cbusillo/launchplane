@@ -685,7 +685,9 @@ Preparation rejects a missing or globbed configured identity, an occupied set
 with another identity/shape, and overlapping proposal authority. Exact installed
 add/remove intents are already satisfied. Replays bind the configured principal
 and exact candidate; a configuration change cannot rebind a saved plan. Removal
-proposes an empty fragment for only this set and preserves unrelated rules.
+proposes an empty fragment for every rule in only this set, including unexpected
+rules. The exact diff remains subject to Director approval. Unrelated access
+and existing pending plans remain unchanged.
 The standard managed-policy review, human confirmation, current-policy checks,
 CAS and service worker govern installation. Installing or removing the rule is
 an access change, so the Director approves it separately; code adds no grant.

@@ -1294,3 +1294,30 @@ class AgentPolicyProposerCandidateTests(unittest.TestCase):
                 compile_agent_policy_proposer_candidate(
                     current_policy=current, identity=principal, intent="add"
                 )
+
+    def test_proposer_removal_can_review_drift_without_adopting_it(self) -> None:
+        from control_plane.authz_candidate_preparation import (
+            compile_agent_policy_proposer_candidate,
+        )
+
+        _, proposal = compile_agent_policy_proposer_candidate(
+            current_policy=_policy(), identity=_OPERATOR, intent="add"
+        )
+        assert proposal is not None
+        rule = proposal.desired_policy.local_operators[0]
+        changed = rule.model_copy(
+            update={"actions": (*rule.actions, "authz_policy_operation.approve")}
+        )
+        drifted = _policy().model_copy(update={"local_operators": (changed, changed)})
+        with self.assertRaises(AuthorizationCandidatePreparationError):
+            compile_agent_policy_proposer_candidate(
+                current_policy=drifted, identity=_OPERATOR, intent="add"
+            )
+        state, removal = compile_agent_policy_proposer_candidate(
+            current_policy=drifted, identity=None, intent="remove"
+        )
+        self.assertEqual(state, "planned")
+        assert removal is not None
+        self.assertEqual(removal.managed_set_id, proposal.managed_set_id)
+        self.assertFalse(removal.desired_policy.local_operators)
+        self.assertEqual(drifted.local_operators, (changed, changed))

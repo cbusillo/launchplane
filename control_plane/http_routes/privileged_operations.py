@@ -1551,6 +1551,7 @@ def register_privileged_operation_routes(
                 ),
             )
         else:
+            assert isinstance(identity, TerminalAgentIdentity)
             actor = PrivilegedOperationAgentActor(
                 principal_sha256=terminal_agent_principal_sha256(
                     subject=identity.subject,

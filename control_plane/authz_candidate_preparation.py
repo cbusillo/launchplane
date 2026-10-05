@@ -1210,6 +1210,7 @@ def compile_agent_policy_proposer_candidate(
         raise AuthorizationCandidatePreparationError(
             "candidate_set_conflict", "Agent proposals require authorization policy version 2 or 3."
         )
+    schema_version: Literal[2, 3] = 2 if current_policy.schema_version == 2 else 3
     owned = tuple(
         (kind, rule)
         for kind, rule in _rules(current_policy)
@@ -1225,6 +1226,15 @@ def compile_agent_policy_proposer_candidate(
             "candidate_principal_unavailable",
             "No exact configured local_operator identity is available.",
         )
+    if intent == "remove":
+        if not owned:
+            return "already_satisfied", None
+        return "planned", ManagedAuthzPolicySetProposalInput(
+            managed_set_id=AGENT_POLICY_PROPOSER_MANAGED_SET_ID,
+            desired_policy=LaunchplaneAuthzPolicy(schema_version=schema_version),
+            reason=AGENT_POLICY_PROPOSER_REASON,
+            related_issue=AGENT_POLICY_PROPOSER_RELATED_ISSUE,
+        )
     if owned:
         if (
             len(owned) != 1
@@ -1235,6 +1245,7 @@ def compile_agent_policy_proposer_candidate(
                 "candidate_set_conflict", "The agent proposer set is occupied by another shape."
             )
         existing = owned[0][1]
+        assert isinstance(existing, LocalOperatorPolicyRule)
         if len(existing.subjects) != 1 or len(existing.token_labels) != 1:
             raise AuthorizationCandidatePreparationError(
                 "candidate_set_conflict", "The agent proposer identity is ambiguous."
@@ -1264,7 +1275,7 @@ def compile_agent_policy_proposer_candidate(
                     product="launchplane",
                     context=LAUNCHPLANE_SERVICE_CONTEXT,
                     target=AuthorizationTarget(scope="global"),
-                    schema_version=current_policy.schema_version,
+                    schema_version=schema_version,
                 )
                 for action in AGENT_POLICY_PROPOSER_ACTIONS
             )
@@ -1278,14 +1289,10 @@ def compile_agent_policy_proposer_candidate(
         desired_rules: tuple[LocalOperatorPolicyRule, ...] = (
             _agent_policy_proposer_rule(identity),
         )
-    else:
-        if not owned:
-            return "already_satisfied", None
-        desired_rules = ()
     return "planned", ManagedAuthzPolicySetProposalInput(
         managed_set_id=AGENT_POLICY_PROPOSER_MANAGED_SET_ID,
         desired_policy=LaunchplaneAuthzPolicy(
-            schema_version=current_policy.schema_version, local_operators=desired_rules
+            schema_version=schema_version, local_operators=desired_rules
         ),
         reason=AGENT_POLICY_PROPOSER_REASON,
         related_issue=AGENT_POLICY_PROPOSER_RELATED_ISSUE,
