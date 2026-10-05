@@ -94,12 +94,14 @@ def concurrent_publication(
     github = FakeReleaseIssues()
     github.continue_lookup.clear()
     contender_started = Event()
+    contender_acquired = Event()
     original_lock = stores[1].release_review_publication_lock
 
     @contextmanager
     def contender_lock(*, record_id: str) -> Iterator[None]:
         contender_started.set()
         with original_lock(record_id=record_id):
+            contender_acquired.set()
             yield
 
     with (
@@ -130,6 +132,8 @@ def concurrent_publication(
             )
             if not contender_started.wait(timeout=10):
                 raise TimeoutError("Second publisher did not attempt serialization")
+            if contender_acquired.wait(timeout=0.5):
+                raise AssertionError("Contender acquired publication lock during the first lookup")
         finally:
             github.continue_lookup.set()
         urls = (first.result(timeout=10), second.result(timeout=10))
