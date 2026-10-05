@@ -2367,6 +2367,16 @@ the separate `managed-authz-policy-set` privileged-operation lifecycle for
 proposal review and approval; only the service-internal worker executes that
 approved path.
 
+Managed reconciliation returns HTTP 409 `authz_policy_reviewed_plan_conflict`
+when the reviewed digest does not match the plan for the current policy and
+requested changes. This can mean a mistyped digest or a stale review; it does
+not by itself prove policy drift. Generate and review a new dry run before
+applying. A detected policy change after caller authorization or at the
+compare-and-swap boundary retains `authz_policy_conflict`. Stored successful
+requests still replay through their original idempotency key before these
+planning errors are reported. Diagnoses do not disclose policy or selector
+contents.
+
 The hidden issue `#2277` recovery companion routes use the same browser-only
 authentication, exact CSRF/origin checks, DB storage, idempotency, and policy
 CAS boundary. They take only closed candidate forms, require exact-digest solo

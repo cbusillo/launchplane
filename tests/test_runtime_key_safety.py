@@ -552,6 +552,11 @@ class RuntimeKeySafetyTests(unittest.TestCase):
             "REPAIRSHOPR_API_KEY",
             "FISHBOWL_PASSWORD",
             "RESEND_API_KEY",
+            "MAPBOX_API_KEY",
+            "UNSPLASH_ACCESS_TOKEN",
+            "TENOR_API_KEY",
+            "WEB_PUSH_VAPID_PRIVATE_KEY",
+            "ENV_OVERRIDE_CM_DATA__DB_PASSWORD",
         ):
             for instance, environment_class in lanes:
                 with self.subTest(binding_key=binding_key, instance=instance):
@@ -698,7 +703,7 @@ class RuntimeKeySafetyTests(unittest.TestCase):
             environment_class="testing",
         )
         binding = _binding(
-            binding_key="ENV_OVERRIDE_CM_DATA__DB_PASSWORD",
+            binding_key="ENV_OVERRIDE_EXAMPLE_CONNECTOR__DB_PASSWORD",
             context="cm",
             instance="testing",
         )
@@ -714,7 +719,7 @@ class RuntimeKeySafetyTests(unittest.TestCase):
             required_binding_keys=(binding.binding_key,),
             secret_bindings=(binding,),
             secret_rules=(),
-            integration_key_markers=("CM_DATA",),
+            integration_key_markers=("EXAMPLE_CONNECTOR",),
         )
 
         self.assertEqual(without_marker.status, "pass")
@@ -747,9 +752,8 @@ class RuntimeKeySafetyTests(unittest.TestCase):
         self.assertFalse(is_integration_runtime_key("EMAIL_ALERT_WEBHOOK_URL"))
         self.assertFalse(is_integration_runtime_key("SQUARESPACE_TOKEN"))
         self.assertFalse(is_integration_runtime_key("ODOO_KEY"))
-        self.assertTrue(
-            is_integration_runtime_key("cm_data.db.password", extra_markers=("CM_DATA",))
-        )
+        self.assertTrue(is_integration_runtime_key("cm_data.db.password"))
+        self.assertFalse(is_integration_runtime_key("CM_DATABASE_PASSWORD"))
 
     def test_policy_record_normalizes_integration_key_markers(self) -> None:
         record = RuntimeKeySafetyPolicyRecord(

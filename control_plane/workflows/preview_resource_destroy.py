@@ -38,12 +38,14 @@ def destroy_dokploy_preview_resource(
     continue_after_domain_cleanup_error: bool = True,
     missing_resource_is_clean: bool = False,
     before_provider_mutation: Callable[[str], None] | None = None,
+    propagate_domain_lookup_error: bool = False,
 ) -> PreviewResourceDestroyResult:
     normalized_resource_id = resource_id.strip()
     normalized_domain_host = domain_host.strip().lower()
     steps: list[PreviewResourceDestroyStep] = []
     cleanup_errors: list[str] = []
     domain_ids: list[str] = []
+    domain_mutation_attempted = False
 
     try:
         domain_ids = list(
@@ -59,9 +61,12 @@ def destroy_dokploy_preview_resource(
         for domain_id in domain_ids:
             if before_provider_mutation is not None:
                 before_provider_mutation("domain_delete")
+            domain_mutation_attempted = True
             _delete_domain(host=host, token=token, domain_id=domain_id)
             steps.append(PreviewResourceDestroyStep("domain_delete", domain_id))
     except click.ClickException as exc:
+        if propagate_domain_lookup_error and not domain_mutation_attempted:
+            raise
         cleanup_errors.append(f"domain cleanup failed: {exc}")
         if not continue_after_domain_cleanup_error:
             return PreviewResourceDestroyResult(

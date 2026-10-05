@@ -18,9 +18,13 @@ from control_plane import runtime_environments
 from control_plane import secrets as control_plane_secrets
 from control_plane.github_payload import json_object, required_positive_int, required_string_text
 from control_plane.workflows.launchplane import github_api_request
+from control_plane.github_app_configuration import (
+    ADVISORY_GITHUB_APP_ID_ENV_KEY,
+    advisory_app_id_from_values,
+    service_github_app_values,
+)
 
 
-ADVISORY_GITHUB_APP_ID_ENV_KEY = "LAUNCHPLANE_ADVISORY_GITHUB_APP_ID"
 ADVISORY_GITHUB_APP_PRIVATE_KEY_ENV_KEY = "LAUNCHPLANE_ADVISORY_GITHUB_APP_PRIVATE_KEY"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _ALLOWED_INSTALLATION_PERMISSIONS = {"checks": "write", "metadata": "read"}
@@ -164,9 +168,10 @@ class GitHubAppInstallationInspection:
 
 def resolve_advisory_github_app_identity(*, control_plane_root: Path) -> GitHubAppIdentity:
     try:
-        values = runtime_environments.resolve_runtime_context_values(
-            control_plane_root=control_plane_root,
-            context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
+        values = service_github_app_values(
+            runtime_environments.load_runtime_environment_definition(
+                control_plane_root=control_plane_root,
+            )
         )
         private_key = (
             control_plane_secrets.resolve_launchplane_service_secret(
@@ -175,14 +180,14 @@ def resolve_advisory_github_app_identity(*, control_plane_root: Path) -> GitHubA
             )
             or values.get(ADVISORY_GITHUB_APP_PRIVATE_KEY_ENV_KEY, "").strip()
         ).replace("\\n", "\n")
-    except click.ClickException as error:
+    except (click.ClickException, ValueError) as error:
         raise GitHubAppIdentityError(
             "Launchplane advisory GitHub App identity is unavailable."
         ) from error
-    raw_app_id = values.get(ADVISORY_GITHUB_APP_ID_ENV_KEY, "").strip()
-    if not raw_app_id.isdecimal() or int(raw_app_id) < 1 or not private_key:
+    app_id = advisory_app_id_from_values(values)
+    if app_id is None or not private_key:
         raise GitHubAppIdentityError("Launchplane advisory GitHub App identity is unavailable.")
-    return GitHubAppIdentity(app_id=int(raw_app_id), private_key=private_key)
+    return GitHubAppIdentity(app_id=app_id, private_key=private_key)
 
 
 def mint_repository_installation_token(
@@ -203,6 +208,32 @@ def mint_repository_installation_token(
         allowed_token_permissions=_ALLOWED_INSTALLATION_PERMISSIONS,
         identity_label="Launchplane advisory GitHub App",
         permission_boundary_label="advisory check projection",
+        api_request=api_request,
+        now=now,
+    )
+
+
+def mint_delivery_installation_token(
+    *,
+    identity: GitHubAppIdentity,
+    repository: str,
+    repository_id: str,
+    permissions: Mapping[str, str],
+    api_request: GitHubApiRequest = github_api_request,
+    now: datetime | None = None,
+) -> GitHubAppInstallationToken:
+    """Mint exactly the permissions one Launchplane delivery operation needs."""
+    allowed = {"metadata": "read", **permissions}
+    return _mint_repository_installation_token(
+        identity=identity,
+        repository=repository,
+        repository_id=repository_id,
+        requested_permissions=dict(permissions),
+        required_installation_permissions=allowed,
+        allowed_installation_permissions=None,
+        allowed_token_permissions=allowed,
+        identity_label="Launchplane delivery GitHub App",
+        permission_boundary_label="delivery operation",
         api_request=api_request,
         now=now,
     )

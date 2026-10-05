@@ -3559,6 +3559,48 @@
         "title": "DataProvenance",
         "type": "object"
       },
+      "DeliveryGitHubAppConfigurationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "app_id": {
+            "exclusiveMinimum": 0.0,
+            "title": "App Id",
+            "type": "integer"
+          },
+          "expected_plan_digest": {
+            "default": "",
+            "title": "Expected Plan Digest",
+            "type": "string"
+          },
+          "integration": {
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,127}$",
+            "title": "Integration",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "app_id",
+          "integration",
+          "reason"
+        ],
+        "title": "DeliveryGitHubAppConfigurationRequest",
+        "type": "object"
+      },
       "DeployTargetContractReference": {
         "additionalProperties": false,
         "properties": {
@@ -35151,6 +35193,182 @@
         "title": "PromotionRecordResponse",
         "type": "object"
       },
+      "PromotionRecoveryApplied": {
+        "additionalProperties": false,
+        "properties": {
+          "checkpoint": {
+            "title": "Checkpoint",
+            "type": "string"
+          },
+          "instance": {
+            "const": "prod",
+            "default": "prod",
+            "title": "Instance",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "proposed_action": {
+            "enum": [
+              "replay_completed",
+              "wait_for_active_lease",
+              "adopt_promotion",
+              "adopt_rollback",
+              "hold_unknown"
+            ],
+            "title": "Proposed Action",
+            "type": "string"
+          },
+          "recovery_digest": {
+            "title": "Recovery Digest",
+            "type": "string"
+          },
+          "recovery_reference": {
+            "title": "Recovery Reference",
+            "type": "string"
+          },
+          "reservation_attempt": {
+            "title": "Reservation Attempt",
+            "type": "integer"
+          },
+          "reservation_state": {
+            "enum": [
+              "running",
+              "reconcile_required",
+              "completed"
+            ],
+            "title": "Reservation State",
+            "type": "string"
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "recovery_reference",
+          "reservation_state",
+          "reservation_attempt",
+          "checkpoint",
+          "proposed_action",
+          "recovery_digest"
+        ],
+        "title": "PromotionRecoveryApplied",
+        "type": "object"
+      },
+      "PromotionRecoveryApply": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_recovery_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Expected Recovery Digest",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "pattern": "\\S",
+            "title": "Reason",
+            "type": "string"
+          },
+          "recovery_reference": {
+            "minLength": 1,
+            "title": "Recovery Reference",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "recovery_reference",
+          "expected_recovery_digest"
+        ],
+        "title": "PromotionRecoveryApply",
+        "type": "object"
+      },
+      "PromotionRecoveryPlan": {
+        "additionalProperties": false,
+        "properties": {
+          "checkpoint": {
+            "title": "Checkpoint",
+            "type": "string"
+          },
+          "instance": {
+            "const": "prod",
+            "default": "prod",
+            "title": "Instance",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "proposed_action": {
+            "enum": [
+              "replay_completed",
+              "wait_for_active_lease",
+              "adopt_promotion",
+              "adopt_rollback",
+              "hold_unknown"
+            ],
+            "title": "Proposed Action",
+            "type": "string"
+          },
+          "recovery_digest": {
+            "title": "Recovery Digest",
+            "type": "string"
+          },
+          "recovery_reference": {
+            "title": "Recovery Reference",
+            "type": "string"
+          },
+          "reservation_attempt": {
+            "title": "Reservation Attempt",
+            "type": "integer"
+          },
+          "reservation_state": {
+            "enum": [
+              "running",
+              "reconcile_required",
+              "completed"
+            ],
+            "title": "Reservation State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "recovery_reference",
+          "reservation_state",
+          "reservation_attempt",
+          "checkpoint",
+          "proposed_action",
+          "recovery_digest"
+        ],
+        "title": "PromotionRecoveryPlan",
+        "type": "object"
+      },
+      "PromotionRecoveryReview": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "pattern": "\\S",
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "PromotionRecoveryReview",
+        "type": "object"
+      },
       "ProtectedArtifactEntry": {
         "additionalProperties": false,
         "properties": {
@@ -37076,6 +37294,18 @@
             "default": "",
             "title": "Target Deployment Record Id",
             "type": "string"
+          },
+          "target_promoted_from_instance": {
+            "default": "",
+            "title": "Target Promoted From Instance",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
+          "target_promotion_record_id": {
+            "default": "",
+            "title": "Target Promotion Record Id",
+            "type": "string",
+            "x-launchplane-optional-response": true
           }
         },
         "title": "RollbackExecutionEvidence",
@@ -45284,6 +45514,386 @@
           }
         },
         "summary": "Inspect exact provider evidence for a generic web deploy reservation"
+      }
+    },
+    "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}": {
+      "get": {
+        "operationId": "read_promotion_recovery",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "decision_record_id",
+            "required": true,
+            "schema": {
+              "title": "Decision Record Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "attempt",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "maximum": 2,
+              "minimum": 1,
+              "title": "Attempt",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromotionRecoveryPlan"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read Promotion Recovery"
+      }
+    },
+    "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}/apply": {
+      "post": {
+        "operationId": "apply_promotion_recovery",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "decision_record_id",
+            "required": true,
+            "schema": {
+              "title": "Decision Record Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "attempt",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "maximum": 2,
+              "minimum": 1,
+              "title": "Attempt",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromotionRecoveryApply"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromotionRecoveryApplied"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Apply Promotion Recovery"
+      }
+    },
+    "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}/dry-run": {
+      "post": {
+        "operationId": "dry_run_promotion_recovery",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "decision_record_id",
+            "required": true,
+            "schema": {
+              "title": "Decision Record Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "attempt",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "maximum": 2,
+              "minimum": 1,
+              "title": "Attempt",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromotionRecoveryReview"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromotionRecoveryPlan"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Dry Run Promotion Recovery"
       }
     },
     "/v1/agent/context": {
@@ -84956,6 +85566,88 @@
           }
         },
         "summary": "Read Launchplane managed secret status"
+      }
+    },
+    "/v1/service/github-delivery/configuration": {
+      "post": {
+        "operationId": "configure_launchplane_github_delivery",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeliveryGitHubAppConfigurationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Configure Launchplane Github Delivery",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Configure the existing service Delivery App"
       }
     },
     "/v1/service/odoo-workers/reconcile": {

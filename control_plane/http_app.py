@@ -245,6 +245,9 @@ from control_plane.http_routes.ordinary_agent import (
     OrdinaryAgentRouteDependencies,
     register_ordinary_agent_routes,
 )
+from control_plane.http_routes.generic_web_promotion_recovery import (
+    register_promotion_recovery_routes,
+)
 from control_plane.generic_web_deploy_recovery_http import (
     GENERIC_WEB_DEPLOY_RECOVERY_PROVIDER_EVIDENCE_ROUTE,
     GenericWebDeployRecoveryDependencies,
@@ -412,6 +415,12 @@ from control_plane.generic_web_promotion_http import (
     execute_generic_web_prod_promotion_result,
 )
 from control_plane.product_review import require_product_review_store
+from control_plane.github_delivery_configuration import (
+    DeliveryGitHubAppConfigurationRequest,
+    GITHUB_DELIVERY_CONFIGURATION_ROUTE,
+    apply_delivery_github_configuration,
+)
+from control_plane.launchplane_github_delivery import delivery_github_credentials_ready
 from control_plane.product_review_status import (
     OwnerReviewStatusPublisher,
     owner_review_reference_url,
@@ -5093,11 +5102,9 @@ def create_launchplane_fastapi_app(
         common=read_route_dependencies,
         read_product_profile_list_identity=read_product_profile_list_identity,
         work_graph_planning_facts_provider=work_graph_planning_facts_provider,
-        workflow_credentials_ready=lambda context: bool(
-            resolve_launchplane_github_token(
-                control_plane_root=resolved_control_plane_root,
-                context_name=context,
-            )
+        workflow_credentials_ready=lambda context, repository: delivery_github_credentials_ready(
+            control_plane_root=resolved_control_plane_root,
+            repository=repository,
         ),
         control_plane_root=resolved_control_plane_root,
         github_token=resolve_launchplane_github_token,
@@ -12885,6 +12892,7 @@ def create_launchplane_fastapi_app(
             github_token = resolve_launchplane_github_token(
                 control_plane_root=resolved_control_plane_root,
                 context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
+                repository=profile.repository,
             )
             if not github_token:
                 raise _launchplane_http_error(
@@ -16078,10 +16086,10 @@ def create_launchplane_fastapi_app(
                         else AuthorizationTarget(scope="context"),
                     )
                 ),
-                workflow_credentials_ready=lambda context: bool(
-                    resolve_launchplane_github_token(
+                workflow_credentials_ready=lambda context, repository: (
+                    delivery_github_credentials_ready(
                         control_plane_root=resolved_control_plane_root,
-                        context_name=context,
+                        repository=repository,
                     )
                 ),
             )
@@ -17156,6 +17164,18 @@ def create_launchplane_fastapi_app(
                     trace_id=trace_id,
                     code="authz_policy_schema_conflict",
                     message=str(error),
+                ) from error
+            if isinstance(
+                error, control_plane_authz_grant_service.AuthzPolicyReviewedPlanConflictError
+            ):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="authz_policy_reviewed_plan_conflict",
+                    message=(
+                        "Reviewed plan digest does not match the current policy and requested "
+                        "changes. Generate a new dry run and review its plan before applying."
+                    ),
                 ) from error
             raise _launchplane_http_error(
                 status_code=409,
@@ -22151,6 +22171,7 @@ def create_launchplane_fastapi_app(
             token = resolve_remediation_token(
                 control_plane_root=resolved_control_plane_root,
                 context=remediation_request.context,
+                repository=target.profile.repository,
             )
             observation = observe_managed_preview_pr_feedback(
                 target=target,
@@ -24477,6 +24498,63 @@ def create_launchplane_fastapi_app(
         response_model=HealthResponse,
         operation_id="read_launchplane_health",
         summary="Read Launchplane service health",
+    )
+
+    async def configure_github_delivery(
+        configuration: DeliveryGitHubAppConfigurationRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> dict[str, object]:
+        trace_id = next_trace_id()
+        action = "product_config.apply" if configuration.mode == "apply" else "product_config.plan"
+        if (
+            not isinstance(identity, GitHubHumanIdentity)
+            or identity.role != "admin"
+            or not resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action=action,
+                product=_LAUNCHPLANE_SERVICE_CONTEXT,
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                target=AuthorizationTarget(scope="context"),
+            )
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Only an authorized signed-in administrator can configure the Delivery App.",
+            )
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Delivery App configuration requires shared database storage.",
+            )
+        try:
+            return await run_in_threadpool(
+                apply_delivery_github_configuration,
+                store=record_store,
+                request=configuration,
+                actor=f"github:{identity.github_id}",
+                trace_id=trace_id,
+                idempotency_key=idempotency_key.strip(),
+            )
+        except (ValueError, FileNotFoundError) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="github_delivery_configuration_conflict",
+                message="Delivery App configuration is unavailable, stale, or conflicts with its reviewed request.",
+            ) from error
+
+    app.add_api_route(
+        GITHUB_DELIVERY_CONFIGURATION_ROUTE,
+        configure_github_delivery,
+        methods=["POST"],
+        operation_id="configure_launchplane_github_delivery",
+        summary="Configure the existing service Delivery App",
     )
 
     app.add_api_route(
@@ -28122,6 +28200,9 @@ def create_launchplane_fastapi_app(
     register_product_path_check_read_routes(
         app,
         dependencies=product_read_route_dependencies,
+    )
+    register_promotion_recovery_routes(
+        app, dependencies=generic_web_write_route_dependencies, read_identity=read_identity
     )
     app.add_exception_handler(HTTPException, launchplane_http_exception_handler)
     app.add_exception_handler(

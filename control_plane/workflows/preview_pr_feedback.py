@@ -320,7 +320,12 @@ def pull_request_has_label(
     normalized_label = label.strip().casefold()
     github_reference = github_pull_request_reference(pr_url=anchor_pr_url)
     github_token = resolve_launchplane_github_token(
-        control_plane_root=control_plane_root, context_name=context
+        control_plane_root=control_plane_root,
+        context_name=context,
+        repository=f"{github_reference['owner']}/{github_reference['repo']}"
+        if github_reference
+        else "",
+        purpose="repository_read",
     )
     if not normalized_label or github_reference is None or not github_token:
         return False
@@ -392,6 +397,8 @@ def _github_assign_user(
 
 def _notify_every_code_preview_ready_source_issue(
     *,
+    control_plane_root: Path,
+    context: str,
     record_store: EveryCodeWorkRequestReadStore | None,
     owner: str,
     repo: str,
@@ -417,6 +424,17 @@ def _notify_every_code_preview_ready_source_issue(
     )
     if record is None:
         return "skipped_no_every_code_request"
+
+    token = resolve_launchplane_github_token(
+        control_plane_root=control_plane_root,
+        context_name=context,
+        repository=f"{owner}/{repo}",
+        purpose="source_issue_feedback",
+    )
+    if not token:
+        raise click.ClickException(
+            "Source-issue feedback Delivery App credentials are unavailable."
+        )
 
     issue_author = _github_issue_author_login(
         owner=owner,
@@ -1070,11 +1088,15 @@ def build_preview_pr_feedback_record(
     github_token = resolve_launchplane_github_token(
         control_plane_root=control_plane_root,
         context_name=context,
+        repository=f"{github_reference['owner']}/{github_reference['repo']}"
+        if github_reference
+        else "",
+        purpose="pull_request_feedback",
     )
     if github_reference is None:
         error_message = "anchor_pr_url must be a GitHub pull request URL"
     elif not github_token:
-        error_message = "Launchplane runtime records do not expose GITHUB_TOKEN for this context"
+        error_message = "Launchplane Delivery App credentials are unavailable for this repository"
     else:
         try:
             existing_comment = _find_preview_pr_feedback_comment(
@@ -1129,6 +1151,8 @@ def build_preview_pr_feedback_record(
                 comment_url = _comment_url(created_comment)
             if status == "ready" and resolved_preview_url:
                 source_issue_action = _notify_every_code_preview_ready_source_issue(
+                    control_plane_root=control_plane_root,
+                    context=context,
                     record_store=every_code_record_store,
                     owner=github_reference["owner"],
                     repo=github_reference["repo"],

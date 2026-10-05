@@ -138,7 +138,7 @@ YAML_SCALAR_PATTERN = re.compile(rf"^\s*(?P<key>{YAML_KEY_PATTERN})\s*:\s*(?P<va
 YAML_EMPTY_MAPPING_PATTERN = re.compile(rf"^\s*(?P<key>{YAML_KEY_PATTERN})\s*:\s*(?:#.*)?$")
 YAML_LIST_ITEM_PATTERN = re.compile(r"^\s*-\s*(?P<value>.+?)\s*$")
 YAML_BLOCK_ASSIGNMENT_PATTERN = re.compile(r"^(?P<key>[A-Za-z0-9_.-]+)\s*=\s*(?P<value>.+?)\s*$")
-GITHUB_EXPRESSION_PATTERN = re.compile(r"^\$\{\{\s*(?P<body>[^}]+?)\s*\}\}$")
+GITHUB_EXPRESSION_PATTERN = re.compile(r"^\$\{\{\s*(?P<body>[^}]+?)\s*}}$")
 GITHUB_CONTEXT_REFERENCE_PATTERN = re.compile(
     r"^(?:env|github|inputs|matrix|needs|secrets|steps|vars)\.[A-Za-z0-9_.-]+$"
 )
@@ -173,7 +173,7 @@ SAME_REPOSITORY_REUSABLE_WORKFLOW_PATTERN = re.compile(
 )
 LAUNCHPLANE_CONFIG_AUTHORITY_REUSABLE_WORKFLOW_PATTERN = re.compile(
     r"^cbusillo/launchplane/\.github/workflows/"
-    r"reusable-product-repo-config-authority\.yml@(?P<revision>[^\s]+)$"
+    r"reusable-product-repo-config-authority\.yml@(?P<revision>\S+)$"
 )
 LAUNCHPLANE_GENERIC_WEB_PREVIEW_FACADE_PATTERN = re.compile(
     r"^cbusillo/launchplane/\.github/workflows/"
@@ -184,7 +184,7 @@ LAUNCHPLANE_GENERIC_WEB_PREVIEW_FACADE_INPUTS = frozenset(
     ("verification_command", "image_repository")
 )
 LAUNCHPLANE_DEPENDENCY_HEALTH_ACTION_REFERENCE_PATTERN = re.compile(
-    r"^cbusillo/launchplane/\.github/actions/dependency-health-trivy@[^\s]+$"
+    r"^cbusillo/launchplane/\.github/actions/dependency-health-trivy@\S+$"
 )
 IMMUTABLE_LAUNCHPLANE_DEPENDENCY_HEALTH_ACTION_PATTERN = re.compile(
     r"^cbusillo/launchplane/\.github/actions/dependency-health-trivy@[0-9a-f]{40}$"
@@ -1452,7 +1452,7 @@ class ConfigAuthorityFinding:
 
     @property
     def fingerprint(self) -> tuple[str, str, str, str]:
-        return (self.path, self.rule_id, self.key, self.value_hash)
+        return self.path, self.rule_id, self.key, self.value_hash
 
     def as_payload(self) -> dict[str, object]:
         return {
@@ -2087,7 +2087,7 @@ def _scan_source_text(
     candidates: list[tuple[int, str, object]] = []
     coverage_gaps: list[CoverageGap] = []
     if parser == "python_ast":
-        parsed_candidates, parse_error = _python_candidates(source_file.relative_path, text)
+        parsed_candidates, parse_error = _python_candidates(text)
         candidates.extend(parsed_candidates)
         if parse_error:
             coverage_gaps.append(
@@ -2155,7 +2155,7 @@ def _scan_source_text(
     return findings, coverage_gaps
 
 
-def _python_candidates(relative_path: str, text: str) -> tuple[list[tuple[int, str, object]], str]:
+def _python_candidates(text: str) -> tuple[list[tuple[int, str, object]], str]:
     try:
         tree = ast.parse(text)
     except SyntaxError as error:
@@ -2752,7 +2752,7 @@ def _allow_context_for_candidates(
 
 
 def _checkout_candidate_block(key: str) -> str:
-    match = re.search(r"\[(?P<block>\d+)\]$", key)
+    match = re.search(r"\[(?P<block>\d+)]$", key)
     if match is None:
         return ""
     return match.group("block")
@@ -3212,7 +3212,6 @@ def _allow_reason(
     ):
         return ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT
     if normalized.startswith(".github/workflows/") and _is_workflow_launchplane_operator_var(
-        path=normalized,
         key=key,
         value=value,
     ):
@@ -3385,7 +3384,7 @@ def _is_workflow_operator_input_reference(*, path: str, key: str, value: object)
     return value_text in allowed_values
 
 
-def _is_workflow_launchplane_operator_var(*, path: str, key: str, value: object) -> bool:
+def _is_workflow_launchplane_operator_var(*, key: str, value: object) -> bool:
     key_text = key.upper().replace(".", "_").replace("-", "_")
     if key_text == "LAUNCHPLANE_URL":
         key_text = "LAUNCHPLANE_PUBLIC_URL"
@@ -3605,7 +3604,7 @@ def _is_dependency_health_workflow_mechanic(
 
 def _dependency_health_action_input_name(key: str) -> str:
     match = re.fullmatch(
-        r"dependency-health\.with\[[0-9]+\]\.(?P<input_name>[A-Za-z0-9_.-]+)",
+        r"dependency-health\.with\[[0-9]+]\.(?P<input_name>[A-Za-z0-9_.-]+)",
         key,
     )
     return "" if match is None else match.group("input_name")
@@ -3626,9 +3625,9 @@ def _is_dependabot_production_scope_target_advisory_text_expression(
     return (
         re.fullmatch(
             r"\$\{\{ github\.event_name == 'pull_request' && "
-            r"github\.event\.pull_request\.user\.login == 'dependabot\[bot\]' && "
+            r"github\.event\.pull_request\.user\.login == 'dependabot\[bot]' && "
             r"steps\.[A-Za-z_][A-Za-z0-9_-]*\.outputs\.production-scope == 'true' && "
-            r"github\.event\.pull_request\.body \|\| '' \}\}",
+            r"github\.event\.pull_request\.body \|\| '' }}",
             value,
         )
         is not None
@@ -3866,7 +3865,7 @@ def _is_github_bracket_input_reference(value_text: str) -> bool:
     if match is None:
         return False
     body = match.group("body").strip()
-    return bool(re.fullmatch(r"inputs\[['\"][A-Za-z0-9_.-]+['\"]\]", body))
+    return bool(re.fullmatch(r"inputs\[['\"][A-Za-z0-9_.-]+['\"]]", body))
 
 
 def _is_launchplane_config_authority_workflow_reference(value: object) -> bool:
@@ -3932,7 +3931,7 @@ def _is_workflow_thin_connector_key_value(*, path: str, key: str, value: object)
 def _is_generic_web_preview_facade_input(*, path: str, key: str) -> bool:
     if path != LAUNCHPLANE_GENERIC_WEB_PREVIEW_CALLER_WORKFLOW_PATH:
         return False
-    match = re.fullmatch(r"generic-web-preview\.with\[\d+\]\.(?P<input_name>[A-Za-z0-9_.-]+)", key)
+    match = re.fullmatch(r"generic-web-preview\.with\[\d+]\.(?P<input_name>[A-Za-z0-9_.-]+)", key)
     return (
         match is not None
         and match.group("input_name") in LAUNCHPLANE_GENERIC_WEB_PREVIEW_FACADE_INPUTS
@@ -4284,7 +4283,7 @@ def _mapping_payload(value: object) -> Mapping[str, object]:
 
 
 def _list_payload(value: object) -> list[object]:
-    return cast(list[object], value) if isinstance(value, list) else []
+    return value if isinstance(value, list) else []
 
 
 def _assignment_target_name(node: ast.AST) -> str:
@@ -4385,7 +4384,7 @@ def _semantic_leaf_text(key: str) -> str:
 
 
 def _semantic_full_key_text(key: str) -> str:
-    return re.sub(r"\[\d+\]", "", key).upper().replace(".", "_").replace("-", "_")
+    return re.sub(r"\[\d+]", "", key).upper().replace(".", "_").replace("-", "_")
 
 
 def _raw_finding_payload(finding: ConfigAuthorityFinding) -> dict[str, object]:

@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.routing import APIRoute
 
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.http_routes.generic_web_promotion_recovery import RECOVERY_ROUTE
 from control_plane.service_human_auth import (
     HumanSessionManager,
     InMemoryHumanSessionStore,
@@ -32,6 +33,8 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             record_store_factory=lambda: _MissingProductReadStore(),
         )
         expected_routes = {
+            RECOVERY_ROUTE + "/dry-run",
+            RECOVERY_ROUTE + "/apply",
             "/auth/logout",
             "/v1/agent/write-intents/evaluate",
             "/v1/authz-diagnostics/effective-access/evaluate",
@@ -59,6 +62,7 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "/v1/product-profiles/{product}/production-use",
             "/v1/product-review/decisions",
             "/v1/product-review/feedback/retry",
+            "/v1/service/github-delivery/configuration",
             "/v1/owner-secret-inputs/submit",
             "/v1/release-review/decisions",
             "/v1/privileged-operations/authorization-candidates/prepare",

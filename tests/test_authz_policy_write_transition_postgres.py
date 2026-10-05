@@ -398,6 +398,18 @@ class EmptySetContractionPostgresTests(unittest.IsolatedAsyncioTestCase):
                     mode="apply",
                     reviewed_plan_sha256=dry_run.json()["result"]["diff"]["plan_sha256"],
                 ).model_dump(mode="json")
+                wrong_digest = await client.post(
+                    path,
+                    headers={**headers, "Idempotency-Key": "wrong-reviewed-digest"},
+                    json={**request, "reviewed_plan_sha256": "0" * 64},
+                )
+                self.assertEqual(wrong_digest.status_code, 409, wrong_digest.text)
+                self.assertEqual(
+                    wrong_digest.json()["error"]["code"], "authz_policy_reviewed_plan_conflict"
+                )
+                self.assertEqual(
+                    store.list_authz_policy_records(status="active", limit=1)[0], active
+                )
                 missing_key = await client.post(path, headers=headers, json=request)
                 self.assertEqual(missing_key.status_code, 400)
                 self.assertEqual(missing_key.json()["error"]["code"], "idempotency_key_required")
@@ -411,6 +423,9 @@ class EmptySetContractionPostgresTests(unittest.IsolatedAsyncioTestCase):
                     path, headers={**headers, "Idempotency-Key": "stale-review"}, json=request
                 )
                 self.assertEqual(stale.status_code, 409, stale.text)
+                self.assertEqual(
+                    stale.json()["error"]["code"], "authz_policy_reviewed_plan_conflict"
+                )
             with closing(PostgresRecordStore(database_url=store.database_url)) as independent_store:
                 current = independent_store.list_authz_policy_records(status="active", limit=1)[0]
             expected = active.policy.model_copy(

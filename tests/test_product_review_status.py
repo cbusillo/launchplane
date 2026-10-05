@@ -1,5 +1,7 @@
 import json
 import unittest
+from dataclasses import replace
+from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -60,6 +62,7 @@ class _GitHub:
         self.labels = labels
         self.head_sha = head_sha
         self.statuses: list[dict[str, object]] = []
+        self.legacy_statuses: list[dict[str, object]] = []
         self.check_runs: list[dict[str, object]] = []
         self.comments: list[dict[str, object]] = []
         self.writes: list[tuple[str, str, dict[str, object]]] = []
@@ -75,7 +78,7 @@ class _GitHub:
         body = kwargs.get("body")
         repository_path = f"/repos/{self.repository}"
         if path == "/user":
-            return {"id": 99, "login": "fixture-service"}
+            raise AssertionError("Installation tokens cannot resolve a user identity.")
         if path == "/installation/token" and method == "DELETE":
             self.revoked_app_tokens += 1
             return None
@@ -113,7 +116,7 @@ class _GitHub:
                 "id": len(self.comments) + 1,
                 "body": body["body"],
                 "user": {"login": "fixture-service", "id": 99},
-                "performed_via_github_app": None,
+                "performed_via_github_app": {"id": 99},
                 "created_at": "2026-09-26T12:00:00Z",
             }
             self.comments.append(comment)
@@ -125,14 +128,38 @@ class _GitHub:
             return list(self.statuses)
         if path.startswith(f"{repository_path}/commits/{self.head_sha}/check-runs?"):
             return {"check_runs": list(self.check_runs)}
+        if path == f"{repository_path}/check-runs" and method == "POST":
+            assert isinstance(body, dict)
+            check_run = {"id": len(self.check_runs) + 100, "app": {"id": _APP_ID}, **body}
+            self.check_runs.insert(0, check_run)
+            self._record_review_check(check_run)
+            return check_run
         if path.startswith(f"{repository_path}/check-runs/") and method == "PATCH":
             assert isinstance(body, dict)
             check_run = next(
                 run for run in self.check_runs if run["id"] == int(path.rsplit("/", 1)[1])
             )
             check_run.update(body)
+            self._record_review_check(check_run)
             return check_run
         raise AssertionError(f"Unexpected GitHub request: {method} {path}")
+
+    def _record_review_check(self, check_run: dict[str, object]) -> None:
+        if check_run["name"] != "launchplane/owner-review":
+            return
+        output = check_run["output"]
+        assert isinstance(output, dict)
+        self.statuses.insert(
+            0,
+            {
+                "state": "pending"
+                if check_run["status"] == "in_progress"
+                else check_run["conclusion"],
+                "description": output["title"],
+                "context": check_run["name"],
+                "target_url": check_run["details_url"],
+            },
+        )
 
     def owner_review_statuses(self) -> list[dict[str, object]]:
         return [
@@ -158,6 +185,7 @@ def _publisher(github: _GitHub) -> OwnerReviewStatusPublisher:
         github_token=lambda **_: "feedback-token",
         api_request=github,
         github_app_token=_app_token,
+        github_feedback_app_id=lambda **_: 99,
     )
 
 
@@ -204,6 +232,26 @@ class OwnerReviewStatusTests(unittest.TestCase):
             pull_request_number=_PULL_REQUEST,
             retire_leftovers=retire_leftovers,
         )
+
+    def test_default_publisher_projects_with_the_advisory_app(self) -> None:
+        github = _GitHub()
+        publisher = replace(_publisher(github), github_app_token=None)
+        with (
+            patch("control_plane.product_review_status.resolve_advisory_github_app_identity"),
+            patch(
+                "control_plane.product_review_status.mint_repository_installation_token",
+                side_effect=lambda **kwargs: _app_token(
+                    kwargs["repository"], kwargs["repository_id"]
+                ),
+            ),
+        ):
+            result = publisher.publish(
+                store=self.store, profile=_profile(), pull_request_number=_PULL_REQUEST
+            )
+        self.assertIsNotNone(result)
+        self.assertEqual(github.check_runs[-1]["name"], "launchplane/owner-review")
+        self.assertEqual(github.check_runs[-1]["app"], {"id": _APP_ID})
+        self.assertEqual(github.revoked_app_tokens, 1)
 
     def test_review_link_encodes_target_and_rejects_non_origin_urls(self) -> None:
         self.assertEqual(
@@ -326,13 +374,10 @@ class OwnerReviewStatusTests(unittest.TestCase):
         writes_after_first = len(github.writes)
         self._publish(github, retire_leftovers=True)
 
-        self.assertEqual(writes_after_first, 2)
-        self.assertEqual(len(github.writes), 2)
+        self.assertEqual(writes_after_first, 1)
+        self.assertEqual(len(github.writes), 1)
         self.assertEqual(github.statuses[0]["context"], "manager-preview-approval")
-        self.assertEqual(github.statuses[0]["state"], "success")
-        self.assertEqual(
-            github.statuses[0]["description"], "Retired. Client review is recorded in Launchplane."
-        )
+        self.assertEqual(github.statuses[0]["state"], "pending")
         self.assertEqual(github.check_runs[0]["conclusion"], "neutral")
         output = github.check_runs[0]["output"]
         assert isinstance(output, dict)
@@ -775,7 +820,7 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ready_while_github_is_down.status_code, 202)
         self.assertEqual(
             [(status["context"], status["state"]) for status in github.statuses[:2]],
-            [("manager-preview-approval", "success"), ("launchplane/owner-review", "pending")],
+            [("launchplane/owner-review", "pending"), ("manager-preview-approval", "pending")],
         )
         self.assertEqual(
             github.owner_review_statuses()[0]["description"],

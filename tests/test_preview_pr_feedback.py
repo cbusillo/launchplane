@@ -170,7 +170,11 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
             with (
                 patch(
                     "control_plane.workflows.preview_pr_feedback.resolve_launchplane_github_token",
-                    return_value="github-token",
+                    side_effect=lambda **kwargs: (
+                        "issue-token"
+                        if kwargs["purpose"] == "source_issue_feedback"
+                        else "github-token"
+                    ),
                 ),
                 patch(
                     "control_plane.workflows.preview_pr_feedback.find_github_issue_comment_by_marker",
@@ -235,6 +239,7 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
         )
         source_issue_call = create_comment.call_args_list[1]
         self.assertEqual(source_issue_call.kwargs["issue_number"], 82)
+        self.assertEqual(source_issue_call.kwargs["token"], "issue-token")
         self.assertIn("@Mbanks89", source_issue_call.kwargs["body"])
         self.assertIn("https://pr-88.sellyouroutboard.dev", source_issue_call.kwargs["body"])
         self.assertIn(

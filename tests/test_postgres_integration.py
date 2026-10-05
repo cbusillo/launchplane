@@ -6078,6 +6078,70 @@ def _run_integration_provider_operation(
 
 
 class RealPostgresProviderOperationTests(unittest.TestCase):
+    def test_promotion_recovery_adoption_and_evidence_compare_on_postgres(self) -> None:
+        from tests import test_generic_web_client_release as release_fixtures
+        from tests.test_generic_web_promotion_recovery import PromotionRecoveryTests
+
+        for scenario in (
+            "test_adopts_terminal_promotion_once_without_provider_effect",
+            "test_adopts_verified_rollback_and_preserves_failed_release",
+            "test_atomic_adoption_refuses_late_record_change",
+            "test_interrupted_rollback_health_is_verified_without_redeploying",
+            "test_paused_original_worker_cannot_overwrite_recovered_evidence",
+            "test_failed_candidate_health_before_lost_final_write_remains_held",
+            "test_failed_rollback_health_before_lost_final_write_remains_held",
+            "test_identical_apply_that_loses_adoption_race_replays",
+            "test_interrupted_rollback_after_deploy_failure_preserves_skipped_health",
+            "test_older_stored_default_fields_do_not_prevent_adoption",
+            "test_unrelated_backup_match_cannot_hide_ambiguous_promotion",
+        ):
+            with self.subTest(scenario=scenario), _store_for_fresh_head_database() as store:
+                with patch.object(release_fixtures, "PostgresRecordStore", return_value=store):
+                    case = PromotionRecoveryTests(scenario)
+                    try:
+                        case.debug()
+                    finally:
+                        case.doCleanups()
+
+    def test_expired_running_promotion_recovery_uses_postgres_clock(self) -> None:
+        from tests import test_generic_web_client_release as release_fixtures
+        from tests.test_generic_web_promotion_recovery import PromotionRecoveryTests
+        from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
+        from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+
+        with _store_for_fresh_head_database() as store:
+            case = PromotionRecoveryTests()
+            with patch.object(release_fixtures, "PostgresRecordStore", return_value=store):
+                case.setUp()
+            try:
+                case.interrupt_completion(hold=False)
+                reservation = case.reservation()
+                # Move this isolated fixture's complete lease history back together,
+                # preserving the invariant that expiry follows its last update.
+                aged = reservation.model_copy(
+                    update={
+                        field: (
+                            parse_launchplane_mutation_timestamp(
+                                getattr(reservation, field), field_name=field
+                            )
+                            - timedelta(days=1)
+                        ).isoformat()
+                        for field in ("created_at", "updated_at", "lease_expires_at")
+                    }
+                )
+                aged = type(reservation).model_validate(aged.model_dump())
+                with store._session_factory() as session:
+                    row = session.get(LaunchplaneIdempotencyRow, reservation.record_id)
+                    assert row is not None
+                    store._sync_idempotency_row(row, aged)
+                    session.commit()
+                plan = case.dry_run()
+                self.assertEqual(plan["proposed_action"], "adopt_promotion")
+                self.assertEqual(case.apply(plan)[0], 202)
+                self.assertEqual(case.reservation().state, "completed")
+            finally:
+                case.doCleanups()
+
     def test_two_instances_apply_provider_effect_exactly_once(self) -> None:
         with _store_for_fresh_head_database() as store:
             second_store = PostgresRecordStore(database_url=store.database_url)

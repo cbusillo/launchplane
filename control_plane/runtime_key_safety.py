@@ -29,8 +29,8 @@ ALLOWED_SECRET_CLASSES_BY_ENVIRONMENT: dict[RuntimeEnvironmentClass, set[Runtime
 }
 SECRET_SHAPED_RUNTIME_KEY_PARTS = frozenset({"PASSWORD", "TOKEN", "SECRET", "KEY"})
 # Key-name markers for production integration credentials: stores, payments,
-# outgoing mail, printing and common business-system connectors. A binding whose
-# key carries one of these never takes its classification from a non-production
+# outgoing mail, printing, maps, media, web push and business-system connectors.
+# A binding whose key carries one never takes its classification from a non-production
 # lane. The active policy record can add product-specific markers.
 DEFAULT_INTEGRATION_KEY_MARKERS = (
     "SHOPIFY",
@@ -49,6 +49,11 @@ DEFAULT_INTEGRATION_KEY_MARKERS = (
     "PRINTNODE",
     "REPAIRSHOPR",
     "FISHBOWL",
+    "CM_DATA",
+    "MAPBOX",
+    "UNSPLASH",
+    "TENOR",
+    "VAPID",
 )
 
 
