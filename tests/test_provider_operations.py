@@ -400,6 +400,74 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
             self.assertEqual(fixture.stored().state, "completed")
             self.assertEqual(adapter.apply_calls, 1)
 
+    def test_heartbeat_recovers_after_transient_failure_while_effect_runs(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            renewal_failed = Event()
+            renewal_committed = Event()
+            adapter = _FakeAdapter(apply_release=renewal_committed)
+            observed_at = "2026-09-01T00:00:00Z"
+            original_expiry = ""
+            recovered_records: list[LaunchplaneIdempotencyRecord] = []
+            renew_reservation = fixture.store.renew_mutation_reservation
+
+            def database_timestamp(_session: object) -> str:
+                return observed_at
+
+            def fail_once_then_renew(
+                *, reservation: LaunchplaneIdempotencyRecord, lease_seconds: int
+            ) -> MutationReservationUpdateResult:
+                nonlocal observed_at, original_expiry
+                if reservation.provider_effect_started_at and not renewal_failed.is_set():
+                    original_expiry = reservation.lease_expires_at
+                    observed_at = format_launchplane_mutation_timestamp(
+                        parse_launchplane_mutation_timestamp(
+                            original_expiry, field_name="lease_expires_at"
+                        )
+                        - timedelta(seconds=1)
+                    )
+                    renewal_failed.set()
+                    raise RuntimeError("temporary database outage")
+                renewal = renew_reservation(reservation=reservation, lease_seconds=lease_seconds)
+                if (
+                    renewal_failed.is_set()
+                    and not renewal_committed.is_set()
+                    and renewal.status == "updated"
+                ):
+                    recovered_records.append(fixture.stored())
+                    # Completion at original expiry requires the recovered lease.
+                    observed_at = original_expiry
+                    renewal_committed.set()
+                return renewal
+
+            with (
+                patch.object(
+                    fixture.store, "_database_mutation_timestamp", side_effect=database_timestamp
+                ),
+                patch.object(
+                    fixture.store,
+                    "renew_mutation_reservation",
+                    side_effect=fail_once_then_renew,
+                ),
+            ):
+                result = fixture.run(
+                    adapter,
+                    lease_seconds=2,
+                    heartbeat_interval_seconds=0.01,
+                )
+
+            self.assertTrue(renewal_failed.is_set(), "No post-effect renewal failure observed")
+            self.assertTrue(renewal_committed.is_set(), "No renewal recovered while apply waited")
+            recovered = recovered_records[0]
+            self.assertEqual(recovered.state, "running")
+            self.assertTrue(recovered.provider_effect_started_at)
+            self.assertGreater(recovered.lease_expires_at, original_expiry)
+            self.assertEqual(result.status, "completed")
+            stored = fixture.stored()
+            self.assertEqual(stored.state, "completed")
+            self.assertGreaterEqual(stored.lease_expires_at, recovered.lease_expires_at)
+            self.assertEqual(adapter.apply_calls, 1)
+
     def test_active_target_fence_blocks_different_idempotency_key(self) -> None:
         with TemporaryDirectory() as directory:
             fixture = _StoreFixture(directory)
