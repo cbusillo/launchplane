@@ -18,6 +18,7 @@ import type { DevFixtureMode } from "./dev-fixture-loader";
 import { formatTime } from "./format";
 import { ProductOwnerPanel } from "./ProductOwnerPanel";
 import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
+import { environmentOperationalTone, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
   type ResourceState,
@@ -39,7 +40,6 @@ import type {
 } from "./generated/openapi.ts";
 
 export type TrustState = ProductSiteOverview["trust_state"];
-type SignalTone = TrustState | "warning" | "danger";
 
 interface WarningItem {
   id: string;
@@ -1208,38 +1208,7 @@ function signalHeadline(environment: ProductEnvironmentSummary | null): string {
   if (["pass", "passed", "healthy", "ok", "success"].includes(status)) {
     return "Public evidence passed";
   }
-  return environment.trust_state === "verified" ? "Evidence current" : "Evidence recorded";
-}
-
-function environmentOperationalTone(
-  environment: ProductEnvironmentSummary | null,
-): SignalTone {
-  if (!environment) {
-    return "missing";
-  }
-  const negativeTlsStates = new Set([
-    "expired",
-    "hostname_mismatch",
-    "untrusted",
-    "self_signed",
-    "unreachable",
-  ]);
-  if (
-    environment.topology.warnings.some((warning) => warning.severity === "error") ||
-    environment.topology.observed.tls_domains.some((domain) =>
-      negativeTlsStates.has(domain.status),
-    )
-  ) {
-    return "danger";
-  }
-  if (
-    environment.warnings.length ||
-    environment.topology.warnings.length ||
-    environment.trust_state === "stale"
-  ) {
-    return "warning";
-  }
-  return environment.trust_state;
+  return tone === "verified" ? "Evidence current" : "Evidence recorded";
 }
 
 function domainForEnvironment(environment: ProductEnvironmentSummary): string {

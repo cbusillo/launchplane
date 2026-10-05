@@ -34,6 +34,7 @@ from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.drivers.route_paths import INGRESS_ROUTE_APPLY_ROUTE
+from control_plane.lane_runtime_verification import read_lane_runtime_verification
 from control_plane.production_backup_authority import (
     require_production_backup_authority_store,
     resolve_production_backup_authority,
@@ -1275,7 +1276,19 @@ def _freshness_status(
     return ("verified" if verified else "recorded"), _format_timestamp(stale_at)
 
 
-def build_lane_summary_provenance(summary: LaunchplaneLaneSummary) -> DataProvenance:
+def build_lane_summary_provenance(
+    summary: LaunchplaneLaneSummary, *, record_store: object | None = None
+) -> DataProvenance:
+    list_profiles = _list_product_profile_records_method(record_store)
+    if list_profiles is not None:
+        for profile in list_profiles():
+            if not profile.is_active:
+                continue
+            for lane in profile.lanes:
+                if (lane.context, lane.instance) == (summary.context, summary.instance):
+                    return read_lane_runtime_verification(
+                        record_store=record_store, profile=profile, lane=lane, summary=summary
+                    ).provenance
     if summary.inventory is not None:
         status, stale_after = _freshness_status(
             recorded_at=summary.inventory.updated_at,
@@ -1400,7 +1413,9 @@ def _read_lane_summary(
             context_name=context_name,
             instance_name=instance_name,
         )
-        return summary.model_copy(update={"provenance": build_lane_summary_provenance(summary)})
+        return summary.model_copy(
+            update={"provenance": build_lane_summary_provenance(summary, record_store=record_store)}
+        )
 
     inventory = None
     read_inventory = _read_environment_inventory_method(record_store)
@@ -1478,7 +1493,9 @@ def _read_lane_summary(
         latest_backup_gate=latest_backup_gate,
         odoo_instance_override=odoo_instance_override,
     )
-    return summary.model_copy(update={"provenance": build_lane_summary_provenance(summary)})
+    return summary.model_copy(
+        update={"provenance": build_lane_summary_provenance(summary, record_store=record_store)}
+    )
 
 
 def _inventory_is_older_than_deployment(

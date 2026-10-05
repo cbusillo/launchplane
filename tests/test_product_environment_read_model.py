@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from control_plane.contracts.artifact_identity import (
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -317,6 +319,22 @@ class _PublicIngressReadModelStore(_PreviewRecordStore):
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+
+class _ContinuouslyVerifiedLaneStore(_PublicIngressReadModelStore):
+    def __init__(
+        self,
+        profile: LaunchplaneProductProfileRecord,
+        summary: LaunchplaneLaneSummary,
+        observations: tuple[PublicIngressObservationRecord, ...],
+    ) -> None:
+        super().__init__(profile, observations)
+        self.summary = summary
+
+    def read_lane_summary(self, *, context_name: str, instance_name: str) -> LaunchplaneLaneSummary:
+        if (context_name, instance_name) != (self.summary.context, self.summary.instance):
+            raise FileNotFoundError(instance_name)
+        return self.summary
 
 
 class _PublicIngressObservationsOnlyStore(_PreviewRecordStore):
@@ -1347,7 +1365,7 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertTrue(prod_summary.health_monitoring.public_incident_eligible)
         self.assertEqual(prod_summary.public_ingress.status, "fail")
         self.assertTrue(prod_summary.public_ingress.incident_eligible)
-        self.assertEqual(prod_summary.public_ingress.trust_state, "verified")
+        self.assertEqual(prod_summary.public_ingress.trust_state, "stale")
         self.assertEqual(prod_summary.public_ingress.record_id, observation.record_id)
         self.assertEqual(prod_summary.public_ingress.incident_status, "open")
         self.assertEqual(prod_summary.public_ingress.incident_id, incident.incident_id)
@@ -1367,6 +1385,85 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             "2026-05-29T18:00:00Z",
         )
         self.assertTrue(detail.public_ingress.notification_sent)
+
+    def test_current_monitor_verification_refreshes_environment_and_placement(self) -> None:
+        payload = _site_profile_payload(preview_enabled=False)
+        lanes = cast(tuple[dict[str, object], ...], payload["lanes"])
+        lanes[1]["health_monitoring"] = {
+            "monitoring_intent": "public",
+            "checks": [
+                {"name": "public-ingress", "kind": "public_http", "require_runtime_identity": True}
+            ],
+        }
+        profile = LaunchplaneProductProfileRecord.model_validate(payload)
+        profile = profile.model_copy(update={"lanes": (profile.lanes[1],)})
+        checked = datetime.now(timezone.utc)
+        recorded_at = (checked - timedelta(days=7)).isoformat()
+        identity = RuntimeIdentity(
+            context="example-site-prod",
+            instance="prod",
+            deployment_record_id="deployment-prod-1",
+            artifact_id="artifact-1",
+            source_git_ref="abc123",
+        )
+        summary = LaunchplaneLaneSummary(
+            context=identity.context,
+            instance=identity.instance,
+            inventory=EnvironmentInventory(
+                context=identity.context,
+                instance=identity.instance,
+                source_git_ref=identity.source_git_ref,
+                runtime_identity=identity,
+                deployment_record_id=identity.deployment_record_id,
+                updated_at=recorded_at,
+                deploy=DeploymentEvidence(
+                    target_name="example-site-prod",
+                    target_type="application",
+                    deploy_mode="image",
+                    status="pass",
+                ),
+            ),
+        )
+        observation = PublicIngressObservationRecord(
+            schema_version=2,
+            record_id="current-monitor-probe",
+            product=profile.product,
+            context=identity.context,
+            instance=identity.instance,
+            monitoring_intent="public",
+            observed_at=checked.isoformat(),
+            status="pass",
+            expected_runtime_identity=identity,
+            summary="Current runtime passed",
+            targets=(
+                PublicIngressTargetObservation(
+                    target="health_url",
+                    url="https://example.test/health",
+                    status="pass",
+                    runtime_identity_status="match",
+                    observed_runtime_identity=identity,
+                    summary="Current runtime matches",
+                ),
+            ),
+        )
+        store = _ContinuouslyVerifiedLaneStore(profile, summary, (observation,))
+        detail = build_product_environment_detail(
+            record_store=store,
+            product=profile.product,
+            environment="prod",
+            action_allowed=lambda *_: False,
+        )
+        overview = build_product_site_overview(
+            record_store=store, product=profile.product, action_allowed=lambda *_: False
+        )
+        prod = next(lane for lane in overview.environments if lane.environment == "prod")
+        for projected in (detail, prod):
+            self.assertEqual(projected.provenance.freshness_status, "verified")
+            self.assertEqual(projected.provenance.refreshed_at, observation.observed_at)
+            self.assertEqual(projected.topology.observed.placement.runtime_identity_status, "match")
+            self.assertEqual(projected.topology.observed.placement.trust_state, "verified")
+        assert store.summary.inventory is not None
+        self.assertEqual(store.summary.inventory.updated_at, recorded_at)
 
     def test_private_monitoring_read_model_ignores_reconciliation_as_probe_evidence(
         self,

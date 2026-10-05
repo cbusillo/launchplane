@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -55,6 +55,11 @@ from control_plane.contracts.public_ingress_monitoring import (
     public_ingress_incident_record_sha256,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.public_ingress_monitoring import (
+    PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS,
+)
+from control_plane.drivers.registry import build_lane_summary_provenance
+from control_plane.lane_runtime_verification import read_lane_runtime_verification
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.workflows.public_ingress_monitor import (
     HttpObservation,
@@ -587,6 +592,200 @@ class PublicIngressMonitorCliTests(unittest.TestCase):
 
 
 class PublicIngressMonitorTests(unittest.TestCase):
+    def test_each_monitor_run_refreshes_public_and_private_lane_verification(self) -> None:
+        identity = _identity()
+        for private in (False, True):
+            with self.subTest(private=private):
+                profile = _profile()
+                if private:
+                    lane = profile.lanes[0].model_copy(
+                        update={
+                            "health_monitoring": ProductLaneHealthMonitoringPolicy(
+                                monitoring_intent="private",
+                                checks=(
+                                    ProductLaneHealthCheck(
+                                        name="private-runtime",
+                                        kind="private_http",
+                                        private_endpoint_key="example-site-prod-runtime",
+                                        require_runtime_identity=True,
+                                    ),
+                                ),
+                            ),
+                        }
+                    )
+                    profile = profile.model_copy(update={"lanes": (lane,)})
+                store = _Store((profile,))
+                if private:
+                    _add_private_endpoint(store)
+                summary = _lane_summary(identity)
+                store.lane_summaries[("example-site", "prod")] = summary
+
+                def healthy(url: str, _timeout: int) -> HttpObservation:
+                    return HttpObservation(
+                        status_code=200,
+                        final_url=url,
+                        redirect_count=0,
+                        payload={"runtime_identity": identity.model_dump(mode="json")},
+                    )
+
+                for checked_at in ("2026-05-29T12:20:00Z", "2026-05-29T12:40:00Z"):
+                    result = run_public_ingress_monitor_once(
+                        record_store=store,
+                        checked_at=checked_at,
+                        http_get=healthy,
+                        private_http_get=healthy,
+                        notify=False,
+                    )
+                    self.assertEqual(result.fail_count, 0)
+                now = datetime(2026, 5, 29, 12, 45, tzinfo=timezone.utc)
+                verification = read_lane_runtime_verification(
+                    record_store=store,
+                    profile=profile,
+                    lane=profile.lanes[0],
+                    summary=summary,
+                    now=now,
+                )
+                self.assertEqual(verification.provenance.freshness_status, "verified")
+                self.assertEqual(verification.provenance.refreshed_at, checked_at)
+                self.assertEqual(verification.observation, store.records[-1])
+                self.assertEqual(store.lane_summaries[("example-site", "prod")], summary)
+                with patch(
+                    "control_plane.lane_runtime_verification.datetime", wraps=datetime
+                ) as clock:
+                    clock.now.return_value = now
+                    self.assertEqual(
+                        build_lane_summary_provenance(summary, record_store=store),
+                        verification.provenance,
+                    )
+
+    def test_lane_verification_expires_at_the_monitor_cadence(self) -> None:
+        identity = _identity()
+        profile = _profile()
+        store = _Store((profile,))
+        summary = _lane_summary(identity)
+        store.lane_summaries[("example-site", "prod")] = summary
+        checked = datetime(2026, 5, 29, 12, 20, tzinfo=timezone.utc)
+        run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at=checked.isoformat(),
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+                payload={"runtime_identity": identity.model_dump(mode="json")},
+            ),
+            notify=False,
+        )
+        for elapsed, expected in (
+            (-1, "stale"),
+            (PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS, "verified"),
+            (PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS + 1, "stale"),
+        ):
+            with self.subTest(elapsed=elapsed):
+                verification = read_lane_runtime_verification(
+                    record_store=store,
+                    profile=profile,
+                    lane=profile.lanes[0],
+                    summary=summary,
+                    now=checked + timedelta(seconds=elapsed),
+                )
+                self.assertEqual(verification.provenance.freshness_status, expected)
+
+    def test_current_verification_requires_identity_health_and_current_authority(self) -> None:
+        identity = _identity()
+        profile = _profile()
+        store = _Store((profile,))
+        summary = _lane_summary(identity)
+        store.lane_summaries[("example-site", "prod")] = summary
+        run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:20:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+                payload={"runtime_identity": identity.model_dump(mode="json")},
+            ),
+            notify=False,
+        )
+        original = store.records[0]
+        now = datetime(2026, 5, 29, 12, 25, tzinfo=timezone.utc)
+        changed_identity = identity.model_copy(
+            update={"deployment_record_id": "deploy-2", "artifact_id": "artifact-2"}
+        )
+        for label, observation, current_profile, current_summary in (
+            ("new deployment", original, profile, _lane_summary(changed_identity)),
+            (
+                "profile changed",
+                original,
+                profile.model_copy(update={"updated_at": "2026-05-29T12:21:00Z"}),
+                summary,
+            ),
+            (
+                "identity missing",
+                original.model_copy(
+                    update={
+                        "targets": tuple(
+                            target.model_copy(
+                                update={
+                                    "runtime_identity_status": "missing",
+                                    "observed_runtime_identity": None,
+                                }
+                            )
+                            for target in original.targets
+                        )
+                    }
+                ),
+                profile,
+                summary,
+            ),
+        ):
+            with self.subTest(label=label):
+                store.records = [observation]
+                verification = read_lane_runtime_verification(
+                    record_store=store,
+                    profile=current_profile,
+                    lane=current_profile.lanes[0],
+                    summary=current_summary,
+                    now=now,
+                )
+                self.assertNotEqual(verification.provenance.freshness_status, "verified")
+
+    def test_monitor_mismatch_replaces_prior_pass_and_opens_incident(self) -> None:
+        identity = _identity()
+        profile = _profile()
+        store = _Store((profile,))
+        summary = _lane_summary(identity)
+        store.lane_summaries[("example-site", "prod")] = summary
+        for checked_at, observed in (
+            ("2026-05-29T12:20:00Z", identity),
+            ("2026-05-29T12:30:00Z", identity.model_copy(update={"artifact_id": "wrong-artifact"})),
+        ):
+            result = run_public_ingress_monitor_once(
+                record_store=store,
+                checked_at=checked_at,
+                http_get=lambda url, _timeout: HttpObservation(
+                    status_code=200,
+                    final_url=url,
+                    redirect_count=0,
+                    payload={"runtime_identity": observed.model_dump(mode="json")},
+                ),
+                notify=False,
+            )
+        self.assertEqual(result.fail_count, 1)
+        self.assertEqual(store.incidents[0].failure_code, "wrong_runtime_identity")
+        verification = read_lane_runtime_verification(
+            record_store=store,
+            profile=profile,
+            lane=profile.lanes[0],
+            summary=summary,
+            now=datetime(2026, 5, 29, 12, 35, tzinfo=timezone.utc),
+        )
+        self.assertEqual(verification.provenance.freshness_status, "recorded")
+        self.assertIsNotNone(verification.runtime_target)
+        assert verification.runtime_target is not None
+        self.assertEqual(verification.runtime_target.runtime_identity_status, "mismatch")
+
     def test_discovers_generic_web_targets_by_default_and_derives_health_url(self) -> None:
         store = _Store((_profile(),))
 

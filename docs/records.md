@@ -897,6 +897,21 @@ an enabled public check maps to `public`, otherwise an enabled private check map
 to `private`, and lanes without either map to `prelaunch`. Real product identity
 does not participate in that migration.
 
+Every HTTP monitor run records both health and the runtime identity reported by
+the endpoint against the lane's expected deployment identity. Stable-lane
+freshness uses the latest probe for each effective check, rather than the age
+of the deployment. Verified lane evidence requires passing health and matching
+expected and observed identities for the current deployment, with no probe
+predating the product profile, deployment, or private endpoint authority.
+Missing identity, a newer failure, or a changed deployment cannot reuse an
+older pass. Evidence expires within the shared monitor cadence
+(`PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS`, currently 30 minutes); public HTTP
+topology and health-check summaries use that same expiry. Observations refresh
+the read model without rewriting deployment history or inventory timestamps.
+The lane indicator is green only for this current verification, retains
+topology warnings, and is red for a failing check or open incident, including
+`wrong_runtime_identity`.
+
 The product key is the durable workspace identity. For example,
 `sellyouroutboard` is the SellYourOutboard product workspace; `testing`, `prod`,
 and the preview inventory all appear under that workspace in the Launchplane UI.
