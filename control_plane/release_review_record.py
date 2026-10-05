@@ -28,6 +28,9 @@ def release_decision_issue_body(decision: ReleaseReviewDecisionRecord) -> str:
         f"Decision: **{decision.decision.replace('_', ' ')}**",
         f"Recorded by `{decision.actor_github_login}` (GitHub ID `{decision.actor_github_id}`)",
         f"Recorded at: {decision.decided_at}",
+        "Acceptance source: Director standing acceptance recorded in Client settings."
+        if decision.acceptance_source == "director_standing"
+        else "Acceptance source: Client session.",
         "",
         "This records a decision in Launchplane. It does not publish the site, and editing this issue does not change approval.",
         "",

@@ -5978,7 +5978,8 @@
                         "enum": [
                           "held",
                           "promote",
-                          "promote_with_rollback_drill"
+                          "promote_with_rollback_drill",
+                          "director_standing"
                         ],
                         "type": "string"
                       },
@@ -11970,7 +11971,8 @@
             "enum": [
               "held",
               "promote",
-              "promote_with_rollback_drill"
+              "promote_with_rollback_drill",
+              "director_standing"
             ],
             "title": "Release On Acceptance",
             "type": "string"
@@ -30058,6 +30060,15 @@
       "ReleaseReviewDecisionRecord": {
         "additionalProperties": false,
         "properties": {
+          "acceptance_source": {
+            "default": "client_session",
+            "enum": [
+              "client_session",
+              "director_standing"
+            ],
+            "title": "Acceptance Source",
+            "type": "string"
+          },
           "actor_github_id": {
             "pattern": "^[0-9]+$",
             "title": "Actor Github Id",
@@ -30123,6 +30134,7 @@
           }
         },
         "required": [
+          "acceptance_source",
           "actor_github_id",
           "actor_github_login",
           "checklist",
@@ -30215,7 +30227,8 @@
             "enum": [
               "held",
               "promote",
-              "promote_with_rollback_drill"
+              "promote_with_rollback_drill",
+              "director_standing"
             ],
             "title": "Release On Acceptance",
             "type": "string"

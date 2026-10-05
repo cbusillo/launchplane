@@ -864,7 +864,7 @@ export type LaunchplaneProductProfileRecord = {
     product: string;
     production_use: 'unknown' | 'prelaunch' | 'live';
     promotion_workflow: ProductPromotionWorkflowProfile;
-    release_on_acceptance: 'held' | 'promote' | 'promote_with_rollback_drill';
+    release_on_acceptance: 'held' | 'promote' | 'promote_with_rollback_drill' | 'director_standing';
     repository: string;
     repository_id: string;
     repository_owner_id: string;
@@ -3847,6 +3847,7 @@ export type ReleaseReviewDecisionEnvelope = {
 };
 
 export type ReleaseReviewDecisionRecord = {
+    acceptance_source: 'client_session' | 'director_standing';
     actor_github_id: string;
     actor_github_login: string;
     checklist: ReleaseChecklist;
@@ -3876,7 +3877,7 @@ export type ReleaseReviewResponse = {
     live_site_url: string;
     owner_github_login: string;
     product: string;
-    release_on_acceptance: 'held' | 'promote' | 'promote_with_rollback_drill';
+    release_on_acceptance: 'held' | 'promote' | 'promote_with_rollback_drill' | 'director_standing';
     release_run: ClientReleaseRunView | null;
     review: ReleaseReviewStatus;
     trace_id: string;
@@ -5920,7 +5921,7 @@ export type ApplyProductProductionUseData = {
         mode?: 'dry-run' | 'apply';
         production_use: 'unknown' | 'prelaunch' | 'live';
         reason: string;
-        release_on_acceptance?: 'held' | 'promote' | 'promote_with_rollback_drill' | null;
+        release_on_acceptance?: 'held' | 'promote' | 'promote_with_rollback_drill' | 'director_standing' | null;
         reviewed_plan_sha256?: string;
         schema_version?: 1;
     };

@@ -379,7 +379,7 @@ function useProductOwnerOperation(scope: string, product: string, fixtureMode: D
 
 type ProfileField = "image" | "production" | "release";
 type ProductionUse = "unknown" | "prelaunch" | "live";
-type ReleaseOnAcceptance = "held" | "promote" | "promote_with_rollback_drill";
+type ReleaseOnAcceptance = "held" | "promote" | "promote_with_rollback_drill" | "director_standing";
 const PROFILE_FIELD_TITLES: Record<ProfileField, string> = {
   image: "Image repository", production: "Production use", release: "Releases on acceptance",
 };
@@ -563,7 +563,7 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
         <p>{field === "image"
           ? "Change where this product publishes new images. Recorded rollback artifacts remain available."
           : field === "release"
-            ? "Held: the Client's acceptance only records a decision. Promote: the Client's acceptance starts the gated production release (Odoo products). With rollback drill: the next accepted release also rolls back once and promotes again."
+            ? "Held: the Client's acceptance only records a decision. Promote: the Client's acceptance starts the gated production release. With rollback drill (Odoo): the next accepted release also rolls back once and promotes again. Director standing acceptance (generic web): use only when the recorded Client is the Director; Launchplane accepts each complete candidate and releases it automatically. Applying this setting enables production releases."
             : "Prelaunch exempts this product from release review. Unknown and live require review."}</p>
       </div></header>
       <p>Current: {current === null ? "Reading profile…" : current || "Not set"}</p>
@@ -571,7 +571,7 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
         <div className="product-config-field"><label htmlFor={`product-${field}-value`}>{title}</label>
           {field === "image" ? <input id={`product-${field}-value`} type="text" value={value} onChange={(event) => setValue(event.target.value)} spellCheck={false} autoCapitalize="none" />
             : field === "release" ? <select id={`product-${field}-value`} value={value} onChange={(event) => setValue(event.target.value)}>
-              <option value="held">Held</option><option value="promote">Promote</option><option value="promote_with_rollback_drill">Promote with rollback drill</option>
+              <option value="held">Held</option><option value="promote">Promote</option><option value="promote_with_rollback_drill">Promote with rollback drill</option><option value="director_standing">Director standing acceptance</option>
             </select>
             : <select id={`product-${field}-value`} value={value} onChange={(event) => setValue(event.target.value)}>
               <option value="unknown">Unknown</option><option value="prelaunch">Prelaunch</option><option value="live">Live</option>

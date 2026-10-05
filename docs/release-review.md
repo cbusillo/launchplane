@@ -132,22 +132,45 @@ dispatches a workflow, and only a Client's acceptance starts a release.
 ## Acceptance starts the release
 
 Each product profile records `release_on_acceptance`: `held` (the default for
-every product), `promote`, or `promote_with_rollback_drill`. An admin with
+every product), `promote`, `promote_with_rollback_drill` (Odoo), or
+`director_standing` (generic web). An admin with
 `product_profile.write` changes it in the product's Client settings, through
 `POST /v1/product-profiles/{product}/production-use` with the optional
 `release_on_acceptance` field: dry run, Apply bound to the reviewed plan digest,
 audit record, and profile read-back. A held profile serializes exactly as it did
 before the switch existed.
 
-When the product's recorded Client accepts a release of an Odoo product that is
+When the product's recorded Client accepts a release of an Odoo or generic-web product that is
 not `prelaunch` and not held, the decision stores `release_start`, fixed at that
 moment. Recording it starts nothing by itself. Launchplane's Odoo stable worker
 checks about every 30 seconds and queues the same operations the admin's
 Release panel queues:
 
 1. a verified production backup;
-2. the queued promotion with that backup, which takes the logical backup,
-   deploys, runs post-deploy and health checks, and rolls back on failure.
+2. the promotion with that backup, which deploys, runs post-deploy and health
+   checks, and rolls back on failure. Odoo queues its existing Release operation
+   and takes its logical backup. Generic web runs its existing promotion through
+   the durable provider-operation runner, with a target fence and heartbeat;
+   its promotion record names the deployment and automatic rollback outcome.
+
+For generic web, a signed-in admin can record `director_standing` through the
+same reviewed Client setting. This explicitly records that the named Client is
+the Director and that the Director's standing acceptance starts releases.
+Admin permission never implies that a Client is the Director. A machine caller
+can prepare a dry run but cannot apply this mode. Changing the recorded Client's
+immutable identity resets this mode to `held`.
+
+The worker compiles each complete candidate's checklist and records an accepted
+decision under the recorded Client's identity, with
+`acceptance_source: director_standing`; it does not claim a human clicked Accept.
+It publishes that exact checklist through the existing release-record path
+before queueing the backup. Publication retries reuse the saved decision.
+Missing notes, missing lane identities or a Client, a held or prelaunch product,
+and a latest request for changes or admin override start nothing. A failed
+release is not automatically retried with another acceptance of the same
+checklist. No agent receives a promotion grant and no product workflow calls
+Launchplane. Enabling this setting is a production-release activation; prepare
+and verify the Client, testing lane and backup policy before applying it.
 
 With `promote_with_rollback_drill` it then runs the rollback drill:
 
@@ -175,7 +198,10 @@ decision. Before a step is queued, the worker checks all of the following:
 
 The worker repeats the decision, Client and hold checks before every provider
 effect. The promotion still checks release approval for the exact candidate and
-the verified backup.
+the verified backup. Once generic-web production has changed, automatic rollback
+remains allowed to restore the admitted previous deployment even if acceptance
+is withdrawn. A crash or uncertain provider outcome keeps the provider operation
+fenced for reconciliation rather than repeating the release.
 
 A changed candidate, a newer decision, or a hold therefore stops the release
 before its next step and never falls back to a newer testing build. A failed or

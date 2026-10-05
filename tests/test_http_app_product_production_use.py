@@ -13,6 +13,15 @@ from tests.http_app_test_support import _asgi_request, _product_profile_write_po
 from tests.support.auth import StubVerifier, identity
 from tests.support.profiles import product_profile_payload
 from tests.support.stores import sqlite_database_url
+from control_plane.contracts.product_profile_record import ProductOwnerProfile
+from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
+from tests.http_app_test_support import (
+    _browser_mutation_headers,
+    _github_human_identity,
+    _github_human_product_config_policy,
+    _github_oauth_config,
+    _RejectingVerifier,
+)
 
 _PRODUCT = "sellyouroutboard"
 _ROUTE = f"/v1/product-profiles/{_PRODUCT}/production-use"
@@ -58,6 +67,80 @@ def _apply(expected: str) -> dict[str, object]:
 
 
 class ProductProductionUseHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_standing_acceptance_requires_signed_in_admin_and_reviewed_profile(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            self.addCleanup(store.close)
+            stored = store.read_product_profile_record(_PRODUCT)
+            store.write_product_profile_record(
+                stored.model_copy(
+                    update={
+                        "owner": ProductOwnerProfile(
+                            github_login="example-client", github_id="1234"
+                        ),
+                    }
+                )
+            )
+            payload: dict[str, object] = {
+                "production_use": _OLD,
+                "release_on_acceptance": "director_standing",
+                "reason": "The recorded Client is the Director.",
+            }
+            dry = await _post(_app(store), payload)
+            self.assertEqual(dry.status_code, 202, dry.text)
+            apply = {
+                **payload,
+                "mode": "apply",
+                "reviewed_plan_sha256": dry.json()["result"]["plan_sha256"],
+            }
+            denied = await _post(_app(store), apply, idempotency_key="machine-standing")
+            self.assertEqual(denied.status_code, 403)
+            self.assertEqual(
+                store.read_product_profile_record(_PRODUCT).release_on_acceptance, "held"
+            )
+            sessions = HumanSessionManager(
+                config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+            )
+            session = sessions.issue(_github_human_identity())
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_github_human_product_config_policy(
+                    action="product_profile.write", product=_PRODUCT, context="launchplane"
+                ),
+                record_store_factory=lambda: store,
+                human_session_manager=sessions,
+            )
+            headers = {
+                **_browser_mutation_headers(sessions, session),
+                "Idempotency-Key": "human-standing",
+            }
+            accepted = await _asgi_request(app, "POST", _ROUTE, headers=headers, payload=apply)
+            self.assertEqual(accepted.status_code, 202, accepted.text)
+            self.assertEqual(
+                store.read_product_profile_record(_PRODUCT).release_on_acceptance,
+                "director_standing",
+            )
+
+    async def test_standing_acceptance_without_client_and_generic_web_drill_are_refused(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            self.addCleanup(store.close)
+            for mode in ("director_standing", "promote_with_rollback_drill"):
+                response = await _post(
+                    _app(store),
+                    {
+                        "production_use": _OLD,
+                        "release_on_acceptance": mode,
+                        "reason": "Configure releases.",
+                    },
+                )
+                self.assertEqual(response.status_code, 400, response.text)
+            self.assertEqual(
+                store.read_product_profile_record(_PRODUCT).release_on_acceptance, "held"
+            )
+
     async def test_dry_run_shows_the_change_and_writes_nothing(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = _store(Path(temporary_directory_name))
@@ -104,7 +187,7 @@ class ProductProductionUseHttpTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as temporary_directory_name:
             store = _store(Path(temporary_directory_name))
             app = _app(store)
-            for index, mode in enumerate(("promote_with_rollback_drill", "held")):
+            for index, mode in enumerate(("promote", "held")):
                 request: dict[str, object] = {
                     "production_use": _OLD,
                     "release_on_acceptance": mode,
