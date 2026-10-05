@@ -16068,6 +16068,12 @@
             "title": "Blocked Label",
             "type": "string"
           },
+          "config_authority_events_enabled": {
+            "default": false,
+            "title": "Config Authority Events Enabled",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
+          },
           "engineering_review_mode": {
             "default": "advisory",
             "enum": [
