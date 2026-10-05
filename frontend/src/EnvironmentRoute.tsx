@@ -581,7 +581,7 @@ function EnvironmentOverview({
           label="Runtime identity"
           timestamp={evidenceTimestamp(observedPlacement.provenance)}
           tone={conditionTone(
-            runtimeIdentityTone(observedPlacement.runtime_identity_status),
+            runtimeIdentityTone(observedPlacement.runtime_identity_status, observedPlacement.trust_state),
             observedPlacement.trust_state,
           )}
           trustState={observedPlacement.trust_state}
@@ -1069,9 +1069,10 @@ function tlsTone(domain: ProductObservedTlsDomain | null): ConditionTone {
 
 function runtimeIdentityTone(
   status: ProductObservedPlacement["runtime_identity_status"],
+  trustState: TrustState,
 ): ConditionTone {
   if (status === "match") {
-    return "pass";
+    return trustState === "verified" ? "pass" : "warning";
   }
   if (status === "mismatch" || status === "malformed") {
     return "danger";

@@ -284,6 +284,13 @@ test.describe("operator journeys", () => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto("/ui/products?fixture=products");
+    const recordedAt = await page.evaluate(async () => {
+      const modulePath = "/ui/src/dev-fixtures.ts";
+      const { productsForFixture } = await import(modulePath);
+      return productsForFixture("products")[0].environments[0].provenance.refreshed_at;
+    });
+    await page.clock.install({ time: new Date(recordedAt) });
+    await page.reload();
 
     const productsHeading = page.getByRole("heading", {
       level: 1,

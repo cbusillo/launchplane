@@ -15,6 +15,8 @@ import type {
   ProductSiteOverview,
 } from "./generated/openapi.ts";
 import type { ResourceState } from "./resource";
+import { useEvidenceExpiry } from "./ProductOps";
+import { expireProductEvidence } from "./product-environment-signal";
 import {
   environmentLabel,
   environmentViewLabel,
@@ -59,7 +61,8 @@ export function AppShell({
   signingOut: boolean;
   theme: Theme;
 }) {
-  const products = productsResource.data ?? [];
+  const products = (productsResource.data ?? []).map(product => expireProductEvidence(product));
+  useEvidenceExpiry(products.flatMap(product => product.environments));
   const selectedProductKey = routeProductKey(route);
   const productArea = route.kind === "product-index" || Boolean(selectedProductKey);
   const routeLabel =

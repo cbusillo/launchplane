@@ -909,7 +909,7 @@ older pass. Evidence expires within the shared monitor cadence
 topology and health-check summaries use that same expiry. Observations refresh
 the read model without rewriting deployment history or inventory timestamps.
 The lane indicator is green only for this current verification, retains
-topology warnings, and is red for a failing check or open incident, including
+topology warnings, and is red for a failing effective check or its open incident, including
 `wrong_runtime_identity`.
 
 The product key is the durable workspace identity. For example,
