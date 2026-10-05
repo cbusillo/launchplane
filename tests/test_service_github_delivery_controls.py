@@ -6,7 +6,13 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from control_plane.contracts.secret_record import SecretBinding, SecretRecord
+from control_plane.contracts.secret_record import (
+    SecretAuditEvent,
+    SecretBinding,
+    SecretRecord,
+    SecretRotationWrite,
+    SecretVersion,
+)
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import (
@@ -27,7 +33,9 @@ from control_plane.service_github_delivery_controls import (
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
     RuntimeEnvironmentConflictError,
+    SecretRecordConflictError,
     SecretCopySourceConflictError,
 )
 from tests.http_app_test_support import (
@@ -303,6 +311,81 @@ class ServiceTokenRetirementTests(unittest.TestCase):
             with self.assertRaises(SecretCopySourceConflictError):
                 store.write_product_authority_bundle(bundle)
             self.assertEqual(store.read_secret_record("token-global").status, "configured")
+
+
+class RetiredSecretRotationTests(unittest.TestCase):
+    def test_prepared_rotation_cannot_reenable_a_retired_record(self) -> None:
+        for backend in ("database", "filesystem"):
+            with self.subTest(backend=backend), TemporaryDirectory() as directory:
+                store: PostgresRecordStore | FilesystemRecordStore
+                if backend == "database":
+                    store = PostgresRecordStore(
+                        database_url=sqlite_database_url(Path(directory) / "state.sqlite3")
+                    )
+                    store.ensure_schema()
+                    self.addCleanup(store.close)
+                else:
+                    store = FilesystemRecordStore(Path(directory))
+                seed_metadata(store)
+                record = store.read_secret_record("token-global")
+                rotation = SecretRotationWrite(
+                    expected_current_version_id=record.current_version_id,
+                    record=record.model_copy(update={"current_version_id": "new-fixture-version"}),
+                    version=SecretVersion(
+                        version_id="new-fixture-version",
+                        secret_id=record.secret_id,
+                        created_at=record.updated_at,
+                        ciphertext="opaque-fixture-ciphertext",
+                    ),
+                    audit_event=SecretAuditEvent(
+                        event_id="rotation-event",
+                        secret_id=record.secret_id,
+                        event_type="rotated",
+                        recorded_at=record.updated_at,
+                    ),
+                )
+                disabled = record.model_copy(update={"status": "disabled"})
+                store.write_secret_record(disabled)
+                with self.assertRaisesRegex(ValueError, "changed after rotation preflight"):
+                    store.write_secret_rotations((rotation,))
+                self.assertEqual(store.read_secret_record(record.secret_id), disabled)
+                self.assertEqual(store.list_secret_audit_events(secret_id=record.secret_id), ())
+
+    def test_filesystem_rotation_guards_status_change_after_its_precheck(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            seed_metadata(store)
+            record = store.read_secret_record("token-global")
+            rotation = SecretRotationWrite(
+                expected_current_version_id=record.current_version_id,
+                record=record.model_copy(update={"current_version_id": "new-fixture-version"}),
+                version=SecretVersion(
+                    version_id="new-fixture-version",
+                    secret_id=record.secret_id,
+                    created_at=record.updated_at,
+                    ciphertext="opaque-fixture-ciphertext",
+                ),
+                audit_event=SecretAuditEvent(
+                    event_id="rotation-event",
+                    secret_id=record.secret_id,
+                    event_type="rotated",
+                    recorded_at=record.updated_at,
+                ),
+            )
+            original = store.write_product_authority_bundle
+
+            def retire_then_commit(bundle: ProductAuthorityBundle) -> None:
+                store.write_secret_record(record.model_copy(update={"status": "disabled"}))
+                original(bundle)
+
+            with (
+                patch.object(
+                    store, "write_product_authority_bundle", side_effect=retire_then_commit
+                ),
+                self.assertRaises(SecretRecordConflictError),
+            ):
+                store.write_secret_rotations((rotation,))
+            self.assertEqual(store.read_secret_record(record.secret_id).status, "disabled")
 
 
 class ServiceDeliveryHttpTests(unittest.IsolatedAsyncioTestCase):

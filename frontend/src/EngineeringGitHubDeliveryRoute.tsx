@@ -174,7 +174,8 @@ function TokenRetirement({ status, actorId, onApplied, stale }: { status: Servic
       <label>Retirement reason<textarea value={reason} maxLength={2000} onChange={event => setReason(event.target.value)} /></label>
     </fieldset>
     <ReviewActions change={change} canPlan={ready && secretIds.length > 0 && [reason, advisoryCheck, deliveryComment, releaseIssue, consumerEvidence].every(value => Boolean(value.trim()))} stale={stale}
-      confirmation={`I am the Director. I verified Advisory App ${status.advisory_app_id} on the current PR commit, Delivery App ${status.app_id} on the comment and release issue, checked remaining consumers, and approve disabling these records and their bindings.`}>
+      confirmation={`I am the Director. I verified Advisory App ${change.review?.advisory_app_id || status.advisory_app_id} on the current PR commit, Delivery App ${change.review?.app_id || status.app_id} on the comment and release issue, checked remaining consumers, and approve disabling these records and their bindings.`}>
+      <p>Reviewed Delivery App: <strong>{change.review?.app_id}</strong> · Advisory App: <strong>{change.review?.advisory_app_id}</strong></p>
       <p>Disable only these records and their GITHUB_TOKEN bindings:</p>
       <ul>{change.review?.tokens.map(token => <li key={token.secret_id}><strong>{token.secret_id}</strong> · {token.scope === "global" ? "global, shared across service contexts" : token.context}</li>)}</ul>
     </ReviewActions>

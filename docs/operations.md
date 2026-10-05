@@ -4024,7 +4024,8 @@ records, all their bindings, key metadata and runtime selector layers (including
 absence), disables only selected records/bindings, and appends audit evidence and
 the replay receipt together. Encrypted versions remain untouched; no secret value
 is read, created or copied. This control neither revokes a GitHub PAT nor retires
-a product. A conflict or scope refusal is reported rather than bypassed.
+a product. A previously prepared re-encryption cannot re-enable a disabled
+record's metadata. A conflict or scope refusal is reported rather than bypassed.
 
 The operation requests only its needed permissions:
 

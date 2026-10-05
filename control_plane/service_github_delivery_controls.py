@@ -315,7 +315,9 @@ def apply_service_token_retirement(
         if not idempotency_key.strip():
             raise ValueError("Service-token retirement requires Idempotency-Key.")
         previous = store.read_idempotency_record(
-            scope=scope, route_path=SERVICE_TOKEN_RETIREMENT_ROUTE, idempotency_key=idempotency_key
+            scope=scope,
+            route_path=SERVICE_TOKEN_RETIREMENT_ROUTE,
+            idempotency_key=idempotency_key,
         )
         if previous is not None:
             if previous.state != "completed" or previous.request_fingerprint != fingerprint:

@@ -25,6 +25,8 @@ async function setup(page: Page, outcome = "ok") {
     expect(route.request().headers()["x-csrf-token"]).toBe("csrf-fixture");
     if (body.mode === "apply") {
       requests.push({ path: "configuration", body, key: route.request().headers()["idempotency-key"] });
+      if (outcome === "uncertain-stale" && requests.length === 1) { await route.abort("failed"); return; }
+      if (outcome === "uncertain-stale") { await route.fulfill({ status: 409, json: { trace_id: "stale", error: { code: "stale", message: "The reviewed selector changed." } } }); return; }
       if (outcome === "stale") { await route.fulfill({ status: 409, json: { trace_id: "stale", error: { code: "stale", message: "Configuration changed; review a new dry-run." } } }); return; }
       if (outcome !== "mismatch") { current.app_id = String(body.app_id); current.integration = body.integration; }
       if (outcome === "uncertain" && requests.length === 1) { await route.abort("failed"); return; }
@@ -148,6 +150,30 @@ test("retirement retry after reload keeps the exact selected record and operatio
   await expect(panel.getByRole("status")).toContainText("Applied and read back.");
   expect(requests[1]).toEqual(requests[0]);
   expect(current.obsolete_tokens[1].status).toBe("configured");
+});
+
+test("retirement confirmation uses the App ids reviewed by the server after another tab changes selectors", async ({ page }) => {
+  const { current } = await setup(page);
+  current.app_id = "76"; current.integration = "existing-delivery";
+  await page.goto("/ui/engineering/github-delivery");
+  await expect(page.getByRole("region", { name: "Current service selection" })).toContainText("76");
+  current.app_id = "79"; current.advisory_app_id = "78";
+  const panel = await reviewRetirement(page);
+  await expect(panel.getByLabel(/I am the Director\. I verified Advisory App 78.*Delivery App 79/)).toBeVisible();
+  await expect(panel.getByText("Reviewed Delivery App:", { exact: false })).toContainText("79");
+});
+
+test("a conflict after an uncertain Apply preserves its request and operation key", async ({ page }) => {
+  const { requests } = await setup(page, "uncertain-stale");
+  await page.goto("/ui/engineering/github-delivery");
+  const panel = await selectDelivery(page);
+  await panel.getByRole("button", { name: "Apply", exact: true }).click();
+  await panel.getByRole("button", { name: "Retry Apply" }).click();
+  await expect(panel.getByRole("status")).toContainText("The reviewed selector changed.");
+  await expect(panel.getByRole("button", { name: "Dry run", exact: true })).toBeDisabled();
+  await expect(panel.getByLabel("Delivery App id", { exact: true })).toBeDisabled();
+  expect(requests[1]).toEqual(requests[0]);
+  // A metadata match is not proof of the original receipt. Safe reconciliation is #3059.
 });
 
 test("unavailable metadata and absent key leave controls unavailable", async ({ page }) => {

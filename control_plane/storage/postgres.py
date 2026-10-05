@@ -6179,6 +6179,19 @@ class PostgresRecordStore(HumanSessionStore):
                     or SecretBinding.model_validate(binding_row.payload) != expected_source.binding
                 ):
                     raise SecretCopySourceConflictError("Secret copy source changed before commit.")
+            for expected_secret in bundle.expected_secret_records:
+                current_secret = session.scalar(
+                    select(LaunchplaneSecretRow)
+                    .where(LaunchplaneSecretRow.secret_id == expected_secret.secret_id)
+                    .with_for_update()
+                )
+                if (
+                    current_secret is None
+                    or SecretRecord.model_validate(current_secret.payload) != expected_secret
+                ):
+                    raise SecretRecordConflictError(
+                        "Managed secret metadata changed before commit."
+                    )
             for expectation in bundle.runtime_environment_read_sets:
                 current_runtime = tuple(
                     RuntimeEnvironmentRecord.model_validate(row.payload)
@@ -37647,7 +37660,11 @@ class PostgresRecordStore(HumanSessionStore):
                     raise FileNotFoundError(
                         f"No Launchplane secret record found for {rotation.record.secret_id!r}"
                     )
-                if current_row.current_version_id != rotation.expected_current_version_id:
+                if (
+                    current_row.current_version_id != rotation.expected_current_version_id
+                    or SecretRecord.model_validate(current_row.payload).status
+                    != rotation.record.status
+                ):
                     raise ValueError("Managed secret changed after rotation preflight.")
             for rotation in ordered_rotations:
                 version = rotation.version

@@ -170,6 +170,7 @@ class ProductAuthorityBundle(BaseModel):
     runtime_environment_writes: tuple[RuntimeEnvironmentWrite, ...] = ()
     runtime_environment_read_sets: tuple[RuntimeEnvironmentSetExpectation, ...] = ()
     secret_records: tuple[SecretRecord, ...] = ()
+    expected_secret_records: tuple[SecretRecord, ...] = ()
     secret_versions: tuple[SecretVersion, ...] = ()
     secret_bindings: tuple[SecretBinding, ...] = ()
     secret_audit_events: tuple[SecretAuditEvent, ...] = ()
