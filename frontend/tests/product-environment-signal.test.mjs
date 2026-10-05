@@ -38,3 +38,18 @@ test("every effective check and topology warning still matters", () => {
   lane.topology.warnings.push({ severity: "warning" });
   assert.equal(environmentOperationalTone(lane), "warning");
 });
+
+test("an open page cannot keep an expired verification green", () => {
+  const lane = environment();
+  const now = Date.now();
+  lane.provenance.stale_after = new Date(now).toISOString();
+  assert.equal(environmentOperationalTone(lane, now), "verified");
+  assert.equal(environmentOperationalTone(lane, now + 1), "warning");
+});
+
+test("a recorded runtime mismatch stays red without an effective monitor check", () => {
+  const lane = environment();
+  lane.health_monitoring.checks = [];
+  lane.topology.observed.placement = { runtime_identity_status: "mismatch" };
+  assert.equal(environmentOperationalTone(lane), "danger");
+});

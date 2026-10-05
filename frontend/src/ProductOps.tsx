@@ -62,6 +62,7 @@ export function ProductIndexRoute({
   onRetry: () => void;
 }) {
   const products = resource.data ?? [];
+  useEvidenceExpiry(products.flatMap(product => product.environments));
   const loading = resource.status === "idle" || resource.status === "loading";
   const viewState =
     loading && !products.length
@@ -159,6 +160,7 @@ export function ProductWorkspaceRoute({
     emptyResource(),
   );
   const loadedProductKey = useRef("");
+  useEvidenceExpiry(resource.data?.environments ?? []);
 
   useEffect(() => {
     if (fixtureResource) {
@@ -267,6 +269,24 @@ export function ProductWorkspaceRoute({
       updating={resource.status === "loading"}
     />
   );
+}
+
+function useEvidenceExpiry(environments: ProductEnvironmentSummary[]) {
+  const [tick, setTick] = useState(0);
+  const nextExpiry = Math.min(...environments.flatMap(environment => [
+    environment.provenance.stale_after,
+    ...environment.health_monitoring.checks.map(check => check.provenance.stale_after),
+  ]).map(value => Date.parse(value)).filter(value => Number.isFinite(value) && value >= Date.now()));
+  useEffect(() => {
+    const update = () => setTick(value => value + 1);
+    const timer = Number.isFinite(nextExpiry)
+      ? window.setTimeout(update, Math.min(nextExpiry - Date.now() + 1, 2_147_483_647)) : undefined;
+    window.addEventListener("focus", update);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("focus", update);
+    };
+  }, [nextExpiry, tick]);
 }
 
 function ProductDirectoryRow({ product }: { product: ProductSiteOverview }) {

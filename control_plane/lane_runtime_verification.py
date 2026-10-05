@@ -68,10 +68,44 @@ def read_lane_runtime_verification(
     now: datetime | None = None,
 ) -> LaneRuntimeVerification:
     read_observations = getattr(record_store, "list_public_ingress_observation_records", None)
+    evaluated_at = now or datetime.now(timezone.utc)
+    deployment_at = (
+        summary.inventory.updated_at
+        if summary.inventory is not None
+        else (
+            summary.latest_deployment.deploy.finished_at
+            or summary.latest_deployment.deploy.started_at
+        )
+        if summary.latest_deployment is not None
+        else ""
+    )
+    deployment_id = (
+        summary.inventory.deployment_record_id
+        if summary.inventory is not None
+        else summary.latest_deployment.record_id
+        if summary.latest_deployment is not None
+        else ""
+    )
+    recorded_at = _timestamp(deployment_at)
+    stale_at = (
+        recorded_at + timedelta(seconds=PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS)
+        if recorded_at is not None
+        else None
+    )
+    historical_status: FreshnessStatus = (
+        "missing"
+        if not deployment_id
+        else "stale"
+        if stale_at is not None and evaluated_at > stale_at
+        else "recorded"
+    )
     missing = LaneRuntimeVerification(
         DataProvenance(
             source_kind="record",
-            freshness_status="missing",
+            source_record_id=deployment_id,
+            recorded_at=deployment_at,
+            freshness_status=historical_status,
+            stale_after=stale_at.isoformat().replace("+00:00", "Z") if stale_at else "",
             detail="Launchplane has no current monitor runtime-identity and health verification.",
         )
     )
@@ -89,16 +123,6 @@ def read_lane_runtime_verification(
     if not checks:
         return missing
     expected = lane_expected_runtime_identity(summary)
-    deployment_at = (
-        summary.inventory.updated_at
-        if summary.inventory is not None
-        else (
-            summary.latest_deployment.deploy.finished_at
-            or summary.latest_deployment.deploy.started_at
-        )
-        if summary.latest_deployment is not None
-        else ""
-    )
     results: list[LaneRuntimeVerification] = []
     for check in checks:
         observation = next(
@@ -117,7 +141,8 @@ def read_lane_runtime_verification(
             None,
         )
         if observation is None:
-            return missing
+            results.append(missing)
+            continue
         target = next(
             (
                 target
@@ -132,16 +157,26 @@ def read_lane_runtime_verification(
         if check.private_endpoint_key:
             read_endpoint = getattr(record_store, "read_private_health_endpoint_record", None)
             if not callable(read_endpoint):
-                return missing
+                results.append(missing)
+                continue
             try:
-                authority_times.append(read_endpoint(check.private_endpoint_key).updated_at)
+                endpoint = read_endpoint(check.private_endpoint_key)
             except (FileNotFoundError, KeyError):
-                return missing
+                results.append(missing)
+                continue
+            if endpoint.status != "active" or (
+                endpoint.product,
+                endpoint.context,
+                endpoint.instance,
+            ) != (profile.product, lane.context, lane.instance):
+                results.append(missing)
+                continue
+            authority_times.append(endpoint.updated_at)
         current = (
             observed_at is not None
             and observation.monitoring_intent == lane.health_monitoring.monitoring_intent
             and all(
-                (at := _timestamp(value)) is not None and observed_at >= at
+                (at := _timestamp(value)) is not None and observed_at > at
                 for value in authority_times
                 if value
             )
@@ -168,13 +203,32 @@ def read_lane_runtime_verification(
             LaneRuntimeVerification(provenance, observation, target if current else None)
         )
     # Every effective check must pass; never pick an older success over a failure.
+    provenance = min(results, key=lambda result: result.provenance.stale_after).provenance
     for status in ("missing", "stale", "recorded", "unsupported"):
         failed = next(
             (result for result in results if result.provenance.freshness_status == status), None
         )
         if failed is not None:
-            return failed
-    return min(results, key=lambda result: datetime.fromisoformat(result.provenance.stale_after))
+            provenance = failed.provenance
+            break
+    identity_failure = next(
+        (
+            result
+            for result in results
+            if result.runtime_target is not None
+            and result.runtime_target.runtime_identity_status
+            in {"mismatch", "missing", "malformed", "unverifiable"}
+        ),
+        None,
+    )
+    evidence = identity_failure or next(
+        (result for result in results if result.runtime_target is not None), None
+    )
+    return LaneRuntimeVerification(
+        provenance,
+        evidence.observation if evidence else None,
+        evidence.runtime_target if evidence else None,
+    )
 
 
 def _timestamp(value: str) -> datetime | None:

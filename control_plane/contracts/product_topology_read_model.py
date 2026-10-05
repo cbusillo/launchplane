@@ -583,13 +583,21 @@ def _observed_topology(
     if lane_summary is not None and runtime_verification is not None:
         verification = runtime_verification
         target = verification.runtime_target
-        placement = ProductObservedPlacement(
-            expected_runtime_identity=lane_expected_runtime_identity(lane_summary),
-            observed_runtime_identity=target.observed_runtime_identity if target else None,
-            runtime_identity_status=target.runtime_identity_status if target else "unchecked",
-            runtime_identity_detail=target.runtime_identity_detail if target else "",
-            trust_state=verification.provenance.freshness_status,
-            provenance=verification.provenance,
+        placement = (
+            ProductObservedPlacement(
+                expected_runtime_identity=lane_expected_runtime_identity(lane_summary),
+                observed_runtime_identity=target.observed_runtime_identity if target else None,
+                runtime_identity_status=target.runtime_identity_status if target else "unchecked",
+                runtime_identity_detail=target.runtime_identity_detail if target else "",
+                trust_state=verification.provenance.freshness_status,
+                provenance=verification.provenance,
+            )
+            if target is not None
+            else placement.model_copy(
+                update={
+                    "trust_state": verification.provenance.freshness_status,
+                }
+            )
         )
     domain_roles: dict[str, ProductTopologyDomainRole] = {
         domain.domain_name: domain.role for domain in desired.domains

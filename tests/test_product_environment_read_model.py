@@ -1464,6 +1464,34 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             self.assertEqual(projected.topology.observed.placement.trust_state, "verified")
         assert store.summary.inventory is not None
         self.assertEqual(store.summary.inventory.updated_at, recorded_at)
+        store._observations = ()
+        store.summary = summary.model_copy(
+            update={
+                "inventory": store.summary.inventory.model_copy(
+                    update={
+                        "destination_health": HealthcheckEvidence(
+                            verified=True,
+                            urls=("https://example.test/health",),
+                            timeout_seconds=10,
+                            status="fail",
+                            runtime_identity_status="mismatch",
+                            observed_runtime_identity=identity.model_copy(
+                                update={"artifact_id": "wrong-artifact"}
+                            ),
+                        )
+                    }
+                )
+            }
+        )
+        detail = build_product_environment_detail(
+            record_store=store,
+            product=profile.product,
+            environment="prod",
+            action_allowed=lambda *_: False,
+        )
+        self.assertNotEqual(detail.provenance.freshness_status, "verified")
+        self.assertEqual(detail.provenance.source_record_id, identity.deployment_record_id)
+        self.assertEqual(detail.topology.observed.placement.runtime_identity_status, "mismatch")
 
     def test_private_monitoring_read_model_ignores_reconciliation_as_probe_evidence(
         self,

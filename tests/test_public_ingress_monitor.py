@@ -722,6 +722,12 @@ class PublicIngressMonitorTests(unittest.TestCase):
                 summary,
             ),
             (
+                "authority changed in the same timestamp",
+                original,
+                profile.model_copy(update={"updated_at": original.observed_at}),
+                summary,
+            ),
+            (
                 "identity missing",
                 original.model_copy(
                     update={
@@ -783,6 +789,26 @@ class PublicIngressMonitorTests(unittest.TestCase):
         )
         self.assertEqual(verification.provenance.freshness_status, "recorded")
         self.assertIsNotNone(verification.runtime_target)
+        assert verification.runtime_target is not None
+        self.assertEqual(verification.runtime_target.runtime_identity_status, "mismatch")
+        extra_check = ProductLaneHealthCheck(name="not-yet-probed")
+        monitored_lane = profile.lanes[0].model_copy(
+            update={
+                "health_monitoring": profile.lanes[0].health_monitoring.model_copy(
+                    update={
+                        "checks": (extra_check, *profile.lanes[0].health_monitoring.checks),
+                    }
+                ),
+            }
+        )
+        verification = read_lane_runtime_verification(
+            record_store=store,
+            profile=profile,
+            lane=monitored_lane,
+            summary=summary,
+            now=datetime(2026, 5, 29, 12, 35, tzinfo=timezone.utc),
+        )
+        self.assertNotEqual(verification.provenance.freshness_status, "verified")
         assert verification.runtime_target is not None
         self.assertEqual(verification.runtime_target.runtime_identity_status, "mismatch")
 
