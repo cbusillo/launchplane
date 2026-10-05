@@ -1738,6 +1738,24 @@ checked-in `.example` policy path.
 The first real Launchplane service deployment should be GitHub-driven and
 Dokploy-hosted.
 
+Browser login uses GitHub OAuth with these Launchplane self-bootstrap inputs:
+
+- `LAUNCHPLANE_GITHUB_CLIENT_ID`
+- `LAUNCHPLANE_GITHUB_CLIENT_SECRET`
+- `LAUNCHPLANE_PUBLIC_URL`
+- `LAUNCHPLANE_SESSION_SECRET`
+- optional `LAUNCHPLANE_COOKIE_SECURE` for local HTTP development
+- optional `LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS`, a comma-separated list of
+  verified GitHub email addresses for initial admin access
+
+These inputs configure Launchplane's own login, not product runtime authority.
+For `Deploy Launchplane`, the client ID, public URL, cookie setting, and bootstrap
+admin emails come from repository variables; the client secret and session
+secret come from repository secrets. The workflow projects them into the service
+target environment.
+See [human authentication](service-boundary.md#authentication) for DB-backed
+sessions, policy enforcement, and claim refresh. Never put their values in git.
+
 - Keep test and deploy automation separate.
 - `CI` is the gate for Launchplane code changes and must pass before a deploy
   workflow replaces the live Launchplane app.
@@ -1786,6 +1804,7 @@ testing environment of its own.
 Required GitHub configuration for that workflow:
 
 - repository variables:
+  - `LAUNCHPLANE_RUNNER_LABEL`, the self-hosted runner label used by both deploy jobs
   - `LAUNCHPLANE_PUBLIC_URL`
   - optional `LAUNCHPLANE_SERVICE_AUDIENCE`; when unset, trusted workflows
     derive the GitHub OIDC audience from `LAUNCHPLANE_PUBLIC_URL`'s host.
@@ -2032,6 +2051,22 @@ Current derived-state behavior:
   captures the pre-dispatch GitHub run set and persists its provider marker
   before sending. A marked delivery that cannot yet observe its run remains in
   reconciliation and is never sent again.
+
+### UI data freshness
+
+Launchplane UI data carries record provenance. With `LAUNCHPLANE_DATABASE_URL`
+configured in the inspection environment, the read-only freshness report checks
+lane and preview surfaces and their source records:
+
+```bash
+uv run launchplane service inspect-data-freshness \
+  --context <product> \
+  --preview-context <product-preview-context>
+```
+
+The UI presents that evidence as `verified`, `recorded`, `stale`, `missing`, or
+`unsupported` trust labels. Use it to assess visible evidence before launch or
+handoff; a record-backed report does not establish current provider health.
 
 ## Core Rules
 

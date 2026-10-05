@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Barrier
 from unittest.mock import patch
 from typing import cast
 
@@ -409,6 +410,51 @@ class ReleaseReviewTests(unittest.TestCase):
 
 
 class ReleaseGitHubTests(unittest.TestCase):
+    def test_commit_coverage_worker_failure_fails_closed(self) -> None:
+        def read(path: str) -> object:
+            if "/compare/" in path:
+                return {
+                    "status": "ahead",
+                    "total_commits": 2,
+                    "commits": [{"sha": HEAD}, {"sha": BASE}],
+                }
+            if f"/commits/{BASE}/" in path:
+                return {"message": "coverage unavailable"}
+            return github_read(path)
+
+        with self.assertRaisesRegex(ValueError, "coverage is unavailable"):
+            read_release_changes(
+                repository="example/site",
+                production_commit="d" * 40,
+                candidate_commit=HEAD,
+                read=read,
+            )
+
+    def test_commit_coverage_reads_overlap_and_preserve_untracked_commits(self) -> None:
+        commits = [HEAD, BASE]
+        coverage_readers = Barrier(2)
+
+        def read(path: str) -> object:
+            if "/compare/" in path:
+                return {
+                    "status": "ahead",
+                    "total_commits": len(commits),
+                    "commits": [{"sha": sha} for sha in commits],
+                }
+            # Both requests must start before either finishes. Serial reads fail
+            # without relying on a performance threshold or sleeping.
+            coverage_readers.wait(timeout=5)
+            return github_read(path) if f"/commits/{HEAD}/" in path else []
+
+        items, uncovered = read_release_changes(
+            repository="example/site",
+            production_commit="d" * 40,
+            candidate_commit=HEAD,
+            read=read,
+        )
+        self.assertEqual([item.pull_request_number for item in items], [42])
+        self.assertEqual(uncovered, (BASE,))
+
     def test_notes_ignore_fenced_heading_and_preserve_subheadings(self) -> None:
         self.assertEqual(
             owner_test_notes(
