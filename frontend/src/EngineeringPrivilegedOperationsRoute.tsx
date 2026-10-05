@@ -260,6 +260,17 @@ function AccessPolicyComposer({
         alreadyRemovedMessage="Project evidence access is already removed."
         refresh={refresh}
       />
+      <AuthorizationCandidateCard
+        candidateId="agent-policy-proposer"
+        headingId="agent-policy-proposer-heading"
+        title="Prepare agent proposal access"
+        description="Let your configured agent prepare access-policy and merge-train policy plans for your review. Every plan remains pending until you approve it while signed in. The agent cannot approve or apply a plan. This access remains until a separately approved removal."
+        addLabel="Prepare proposal access"
+        removeLabel="Prepare proposal removal"
+        alreadyAddedMessage="Agent proposal access is already installed."
+        alreadyRemovedMessage="Agent proposal access is already removed."
+        refresh={refresh}
+      />
       <AgentProductSetupCandidateCard fixtureMode={fixtureMode} refresh={refresh} />
     </div>
   );
@@ -873,6 +884,16 @@ function PrivilegedOperationPlanCard({
   const [mutationMessage, setMutationMessage] = useState("");
   const [detailMessage, setDetailMessage] = useState("");
   const [rawDetail, setRawDetail] = useState("");
+  const isAgentPolicyProposal = review.requested_by_kind === "local_operator";
+  const proposalLoader = useCallback(async (signal: AbortSignal) => {
+    if (!isAgentPolicyProposal) return null;
+    return readPrivilegedOperationRawDetail(review.operation_id, signal);
+  }, [review.operation_id, isAgentPolicyProposal]);
+  const proposalResource = useEngineeringResource(proposalLoader, `proposal:${review.operation_id}:${isAgentPolicyProposal}`);
+  const proposal = proposalResource.state.data;
+  const proposalMatches = proposalResource.state.phase === "ready"
+    && !proposalResource.state.stale
+    && proposal?.record.operation_id === review.operation_id;
 
   async function mutate(action: "approve" | "revoke") {
     const reason =
@@ -1037,10 +1058,29 @@ function PrivilegedOperationPlanCard({
         ) : null}
       </details>
 
+      {isAgentPolicyProposal ? (
+        <section aria-label="Proposed policy changes" className="privileged-operation-policy-review">
+          <h3>Proposed policy changes</h3>
+          <p>Review the exact prepared request and change evidence before approving.</p>
+          <EngineeringResourceGate noun="Proposed policy changes" refresh={proposalResource.refresh} state={proposalResource.state}>
+            {detail => detail && detail.record.operation_id === review.operation_id ? (
+              <>
+                <h4>Proposer</h4>
+                <pre>{JSON.stringify(detail.record.requested_by, null, 2)}</pre>
+                <h4>Prepared request</h4>
+                <pre>{JSON.stringify(detail.record.request, null, 2)}</pre>
+                <h4>Change evidence</h4>
+                <pre>{JSON.stringify(detail.record.evidence, null, 2)}</pre>
+              </>
+            ) : <p>The proposal details do not match this plan.</p>}
+          </EngineeringResourceGate>
+        </section>
+      ) : null}
+
       {review.can_approve || review.can_revoke ? (
         <div className="privileged-operation-actions">
           {review.can_approve ? (
-            <button type="button" onClick={() => void mutate("approve")}>
+            <button type="button" disabled={isAgentPolicyProposal && !proposalMatches} onClick={() => void mutate("approve")}>
               Approve plan
             </button>
           ) : null}
