@@ -301,9 +301,12 @@ pairs and fetches a missing named commit from the checked-out repository; zero-S
 CLI with an explicit pair, or full-audit, for other events. Reusable callers
 should select pull_request and merge_group, or push updates with two existing
 commits. Branch/tag creation has no valid before commit and must use the PR path
-for changed-file verification; no default-branch fallback is invented. Audited symlinks
+for changed-file verification; no default-branch fallback is invented. Changed symlink paths
 resolve only within the committed tree and are classified under the link path;
-links outside that tree or through submodules fail closed. Use in-repository
+links outside that tree or through submodules fail closed. Link hops are bounded,
+and a broken base-side link supplies no preexisting finding exemption, so a PR
+can repair it. The changed-file scan does not discover unchanged links that
+depend on a changed target; that wider dependency gap remains in the test audit. Use in-repository
 links or regular committed files for verification, or full-audit for local analysis. Submodule contents are a reported coverage gap
 because they belong to another repository. Allowed docs, tests, schema examples, Launchplane self-bootstrap wiring,
 admin-supplied inputs, and thin connector mechanics keep explicit allow

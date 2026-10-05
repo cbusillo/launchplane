@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import ast
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 import json
 import os
-import posixpath
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
@@ -1528,7 +1527,7 @@ def build_config_authority_audit(
             if file_mode in {"100644", "100755", "120000"}
         }
         baseline_files, _ = _committed_source_files(
-            root, base_sha, [path for path in changed_paths if path in base_paths]
+            root, base_sha, [path for path in changed_paths if path in base_paths], baseline=True
         )
         for source_file in baseline_files:
             baseline_findings, _ = _scan_source_file(source_file)
@@ -1690,35 +1689,61 @@ def _git_file_modes(root: Path, revision: str) -> dict[str, str]:
     }
 
 
+MAX_COMMITTED_SYMLINK_HOPS = 40
+
+
+class _CommittedPathUnavailable(ValueError):
+    pass
+
+
 def _resolve_committed_path(root: Path, revision: str, path: str, modes: Mapping[str, str]) -> str:
-    seen: set[str] = set()
-    while True:
-        if path in seen:
-            raise ValueError(f"Committed symlink cycle at {path}.")
-        seen.add(path)
-        parts = path.split("/")
-        prefixes = ["/".join(parts[:index]) for index in range(1, len(parts) + 1)]
-        if any(modes.get(prefix) == "160000" for prefix in prefixes[:-1]):
-            raise ValueError(f"Committed symlink cannot resolve through a submodule: {path}.")
-        link = next((prefix for prefix in prefixes if modes.get(prefix) == "120000"), None)
-        if link is None:
-            return path
-        target = _git_bytes(root, "show", f"{revision}:{link}", strict=True).decode("utf-8")
-        if not target:
-            raise ValueError(f"Committed symlink has an empty target: {link}.")
-        if target.startswith("/"):
-            raise ValueError(f"Committed symlink leaves the repository: {link}.")
-        path = posixpath.normpath(
-            posixpath.join(posixpath.dirname(link), target, *parts[len(link.split("/")) :])
-        )
-        if path == ".." or path.startswith("../"):
-            raise ValueError(f"Committed symlink leaves the repository: {link}.")
+    pending = deque(path.split("/"))
+    resolved: list[str] = []
+    hops = 0
+    while pending:
+        part = pending.popleft()
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not resolved:
+                raise _CommittedPathUnavailable(f"Committed symlink leaves the repository: {path}.")
+            resolved.pop()
+            continue
+        candidate = "/".join([*resolved, part])
+        mode = modes.get(candidate)
+        if mode == "120000":
+            hops += 1
+            if hops > MAX_COMMITTED_SYMLINK_HOPS:
+                raise _CommittedPathUnavailable(f"Too many committed symlink hops at {path}.")
+            content = _git_bytes(root, "show", f"{revision}:{candidate}", strict=True)
+            try:
+                target = content.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise _CommittedPathUnavailable(
+                    f"Committed symlink target is not UTF-8: {candidate}."
+                ) from error
+            if not target or target.startswith("/"):
+                raise _CommittedPathUnavailable(
+                    f"Committed symlink target is outside the tree or empty: {candidate}."
+                )
+            pending.extendleft(reversed(target.split("/")))
+            continue
+        if mode == "160000" and (pending or hops):
+            raise _CommittedPathUnavailable(
+                f"Committed symlink cannot resolve through a submodule: {path}."
+            )
+        if mode is None or (pending and mode != "040000"):
+            raise _CommittedPathUnavailable(f"Committed path does not resolve in the tree: {path}.")
+        resolved.append(part)
+    return "/".join(resolved) or "."
 
 
 def _committed_source_files(
     root: Path,
     revision: str,
     relative_paths: Sequence[str],
+    *,
+    baseline: bool = False,
 ) -> tuple[list[AuditSourceFile], list[CoverageGap]]:
     files: list[AuditSourceFile] = []
     gaps: list[CoverageGap] = []
@@ -1735,7 +1760,13 @@ def _committed_source_files(
                 CoverageGap(relative_path, "skipped_dependency_manifest", "Dependency lockfile.")
             )
             continue
-        blob_path = _resolve_committed_path(root, revision, relative_path, modes)
+        try:
+            blob_path = _resolve_committed_path(root, revision, relative_path, modes)
+        except _CommittedPathUnavailable as error:
+            if not baseline:
+                raise
+            gaps.append(CoverageGap(relative_path, "unavailable_baseline_path", str(error)))
+            continue
         mode = modes.get(blob_path)
         if mode == "160000":
             if blob_path != relative_path:

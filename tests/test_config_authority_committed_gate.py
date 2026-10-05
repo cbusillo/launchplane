@@ -199,3 +199,70 @@ class CommittedConfigAuthorityGateTests(unittest.TestCase):
                             head_sha=_git(root, "rev-parse", "HEAD"),
                         )
                     link.unlink()
+
+    def test_parent_component_follows_the_prior_symlink_before_dotdot(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _init_repo(root)
+            (root / "tests/fixtures/deep").mkdir(parents=True)
+            (root / "tests/fixtures/deep/keep.txt").write_text("# directory\n")
+            (root / "tests/fixtures/real.env").write_text("PRODUCT_DOMAIN=live.example\n")
+            (root / "real.env").write_text("# harmless\n")
+            _commit_all(root)
+            base = _git(root, "rev-parse", "HEAD")
+            (root / "a").symlink_to("tests/fixtures/deep")
+            (root / "runtime.env").symlink_to("a/../real.env")
+            _commit_all(root)
+            payload = build_config_authority_audit(
+                control_plane_root=root,
+                mode="changed-files-gate",
+                base_sha=base,
+                head_sha=_git(root, "rev-parse", "HEAD"),
+            )
+            self.assertEqual(
+                evaluate_config_authority_gate(payload, profile="product-repo")["status"], "fail"
+            )
+
+    def test_broken_baseline_link_can_be_repaired_and_expanding_cycles_stop(self) -> None:
+        from control_plane.config_authority_audit import MAX_COMMITTED_SYMLINK_HOPS
+        import control_plane.config_authority_audit as audit
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _init_repo(root)
+            link = root / "CLAUDE.md"
+            link.symlink_to("../AGENTS.md")
+            _commit_all(root)
+            base = _git(root, "rev-parse", "HEAD")
+            link.unlink()
+            link.write_text("# repaired\n")
+            _commit_all(root)
+            payload = build_config_authority_audit(
+                control_plane_root=root,
+                mode="changed-files-gate",
+                base_sha=base,
+                head_sha=_git(root, "rev-parse", "HEAD"),
+            )
+            self.assertEqual(evaluate_config_authority_gate(payload)["status"], "pass")
+            (root / "loop").symlink_to("loop/x")
+            (root / "runtime.env").symlink_to("loop/runtime.env")
+            _commit_all(root)
+            original = audit._git_bytes
+            calls = 0
+
+            def bounded_read(path: Path, *arguments: str, strict: bool = False) -> bytes:
+                nonlocal calls
+                if arguments[0] == "show":
+                    calls += 1
+                    if calls > MAX_COMMITTED_SYMLINK_HOPS + 1:
+                        raise RuntimeError("Resolver did not stop within its hop budget")
+                return original(path, *arguments, strict=strict)
+
+            with patch.object(audit, "_git_bytes", side_effect=bounded_read):
+                with self.assertRaisesRegex(ValueError, "symlink hops"):
+                    build_config_authority_audit(
+                        control_plane_root=root,
+                        mode="changed-files-gate",
+                        base_sha=base,
+                        head_sha=_git(root, "rev-parse", "HEAD"),
+                    )
