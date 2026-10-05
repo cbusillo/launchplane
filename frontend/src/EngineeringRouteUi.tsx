@@ -25,6 +25,7 @@ const ENGINEERING_VIEWS: Exclude<EngineeringView, "hub">[] = [
   "merge-train",
   "tenant-admission",
   "governance-projection",
+  "github-delivery",
   "privileged-operations",
 ];
 

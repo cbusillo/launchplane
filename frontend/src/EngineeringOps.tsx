@@ -15,6 +15,7 @@ import { EngineeringGovernanceProjectionRoute } from "./EngineeringGovernancePro
 import { EngineeringPrivilegedOperationsRoute } from "./EngineeringPrivilegedOperationsRoute";
 import { EngineeringTenantAdmissionRoute } from "./EngineeringTenantAdmissionRoute";
 import { EngineeringRouteFrame } from "./EngineeringRouteUi";
+import { EngineeringGitHubDeliveryRoute } from "./EngineeringGitHubDeliveryRoute";
 import { EngineeringWorkGraphRoute } from "./EngineeringWorkGraphRoute";
 import {
   AppLink,
@@ -25,6 +26,13 @@ import {
 import type { DevFixtureMode } from "./dev-fixture-loader";
 
 const ENGINEERING_SURFACES = [
+  {
+    detail: "Select the service's existing Delivery App key and review obsolete service-token retirement.",
+    icon: KeyRound,
+    label: "Director controls",
+    title: "GitHub delivery",
+    view: "github-delivery" as const,
+  },
   {
     detail:
       "Inspect current readiness, immutable admission, landing outcome, and GitHub observations.",
@@ -86,10 +94,15 @@ const ENGINEERING_SURFACES = [
 export function EngineeringOpsRoute({
   fixtureMode,
   view,
+  actorId,
 }: {
   fixtureMode: DevFixtureMode;
   view: EngineeringView;
+  actorId: number;
 }) {
+  if (view === "github-delivery") {
+    return <EngineeringGitHubDeliveryRoute actorId={actorId} />;
+  }
   if (view === "work-graph") {
     return <EngineeringWorkGraphRoute fixtureMode={fixtureMode} />;
   }
