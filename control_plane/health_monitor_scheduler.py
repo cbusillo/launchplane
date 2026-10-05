@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import logging
 from threading import Event, Thread
@@ -20,6 +21,7 @@ from control_plane.contracts.public_ingress_monitoring import (
 )
 from control_plane.provider_operations import _ReservationHeartbeat
 from control_plane.workflows.public_ingress_monitor import (
+    MonitorRunCancelled,
     public_ingress_notification_drivers,
     record_monitor_cadence,
     run_public_ingress_monitor_once,
@@ -127,25 +129,25 @@ class HealthMonitorScheduler:
         while not self._stop.is_set():
             try:
                 action()
+            except MonitorRunCancelled:
+                pass
             except Exception:  # noqa: BLE001 - keep the watchdog and next attempt alive.
                 _LOGGER.exception("Health monitor scheduler pass failed")
             self._stop.wait(MONITOR_POLL_SECONDS)
 
-    def run_once(self) -> bool:
-        now = self.clock()
-        key = str(monitor_slot(now))
-        if self._read(key) is not None:
-            return False
+    @contextmanager
+    def _lease(self, key: str) -> Iterator[_ReservationHeartbeat | None]:
         claim = self.store.reserve_mutation(
             scope=_SCOPE,
             route_path=_ROUTE,
-            idempotency_key="active",
+            idempotency_key=key,
             request_fingerprint="health-monitor-scheduler-v1",
             lease_owner=self._owner,
             lease_seconds=MONITOR_POLL_SECONDS * 4,
         )
         if claim.status != "acquired":
-            return False
+            yield None
+            return
         heartbeat = _ReservationHeartbeat(
             store=self.store,
             reservation=claim.record,
@@ -154,20 +156,28 @@ class HealthMonitorScheduler:
         )
         heartbeat.start()
         try:
+            yield heartbeat
+        finally:
+            reservation, _failure = heartbeat.stop()
+            self.store.release_mutation_reservation(reservation=reservation)
+
+    def run_once(self) -> bool:
+        key = str(monitor_slot(self.clock()))
+        if self._read(key) is not None:
+            return False
+        with self._lease("active") as heartbeat:
+            if heartbeat is None:
+                return False
             # Another replica may have finished this slot while we waited for the lease.
             if self._read(key) is not None:
                 return False
             self.run_monitor()
+            if self._stop.is_set():
+                raise MonitorRunCancelled()
             heartbeat.assert_current()
-            _reservation, failure = heartbeat.stop()
-            if failure:
-                raise RuntimeError("Health monitor completion lease is not held")
             self._write_completion(key, self.clock())
             _LOGGER.info("Health monitor slot %s completed", key)
             return True
-        finally:
-            reservation, _failure = heartbeat.stop()
-            self.store.release_mutation_reservation(reservation=reservation)
 
     def watch_once(self) -> bool:
         now = self.clock()
@@ -185,12 +195,22 @@ class HealthMonitorScheduler:
         enabled_slot = monitor_slot(enabled_at)
         if due_slot < enabled_slot:
             return False
-        completed = self._read(str(due_slot))
-        missed = completed is None
-        report_key = (due_slot, missed)
-        if self._last_report != report_key:
-            self.report_cadence(missed, _timestamp(now))
-            self._last_report = report_key
+        missed = self._read(str(due_slot)) is None
+        if self._last_report == (due_slot, missed):
+            return missed
+        with self._lease("watch-active") as heartbeat:
+            if heartbeat is None:
+                return missed
+            # Serialize missed and recovery reporting, and re-read after claiming.
+            missed = self._read(str(due_slot)) is None
+            key = f"watch:{due_slot}:{missed}"
+            if self._read(key) is None:
+                self.report_cadence(missed, _timestamp(self.clock()))
+                if self._stop.is_set():
+                    raise MonitorRunCancelled()
+                heartbeat.assert_current()
+                self._write_completion(key, self.clock())
+            self._last_report = (due_slot, missed)
         if missed:
             _LOGGER.error("Health monitor slot %s missed its completion deadline", due_slot)
         return missed
@@ -200,12 +220,18 @@ class HealthMonitorScheduler:
             record_store=self.store,
             notification_drivers=public_ingress_notification_drivers(record_store=self.store),
             runtime_identity_confirmation_delay_seconds=30,
+            should_stop=self._stop.is_set,
+            sleep=self._wait,
         )
 
     def _report_cadence(self, missed: bool, observed_at: str) -> None:
         record_monitor_cadence(
             record_store=self.store,
             missed=missed,
+            should_stop=self._stop.is_set,
             observed_at=observed_at,
             notification_drivers=public_ingress_notification_drivers(record_store=self.store),
         )
+
+    def _wait(self, seconds: float) -> None:
+        self._stop.wait(seconds)

@@ -624,6 +624,15 @@ def _private_health_endpoint_material_sha256(endpoint: PrivateHealthEndpointReco
     ).hexdigest()
 
 
+class MonitorRunCancelled(RuntimeError):
+    """The service is stopping; unfinished work is not a completed monitor run."""
+
+
+def _check_monitor_cancelled(should_stop: Callable[[], bool] | None) -> None:
+    if should_stop is not None and should_stop():
+        raise MonitorRunCancelled()
+
+
 def run_public_ingress_monitor_once(
     *,
     record_store: PublicIngressMonitorStore,
@@ -636,6 +645,7 @@ def run_public_ingress_monitor_once(
     notification_drivers: PublicIngressNotificationDrivers | None = None,
     runtime_identity_confirmation_delay_seconds: float = 0,
     sleep: Callable[[float], None] = time.sleep,
+    should_stop: Callable[[], bool] | None = None,
 ) -> PublicIngressMonitorResult:
     observed_at = checked_at.strip() or utc_now_timestamp()
     public_get = http_get or fetch_public_ingress_url
@@ -656,6 +666,7 @@ def run_public_ingress_monitor_once(
     authority_changed_count = 0
 
     def probe(target: PublicIngressMonitorTarget) -> PublicIngressObservationRecord:
+        _check_monitor_cancelled(should_stop)
         return check_public_ingress_target(
             target=target,
             checked_at=observed_at,
@@ -686,6 +697,7 @@ def run_public_ingress_monitor_once(
             )
             probed[index] = (target, probe(target))
     for target, record in probed:
+        _check_monitor_cancelled(should_stop)
         stored_transition = _store_monitor_observation(
             record_store=record_store,
             record=record,
@@ -710,6 +722,7 @@ def run_public_ingress_monitor_once(
         eligible_target_keys=eligible_target_keys,
         observed_at=observed_at,
     ):
+        _check_monitor_cancelled(should_stop)
         stored_transition = _store_monitor_observation(
             record_store=record_store,
             record=record,
@@ -756,9 +769,11 @@ def record_monitor_cadence(
     missed: bool,
     observed_at: str,
     notification_drivers: PublicIngressNotificationDrivers | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> None:
     """Separate scheduler incidents, delivered only to each check's existing destinations."""
     for target in discover_public_ingress_monitor_targets(record_store):
+        _check_monitor_cancelled(should_stop)
         if not target.incident_eligible:
             continue
         check_name = f"{MONITOR_CADENCE_CHECK_PREFIX}{target.check_kind}:{target.check_name}"

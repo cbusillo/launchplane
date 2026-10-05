@@ -21,6 +21,7 @@ from control_plane.contracts.public_ingress_monitoring import (
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.public_ingress_monitor import (
     HttpObservation,
+    MonitorRunCancelled,
     PublicIngressNotificationDriverSet,
     record_monitor_cadence,
     run_public_ingress_monitor_once,
@@ -119,10 +120,57 @@ class HealthMonitorSchedulerTests(unittest.TestCase):
         scheduler.run_monitor = lambda: order.append("probe")
         with patch.object(scheduler, "_loop", return_value=None):
             scheduler.start()
+            self.assertEqual(order, ["missed"])
+            scheduler.run_once()
             scheduler.stop()
-        self.assertEqual(order, ["missed"])
-        scheduler.run_once()
         self.assertEqual(order[-1], "probe")
+
+    def test_replicas_report_miss_and_recovery_once(self) -> None:
+        peer = self.make_scheduler()
+        self.now += MONITOR_COMPLETION_GRACE_SECONDS
+        self.assertTrue(self.scheduler.watch_once())
+        self.assertTrue(peer.watch_once())
+        self.assertEqual(self.alert.call_count, 1)
+        self.scheduler.run_once()
+        self.assertFalse(peer.watch_once())
+        self.assertFalse(self.scheduler.watch_once())
+        self.assertEqual(self.alert.call_count, 2)
+
+    def test_shutdown_cancels_unfinished_run_without_completing_slot(self) -> None:
+        entered = Event()
+
+        def until_shutdown() -> None:
+            entered.set()
+            if not self.scheduler._stop.wait(5):
+                raise TimeoutError("scheduler did not signal shutdown")
+            raise MonitorRunCancelled()
+
+        self.scheduler.run_monitor = until_shutdown
+        self.scheduler.start()
+        threads = list(self.scheduler._threads)
+        try:
+            self.assertTrue(entered.wait(5))
+        finally:
+            self.scheduler.stop()
+        self.assertIsNone(self.scheduler._read(str(int(self.now // MONITOR_INTERVAL_SECONDS))))
+        self.assertIsNone(self.scheduler._read("active"))
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+
+    def test_unexpected_callback_failure_does_not_end_worker(self) -> None:
+        calls: list[str] = []
+
+        def unexpected_failure_then_stop() -> None:
+            calls.append("attempt")
+            if len(calls) == 1:
+                raise LookupError("unexpected callback failure")
+            self.scheduler._stop.set()
+
+        with (
+            patch("control_plane.health_monitor_scheduler.MONITOR_POLL_SECONDS", 0),
+            self.assertLogs("control_plane.health_monitor_scheduler", level="ERROR"),
+        ):
+            self.scheduler._loop(unexpected_failure_then_stop)
+        self.assertEqual(len(calls), 2)
 
     def test_slow_alert_delivery_cannot_block_probe_lease_renewal(self) -> None:
         probing = Event()
@@ -151,7 +199,7 @@ class HealthMonitorSchedulerTests(unittest.TestCase):
                 store=store,
                 reservation=reservation,
                 lease_seconds=lease_seconds,
-                interval_seconds=0.01,
+                interval_seconds=min(interval_seconds, 0.01),
             )
 
         original_renew = self.store.renew_mutation_reservation
@@ -160,7 +208,11 @@ class HealthMonitorSchedulerTests(unittest.TestCase):
             *, reservation: LaunchplaneIdempotencyRecord, lease_seconds: int = 300
         ) -> object:
             result = original_renew(reservation=reservation, lease_seconds=lease_seconds)
-            if reporting.is_set() and result.status == "updated":
+            if (
+                reporting.is_set()
+                and reservation.idempotency_key == "active"
+                and result.status == "updated"
+            ):
                 renewed.set()
             return result
 
@@ -194,6 +246,22 @@ class HealthMonitorSchedulerTests(unittest.TestCase):
 
 
 class MonitorCadenceIncidentTests(unittest.TestCase):
+    def test_stopping_monitor_does_not_persist_partial_probe_batch(self) -> None:
+        store = _Store((_profile(),))
+        stopped = Event()
+
+        def probe_then_stop(url: str, _timeout: int) -> HttpObservation:
+            stopped.set()
+            return HttpObservation(200, url, 0)
+
+        with self.assertRaises(MonitorRunCancelled):
+            run_public_ingress_monitor_once(
+                record_store=store,
+                http_get=probe_then_stop,
+                should_stop=stopped.is_set,
+            )
+        self.assertEqual(store.records, [])
+
     def test_cadence_alert_does_not_replace_site_incident_and_uses_existing_policy(self) -> None:
         profile = _profile()
         store = _Store((profile,))

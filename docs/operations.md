@@ -1438,6 +1438,9 @@ The Launchplane service owns the recurring schedule: it starts one run per
 30-minute UTC slot, polling every 30 seconds, independently of GitHub cron.
 The service lifespan starts and stops the scheduler; DB-backed completion records
 survive restarts, and a renewed DB lease serializes replicas across slots.
+Shutdown cancels before the next probe or incident update and interrupts the
+runtime-identity confirmation wait. In-flight requests finish under their existing
+timeouts; cancelled batches do not count as completed scheduled runs.
 The service uses the same monitor, recorded lane intent, notification policies,
 and managed secrets as manual runs, with no caller credential or new grant.
 The `Public Ingress Monitor` workflow remains a manual admin rerun and best-effort
@@ -1459,6 +1462,8 @@ Completion records use mutation scope `launchplane:health-monitor-scheduler`,
 route `service:health-monitor-scheduler`, and the UTC epoch slot as idempotency key.
 Service logs identify completed and missed slots; incident and notification
 records show alert and recovery delivery.
+Watchdog reporting has its own renewed lease and DB-backed per-slot receipts,
+so replicas and restarts share miss/recovery delivery state.
 
 If the entire service is down, it cannot send a notification until it restarts;
 an external availability monitor is needed for alerts during a total outage.
