@@ -168,6 +168,17 @@ decision under the recorded Client's identity, with
 `acceptance_source: director_standing`; it does not claim a human clicked Accept.
 It publishes that exact checklist through the existing release-record path
 before queueing the backup. Publication retries reuse the saved decision.
+Creation is insert-if-absent: replicas racing on the same decision ID publish
+the stored winner, retaining its original Client identity and decision time.
+Publication updates only an existing decision's empty issue URL under a storage
+lock; a stale writer cannot clear or replace an authoritative publication or
+rewrite the checklist and audit fields.
+The Client's decision route uses the same creation and publication operations,
+so a Client retry cannot upsert a stale unpublished snapshot over the worker's
+publication. An already published winner needs no further source-control lookup.
+The first stored issue URL is authoritative. Concurrent external issue creation
+can still produce a duplicate issue with that decision's marker; publication
+serialization is tracked separately in [#3030](https://github.com/cbusillo/launchplane/issues/3030).
 Missing notes, missing lane identities or a Client, a held or prelaunch product,
 and a request for changes or admin override on that checklist start nothing. A failed
 release is not automatically retried with another acceptance of the same

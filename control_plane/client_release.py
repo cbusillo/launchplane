@@ -509,15 +509,15 @@ def _record_standing_acceptance(
             release_start="promote",
             acceptance_source="director_standing",
         )
-        store.write_release_review_decision_record(decision)
+    decision = store.create_release_review_decision_record_if_absent(decision)
     # Use the existing publication/recovery path. An unpublished decision cannot
     # queue a backup or promotion, and a retry keeps the same decision id.
-    issue_url = publish_release_decision(
+    issue_url = decision.release_issue_url or publish_release_decision(
         control_plane_root=control_plane_root, profile=profile, decision=decision
     )
     if issue_url:
-        store.write_release_review_decision_record(
-            decision.model_copy(update={"release_issue_url": issue_url})
+        store.record_release_review_decision_publication(
+            record_id=decision.record_id, release_issue_url=issue_url
         )
         if backoff is not None:
             backoff.blocked.pop(profile.product, None)
