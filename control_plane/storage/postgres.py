@@ -37460,7 +37460,8 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_secret_record(self, record: SecretRecord) -> None:
-        self._write_bundled_metadata_row(self._secret_row(record))
+        # Existing records are row-guarded; concurrent direct creates arbitrate by uniqueness.
+        self._write_row(self._secret_row(record))
 
     def _write_bundled_metadata_row(self, row: Base) -> None:
         with self._session_factory() as session:
