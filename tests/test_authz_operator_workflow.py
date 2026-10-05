@@ -266,7 +266,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                 env={
                     **os.environ,
                     "DEFAULT_BRANCH": "main",
-                    "EXPECTED_MANAGED_SET_ID": "operator.manager-preview-approval",
+                    "EXPECTED_MANAGED_SET_ID": "operator.unrelated-test-set",
                     "GITHUB_EVENT_NAME": "workflow_dispatch",
                     "GITHUB_OUTPUT": str(Path(temporary_directory) / "github-output"),
                     "GITHUB_REF": "refs/heads/main",
@@ -274,7 +274,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                     "GITHUB_RUN_ID": "1234",
                     "LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON": json.dumps(configuration),
                     "MODE": "dry_run",
-                    "REASON": "Review the manager preview authorization set.",
+                    "REASON": "Review an unrelated authorization set.",
                     "RELATED_ISSUE": "cbusillo/launchplane#1919",
                     "REVIEWED_PLAN_SHA256": "",
                     "RUNNER_TEMP": temporary_directory,
