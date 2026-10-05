@@ -443,7 +443,8 @@ def run_durable_provider_operation(
     reservation = reservation_result.record
 
     if (
-        decision == "target_busy"
+        allow_mutation
+        and decision == "target_busy"
         and reservation.state == "reconcile_required"
         and target_supersession is not None
         and target_supersession.quiescence_check(reservation)

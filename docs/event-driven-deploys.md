@@ -161,6 +161,8 @@ reservation. The webhook request never waits on a deploy.
     record, so removing the domain during destroy does not prevent observing the
     original compose. Fresh planning and destination checks still precede any
     mutation retry. Pre-checkpoint provider read outages do not consume attempts.
+    Typed permanent read refusals remain bounded failures. A stale or incompatible
+    retained plan falls back to fresh planning instead of preventing profile repairs.
     Older requests without a retained plan still need ready inputs; no target is
     guessed from a name or an error message.
     The plan retains `destroy_failed_attempts`,

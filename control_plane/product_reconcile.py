@@ -25,6 +25,7 @@ from urllib.parse import quote, urlencode
 from uuid import uuid4
 
 import click
+from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane import secrets
@@ -1298,6 +1299,7 @@ def reconcile_preview_target(
         and (
             plan.get("preview_operation_status") != "reconcile_required"
             or plan.get("preview_mutation_attempted") is True
+            or plan.get("preview_execution_refused") is True
         )
         and not plan.get("preview_transport_retryable")
     ):
@@ -1473,9 +1475,14 @@ def _run_preview_operation(
             # including execution that raises instead of returning a result.
             plan["preview_mutation_attempted"] = True
 
-        return preview_hooks.execute_apply(
-            **{**kwargs, "provider_effect_checkpoint": checkpoint_effect}
-        )
+        try:
+            return preview_hooks.execute_apply(
+                **{**kwargs, "provider_effect_checkpoint": checkpoint_effect}
+            )
+        except Exception as error:
+            if not isinstance(error, DokployRequestFailed) or not error.retryable:
+                plan["preview_execution_refused"] = True
+            raise
 
     def run_issued_plan(
         issued_plan: OdooPreviewApplyInputsResult, *, allow_mutation: bool
@@ -1543,12 +1550,18 @@ def _run_preview_operation(
     try:
         recovery_plan = plan.get("preview_recovery_plan")
         if unknown_destroy and isinstance(recovery_plan, dict):
-            stored_plan = OdooPreviewApplyInputsResult.model_validate(recovery_plan)
-            # Observe the original target before new discovery: destroy may already
-            # have removed its domain, making fresh planning impossible.
-            observed = run_issued_plan(stored_plan, allow_mutation=False)
-            if observed.status != "reconcile_required" or not allow_retry:
-                return finish_result(observed, stored_plan)
+            try:
+                stored_plan = OdooPreviewApplyInputsResult.model_validate(recovery_plan)
+                # Observe the original target before new discovery: destroy may already
+                # have removed its domain, making fresh planning impossible.
+                observed = run_issued_plan(stored_plan, allow_mutation=False)
+            except (ValidationError, OdooPreviewPlanProvenanceError):
+                # Retained intent must not prevent a supported profile/model repair.
+                # Fresh planning still owns mutation authority and the runner's fence.
+                plan.pop("preview_recovery_plan", None)
+            else:
+                if observed.status != "reconcile_required" or not allow_retry:
+                    return finish_result(observed, stored_plan)
         inputs = preview_hooks.build_inputs(
             control_plane_root=control_plane_root,
             record_store=record_store,

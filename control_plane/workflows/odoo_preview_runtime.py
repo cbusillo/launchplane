@@ -1749,6 +1749,7 @@ def _execute_destroy(
         domain_host=plan.domain_host,
         delete_volumes=plan.delete_volumes,
         continue_after_domain_cleanup_error=False,
+        propagate_domain_lookup_error=True,
         missing_resource_is_clean=True,
         before_provider_mutation=provider_effect_checkpoint,
     )

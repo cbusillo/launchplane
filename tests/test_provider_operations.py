@@ -515,18 +515,29 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
                     reconciliation_key=_RECONCILIATION_KEY,
                 )
                 clock["now"] = "2026-07-30T15:17:00Z"
+                supersession = ProviderTargetSupersession(
+                    response_status_code=409,
+                    response_payload={"status": "superseded"},
+                    minimum_expired_seconds=900,
+                    quiescence_check=lambda _reservation: True,
+                )
+                observed = fixture.run(
+                    adapter,
+                    idempotency_key="provider-op:destroy:new",
+                    request_fingerprint="provider-op-fingerprint-destroy",
+                    target_supersession=supersession,
+                    allow_mutation=False,
+                )
+                self.assertEqual(observed.status, "target_busy")
+                self.assertEqual(adapter.apply_calls, 0)
+                self.assertEqual(observed.record, marked.record)
                 result = fixture.run(
                     adapter,
                     lease_owner="instance-b",
                     response_trace_id="destroy-trace",
                     idempotency_key="provider-op:destroy:new",
                     request_fingerprint="provider-op-fingerprint-destroy",
-                    target_supersession=ProviderTargetSupersession(
-                        response_status_code=409,
-                        response_payload={"status": "superseded"},
-                        minimum_expired_seconds=900,
-                        quiescence_check=lambda _reservation: True,
-                    ),
+                    target_supersession=supersession,
                 )
             stored_stale = fixture.store.read_idempotency_record(
                 scope=_SCOPE,

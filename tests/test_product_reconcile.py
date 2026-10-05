@@ -1879,6 +1879,55 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
                 failed = self.run_once()
             self.assertEqual(failed.last_plan["destroy_failed_attempts"], 0)
 
+    def test_profile_repair_replans_when_retained_destroy_authority_is_stale(self) -> None:
+        calls = self.install_refused_domain_provider()
+        self.request("preview", 5)
+        with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+            self.run_once()
+        profile = self.store.read_product_profile_record("site")
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "preview": profile.preview.model_copy(update={"template_instance": "repaired"}),
+                    "updated_at": "2026-10-05T12:00:00Z",
+                }
+            )
+        )
+        self.request("preview", 5)
+        with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+            repaired = self.run_once()
+        self.assertEqual(calls.count("/api/domain.delete"), 2)
+        self.assertEqual(repaired.last_plan["destroy_failed_attempts"], 1)
+
+    def test_permanent_domain_lookup_refusal_after_unknown_destroy_is_bounded(self) -> None:
+        self.install_refused_domain_provider()
+        self.request("preview", 5)
+        with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+            self.run_once()
+        original = self.provider.execute_apply
+
+        def refused_lookup(
+            *, issued_plan: OdooPreviewApplyInputsResult, **kwargs: object
+        ) -> dict[str, object]:
+            with patch(
+                "control_plane.workflows.preview_resource_destroy._preview_resource_domain_ids",
+                side_effect=DokployRequestFailed(
+                    method="GET", path="/api/domain.byComposeId", detail="Refused", status_code=403
+                ),
+            ):
+                return original(issued_plan=issued_plan, **kwargs)
+
+        with patch.object(self.provider, "execute_apply", refused_lookup):
+            for _sweep in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS):
+                self.request("preview", 5)
+                self.run_once()
+        self.request("preview", 5)
+        held = self.run_once()
+        self.assertEqual(held.last_plan["reason"], "preview_destroy_retry_limit")
+        self.assertEqual(
+            held.last_plan["destroy_failed_attempts"], PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS
+        )
+
     def test_raised_failure_after_safe_destroy_retry_consumes_attempts(self) -> None:
         self.install_refused_domain_provider()
         self.request("preview", 5)
