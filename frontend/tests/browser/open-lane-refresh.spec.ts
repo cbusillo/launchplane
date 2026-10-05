@@ -1,0 +1,130 @@
+import { expect, test } from "@playwright/test";
+
+for (const environmentView of [false, true]) {
+  test(`open ${environmentView ? "environment" : "workspace"} reads recover without reusing expired proof`, async ({ page }, testInfo) => {
+    await page.goto("/ui/products?fixture=products");
+    const fixtures = await page.evaluate(async () => {
+      const modulePath = "/ui/src/dev-fixtures.ts";
+      const module = await import(modulePath);
+      const products = module.productsForFixture("products");
+      const product = products[0];
+      const detail = module.environmentForFixture("products", product.product, "testing");
+      return { products, product, detail, identity: module.fixtureIdentity,
+        incidents: module.incidentsForFixture("products", product.product, "testing") };
+    });
+    const start = Date.parse(fixtures.detail.provenance.stale_after) - 1000;
+    await page.clock.install({ time: new Date(start) });
+    let responseMode: "old" | "delay" | "fail" | "unverified" | "fresh" = "old";
+    let reads = 0;
+    let inventoryReads = 0;
+    let releaseRead: (() => void) | undefined;
+    const mutations: string[] = [];
+    page.on("request", request => {
+      if (request.url().includes("/v1/") && request.method() !== "GET") mutations.push(request.url());
+    });
+    const currentProof = <T,>(data: T): T => {
+      const copy = structuredClone(data);
+      const now = new Date(start + 600_000).toISOString();
+      const refresh = (value: unknown) => {
+        if (!value || typeof value !== "object") return;
+        const record = value as Record<string, unknown>;
+        if ("stale_after" in record) {
+          record.stale_after = now;
+          record.refreshed_at = new Date(start + 180_000).toISOString();
+        }
+        for (const child of Object.values(record)) refresh(child);
+      };
+      refresh(copy);
+      return copy;
+    };
+    await page.route("**/v1/**", route => route.fulfill({ status: 403, json: { status: "error", trace_id: "unused-read", error: { code: "authorization_denied", message: "Fixture read unavailable" } } }));
+    await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: "csrf", identity: fixtures.identity } }));
+    await page.route("**/v1/products", route => {
+      inventoryReads++;
+      return route.fulfill({ json: { status: "ok", trace_id: "products", products: responseMode === "fresh" ? currentProof(fixtures.products) : fixtures.products } });
+    });
+    const productUrl = `**/v1/products/${fixtures.product.product}`;
+    const detailUrl = `${productUrl}/environments/testing`;
+    const targetUrl = environmentView ? detailUrl : productUrl;
+    if (environmentView) await page.route(productUrl, route => route.fulfill({ json: { status: "ok", trace_id: "product", product: fixtures.product } }));
+    await page.route(targetUrl, async route => {
+      reads++;
+      if (responseMode === "delay") await new Promise<void>(resolve => { releaseRead = resolve; });
+      if (responseMode === "fail") {
+        await route.fulfill({ status: 503, json: { status: "error", error: { code: "read_unavailable", message: "Evidence read unavailable" }, trace_id: "failed-refresh" } });
+        return;
+      }
+      let data = environmentView ? fixtures.detail : fixtures.product;
+      if (responseMode === "unverified") {
+        data = currentProof(data);
+        const lane = environmentView ? data : data.environments.find((value: { environment: string }) => value.environment === "testing");
+        lane.provenance.freshness_status = "recorded";
+        lane.trust_state = "recorded";
+        lane.health_monitoring.checks[0].runtime_identity_status = "missing";
+        lane.health_monitoring.checks[0].trust_state = "recorded";
+        lane.topology.observed.placement.provenance.freshness_status = "recorded";
+        lane.topology.observed.placement.trust_state = "recorded";
+      }
+      await route.fulfill({ json: { status: "ok", trace_id: "read",
+        [environmentView ? "environment" : "product"]: responseMode === "fresh" ? currentProof(data) : data } });
+    });
+    await page.route(`${detailUrl}/public-ingress/incidents`, route => route.fulfill({ json: { status: "ok", trace_id: "incidents", incident_list: fixtures.incidents } }));
+    await page.goto(`/ui/products/${fixtures.product.product}${environmentView ? "/environments/testing" : ""}`);
+    const signal = page.locator(environmentView ? ".condition-tile" : ".signal-tile")
+      .filter({ hasText: environmentView ? /^Runtime identity/i : /^Testing/i });
+    await expect(signal).toHaveAttribute("data-tone", environmentView ? "pass" : "verified");
+    await page.clock.runFor(2000);
+    await expect(signal).toContainText("Stale");
+    await expect(signal).toHaveAttribute("data-tone", "warning");
+    const initialReads = reads;
+    responseMode = "delay";
+    await page.clock.runFor(60_000);
+    await expect.poll(() => Boolean(releaseRead)).toBe(true);
+    expect(reads).toBe(initialReads + 1);
+    await page.clock.runFor(120_000);
+    expect(reads).toBe(initialReads + 1);
+    await expect(signal).toHaveAttribute("data-tone", "warning");
+    responseMode = "fail";
+    releaseRead!();
+    await expect(page.getByText("Evidence read unavailable", { exact: false }).first()).toBeVisible();
+    await expect(signal).toContainText("Stale");
+    await page.screenshot({ path: `../tmp/browser-smoke/open-${environmentView ? "environment" : "workspace"}-failed-${testInfo.project.name}.png`, fullPage: true });
+    responseMode = "unverified";
+    await page.clock.runFor(60_000);
+    await expect.poll(() => reads).toBe(initialReads + 2);
+    await expect(signal).toHaveAttribute("data-tone", "warning");
+    await expect(signal).toContainText("Recorded");
+    responseMode = "fresh";
+    await page.evaluate(() => Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" }));
+    await page.clock.runFor(60_000);
+    expect(reads).toBe(initialReads + 2);
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("focus"));
+      window.dispatchEvent(new Event("focus"));
+    });
+    await expect.poll(() => reads).toBe(initialReads + 3);
+    await expect(signal).toHaveAttribute("data-tone", environmentView ? "pass" : "verified");
+    await expect(signal).not.toContainText("Stale");
+    // Inventory has its own read lifecycle, including the rail's lane evidence.
+    await page.clock.runFor(60_000);
+    await expect(page.locator('.rail-product-link[data-active="true"] [data-lane="testing"]')).toHaveAttribute("data-trust", "verified");
+    await page.screenshot({ path: `../tmp/browser-smoke/open-${environmentView ? "environment" : "workspace"}-recovered-${testInfo.project.name}.png`, fullPage: true });
+    responseMode = "delay";
+    releaseRead = undefined;
+    await page.clock.runFor(60_000);
+    await expect.poll(() => Boolean(releaseRead)).toBe(true);
+    const observedReads = reads;
+    await page.getByRole("link", { name: "Engineering Ops" }).click();
+    await expect(page.getByRole("heading", { name: "Platform delivery systems", exact: true })).toBeVisible();
+    const observedInventoryReads = inventoryReads;
+    responseMode = "fresh";
+    releaseRead!();
+    await page.clock.runFor(120_000);
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    expect(reads).toBe(observedReads);
+    expect(inventoryReads).toBe(observedInventoryReads);
+    expect(mutations).toEqual([]);
+  });
+}
