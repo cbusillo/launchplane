@@ -382,6 +382,18 @@ def execute_generic_web_prod_promotion(
             target_name=_fallback_target_name(request=request, lane=destination_lane),
             target_type="application",
             deployment_record_id="",
+        ).model_copy(
+            update={
+                "rollback": RollbackExecutionEvidence(
+                    target_deployment_record_id=rollback_target.deployment_record_id,
+                    target_promotion_record_id=rollback_target.previous_inventory.promotion_record_id
+                    if rollback_target.previous_inventory is not None
+                    else "",
+                    target_promoted_from_instance=rollback_target.previous_inventory.promoted_from_instance
+                    if rollback_target.previous_inventory is not None
+                    else "",
+                )
+            }
         ),
     ) as backup_checkpoint:
 
@@ -743,6 +755,12 @@ def _roll_back_production(
             status="pass" if healthy else "fail",
             detail=detail,
             target_deployment_record_id=target_id,
+            target_promotion_record_id=rollback_target.previous_inventory.promotion_record_id
+            if rollback_target.previous_inventory is not None
+            else "",
+            target_promoted_from_instance=rollback_target.previous_inventory.promoted_from_instance
+            if rollback_target.previous_inventory is not None
+            else "",
             deployment_record_id=rollback_record.record_id,
             started_at=started_at,
             finished_at=utc_now_timestamp(),
@@ -1130,6 +1148,8 @@ def _create_or_verify_github_release(
     token = resolve_launchplane_github_token(
         control_plane_root=control_plane_root,
         context_name=context,
+        repository=profile.repository,
+        purpose="release_publish",
     )
     if not token:
         raise click.ClickException(
@@ -1190,6 +1210,8 @@ def _preflight_github_release(
     token = resolve_launchplane_github_token(
         control_plane_root=control_plane_root,
         context_name=context,
+        repository=profile.repository,
+        purpose="repository_read",
     )
     if not token:
         raise click.ClickException(

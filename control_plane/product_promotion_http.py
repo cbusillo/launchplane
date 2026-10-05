@@ -284,7 +284,7 @@ def build_product_promotion_status(
     product: str,
     destination_environment: str,
     action_allowed: Callable[[str, str, str, tuple[str, ...]], bool],
-    workflow_credentials_ready: Callable[[str], bool],
+    workflow_credentials_ready: Callable[[str, str], bool],
     now: datetime | None = None,
     control_plane_root: Path = Path("."),
     trace_id: str = "",
@@ -329,7 +329,7 @@ def build_product_promotion_status(
     workflow_blockers = list(common_blockers)
     if not _repository_is_owner_repo(profile.repository):
         workflow_blockers.append("Product repository is not configured as owner/repo.")
-    if not workflow_credentials_ready(destination_lane.context):
+    if not workflow_credentials_ready(destination_lane.context, profile.repository):
         workflow_blockers.append("Managed GitHub workflow credentials are unavailable.")
     direct_blockers = list(common_blockers)
     if not action_allowed(

@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 ENGINEERING_REVIEW_CHECK_NAME: Final = "launchplane/engineering-review"
+OWNER_REVIEW_CHECK_NAME: Final = "launchplane/owner-review"
 OWNER_ACCEPTANCE_CHECK_NAME: Final = "launchplane/owner-acceptance"
 LEGACY_ENGINEERING_REVIEW_STATUS_CONTEXT: Final = "launchplane/engineering-review-shadow"
 
@@ -14,6 +15,7 @@ LAUNCHPLANE_PROJECTED_CHECK_NAMES = frozenset(
     {
         ENGINEERING_REVIEW_CHECK_NAME.casefold(),
         OWNER_ACCEPTANCE_CHECK_NAME.casefold(),
+        OWNER_REVIEW_CHECK_NAME.casefold(),
         LEGACY_ENGINEERING_REVIEW_STATUS_CONTEXT.casefold(),
     }
 )
@@ -75,7 +77,11 @@ class GitHubCheckProjection(BaseModel):
 class AdvisoryCheckProjection(GitHubCheckProjection):
     @model_validator(mode="after")
     def _validate_advisory_name(self) -> "AdvisoryCheckProjection":
-        if self.name not in {ENGINEERING_REVIEW_CHECK_NAME, OWNER_ACCEPTANCE_CHECK_NAME}:
+        if self.name not in {
+            ENGINEERING_REVIEW_CHECK_NAME,
+            OWNER_ACCEPTANCE_CHECK_NAME,
+            OWNER_REVIEW_CHECK_NAME,
+        }:
             raise ValueError("Advisory check projection uses an unreserved check name.")
         return self
 

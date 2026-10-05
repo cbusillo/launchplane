@@ -412,12 +412,15 @@ def apply_remediation(
     return outcome, evidence, feedback
 
 
-def resolve_remediation_token(*, control_plane_root: Path, context: str) -> str:
+def resolve_remediation_token(*, control_plane_root: Path, context: str, repository: str) -> str:
     token = resolve_launchplane_github_token(
-        control_plane_root=control_plane_root, context_name=context
+        control_plane_root=control_plane_root,
+        context_name=context,
+        repository=repository,
+        purpose="pull_request_feedback",
     )
     if not token:
         raise click.ClickException(
-            "Launchplane runtime records do not expose GITHUB_TOKEN for this context."
+            "Launchplane Delivery App credentials are unavailable for this repository."
         )
     return token

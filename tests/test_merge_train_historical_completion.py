@@ -882,7 +882,7 @@ class HistoricalCompletionHttpTests(unittest.IsolatedAsyncioTestCase):
             app = await self._app(fixture.store)
             with (
                 patch(
-                    "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                    "control_plane.http_app.resolve_merge_train_github_token",
                     return_value="test-token",
                 ),
                 patch(
@@ -922,7 +922,7 @@ class HistoricalCompletionHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             with (
                 patch(
-                    "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                    "control_plane.http_app.resolve_merge_train_github_token",
                     return_value="test-token",
                 ),
                 patch(
@@ -942,7 +942,7 @@ class HistoricalCompletionHttpTests(unittest.IsolatedAsyncioTestCase):
             app = await self._app(fixture.store)
             with (
                 patch(
-                    "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                    "control_plane.http_app.resolve_merge_train_github_token",
                     return_value="test-token",
                 ),
                 patch(
@@ -968,7 +968,7 @@ class HistoricalCompletionHttpTests(unittest.IsolatedAsyncioTestCase):
             mismatch_transport = _ReadOnlyTransport(responses=_provider_responses())
             with (
                 patch(
-                    "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                    "control_plane.http_app.resolve_merge_train_github_token",
                     return_value="test-token",
                 ),
                 patch(
@@ -989,7 +989,7 @@ class HistoricalCompletionHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             with (
                 patch(
-                    "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                    "control_plane.http_app.resolve_merge_train_github_token",
                     return_value="test-token",
                 ),
                 patch(

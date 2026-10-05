@@ -288,6 +288,7 @@ def validate_odoo_preview_profile_authority(
     *,
     profile: LaunchplaneProductProfileRecord,
     issued_plan: OdooPreviewApplyInputsResult,
+    observation_only: bool = False,
 ) -> None:
     if profile.product != issued_plan.product:
         raise OdooPreviewPlanProvenanceError(
@@ -304,7 +305,7 @@ def validate_odoo_preview_profile_authority(
             code="odoo_preview_plan_stale",
             message="Odoo preview plan context no longer matches current service authority.",
         )
-    if profile.preview.template_instance != issued_plan.template_instance:
+    if not observation_only and profile.preview.template_instance != issued_plan.template_instance:
         raise OdooPreviewPlanProvenanceError(
             code="odoo_preview_plan_stale",
             message="Odoo preview plan template no longer matches current service authority.",
@@ -385,6 +386,7 @@ def execute_odoo_preview_apply_result(
     provider_lease_check: Callable[[], None] | None = None,
     deployment_record_id: str,
     runtime_identity: RuntimeIdentity | None = None,
+    propagate_domain_lookup_error: bool = False,
 ) -> dict[str, object]:
     current_request = refresh_odoo_preview_issued_plan(
         control_plane_root=control_plane_root_path,
@@ -438,6 +440,7 @@ def execute_odoo_preview_apply_result(
         provider_effect_checkpoint=provider_effect_checkpoint,
         provider_lease_check=provider_lease_check,
         expected_runtime_identity=resolved_runtime_identity,
+        propagate_domain_lookup_error=propagate_domain_lookup_error,
     )
     return driver_result.model_dump(mode="json")
 

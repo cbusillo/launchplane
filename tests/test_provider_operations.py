@@ -122,6 +122,7 @@ class _StoreFixture:
         idempotency_key: str = _KEY,
         request_fingerprint: str = _FINGERPRINT,
         target_supersession: ProviderTargetSupersession | None = None,
+        allow_mutation: bool = True,
     ) -> DurableProviderOperationResult:
         return run_durable_provider_operation(
             store=self.store,
@@ -135,6 +136,7 @@ class _StoreFixture:
             lease_seconds=lease_seconds,
             heartbeat_interval_seconds=heartbeat_interval_seconds,
             target_supersession=target_supersession,
+            allow_mutation=allow_mutation,
         )
 
     def maybe_stored(self) -> LaunchplaneIdempotencyRecord | None:
@@ -513,18 +515,29 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
                     reconciliation_key=_RECONCILIATION_KEY,
                 )
                 clock["now"] = "2026-07-30T15:17:00Z"
+                supersession = ProviderTargetSupersession(
+                    response_status_code=409,
+                    response_payload={"status": "superseded"},
+                    minimum_expired_seconds=900,
+                    quiescence_check=lambda _reservation: True,
+                )
+                observed = fixture.run(
+                    adapter,
+                    idempotency_key="provider-op:destroy:new",
+                    request_fingerprint="provider-op-fingerprint-destroy",
+                    target_supersession=supersession,
+                    allow_mutation=False,
+                )
+                self.assertEqual(observed.status, "target_busy")
+                self.assertEqual(adapter.apply_calls, 0)
+                self.assertEqual(observed.record, marked.record)
                 result = fixture.run(
                     adapter,
                     lease_owner="instance-b",
                     response_trace_id="destroy-trace",
                     idempotency_key="provider-op:destroy:new",
                     request_fingerprint="provider-op-fingerprint-destroy",
-                    target_supersession=ProviderTargetSupersession(
-                        response_status_code=409,
-                        response_payload={"status": "superseded"},
-                        minimum_expired_seconds=900,
-                        quiescence_check=lambda _reservation: True,
-                    ),
+                    target_supersession=supersession,
                 )
             stored_stale = fixture.store.read_idempotency_record(
                 scope=_SCOPE,
@@ -753,6 +766,32 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
             self.assertEqual(result.status, "reconcile_required")
             self.assertEqual(recovery.apply_calls, 0)
             self.assertEqual(getattr(fixture.stored(), "state"), "reconcile_required")
+
+    def test_observation_only_preserves_fence_and_supported_retry_can_resume(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            with self.assertRaises(RuntimeError):
+                fixture.run(_FakeAdapter(apply_error=RuntimeError("unknown mutation")))
+            before = fixture.stored()
+            recovery = _FakeAdapter(
+                observation=ProviderObservation(outcome="absent", retry_safe=True)
+            )
+            held = fixture.run(recovery, allow_mutation=False)
+            self.assertEqual(held.status, "reconcile_required")
+            self.assertEqual(recovery.apply_calls, 0)
+            self.assertEqual(fixture.stored(), before)
+            completed = fixture.run(recovery)
+            self.assertEqual(completed.status, "completed")
+            self.assertEqual(recovery.apply_calls, 1)
+
+    def test_observation_only_does_not_apply_a_new_reservation(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            adapter = _FakeAdapter()
+            result = fixture.run(adapter, allow_mutation=False)
+            self.assertEqual(result.status, "reconcile_required")
+            self.assertEqual(adapter.apply_calls, 0)
+            self.assertIsNone(fixture.maybe_stored())
 
     def test_reconcile_retries_once_when_adapter_proves_effect_absent(self) -> None:
         with TemporaryDirectory() as directory:
