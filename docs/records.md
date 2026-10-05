@@ -335,6 +335,18 @@ leaves the stage for admin inspection rather than guessing at authority.
 Ordinary filesystem reads, writes, creates, deletes, and composite promotion
 evidence rollback hold the same bundle lock through their live-file access.
 
+Insert-if-absent creation checks the final path under that lock and uses the
+shared atomic model writer: it serializes into a unique temporary file in the
+record directory, flushes and fsyncs the file, then renames it into place.
+Write failures or process termination before publication leave the final record
+absent; after publication it is complete. Retry preserves an existing record,
+including malformed files or dangling symlinks, rather than repairing it.
+Abandoned `.tmp` files are ignored by record listing and do not block creation.
+This is process-interruption recovery, not qualified power-loss durability:
+the writer does not fsync the parent directory after rename, and no real
+power-loss test has established whether the published name survives a host or
+storage failure.
+
 Provider-backed routes must durably reserve first, bind their stable provider
 operation or reconciliation key before invoking the provider, and complete only
 after durable local evidence is ready. A crash or timeout after key binding is

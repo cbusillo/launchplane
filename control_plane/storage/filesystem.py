@@ -394,18 +394,9 @@ class FilesystemRecordStore:
         self, record_type: str, record_id: str, model: BaseModel
     ) -> bool:
         record_path = self._record_path(record_type, record_id)
-        record_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with record_path.open("x", encoding="utf-8") as record_file:
-                record_file.write(
-                    json.dumps(
-                        model.model_dump(mode="json", exclude_none=True),
-                        indent=2,
-                        sort_keys=True,
-                    )
-                )
-        except FileExistsError:
+        if record_path.exists(follow_symlinks=False):
             return False
+        self._write_model_locked(record_type, record_id, model)
         return True
 
     def _read_model(
