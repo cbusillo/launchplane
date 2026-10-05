@@ -41,6 +41,10 @@ from control_plane.contracts.runtime_identity import (
     RuntimeIdentityStatus,
     compare_runtime_identity,
 )
+from control_plane.lane_runtime_verification import (
+    LaneRuntimeVerification,
+    lane_expected_runtime_identity,
+)
 
 
 ProductTopologyAuthorityStatus = Literal["active", "disabled", "missing"]
@@ -322,6 +326,7 @@ def build_product_environment_topology(
     lane: ProductLaneProfile,
     lane_summary: LaunchplaneLaneSummary | None,
     now: datetime | None = None,
+    runtime_verification: LaneRuntimeVerification | None = None,
 ) -> ProductEnvironmentTopology:
     evaluated_at = now or datetime.now(timezone.utc)
     desired = _desired_topology(profile=profile, lane=lane)
@@ -344,6 +349,7 @@ def build_product_environment_topology(
         desired=desired,
         provider_recorded=provider_recorded,
         now=evaluated_at,
+        runtime_verification=runtime_verification,
     )
     warnings = _topology_warnings(
         lane=lane,
@@ -560,6 +566,7 @@ def _observed_topology(
     desired: ProductDesiredTopology,
     provider_recorded: ProductProviderRecordedTopology,
     now: datetime,
+    runtime_verification: LaneRuntimeVerification | None = None,
 ) -> tuple[ProductObservedTopology, tuple[_ObservedTlsEvidence, ...]]:
     ingress_evidence = _observed_ingress(
         record_store=record_store,
@@ -573,6 +580,25 @@ def _observed_topology(
         lane=lane,
         ingress_evidence=ingress_evidence,
     )
+    if lane_summary is not None and runtime_verification is not None:
+        verification = runtime_verification
+        target = verification.runtime_target
+        placement = (
+            ProductObservedPlacement(
+                expected_runtime_identity=lane_expected_runtime_identity(lane_summary),
+                observed_runtime_identity=target.observed_runtime_identity if target else None,
+                runtime_identity_status=target.runtime_identity_status if target else "unchecked",
+                runtime_identity_detail=target.runtime_identity_detail if target else "",
+                trust_state=verification.provenance.freshness_status,
+                provenance=verification.provenance,
+            )
+            if target is not None
+            else placement.model_copy(
+                update={
+                    "trust_state": verification.provenance.freshness_status,
+                }
+            )
+        )
     domain_roles: dict[str, ProductTopologyDomainRole] = {
         domain.domain_name: domain.role for domain in desired.domains
     }
