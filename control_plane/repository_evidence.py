@@ -78,7 +78,7 @@ class GitHubRepositoryEvidenceProvider:
         if limit < 1 or limit > 100:
             raise ValueError("GitHub open pull request limit must be 1 through 100")
         try:
-            token = self._token()
+            token = self._token(repository)
             repository_path = _repository_path(repository)
             pull_requests = _list_payload(
                 self._github_api(
@@ -126,7 +126,7 @@ class GitHubRepositoryEvidenceProvider:
         max_file_pages: int,
     ) -> RepositoryEvidence:
         try:
-            token = self._token()
+            token = self._token(target.repository)
             repository_path = _repository_path(target.repository)
             repository = _object_payload(
                 self._github_api(path=f"/repos/{repository_path}", token=token),
@@ -214,10 +214,11 @@ class GitHubRepositoryEvidenceProvider:
                 "Launchplane could not resolve authoritative GitHub repository evidence."
             ) from error
 
-    def _token(self) -> str:
+    def _token(self, repository: str) -> str:
         token = self._github_token(
             control_plane_root=self._control_plane_root,
             context_name=self._token_context,
+            repository=repository,
         ).strip()
         if not token:
             raise RepositoryEvidenceError(

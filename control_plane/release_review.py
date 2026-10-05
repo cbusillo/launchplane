@@ -313,7 +313,9 @@ def current_release_review(
         if lane is None:
             raise ReleaseEvidenceUnavailable("testing_lane_missing")
         token = resolve_launchplane_github_token(
-            control_plane_root=control_plane_root, context_name=lane.context
+            control_plane_root=control_plane_root,
+            context_name=lane.context,
+            repository=profile.repository,
         )
         if not token:
             raise ReleaseEvidenceUnavailable("source_control_access_unavailable")

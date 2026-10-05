@@ -7,7 +7,7 @@ product repository's workflows call Launchplane through pinned reusable
 workflows and workflow-identity grants. [DIRECTION.md](../DIRECTION.md) retires
 that: a product repository never calls Launchplane. Previews now come from
 [event-driven deploys](event-driven-deploys.md), and the reconciler writes the PR
-comment and the `launchplane/owner-review` status itself. Products still on the
+comment and the `launchplane/owner-review` check itself. Products still on the
 call-in path keep it until they move (#2740) and #2606 deletes it; do not add a
 new caller. [Client Review Request](#client-review-request) and
 [Manager Preview Approval](#manager-preview-approval) apply to both paths.
@@ -275,29 +275,31 @@ section. If the labels cannot be read, the comment is still delivered without an
 Client section; release approval is the safety net (see
 [DIRECTION.md](../DIRECTION.md)).
 
-The Client's answer is shown on the pull request as one commit status,
+Feedback comments use a repository-scoped Launchplane Delivery App token.
+
+The Client's answer is shown on the pull request as one App-owned check run,
 `launchplane/owner-review`, on the current head. Launchplane writes it with the
-preview context's feedback credential, when the ready preview comment is written
+dedicated Advisory Checks App, when the ready preview comment is written
 (by the feedback route or the event reconciler) and again as soon as the Client
 records a decision:
 
-- marked, Client set, no decision for the current head: `pending`, "Waiting for
+- marked, Client set, no decision for the current head: `in_progress`, "Waiting for
   @client to review the preview", linking the focused `/ui/owner-review` page;
 - latest decision recorded for the current head: `success` ("Accepted by
   @client") or `failure` ("Changes requested by @client");
 - a decision recorded for an older head does not count, because the Client
-  reviews what is actually previewed, so the status returns to `pending`;
+  reviews what is actually previewed, so the check returns to `in_progress`;
   the one exception is an acceptance carried across a base-only refresh made by
   the merge train, which is saved as its own decision for the new head and shown
   as `success` ("Accepted by @client (carried from `<short head>` after a
   base-only refresh)"); see
   [carried acceptance](owner-acceptance.md#carried-acceptance);
-- marked with no Client: `pending`, `No Owner set for this product`;
-- unmarked: no status is written.
+- marked with no Client: `in_progress`, `No Client set for this product`;
+- unmarked: no check is written.
 
-Status delivery is best-effort. A source-control failure is logged and never
+Check delivery is best-effort. A source-control failure is logged and never
 fails preview feedback or loses a recorded decision; the next ready preview
-comment or decision writes it again. The status is a signal for people. It is
+comment or decision writes it again. The check is a signal for people. It is
 not a merge or promotion gate.
 
 ## Manager Preview Approval
