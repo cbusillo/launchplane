@@ -2377,6 +2377,12 @@ requests still replay through their original idempotency key before these
 planning errors are reported. Diagnoses do not disclose policy or selector
 contents.
 
+When a requested managed rule matches an unmanaged rule and the request leaves
+unmanaged adoption disabled, the route returns HTTP 409
+`authz_policy_unmanaged_adoption_conflict`. This is a deterministic planning
+rejection, without policy-drift retry advice. Adoption remains disabled; the
+diagnosis does not authorize adoption or change the reviewed-plan requirement.
+
 The hidden issue `#2277` recovery companion routes use the same browser-only
 authentication, exact CSRF/origin checks, DB storage, idempotency, and policy
 CAS boundary. They take only closed candidate forms, require exact-digest solo
