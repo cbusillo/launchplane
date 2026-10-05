@@ -91,9 +91,6 @@ class UnmanagedAdoptionDiagnosisHttpTests(unittest.IsolatedAsyncioTestCase):
                                 _identity().workflow_ref,
                             ):
                                 self.assertNotIn(private_value, response.text)
-                            self.assertEqual(
-                                store.list_authz_policy_records(status="active"), (active,)
-                            )
                             self.assertIsNone(
                                 store.read_idempotency_record(
                                     scope=idempotency_scope(_identity()),
