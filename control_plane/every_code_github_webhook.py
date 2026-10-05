@@ -943,7 +943,7 @@ def _handle_every_code_preview_validation_webhook(
             control_plane_root=control_plane_root_path,
             context_name=context_name,
             repository=f"{owner}/{repo}",
-            purpose="pull_request_feedback",
+            purpose="source_issue_feedback",
         )
         result = handle_every_code_preview_validation_comment(
             record_store=every_code_store,

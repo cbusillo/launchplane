@@ -2845,6 +2845,19 @@ class ProductReconcileGrantTests(ProductReconcileTestCase):
 
 
 class ProductReconcileFailureTests(ProductReconcileTestCase):
+    def write_policy_without_app(self) -> None:
+        record = build_test_merge_train_policy_record(repository=REPOSITORY)
+        policy = record.policy.model_dump(mode="json")
+        policy["policies"][0]["github_token"] = {}
+        self.store.write_merge_train_policy_record(
+            MergeTrainPolicyRecord(
+                record_id=record.record_id,
+                source=record.source,
+                updated_at=record.updated_at,
+                policy=MergeTrainPolicy.model_validate(policy),
+            )
+        )
+
     def test_missing_build_workflow_is_a_noop_only_with_complete_actions_inventory(self) -> None:
         scenarios: tuple[tuple[dict[str, object] | int, str, str], ...] = (
             ({"total_count": 0, "workflows": []}, "done", "build_workflow_missing"),
@@ -2901,9 +2914,7 @@ class ProductReconcileFailureTests(ProductReconcileTestCase):
         self.assertEqual(failed.state, "failed")
         self.assertIn("active merge train policy record is missing", failed.last_error)
 
-        self.store.write_merge_train_policy_record(
-            build_test_merge_train_policy_record(repository=REPOSITORY)
-        )
+        self.write_policy_without_app()
         self.request()
         with self.assertLogs("control_plane.product_reconcile", "WARNING"):
             failed = run_product_reconcile_once(record_store=self.store, lease_owner="worker-a")
@@ -2912,9 +2923,7 @@ class ProductReconcileFailureTests(ProductReconcileTestCase):
         self.assertIn("has no GitHub App", failed.last_error)
 
     def test_preview_missing_app_has_a_fixed_credential_reason(self) -> None:
-        self.store.write_merge_train_policy_record(
-            build_test_merge_train_policy_record(repository=REPOSITORY)
-        )
+        self.write_policy_without_app()
         self.request("preview", 5)
         with self.assertLogs("control_plane.product_reconcile", "WARNING"):
             failed = run_product_reconcile_once(record_store=self.store, lease_owner="worker-a")
@@ -2974,9 +2983,7 @@ class ProductReconcileFailureTests(ProductReconcileTestCase):
 
     def test_feedback_token_is_refused_without_the_merge_train_app(self) -> None:
         # The policy's other token sources are never a fallback for the reconciler's comments.
-        self.store.write_merge_train_policy_record(
-            build_test_merge_train_policy_record(repository=REPOSITORY)
-        )
+        self.write_policy_without_app()
         with self.assertRaisesRegex(ProductReconcileError, "has no GitHub App"):
             resolve_pull_request_feedback_token(
                 self.store, self.store.read_product_profile_record("site")

@@ -8,6 +8,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane import runtime_environments, secrets
 from control_plane.github_app_identity import GitHubAppIdentity, mint_delivery_installation_token
+from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.product_repository_identity import current_tracked_inventory_record
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -19,6 +20,11 @@ _SERVICE_CONTEXT = "launchplane"
 _PERMISSIONS = {
     "repository_read": {"contents": "read", "pull_requests": "read"},
     "pull_request_feedback": {"contents": "read", "pull_requests": "write"},
+    "source_issue_feedback": {
+        "contents": "read",
+        "pull_requests": "write",
+        "issues": "write",
+    },
     "release_record": {"issues": "write"},
     "workflow_dispatch": {"actions": "write"},
     "release_publish": {"contents": "write"},
@@ -66,26 +72,46 @@ def resolve_delivery_github_app_id(*, control_plane_root: Path) -> int:
     return resolve_delivery_github_app_identity(control_plane_root=control_plane_root).app_id
 
 
+def _tracked_repository(control_plane_root: Path, repository: str) -> RepositoryInventoryRecord:
+    database_url = resolve_database_url()
+    store: PostgresRecordStore | FilesystemRecordStore = (
+        PostgresRecordStore(database_url=database_url)
+        if database_url
+        else FilesystemRecordStore(control_plane_root / "state")
+    )
+    try:
+        return current_tracked_inventory_record(
+            repository=repository.strip().lower(),
+            inventory_records=store.list_repository_inventory_records(),
+        )
+    finally:
+        if isinstance(store, PostgresRecordStore):
+            store.close()
+
+
+def delivery_github_credentials_ready(*, control_plane_root: Path, repository: str) -> bool:
+    """Check configured credentials and inventory without creating a provider token.
+
+    Accepted installation grants are verified by the actual operation's mint.
+    """
+    try:
+        resolve_delivery_github_app_identity(control_plane_root=control_plane_root)
+        _tracked_repository(control_plane_root, repository)
+        return True
+    except (click.ClickException, SQLAlchemyError, OSError, TypeError, ValueError, KeyError):
+        return False
+
+
 def resolve_delivery_github_token(
     *, control_plane_root: Path, context_name: str, repository: str, purpose: str
 ) -> str:
     if not repository.strip():
         return ""
-    database_store = None
-    store: PostgresRecordStore | FilesystemRecordStore
     try:
         permissions = _PERMISSIONS[purpose]
         identity = resolve_delivery_github_app_identity(control_plane_root=control_plane_root)
-        database_url = resolve_database_url()
-        if database_url:
-            database_store = PostgresRecordStore(database_url=database_url)
-            store = database_store
-        else:
-            store = FilesystemRecordStore(control_plane_root / "state")
         repository = repository.strip().lower()
-        inventory = current_tracked_inventory_record(
-            repository=repository, inventory_records=store.list_repository_inventory_records()
-        )
+        inventory = _tracked_repository(control_plane_root, repository)
         return mint_delivery_installation_token(
             identity=identity,
             repository=repository,
@@ -102,6 +128,3 @@ def resolve_delivery_github_token(
     ) as error:
         _LOGGER.warning("Delivery App credentials unavailable (%s).", type(error).__name__)
         return ""
-    finally:
-        if database_store is not None:
-            database_store.close()

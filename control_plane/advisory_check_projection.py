@@ -78,9 +78,20 @@ def write_advisory_check_projection(
         and item["head_sha"].lower() == projection.head_sha
         and _app_id(item.get("app")) == installation_token.app_id
     )
-    exact_match = next(
-        (check_run for check_run in matching_runs if _matches_projection(check_run, projection)),
-        None,
+    pending = next((run for run in matching_runs if run.get("status") == "in_progress"), None)
+    # A completed historical match must not strand a newer pending projection.
+    completing_pending = projection.check_status == "completed" and pending is not None
+    exact_match = (
+        None
+        if completing_pending
+        else next(
+            (
+                check_run
+                for check_run in matching_runs
+                if _matches_projection(check_run, projection)
+            ),
+            None,
+        )
     )
     if exact_match is not None:
         return _result(
@@ -89,7 +100,7 @@ def write_advisory_check_projection(
             installation_token=installation_token,
             check_run=exact_match,
         )
-    current = matching_runs[0] if matching_runs else None
+    current = pending if completing_pending else (matching_runs[0] if matching_runs else None)
     body: dict[str, object] = {
         "name": projection.name,
         "status": projection.check_status,

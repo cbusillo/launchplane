@@ -417,6 +417,7 @@ from control_plane.github_delivery_configuration import (
     GITHUB_DELIVERY_CONFIGURATION_ROUTE,
     apply_delivery_github_configuration,
 )
+from control_plane.launchplane_github_delivery import delivery_github_credentials_ready
 from control_plane.product_review_status import (
     OwnerReviewStatusPublisher,
     owner_review_reference_url,
@@ -5098,13 +5099,9 @@ def create_launchplane_fastapi_app(
         common=read_route_dependencies,
         read_product_profile_list_identity=read_product_profile_list_identity,
         work_graph_planning_facts_provider=work_graph_planning_facts_provider,
-        workflow_credentials_ready=lambda context, repository: bool(
-            resolve_launchplane_github_token(
-                control_plane_root=resolved_control_plane_root,
-                context_name=context,
-                repository=repository,
-                purpose="workflow_dispatch",
-            )
+        workflow_credentials_ready=lambda context, repository: delivery_github_credentials_ready(
+            control_plane_root=resolved_control_plane_root,
+            repository=repository,
         ),
         control_plane_root=resolved_control_plane_root,
         github_token=resolve_launchplane_github_token,
@@ -16086,12 +16083,10 @@ def create_launchplane_fastapi_app(
                         else AuthorizationTarget(scope="context"),
                     )
                 ),
-                workflow_credentials_ready=lambda context, repository: bool(
-                    resolve_launchplane_github_token(
+                workflow_credentials_ready=lambda context, repository: (
+                    delivery_github_credentials_ready(
                         control_plane_root=resolved_control_plane_root,
-                        context_name=context,
                         repository=repository,
-                        purpose="workflow_dispatch",
                     )
                 ),
             )

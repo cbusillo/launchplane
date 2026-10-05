@@ -25,6 +25,8 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.github_app_identity import (
     GitHubAppInstallationToken,
+    mint_repository_installation_token,
+    resolve_advisory_github_app_identity,
     revoke_installation_token,
 )
 from control_plane.product_review import ProductReviewStore
@@ -112,7 +114,7 @@ def owner_review_status(
 
 @dataclass(frozen=True, slots=True)
 class OwnerReviewStatusPublisher:
-    """Writes the Client-review status with the repository's preview feedback credential."""
+    """Project Client review through independently scoped Delivery and Advisory Apps."""
 
     control_plane_root: Path
     public_origin: str | None = None
@@ -332,7 +334,7 @@ class OwnerReviewStatusPublisher:
             ),
             base_branch=facts.base_branch,
         )
-        if self.github_app_token is None or not facts.repository_id or not self.public_origin:
+        if not facts.repository_id or not self.public_origin:
             raise ValueError("Client review check requires the Advisory App and public origin.")
         projection = AdvisoryCheckProjection(
             name=OWNER_REVIEW_CHECK_NAME,
@@ -352,7 +354,7 @@ class OwnerReviewStatusPublisher:
             check_status="in_progress" if status.state == "pending" else "completed",
             conclusion=None if status.state == "pending" else status.state,
         )
-        installation_token = self.github_app_token(profile.repository, facts.repository_id)
+        installation_token = self._advisory_token(profile.repository, facts.repository_id)
         try:
             write_advisory_check_projection(
                 projection=projection,
@@ -366,13 +368,25 @@ class OwnerReviewStatusPublisher:
             )
         return status
 
+    def _advisory_token(self, repository: str, repository_id: str) -> GitHubAppInstallationToken:
+        if self.github_app_token is not None:
+            return self.github_app_token(repository, repository_id)
+        return mint_repository_installation_token(
+            identity=resolve_advisory_github_app_identity(
+                control_plane_root=self.control_plane_root
+            ),
+            repository=repository,
+            repository_id=repository_id,
+            api_request=self.api_request,
+        )
+
     def _retire_owner_acceptance_check(
         self, *, repository: str, facts: _PullRequestFacts, token: str
     ) -> None:
         del token  # Only the app that created a check run may update it.
-        if self.github_app_token is None or not facts.repository_id:
+        if not facts.repository_id:
             return
-        installation_token = self.github_app_token(repository, facts.repository_id)
+        installation_token = self._advisory_token(repository, facts.repository_id)
         try:
             query = urlencode(
                 {

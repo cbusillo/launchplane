@@ -984,8 +984,8 @@ class FastApiProductPromotionTests(unittest.IsolatedAsyncioTestCase):
             openapi = app.openapi()
             browser_headers = _browser_mutation_headers(session_manager, session)
             with patch(
-                "control_plane.http_app.resolve_launchplane_github_token",
-                return_value="managed-github-token",
+                "control_plane.http_app.delivery_github_credentials_ready",
+                return_value=True,
             ):
                 status_response = await _asgi_get(
                     app,
@@ -1266,8 +1266,8 @@ class FastApiProductPromotionTests(unittest.IsolatedAsyncioTestCase):
             )
             browser_headers = _browser_mutation_headers(session_manager, session)
             with patch(
-                "control_plane.http_app.resolve_launchplane_github_token",
-                return_value="managed-github-token",
+                "control_plane.http_app.delivery_github_credentials_ready",
+                return_value=True,
             ):
                 status_response = await _asgi_get(
                     app,

@@ -211,6 +211,23 @@ class AdvisoryCheckProjectionTests(unittest.TestCase):
         self.assertEqual(result.conclusion, "success")
         self.assertEqual(calls[-1]["method"], "PATCH")
 
+    def test_completes_pending_run_instead_of_replaying_an_older_completed_run(self) -> None:
+        calls: list[dict[str, object]] = []
+        pending = {**_check_run(check_status="in_progress", conclusion=None), "id": 92}
+
+        def api_request(**kwargs):  # type: ignore[no-untyped-def]
+            calls.append(kwargs)
+            if kwargs.get("method") == "PATCH":
+                return {**pending, **kwargs["body"]}
+            return {"check_runs": [_check_run(), pending]}
+
+        result = write_advisory_check_projection(
+            projection=_projection(), installation_token=_token(), api_request=api_request
+        )
+        self.assertEqual(result.status, "updated")
+        self.assertEqual(result.check_run_id, 92)
+        self.assertEqual(calls[-1]["path"], "/repos/example/repo/check-runs/92")
+
     def test_rejects_check_run_written_by_another_app(self) -> None:
         def api_request(**kwargs):  # type: ignore[no-untyped-def]
             if kwargs.get("method") == "POST":

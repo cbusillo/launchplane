@@ -4001,6 +4001,7 @@ The operation requests only its needed permissions:
 | --- | --- |
 | Repository and release-checklist reads | Contents read, Pull requests read |
 | PR feedback and remediation | Contents read, Pull requests write |
+| Linked source-issue preview feedback | Contents read, Pull requests write, Issues write |
 | Release-record issue | Issues write |
 | Generic-web workflow dispatch/reconciliation | Actions write |
 | Generic-web release publication | Contents write |
@@ -4011,7 +4012,9 @@ The operation requests only its needed permissions:
 An installation may have other grants, but each issued token must match the
 requested subset and exactly one repository. Missing accepted grants never
 cause a permission change or a token fallback. Only already accepted capabilities
-may run; this PR grants none.
+may run; this PR grants none. Promotion-status polling checks configuration and
+tracked inventory without minting a write token; the actual operation verifies
+the accepted grants when it mints its token.
 
 The Advisory Checks App remains separately configured with
 `LAUNCHPLANE_ADVISORY_GITHUB_APP_ID` and its managed private key. It publishes the

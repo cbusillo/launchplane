@@ -19,6 +19,7 @@ from control_plane.launchplane_github_delivery import (
     DELIVERY_GITHUB_APP_INTEGRATION_KEY,
     resolve_delivery_github_app_identity,
     resolve_delivery_github_token,
+    delivery_github_credentials_ready,
 )
 from control_plane.merge_train_github_token import resolve_merge_train_github_token
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -134,6 +135,10 @@ class DeliveryGitHubTokenTests(unittest.TestCase):
         for purpose, permissions in (
             ("repository_read", {"contents": "read", "pull_requests": "read"}),
             ("pull_request_feedback", {"contents": "read", "pull_requests": "write"}),
+            (
+                "source_issue_feedback",
+                {"contents": "read", "pull_requests": "write", "issues": "write"},
+            ),
             ("release_record", {"issues": "write"}),
             ("workflow_dispatch", {"actions": "write"}),
             ("release_publish", {"contents": "write"}),
@@ -148,6 +153,28 @@ class DeliveryGitHubTokenTests(unittest.TestCase):
         self.installation_permissions["issues"] = "read"
         self.assertEqual(self.resolve("release_record"), "")
         self.assertEqual(self.requested, [])
+
+    def test_readiness_checks_configuration_without_minting_a_write_token(self) -> None:
+        with (
+            patch(
+                "control_plane.launchplane_github_delivery.resolve_delivery_github_app_identity",
+                return_value=self.identity,
+            ),
+            patch(
+                "control_plane.launchplane_github_delivery.mint_delivery_installation_token",
+                side_effect=AssertionError("Readiness must not mint a token"),
+            ),
+        ):
+            self.assertTrue(
+                delivery_github_credentials_ready(
+                    control_plane_root=self.root, repository="example/site"
+                )
+            )
+            self.assertFalse(
+                delivery_github_credentials_ready(
+                    control_plane_root=self.root, repository="example/missing"
+                )
+            )
 
     def test_missing_or_retired_inventory_cannot_mint(self) -> None:
         self.assertEqual(self.resolve("repository_read", repository="example/missing"), "")

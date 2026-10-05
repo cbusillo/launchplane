@@ -1,5 +1,7 @@
 import json
 import unittest
+from dataclasses import replace
+from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -230,6 +232,26 @@ class OwnerReviewStatusTests(unittest.TestCase):
             pull_request_number=_PULL_REQUEST,
             retire_leftovers=retire_leftovers,
         )
+
+    def test_default_publisher_projects_with_the_advisory_app(self) -> None:
+        github = _GitHub()
+        publisher = replace(_publisher(github), github_app_token=None)
+        with (
+            patch("control_plane.product_review_status.resolve_advisory_github_app_identity"),
+            patch(
+                "control_plane.product_review_status.mint_repository_installation_token",
+                side_effect=lambda **kwargs: _app_token(
+                    kwargs["repository"], kwargs["repository_id"]
+                ),
+            ),
+        ):
+            result = publisher.publish(
+                store=self.store, profile=_profile(), pull_request_number=_PULL_REQUEST
+            )
+        self.assertIsNotNone(result)
+        self.assertEqual(github.check_runs[-1]["name"], "launchplane/owner-review")
+        self.assertEqual(github.check_runs[-1]["app"], {"id": _APP_ID})
+        self.assertEqual(github.revoked_app_tokens, 1)
 
     def test_review_link_encodes_target_and_rejects_non_origin_urls(self) -> None:
         self.assertEqual(
