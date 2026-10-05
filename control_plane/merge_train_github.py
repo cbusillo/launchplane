@@ -4,12 +4,13 @@ from hashlib import sha256
 import logging
 import re
 from time import sleep
-from typing import TYPE_CHECKING, Callable, Literal, Protocol, TypeVar
+from typing import TYPE_CHECKING, Callable, Literal, Protocol, TypeVar, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ConfigDict, model_validator
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.advisory_check_projection import is_launchplane_projected_check
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -3279,6 +3280,13 @@ def _required_checks_status(
     return _combine_check_statuses(*statuses)
 
 
+@runtime_checkable
+class _RuntimeAppConfigurationReadStore(Protocol):
+    def list_runtime_environment_records(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
+
+
 def _owner_review_advisory_app_id(store: object | None) -> int | None:
     """Read only the service's configured non-secret App selector."""
     from control_plane.github_app_configuration import (
@@ -3287,13 +3295,12 @@ def _owner_review_advisory_app_id(store: object | None) -> int | None:
     )
     from control_plane.runtime_environments import build_runtime_environment_definition_from_records
 
-    list_records = getattr(store, "list_runtime_environment_records", None)
-    if not callable(list_records):
+    if not isinstance(store, _RuntimeAppConfigurationReadStore):
         return None
     try:
         records = tuple(
             record
-            for record in list_records(context_name="launchplane")
+            for record in store.list_runtime_environment_records(context_name="launchplane")
             if isinstance(record, RuntimeEnvironmentRecord)
             and record.scope == "context"
             and record.context == "launchplane"
@@ -3303,7 +3310,7 @@ def _owner_review_advisory_app_id(store: object | None) -> int | None:
             return None
         shared = tuple(
             record
-            for record in list_records()
+            for record in store.list_runtime_environment_records()
             if isinstance(record, RuntimeEnvironmentRecord)
             and record.scope == "global"
             and not record.context
@@ -3313,7 +3320,7 @@ def _owner_review_advisory_app_id(store: object | None) -> int | None:
             return None
         definition = build_runtime_environment_definition_from_records((*shared, *records))
         return advisory_app_id_from_values(service_github_app_values(definition))
-    except Exception:
+    except (SQLAlchemyError, OSError, ValueError, TypeError, RuntimeError):
         return None
 
 

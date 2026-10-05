@@ -277,7 +277,9 @@ class OutboxWorkerTests(unittest.TestCase):
                     }
                 )
 
-                def started(*_args: object, **_kwargs: object) -> None:
+                def started(
+                    _record: OutboxDeliveryRecord, _operation_key: str, _provider_id: str
+                ) -> None:
                     self.fail("A dispatched marker must not dispatch again")
 
                 with (
