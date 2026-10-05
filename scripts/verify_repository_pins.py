@@ -47,7 +47,9 @@ def verify_worker_pins(root: Path, revision: str, repository: str) -> list[str]:
     for path in WRAPPER_PATHS:
         wrapper = _read_workflow(root, revision, path)
         job = _mapping(_mapping(wrapper["jobs"])["retire"])
-        reference = str(job["uses"])
+        reference = job["uses"]
+        if not isinstance(reference, str):
+            raise ValueError(f"Worker reference in {path} must be a string.")
         source, separator, pin = reference.partition("@")
         prefix = f"{repository}/.github/workflows/"
         if (
