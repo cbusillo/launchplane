@@ -271,3 +271,49 @@ for (const field of ["image", "production", "release"] as const) {
     expect(writes).toBe(0);
   });
 }
+
+test("a late legacy receipt cannot replace another product's Client", async ({ page }) => {
+  await mockProduct(page);
+  await page.goto("/ui/products/atlas-commerce");
+  await page.evaluate(() => sessionStorage.setItem("launchplane.browser-operation.atlas-commerce-owner-apply", JSON.stringify({
+    phase: "uncertain", requiresIdempotencyContinuity: true,
+    identity: { idempotencyKey: "navigation-original", requestFingerprint: "original" },
+  })));
+  await page.route("**/v1/products/beacon-docs", async route => {
+    const product = await page.evaluate(async () => (await import("/ui/src/dev-fixtures.ts")).productsForFixture("products")[1]);
+    await route.fulfill({ json: { status: "ok", trace_id: "beacon", product } });
+  });
+  await page.route("**/v1/product-profiles/beacon-docs", route => route.fulfill({ json: { status: "ok", trace_id: "beacon-profile", profile: {
+    repository: "example/beacon-docs", owner: { github_login: "beacon-client", github_id: "8001" },
+    image: { repository: "ghcr.io/example/beacon-docs" }, production_use: "unknown",
+  } } }));
+  let held: Route | null = null;
+  await page.route("**/mutation-receipts/owner?*", route => { held = route; });
+  await page.reload();
+  await page.getByRole("button", { name: "Check original operation", exact: true }).click();
+  await expect.poll(() => held !== null).toBe(true);
+  const picker = page.getByRole("combobox", { name: "Product", exact: true });
+  if (await picker.isVisible()) await picker.selectOption("beacon-docs");
+  else await page.getByRole("link", { name: "Beacon Docs", exact: false }).click();
+  const other = page.getByRole("region", { name: "beacon-client (id 8001)", exact: true });
+  await expect(other).toBeVisible();
+  await held!.fulfill({ json: { trace_id: "late-read", product: "atlas-commerce", field: "owner",
+    idempotency_key: "navigation-original", state: "completed", original_trace_id: "original-save" } }).catch(() => {});
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem("launchplane.browser-operation.atlas-commerce-owner-apply"))).toBeNull();
+  await expect(other.getByLabel("GitHub login")).toBeEnabled();
+  await expect(page.getByRole("region", { name: "example-owner (id 9001)", exact: true })).toHaveCount(0);
+});
+
+test("legacy fixture recovery never reads a service receipt", async ({ page }) => {
+  await page.goto("/ui/products/atlas-commerce?fixture=products");
+  await page.evaluate(() => sessionStorage.setItem("launchplane.browser-operation.atlas-commerce-owner-apply", JSON.stringify({
+    phase: "uncertain", requiresIdempotencyContinuity: true,
+    identity: { idempotencyKey: "fixture-original", requestFingerprint: "original" },
+  })));
+  const receipts: string[] = [];
+  page.on("request", request => { if (request.url().includes("mutation-receipts")) receipts.push(request.url()); });
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Check original operation", exact: true })).toBeDisabled();
+  await expect(page.getByText("Receipts are unavailable in fixtures.", { exact: false })).toBeVisible();
+  expect(receipts).toEqual([]);
+});

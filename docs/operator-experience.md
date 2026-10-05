@@ -676,3 +676,9 @@ the original key locked. Keep the tab and check again later. Switching caller
 identity cannot recover another caller's receipt. No new key or guessed request
 is sent, and an expired lease or matching current profile alone never unlocks
 an alternate mutation.
+
+Some legacy keys have no durable receipt because the original request was never
+sent or failed before its atomic profile write. Checking again cannot settle
+those keys. They stay locked; this read-only recovery does not fence a delayed
+original request or discard its key. The recovery control is disabled in local
+fixture mode, which cannot supply authoritative service evidence.

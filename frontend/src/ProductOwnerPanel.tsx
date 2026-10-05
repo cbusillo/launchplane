@@ -284,7 +284,7 @@ export function ProductOwnerPanel({
             <InlineFormError message="An earlier Save is uncertain, but its reviewed request is unavailable. Keep this tab and operation key. Check the original Save below before another change." />
           ) : null}
           {applyOperation.state.requiresIdempotencyContinuity && !plannedDraft ? (
-            <ProfileMutationRecovery product={product} field="owner" operation={applyOperation}
+            <ProfileMutationRecovery product={product} fixtureMode={fixtureMode} field="owner" operation={applyOperation}
               onCompleted={async () => {
                 const { profile } = await readProductProfile(product);
                 setResource({ error: "", owner: productOwnerFromRecord(profile.owner), status: "ready" });
@@ -598,7 +598,7 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
       {applyOperation.state.requiresIdempotencyContinuity && !reviewed ?
         <InlineFormError message="An earlier Apply is uncertain, and its reviewed draft is unavailable. Keep this tab and operation key. Check the original Apply below before another change." /> : null}
       {applyOperation.state.requiresIdempotencyContinuity && !reviewed ? (
-        <ProfileMutationRecovery product={product}
+        <ProfileMutationRecovery product={product} fixtureMode={fixtureMode}
           field={field === "image" ? "image-repository" : "production-use"}
           operation={applyOperation} onCompleted={async () => {
             const next = await readValue();
@@ -633,8 +633,9 @@ function profileApplyFailureCertainty(error: unknown, dispatched: boolean): Brow
   return productConfigFailureCertainty(error, dispatched);
 }
 
-function ProfileMutationRecovery({ product, field, operation, onCompleted }: {
+function ProfileMutationRecovery({ product, fixtureMode, field, operation, onCompleted }: {
   product: string;
+  fixtureMode: DevFixtureMode;
   field: "owner" | "image-repository" | "production-use";
   operation: BrowserOperationController<never, AcceptedEvidenceResponse>;
   onCompleted: () => Promise<void>;
@@ -643,7 +644,7 @@ function ProfileMutationRecovery({ product, field, operation, onCompleted }: {
   const [message, setMessage] = useState("");
   async function check() {
     const identity = operation.state.identity;
-    if (!identity || checking) return;
+    if (!identity || checking || fixtureMode) return;
     setChecking(true); setMessage("");
     try {
       const receipt = await readProductProfileMutationReceipt(product, field, identity.idempotencyKey);
@@ -663,9 +664,10 @@ function ProfileMutationRecovery({ product, field, operation, onCompleted }: {
     } finally { setChecking(false); }
   }
   return <div>
-    <button className="button" disabled={checking} onClick={() => void check()} type="button">
+    <button className="button" disabled={checking || Boolean(fixtureMode)} onClick={() => void check()} type="button">
       {checking ? "Checking original operation" : "Check original operation"}
     </button>
+    {fixtureMode ? <p role="status">Receipts are unavailable in fixtures. Open the product without fixture mode to check the original operation.</p> : null}
     {message ? <p role="status">{message}</p> : null}
   </div>;
 }

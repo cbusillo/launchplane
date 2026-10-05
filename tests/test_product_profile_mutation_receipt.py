@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from control_plane.product_profile_mutation_receipt import profile_mutation_receipt
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.http_routes.mutation_support import idempotency_scope
 from tests.http_app_test_support import _product_profile_read_policy
@@ -20,6 +21,25 @@ class ProfileMutationReceiptTests(unittest.IsolatedAsyncioTestCase):
                 idempotency_key="lost-save",
             )
             self.assertEqual(applied.status_code, 202)
+            record = store.read_idempotency_record(
+                scope=idempotency_scope(identity()),
+                route_path="/v1/product-profiles/{product}/owner",
+                idempotency_key="lost-save",
+            )
+            assert record is not None
+            for changes in (
+                {"response_status_code": 400},
+                {"response_payload": {**record.response_payload, "result": {"applied": False}}},
+            ):
+                receipt = profile_mutation_receipt(
+                    record=record.model_copy(update=changes),
+                    trace_id="read",
+                    product=_PRODUCT,
+                    field="owner",
+                    idempotency_key="lost-save",
+                )
+                self.assertEqual(receipt.state, "unresolved")
+                self.assertEqual(receipt.original_trace_id, "")
             before = store.read_product_profile_record(_PRODUCT)
             app = _workflow_app(store, policy=_product_profile_read_policy(product=_PRODUCT))
             response = await request(
