@@ -22,9 +22,10 @@ from __future__ import annotations
 import hashlib
 import logging
 from datetime import UTC, datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event
+from time import monotonic
 from typing import Literal, cast
 
 import click
@@ -95,6 +96,13 @@ ClientReleaseStepStatus = Literal[
 ]
 ClientReleaseRunState = Literal["waiting", "running", "passed", "stopped"]
 _STOPPED_STATUSES = frozenset({"fail", "cancelled", "reconciliation_required"})
+
+
+@dataclass(slots=True)
+class StandingReleaseReviewBackoff:
+    """Delay incomplete standing reviews; never cache acceptance authority."""
+
+    blocked: dict[str, tuple[str, float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -410,6 +418,7 @@ def _record_standing_acceptance(
     store: PostgresRecordStore,
     control_plane_root: Path,
     profile: LaunchplaneProductProfileRecord,
+    backoff: StandingReleaseReviewBackoff | None = None,
 ) -> None:
     """Materialize the Director's recorded standing acceptance for one exact checklist.
 
@@ -425,6 +434,33 @@ def _record_standing_acceptance(
         or profile.production_use == "prelaunch"
     ):
         return
+    production = release_version(store=store, profile=profile, instance="prod")
+    candidate = release_version(store=store, profile=profile, instance="testing")
+    if production == candidate:
+        return
+    latest = store.list_release_review_decision_records(product=profile.product, limit=1)
+    if latest:
+        previous = latest[0]
+        if (
+            previous.checklist.production == production
+            and previous.checklist.candidate == candidate
+            and previous.checklist.owner_github_id == profile.owner.github_id
+            and previous.checklist.repository == profile.repository
+            and (
+                previous.decision != "accepted"
+                or (previous.release_issue_url and previous.release_start)
+            )
+        ):
+            return
+    fingerprint = hashlib.sha256(
+        (
+            profile.model_dump_json() + production.model_dump_json() + candidate.model_dump_json()
+        ).encode()
+    ).hexdigest()
+    if backoff is not None:
+        blocked = backoff.blocked.get(profile.product)
+        if blocked is not None and blocked[0] == fingerprint and monotonic() < blocked[1]:
+            return
     # Stamp before reads: a human decision made while GitHub is being read remains
     # newer than this standing decision even if its DB write finishes first.
     decided_at = datetime.now(UTC).isoformat()
@@ -437,11 +473,17 @@ def _record_standing_acceptance(
         or checklist.production == checklist.candidate
         or checklist_blockers(checklist)
     ):
+        if backoff is not None:
+            backoff.blocked[profile.product] = (fingerprint, monotonic() + 300)
         return
+    if backoff is not None:
+        backoff.blocked.pop(profile.product, None)
     existing = review.latest_decision
     if existing is not None and existing.decision != "accepted":
         return
-    record_key = review.checklist_digest
+    record_key = hashlib.sha256(
+        (review.checklist_digest + (existing.record_id if existing is not None else "")).encode()
+    ).hexdigest()
     expected_record_id = f"release-review-standing-{record_key}"
     if existing is not None and existing.release_issue_url and existing.release_start:
         return
@@ -552,6 +594,7 @@ def advance_client_releases(
     store: object,
     control_plane_root: Path,
     stop_event: Event | None = None,
+    standing_review_backoff: StandingReleaseReviewBackoff | None = None,
 ) -> tuple[str, ...]:
     """Queue the next step of every Client release that is ready for one.
 
@@ -568,7 +611,7 @@ def advance_client_releases(
         if profile.driver_id not in {"odoo", "generic-web"}:
             continue
         try:
-            _record_standing_acceptance(store, control_plane_root, profile)
+            _record_standing_acceptance(store, control_plane_root, profile, standing_review_backoff)
         except (FileNotFoundError, ValueError, click.ClickException):
             _LOGGER.info("standing acceptance not ready product=%s", profile.product)
             continue

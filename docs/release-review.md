@@ -172,6 +172,10 @@ checklist. No agent receives a promotion grant and no product workflow calls
 Launchplane. Enabling this setting is a production-release activation; prepare
 and verify the Client, testing lane and backup policy before applying it.
 Changing unrelated profile metadata does not re-accept or retry that checklist.
+Settled decisions on unchanged lane versions require no background GitHub read.
+Incomplete standing reviews back off for five minutes on each worker; changing
+the profile or lane versions triggers a fresh review. This timer never supplies
+acceptance or replaces the checks immediately before a release effect.
 A Client can explicitly Accept again after a stopped release; a repeated Accept
 while a release is running still returns the original decision.
 

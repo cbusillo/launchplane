@@ -11,6 +11,7 @@ import click
 
 from control_plane.client_release import (
     advance_client_releases,
+    StandingReleaseReviewBackoff,
     read_client_release_run,
     release_start_for_acceptance,
 )
@@ -446,6 +447,74 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         self.assertEqual(len(self.store.list_promotion_records()), 1)
         self.assertEqual(self.provider.deployed_artifacts, [])
 
+    def test_settled_standing_decision_does_not_read_github_again(self) -> None:
+        self.switch("director_standing")
+        self.advance()
+        with patch("control_plane.client_release.current_release_review") as read:
+            self.assertEqual(self.advance(), ())
+        read.assert_not_called()
+
+    def test_incomplete_standing_review_backs_off_until_lane_changes(self) -> None:
+        self.switch("director_standing")
+        incomplete = self.review()
+        assert incomplete.checklist is not None
+        incomplete = incomplete.model_copy(
+            update={
+                "checklist": incomplete.checklist.model_copy(update={"untracked_commits": (HEAD,)})
+            }
+        )
+        backoff = StandingReleaseReviewBackoff()
+        with patch(
+            "control_plane.client_release.current_release_review", return_value=incomplete
+        ) as read:
+            advance_client_releases(
+                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+            )
+            advance_client_releases(
+                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+            )
+            read.assert_called_once()
+            inventory = self.store.read_environment_inventory(
+                context_name=self.context, instance_name="testing"
+            )
+            assert inventory.runtime_identity is not None
+            self.store.write_environment_inventory(
+                inventory.model_copy(
+                    update={
+                        "runtime_identity": inventory.runtime_identity.model_copy(
+                            update={"source_git_ref": "d" * 40}
+                        )
+                    }
+                )
+            )
+            read.reset_mock()
+            advance_client_releases(
+                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+            )
+            read.assert_called_once()
+            self.assertEqual(
+                self.store.list_release_review_decision_records(product=self.profile.product), ()
+            )
+
+    def test_standing_reacceptance_keeps_prior_audit_and_gets_new_operations(self) -> None:
+        self.switch("director_standing")
+        self.advance()
+        prior = self.store.list_release_review_decision_records(product=self.profile.product)[0]
+        self.switch("held")
+        held = self.accept()
+        self.assertEqual(held.release_start, "")
+        self.switch("director_standing")
+        self.advance()
+        latest = self.store.list_release_review_decision_records(product=self.profile.product)[0]
+        self.assertNotEqual(latest.record_id, prior.record_id)
+        recorded = self.store.list_release_review_decision_records(product=self.profile.product)
+        self.assertEqual(
+            next(record for record in recorded if record.record_id == prior.record_id), prior
+        )
+        operations = self.store.list_verireel_prod_backup_gate_operation_records()
+        self.assertEqual(len(operations), 2)
+        self.assertNotEqual(operations[0].operation_id, operations[1].operation_id)
+
     def test_hold_after_a_failed_deploy_still_allows_automatic_rollback(self) -> None:
         from typing import Any
 
@@ -503,6 +572,27 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
         assert run is not None
         self.assertEqual(run.state, "stopped")
+        self.assertEqual(self.provider.deployed_artifacts, [])
+
+    def test_second_review_read_failure_stops_release_without_a_silent_retry(self) -> None:
+        accepted = self.accept()
+        self.advance()
+        self.capture()
+        calls = 0
+
+        def review(**kwargs: object) -> ReleaseReviewStatus:
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                return ReleaseReviewStatus(unavailable_reason="github_read_failed")
+            return self.review(**kwargs)
+
+        with patch("control_plane.client_release.current_release_review", side_effect=review):
+            self.advance()
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
+        assert run is not None
+        self.assertEqual(run.state, "stopped")
+        self.assertEqual(self.advance(), ())
         self.assertEqual(self.provider.deployed_artifacts, [])
 
     def test_expired_running_promotion_reports_reconciliation(self) -> None:
