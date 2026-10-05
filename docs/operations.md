@@ -4027,7 +4027,7 @@ matches the Delivery App's numeric `performed_via_github_app.id`, rather than
 calling the user-only `/user` endpoint with an installation token.
 
 After shipment, Chris configures the Delivery selector through the supported
-service path and confirms the next owner-review check, decision/preview comment
+service path and confirms the next `launchplane/owner-review` check, decision/preview comment
 and release-record issue have the intended App identity. Verify Advisory
 installation coverage and accepted operation grants wherever those paths run;
 source tests are not live installation evidence. Only after these receipts and
