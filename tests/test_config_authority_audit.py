@@ -152,7 +152,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                             "--fail-on-findings",
                         ],
                     )
-                    payload = json.loads(result.output)
+                    payload = json.loads(result.stdout)
                 self.assertEqual(result.exit_code == 0, accepted, result.output)
                 if accepted:
                     allowed = {
