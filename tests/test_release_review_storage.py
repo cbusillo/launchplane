@@ -3,6 +3,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.storage.postgres import PostgresRecordStore
@@ -103,3 +104,16 @@ class FilesystemReleaseReviewStorageTests(ReleaseReviewStorageTests):
         self.addCleanup(directory.cleanup)
         self.store = FilesystemRecordStore(Path(directory.name))
         self.decision = standing_decision(self.store)
+
+    def test_interrupted_creation_leaves_no_partial_record_and_can_retry(self) -> None:
+        with patch(
+            "control_plane.storage.filesystem.json.dumps", side_effect=OSError("Interrupted write")
+        ):
+            with self.assertRaises(OSError):
+                self.store.create_release_review_decision_record_if_absent(self.decision)
+        recovered = self.store.create_release_review_decision_record_if_absent(self.decision)
+        self.assertEqual(recovered, self.decision)
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=self.decision.product),
+            (self.decision,),
+        )

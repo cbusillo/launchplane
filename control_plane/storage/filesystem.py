@@ -6963,7 +6963,12 @@ class FilesystemRecordStore:
     ) -> ReleaseReviewDecisionRecord:
         record_type = "launchplane_release_review_decisions"
         with self._product_authority_bundle_lock():
-            self._create_model_if_absent_locked(record_type, record.record_id, record)
+            try:
+                return self._read_model_locked(
+                    ReleaseReviewDecisionRecord, record_type, record.record_id
+                )
+            except FileNotFoundError:
+                self._write_model_locked(record_type, record.record_id, record)
             return self._read_model_locked(
                 ReleaseReviewDecisionRecord, record_type, record.record_id
             )

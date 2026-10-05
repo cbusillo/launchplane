@@ -176,6 +176,9 @@ rewrite the checklist and audit fields.
 The Client's decision route uses the same creation and publication operations,
 so a Client retry cannot upsert a stale unpublished snapshot over the worker's
 publication. An already published winner needs no further source-control lookup.
+The first stored issue URL is authoritative. Concurrent external issue creation
+can still produce a duplicate issue with that decision's marker; publication
+serialization is tracked separately in [#3030](https://github.com/cbusillo/launchplane/issues/3030).
 Missing notes, missing lane identities or a Client, a held or prelaunch product,
 and a request for changes or admin override on that checklist start nothing. A failed
 release is not automatically retried with another acceptance of the same
