@@ -24,7 +24,11 @@ class WorkflowLoader(yaml.SafeLoader):
 
 
 WorkflowLoader.yaml_implicit_resolvers = {
-    key: [(tag, pattern) for tag, pattern in values if tag != "tag:yaml.org,2002:bool"]
+    key: [
+        (tag, pattern)
+        for tag, pattern in values
+        if tag not in {"tag:yaml.org,2002:bool", "tag:yaml.org,2002:timestamp"}
+    ]
     for key, values in yaml.SafeLoader.yaml_implicit_resolvers.items()
 }
 WorkflowLoader.add_implicit_resolver(
