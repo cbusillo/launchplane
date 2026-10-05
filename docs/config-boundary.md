@@ -310,7 +310,23 @@ depend on a changed target; that wider dependency gap remains in the test audit.
 links or regular committed files for verification, or full-audit for local analysis. Submodule contents are a reported coverage gap
 because they belong to another repository. Allowed docs, tests, schema examples, Launchplane self-bootstrap wiring,
 admin-supplied inputs, and thin connector mechanics keep explicit allow
-reasons and do not fail the default gate. Runner mechanic selectors use the same
+reasons and do not fail the default gate.
+
+The `.github/github.json` catalog's Launchplane routing fields also retain
+`repo_metadata_ergonomics` evidence: capability booleans, service environment
+variable names, the catalog context/admin helpers and local config example,
+and merge-train label, branch, workflow repository/name/ref, controller mode
+and revision-response field paths. These are hints to the supported surfaces,
+not records of live state. Catalog paths may include the catalog-root `skills/`
+prefix; literal labels may use Unicode, spaces and namespace punctuation while
+URLs, host-and-port endpoints and absolute paths remain findings. Only the documented
+field/value shapes are accepted;
+URLs, private credential paths, product/provider/runtime coordinates, malformed
+routing values and unknown Launchplane fields remain findings. The workflow
+repository allowance applies only to its exact catalog field in this file.
+Omit unused optional fields rather than supplying null or empty routing values.
+
+Runner mechanic selectors use the same
 allowed labels in scalar, JSON, and YAML flow-list forms (for example,
 `self-hosted` and `[self-hosted]`); empty lists and lists containing custom
 runtime runner labels remain findings. Quoted or block-scalar job `runs-on`

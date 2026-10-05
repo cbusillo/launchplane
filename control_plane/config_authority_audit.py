@@ -2839,6 +2839,8 @@ def _candidate_is_interesting(*, path: str, key: str, value: object) -> bool:
         return True
     if _is_repo_metadata_ergonomics_key(key):
         return True
+    if normalized == ".github/github.json" and key.startswith("launchplane."):
+        return True
     if key_text in WORKFLOW_RUNTIME_AUTHORITY_KEYS:
         return True
     if normalized.startswith(".github/workflows/") and (
@@ -2999,6 +3001,8 @@ def _allow_reason(
     if normalized.startswith("addons/") or "/addons/" in normalized:
         return ALLOW_REASON_PRODUCT_OWNED_ADDON
     if normalized == ".github/github.json" and _is_repo_metadata_ergonomics_key(key):
+        return ALLOW_REASON_REPO_METADATA_ERGONOMICS
+    if normalized == ".github/github.json" and _is_launchplane_metadata_routing(key, value):
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS
     if normalized.endswith(".py") and (
         key_text.startswith("ALLOW_REASON_")
@@ -3988,6 +3992,78 @@ def _is_python_path_schema_only_value(*, path: str, key: str, value: object) -> 
     if allowed_values is None:
         return False
     return _string_value(value).strip().strip("\"'") in allowed_values
+
+
+def _is_launchplane_metadata_routing(key: str, value: object) -> bool:
+    """Recognize catalog routing hints without accepting runtime coordinates."""
+    if key in {
+        "launchplane.enabled",
+        "launchplane.context.enabled",
+        "launchplane.operator.enabled",
+        "launchplane.operator.requiresPrivateConfig",
+        "launchplane.mergeTrain.enabled",
+        "launchplane.mergeTrain.controller",
+        "launchplane.mergeTrain.githubActionsRunner.mutateDefault",
+    }:
+        return isinstance(value, bool)
+    if not isinstance(value, str):
+        return False
+    catalog_paths = {
+        "launchplane.context.helper": "launchplane/scripts/launchplane-context.py",
+        "launchplane.operator.helper": "launchplane/scripts/launchplane-write-action.py",
+        "launchplane.service.localConfigExample": (
+            "launchplane/references/launchplane-operator.local.example.json"
+        ),
+    }
+    if key in catalog_paths:
+        return value.removeprefix("skills/") == catalog_paths[key]
+    if key in {"launchplane.service.contextUrlEnv", "launchplane.service.operatorUrlEnv"}:
+        return re.fullmatch(r"[A-Z][A-Z0-9_]*", value) is not None
+    if key == "launchplane.mergeTrain.githubActionsRunner.repo":
+        return re.fullmatch(r"[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+", value) is not None and value.split(
+            "/", 1
+        )[1] not in {".", ".."}
+    if key == "launchplane.mergeTrain.githubActionsRunner.workflow":
+        return re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*\.ya?ml", value) is not None
+    if key in {
+        "launchplane.mergeTrain.baseBranch",
+        "launchplane.mergeTrain.githubActionsRunner.ref",
+    }:
+        return (
+            re.fullmatch(r"[^\x00-\x20\x7f~^:?*\[\\]+", value) is not None
+            and ".." not in value
+            and "//" not in value
+            and "@{" not in value
+            and value != "@"
+            and not value.startswith("/")
+            and not value.endswith(("/", "."))
+            and all(
+                not part.startswith(".") and not part.endswith(".lock") for part in value.split("/")
+            )
+        )
+    if key == "launchplane.mergeTrain.readyLabel":
+        return (
+            bool(value.strip())
+            and not re.search(r"[\x00-\x1f\x7f]", value)
+            and not value.startswith(("/", "~", "\\"))
+            and "://" not in value
+            and "//" not in value
+            and not re.search(r":\d+(?:[/?#]|$)", value)
+            and not re.match(r"[A-Za-z]:[\\/]", value)
+            and not re.match(r"(?:[A-Za-z0-9-]+\.)+[A-Za-z0-9-]+(?:/|:|$)", value)
+            and not PROVIDER_TARGET_PATTERN.search(value)
+            and all(part not in {".", ".."} for part in value.split("/"))
+            and not re.search(r"/[^/]+\.(?:json|env|toml|ya?ml|pem|key)$", value, re.I)
+        )
+    if key == "launchplane.mergeTrain.githubActionsRunner.runnerMode":
+        return value == "controller"
+    evidence_fields = {
+        "runnerWorkflow": "workflow_run.head_sha",
+        "candidate": "result.candidate.candidate_sha",
+        "landing": "result.landing_plan.entries[].merge_commit_sha",
+    }
+    prefix = "launchplane.mergeTrain.githubActionsRunner.revisionEvidenceFields."
+    return key.startswith(prefix) and value == evidence_fields.get(key.removeprefix(prefix))
 
 
 def _is_repo_metadata_ergonomics_key(key: str) -> bool:
