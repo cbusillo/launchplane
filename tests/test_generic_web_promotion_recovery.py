@@ -19,7 +19,10 @@ from control_plane.generic_web_promotion_http import (
 from control_plane.generic_web_promotion_provider_adapter import (
     GenericWebProdPromotionProviderMutationAdapter,
 )
-from control_plane.storage.postgres import MutationReservationCompletionResult
+from control_plane.storage.postgres import (
+    MutationReservationCompletionResult,
+    LaunchplaneProviderTargetRow,
+)
 from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
 from control_plane.workflows.generic_web_deploy_provider import GenericWebRuntimeArtifactObservation
 from control_plane.workflows import generic_web_promotion as promotion_workflow
@@ -243,6 +246,35 @@ class PromotionRecoveryTests(unittest.TestCase):
             status, response = self.apply(plan)
         self.assertEqual(status, 409, response)
         self.assertEqual(self.reservation().state, "reconcile_required")
+
+    def test_older_stored_default_fields_do_not_prevent_adoption(self) -> None:
+        self.interrupt_completion()
+        with self.store._session_factory() as session:
+            row = session.get(LaunchplaneProviderTargetRow, (self.case.context, "prod"))
+            assert row is not None
+            payload = dict(row.payload)
+            payload.pop("provider_evidence")
+            row.payload = payload
+            session.commit()
+        plan = self.dry_run()
+        self.assertEqual(plan["proposed_action"], "adopt_promotion")
+        status, response = self.apply(plan)
+        self.assertEqual(status, 202, response)
+
+    def test_unrelated_backup_match_cannot_hide_ambiguous_promotion(self) -> None:
+        self.interrupt_completion()
+        promotion = self.store.list_promotion_records()[0]
+        self.store.write_promotion_record(
+            promotion.model_copy(update={"record_id": "000-duplicate"})
+        )
+        self.store.write_promotion_record(
+            promotion.model_copy(
+                update={"record_id": "zzz-unrelated", "deployment_record_id": "other-deploy"}
+            )
+        )
+        before = self.snapshot()
+        self.assertEqual(self.dry_run()["proposed_action"], "hold_unknown")
+        self.assertEqual(self.snapshot(), before)
 
     def test_interrupted_health_check_finishes_only_after_current_health_passes(self) -> None:
         self.interrupt_completion()

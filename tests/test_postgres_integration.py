@@ -6017,6 +6017,8 @@ class RealPostgresProviderOperationTests(unittest.TestCase):
             "test_failed_rollback_health_before_lost_final_write_remains_held",
             "test_identical_apply_that_loses_adoption_race_replays",
             "test_interrupted_rollback_after_deploy_failure_preserves_skipped_health",
+            "test_older_stored_default_fields_do_not_prevent_adoption",
+            "test_unrelated_backup_match_cannot_hide_ambiguous_promotion",
         ):
             with self.subTest(scenario=scenario), _store_for_fresh_head_database() as store:
                 with patch.object(release_fixtures, "PostgresRecordStore", return_value=store):

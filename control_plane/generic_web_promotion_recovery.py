@@ -371,7 +371,7 @@ def inspect_promotion(
                     "detail": record_failure_summary("rollback_passed"),
                     "deployment_record_id": effective.record_id,
                     "started_at": promotion.rollback.started_at or effective.deploy.started_at,
-                    "finished_at": effective.deploy.finished_at,
+                    "finished_at": promotion.rollback.finished_at or utc_now_timestamp(),
                 }
             )
             if interrupted_rollback:

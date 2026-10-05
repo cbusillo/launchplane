@@ -230,6 +230,8 @@ failed health checks are retained as failures. Older interrupted rollback record
 without the saved target evidence remain held. Successful recovery settles the
 existing accepted release step; the release worker can continue any remaining
 steps under that decision's normal acceptance and hold checks.
+The current Dokploy runtime observer proves compose targets only; application
+targets remain held until their provider supports the same exact runtime proof.
 
 With `promote_with_rollback_drill` it then runs the rollback drill:
 

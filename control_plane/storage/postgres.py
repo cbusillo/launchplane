@@ -8538,7 +8538,19 @@ class PostgresRecordStore(HumanSessionStore):
                 else:
                     raise TypeError("Unsupported promotion recovery evidence.")
                 evidence_row = session.scalar(statement.with_for_update())
-                if evidence_row is None or evidence_row.payload != self._payload_dict(evidence):
+                try:
+                    stored_evidence = (
+                        self._payload_dict(
+                            self._read_payload(
+                                model_type=type(evidence), payload=evidence_row.payload
+                            )
+                        )
+                        if evidence_row is not None
+                        else None
+                    )
+                except ValueError:
+                    stored_evidence = None
+                if stored_evidence != self._payload_dict(evidence):
                     return MutationReservationAdoptionResult(
                         status="reservation_mismatch", record=current_record
                     )
@@ -12172,10 +12184,16 @@ class PostgresRecordStore(HumanSessionStore):
         if recovery_backup_record_id or recovery_deployment_record_id:
             filters.append(
                 or_(
-                    LaunchplanePromotionRow.payload["backup_record_id"].as_string()
-                    == recovery_backup_record_id,
                     LaunchplanePromotionRow.payload["deployment_record_id"].as_string()
                     == recovery_deployment_record_id,
+                    and_(
+                        func.coalesce(
+                            LaunchplanePromotionRow.payload["deployment_record_id"].as_string(), ""
+                        )
+                        == "",
+                        LaunchplanePromotionRow.payload["backup_record_id"].as_string()
+                        == recovery_backup_record_id,
+                    ),
                 )
             )
         return self._list_models(
