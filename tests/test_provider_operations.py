@@ -791,6 +791,7 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
             result = fixture.run(adapter, allow_mutation=False)
             self.assertEqual(result.status, "reconcile_required")
             self.assertEqual(adapter.apply_calls, 0)
+            self.assertIsNone(fixture.maybe_stored())
 
     def test_reconcile_retries_once_when_adapter_proves_effect_absent(self) -> None:
         with TemporaryDirectory() as directory:

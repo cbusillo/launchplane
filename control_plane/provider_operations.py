@@ -499,6 +499,11 @@ def run_durable_provider_operation(
     if decision != "acquired":
         raise RuntimeError(f"Unsupported mutation reservation decision: {decision}")
     if not allow_mutation:
+        release = store.release_reserved_mutation(reservation=reservation)
+        if release.status == "released":
+            return DurableProviderOperationResult(
+                "reconcile_required", None, 409, _reconcile_required_payload()
+            )
         return _mark_reconcile_required(
             store=store, reservation=reservation, reconciliation_key=reconciliation_key
         )

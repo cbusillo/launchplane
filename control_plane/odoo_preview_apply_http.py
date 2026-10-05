@@ -288,6 +288,7 @@ def validate_odoo_preview_profile_authority(
     *,
     profile: LaunchplaneProductProfileRecord,
     issued_plan: OdooPreviewApplyInputsResult,
+    observation_only: bool = False,
 ) -> None:
     if profile.product != issued_plan.product:
         raise OdooPreviewPlanProvenanceError(
@@ -304,7 +305,7 @@ def validate_odoo_preview_profile_authority(
             code="odoo_preview_plan_stale",
             message="Odoo preview plan context no longer matches current service authority.",
         )
-    if profile.preview.template_instance != issued_plan.template_instance:
+    if not observation_only and profile.preview.template_instance != issued_plan.template_instance:
         raise OdooPreviewPlanProvenanceError(
             code="odoo_preview_plan_stale",
             message="Odoo preview plan template no longer matches current service authority.",

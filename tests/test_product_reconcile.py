@@ -1862,6 +1862,15 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(calls.count("/api/compose.one"), PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1)
         # Fresh discovery now refuses because destroy already removed the domain.
         self.assertEqual(observed.last_plan["last_failed_error_code"], "preview_plan_blocked")
+        profile = self.store.read_product_profile_record("site")
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "preview": profile.preview.model_copy(update={"template_instance": "repaired"}),
+                    "updated_at": "2026-10-05T12:00:00Z",
+                }
+            )
+        )
         self.request("preview", 5)
         with patch(
             "control_plane.dokploy.api.fetch_dokploy_target_payload",
@@ -1878,6 +1887,24 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
             with self.assertLogs("control_plane.product_reconcile", "WARNING"):
                 failed = self.run_once()
             self.assertEqual(failed.last_plan["destroy_failed_attempts"], 0)
+
+    def test_checkpoint_storage_failure_does_not_consume_unknown_destroy_attempts(self) -> None:
+        calls = self.install_refused_domain_provider()
+        self.request("preview", 5)
+        with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+            first = self.run_once()
+        with patch.object(
+            self.store, "checkpoint_mutation_provider_effect", side_effect=OSError("DB unavailable")
+        ):
+            for _attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1):
+                self.request("preview", 5)
+                with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                    failed = self.run_once()
+                self.assertEqual(
+                    failed.last_plan["destroy_failed_attempts"],
+                    first.last_plan["destroy_failed_attempts"],
+                )
+        self.assertEqual(calls.count("/api/domain.delete"), 1)
 
     def test_profile_repair_replans_when_retained_destroy_authority_is_stale(self) -> None:
         calls = self.install_refused_domain_provider()

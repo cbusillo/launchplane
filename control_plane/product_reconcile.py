@@ -1480,7 +1480,7 @@ def _run_preview_operation(
                 **{**kwargs, "provider_effect_checkpoint": checkpoint_effect}
             )
         except Exception as error:
-            if not isinstance(error, DokployRequestFailed) or not error.retryable:
+            if isinstance(error, DokployRequestFailed) and not error.retryable:
                 plan["preview_execution_refused"] = True
             raise
 
@@ -1500,7 +1500,9 @@ def _run_preview_operation(
                 ),
             ),
         )
-        validate_odoo_preview_profile_authority(profile=profile, issued_plan=issued_plan)
+        validate_odoo_preview_profile_authority(
+            profile=profile, issued_plan=issued_plan, observation_only=not allow_mutation
+        )
         return run_odoo_preview_apply_operation(
             store=cast(DurableProviderOperationStore, record_store),
             control_plane_root=control_plane_root,
@@ -1558,7 +1560,7 @@ def _run_preview_operation(
             except (ValidationError, OdooPreviewPlanProvenanceError):
                 # Retained intent must not prevent a supported profile/model repair.
                 # Fresh planning still owns mutation authority and the runner's fence.
-                plan.pop("preview_recovery_plan", None)
+                pass
             else:
                 if observed.status != "reconcile_required" or not allow_retry:
                     return finish_result(observed, stored_plan)
