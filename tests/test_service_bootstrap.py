@@ -56,6 +56,11 @@ class _ClosableStore:
 
 
 class LaunchplaneServiceBootstrapTests(unittest.TestCase):
+    def setUp(self) -> None:
+        scheduler_patch = patch.object(service_bootstrap, "HealthMonitorScheduler")
+        self.scheduler = scheduler_patch.start().return_value
+        self.addCleanup(scheduler_patch.stop)
+
     def test_service_serve_runs_fastapi_app(self) -> None:
         fastapi_response: Any | None = None
         ui_response: Any | None = None
@@ -240,6 +245,8 @@ class LaunchplaneServiceBootstrapTests(unittest.TestCase):
                 )
 
             run_uvicorn.assert_called_once()
+            self.scheduler.start.assert_called()
+            self.scheduler.stop.assert_called()
 
         self.assertIsNotNone(fastapi_response)
         self.assertIsNotNone(ui_response)
