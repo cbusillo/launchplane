@@ -424,3 +424,9 @@ scan finished before merge. Before consumer removal, the Director's required-che
 handling must account for a missing/queued source check and for irrelevant old
 branch contexts after a PR retarget. Source implementation does not change that
 live policy. Runtime proof must include a delayed scan, not only a completed pass.
+
+Source reads share the train App installation's rate budget. The four-minute
+read budget and per-scan blob cache bound one attempt's work, but repeated large
+change sets or retries can still consume that shared allowance. Rate admission,
+large-change coverage and interrupted-process resource behavior need operational
+qualification before broad activation; this source proof does not establish them.

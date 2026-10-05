@@ -534,6 +534,7 @@ def run_product_config_authority_once(
             evidence["scan_status"] = evidence.get("status")
             evidence["status"] = "unavailable"
             evidence["projection_status"] = "unavailable"
+            evidence["retry_pending"] = claimed.config_authority_attempt < 3
 
     # The storage fence is held through publication and terminal persistence.
     return record_store.complete_config_authority_delivery(claimed, evidence, publish=project)

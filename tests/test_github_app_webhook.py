@@ -412,6 +412,23 @@ class GitHubAppWebhookTests(unittest.TestCase):
             dependencies=dependencies,
         )
         self.assertEqual(status, 202)
+        publication_failed = run_product_config_authority_once(
+            self.store,
+            "worker",
+            scan=lambda *_args: {"status": "pass", "head_sha": "b" * 40},
+            publish=Mock(side_effect=OSError("private publish failure")),
+        )
+        assert publication_failed is not None
+        self.assertEqual(publication_failed.config_authority_state, "pending")
+        self.assertEqual(publication_failed.config_authority["scan_status"], "pass")
+        self.assertEqual(publication_failed.config_authority["projection_status"], "unavailable")
+        self.assertIs(publication_failed.config_authority["retry_pending"], True)
+        self.assertNotIn("private publish failure", publication_failed.model_dump_json())
+        with self.store._session_factory() as session:
+            row = session.get(LaunchplaneGitHubAppWebhookDeliveryRow, "scan-durable")
+            assert row is not None
+            row.payload = {**row.payload, "config_authority_next_attempt_at": ""}
+            session.commit()
         repaired = run_product_config_authority_once(
             self.store,
             "worker",
