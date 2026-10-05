@@ -51,6 +51,14 @@ class ReleaseReviewStore(Protocol):
         self, record: ReleaseReviewDecisionRecord
     ) -> object: ...
 
+    def create_release_review_decision_record_if_absent(
+        self, record: ReleaseReviewDecisionRecord
+    ) -> ReleaseReviewDecisionRecord: ...
+
+    def record_release_review_decision_publication(
+        self, *, record_id: str, release_issue_url: str
+    ) -> ReleaseReviewDecisionRecord: ...
+
     def list_release_review_decision_records(
         self, *, product: str, limit: int | None = None
     ) -> tuple[ReleaseReviewDecisionRecord, ...]: ...

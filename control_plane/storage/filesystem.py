@@ -6958,6 +6958,30 @@ class FilesystemRecordStore:
     def write_release_review_decision_record(self, record: ReleaseReviewDecisionRecord) -> Path:
         return self._write_model("launchplane_release_review_decisions", record.record_id, record)
 
+    def create_release_review_decision_record_if_absent(
+        self, record: ReleaseReviewDecisionRecord
+    ) -> ReleaseReviewDecisionRecord:
+        record_type = "launchplane_release_review_decisions"
+        with self._product_authority_bundle_lock():
+            self._create_model_if_absent_locked(record_type, record.record_id, record)
+            return self._read_model_locked(
+                ReleaseReviewDecisionRecord, record_type, record.record_id
+            )
+
+    def record_release_review_decision_publication(
+        self, *, record_id: str, release_issue_url: str
+    ) -> ReleaseReviewDecisionRecord:
+        if not release_issue_url.strip():
+            raise ValueError("Release decision publication requires an issue URL.")
+        record_type = "launchplane_release_review_decisions"
+        with self._product_authority_bundle_lock():
+            stored = self._read_model_locked(ReleaseReviewDecisionRecord, record_type, record_id)
+            if stored.release_issue_url:
+                return stored
+            published = stored.model_copy(update={"release_issue_url": release_issue_url})
+            self._write_model_locked(record_type, record_id, published)
+            return published
+
     def list_release_review_decision_records(
         self, *, product: str, limit: int | None = None
     ) -> tuple[ReleaseReviewDecisionRecord, ...]:

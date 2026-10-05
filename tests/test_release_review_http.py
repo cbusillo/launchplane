@@ -164,6 +164,42 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(newest(), "")
         self.assertEqual(self.store.list_deployment_records(), ())
 
+    async def test_retry_preserves_concurrent_publication_before_issue_lookup(self) -> None:
+        self.publisher.side_effect = ValueError("Source-control write unavailable")
+        pending = await self.post()
+        self.assertEqual(pending.status_code, 200, pending.text)
+        unpublished = self.store.list_release_review_decision_records(product="example-site")[0]
+        published = unpublished.model_copy(
+            update={"release_issue_url": "https://github.com/example/site/issues/98"}
+        )
+
+        def review_while_another_writer_publishes(**kwargs: object) -> object:
+            snapshot = build_release_review(store=self.store, profile=profile(), read=github_read)
+            self.store.write_release_review_decision_record(published)
+            return snapshot
+
+        def publish(**kwargs: object) -> str:
+            self.assertEqual(
+                self.store.list_release_review_decision_records(product="example-site"),
+                (published,),
+            )
+            return "https://github.com/example/site/issues/100"
+
+        self.publisher.side_effect = publish
+        with patch(
+            "control_plane.http_app.current_release_review",
+            side_effect=review_while_another_writer_publishes,
+        ):
+            retry = await self.post()
+        self.assertEqual(retry.status_code, 200, retry.text)
+        self.assertEqual(
+            retry.json()["review"]["latest_decision"]["release_issue_url"],
+            published.release_issue_url,
+        )
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product="example-site"), (published,)
+        )
+
     async def test_other_human_and_owner_override_are_denied(self) -> None:
         for args in (
             {"actor": "another-user", "github_id": 9002},

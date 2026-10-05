@@ -6,10 +6,13 @@ import unittest
 
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.test_release_review import decision, seed
 
 
-def standing_decision(store: PostgresRecordStore) -> ReleaseReviewDecisionRecord:
+def standing_decision(
+    store: PostgresRecordStore | FilesystemRecordStore,
+) -> ReleaseReviewDecisionRecord:
     seed(store)
     return decision(store).model_copy(
         update={
@@ -21,6 +24,8 @@ def standing_decision(store: PostgresRecordStore) -> ReleaseReviewDecisionRecord
 
 
 class ReleaseReviewStorageTests(unittest.TestCase):
+    store: PostgresRecordStore | FilesystemRecordStore
+
     def setUp(self) -> None:
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -90,3 +95,11 @@ class ReleaseReviewStorageTests(unittest.TestCase):
             self.store.list_release_review_decision_records(product=self.decision.product),
             (published,),
         )
+
+
+class FilesystemReleaseReviewStorageTests(ReleaseReviewStorageTests):
+    def setUp(self) -> None:
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.store = FilesystemRecordStore(Path(directory.name))
+        self.decision = standing_decision(self.store)

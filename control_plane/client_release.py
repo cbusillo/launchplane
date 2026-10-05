@@ -512,7 +512,7 @@ def _record_standing_acceptance(
         decision = store.create_release_review_decision_record_if_absent(decision)
     # Use the existing publication/recovery path. An unpublished decision cannot
     # queue a backup or promotion, and a retry keeps the same decision id.
-    issue_url = publish_release_decision(
+    issue_url = decision.release_issue_url or publish_release_decision(
         control_plane_root=control_plane_root, profile=profile, decision=decision
     )
     if issue_url:

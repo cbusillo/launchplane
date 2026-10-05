@@ -346,24 +346,22 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             backup = self.store.read_verireel_prod_backup_gate_operation_record(backup_id)
             assert backup.authorization is not None
             self.assertEqual(backup.authorization.release_decision_record_id, winner.record_id)
-            return create(contender)
-
-        def publish(**kwargs: Any) -> str:
-            self.assertEqual(kwargs["decision"], winner)
+            recovered = create(contender)
+            self.assertEqual(recovered, winner)
             self.assertEqual(
                 self.store.list_release_review_decision_records(product=self.profile.product)[0],
                 winner,
             )
-            # Verify while the contender's publication is still unfinished: the
-            # real backup worker must retain its authorization in this window.
+            # Verify before the late creator returns: the real backup worker
+            # must retain its authorization throughout the contention window.
             self.capture()
-            return "https://github.com/example/site/issues/100"
+            return recovered
 
-        self.publish.side_effect = publish
         with patch.object(
             self.store, "create_release_review_decision_record_if_absent", side_effect=race
         ):
             self.advance()
+        self.publish.assert_not_called()
         self.assertEqual(
             self.store.list_release_review_decision_records(product=self.profile.product), (winner,)
         )
