@@ -1148,6 +1148,8 @@ def _create_or_verify_github_release(
     token = resolve_launchplane_github_token(
         control_plane_root=control_plane_root,
         context_name=context,
+        repository=profile.repository,
+        purpose="release_publish",
     )
     if not token:
         raise click.ClickException(
@@ -1208,6 +1210,8 @@ def _preflight_github_release(
     token = resolve_launchplane_github_token(
         control_plane_root=control_plane_root,
         context_name=context,
+        repository=profile.repository,
+        purpose="repository_read",
     )
     if not token:
         raise click.ClickException(

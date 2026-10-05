@@ -1554,7 +1554,7 @@ class GenericWebPromotionWorkflowTests(unittest.TestCase):
                     ),
                 )
 
-        self.assertIn("GITHUB_TOKEN", str(raised.exception))
+        self.assertIn("Delivery App", str(raised.exception))
 
 
 if __name__ == "__main__":

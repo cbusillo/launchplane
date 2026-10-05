@@ -131,10 +131,11 @@ def discover_github_preview_desired_state(
         github_token = resolve_launchplane_github_token(
             control_plane_root=control_plane_root,
             context_name=context,
+            repository=repository,
         )
         if not github_token:
             raise click.ClickException(
-                "Launchplane runtime records do not expose GITHUB_TOKEN for this context"
+                "Launchplane Delivery App credentials are unavailable for this repository"
             )
         pull_requests = list_github_open_pull_requests(
             owner=owner,

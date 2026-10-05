@@ -86,7 +86,10 @@ def publish_release_decision(
     marker = release_decision_marker(decision.record_id)
     lane = next(lane for lane in profile.lanes if lane.instance == "testing")
     token = resolve_launchplane_github_token(
-        control_plane_root=control_plane_root, context_name=lane.context
+        control_plane_root=control_plane_root,
+        context_name=lane.context,
+        repository=profile.repository,
+        purpose="release_record",
     )
     if not token:
         raise ValueError("Release record source-control access is unavailable.")

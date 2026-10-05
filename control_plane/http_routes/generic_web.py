@@ -301,7 +301,7 @@ def build_generic_web_write_route_handlers(
                 product=profile.product,
                 destination_environment=lane.instance,
                 action_allowed=lambda _action, _product, _context, _instances: True,
-                workflow_credentials_ready=lambda _context: True,
+                workflow_credentials_ready=lambda _context, _repository: True,
             )
         except (AttributeError, FileNotFoundError, ValueError, click.ClickException) as error:
             raise dependencies.http_error(
@@ -368,7 +368,7 @@ def build_generic_web_write_route_handlers(
             product=profile.product,
             destination_environment=lane.instance,
             action_allowed=lambda _action, _product, _context, _instances: True,
-            workflow_credentials_ready=lambda _context: True,
+            workflow_credentials_ready=lambda _context, _repository: True,
         )
         return current_profile == profile and current_lane == lane, status.release_review
 

@@ -1965,8 +1965,7 @@ def _owner_review_status_writer(
     control_plane_root: Path | None,
     public_origin: Callable[[], str],
 ) -> OwnerReviewStatusWriter | None:
-    """Write the Owner-review status as the preview feedback route does, with the
-    preview context's feedback credential; the merge-train App cannot write statuses."""
+    """Project Client review through the Delivery and Advisory Apps."""
     if control_plane_root is None:
         return None
     try:
