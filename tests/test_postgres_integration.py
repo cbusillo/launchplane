@@ -3326,11 +3326,30 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             GitHubAppWebhookDeliveryRecord,
             ProductReconcileLeaseLostError,
         )
-        from control_plane.storage.postgres import LaunchplaneGitHubAppWebhookDeliveryRow
+        from control_plane.storage.postgres import (
+            LaunchplaneGitHubAppWebhookDeliveryRow,
+            CONFIG_AUTHORITY_QUEUE_INDEX,
+        )
 
         with _head_postgres_database() as url:
             stores = [PostgresRecordStore(database_url=url) for _ in range(2)]
             try:
+                from control_plane.storage.migrations.versions import (
+                    f3021a0b1c2d_index_config_authority_delivery_queue as scan_migration,
+                )
+                from control_plane.storage.schema_migration import alembic_config
+
+                # Exercise the migration from its predecessor, rather than merely
+                # accepting the index a fresh baseline creates from current metadata.
+                alembic_command.downgrade(alembic_config(url), scan_migration.down_revision)
+                alembic_command.upgrade(alembic_config(url), scan_migration.revision)
+                realized_indexes = {
+                    entry["name"]
+                    for entry in inspect(stores[0]._engine).get_indexes(
+                        LaunchplaneGitHubAppWebhookDeliveryRow.__tablename__
+                    )
+                }
+                self.assertIn(CONFIG_AUTHORITY_QUEUE_INDEX.name, realized_indexes)
                 delivery = GitHubAppWebhookDeliveryRecord(
                     delivery_id="source-scan",
                     event="push",
@@ -3339,6 +3358,8 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     config_authority_state="pending",
                 )
                 stores[0].record_github_app_webhook_delivery(delivery, (), delivery.received_at)
+                followup = delivery.model_copy(update={"delivery_id": "source-scan-followup"})
+                stores[0].record_github_app_webhook_delivery(followup, (), followup.received_at)
                 with ThreadPoolExecutor(max_workers=2) as workers:
                     futures = [
                         workers.submit(
@@ -3359,8 +3380,12 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     session.commit()
                 recovered = stores[1].claim_next_config_authority_delivery("same-worker", 60)
                 assert recovered is not None
+                publisher = Mock()
                 with self.assertRaises(ProductReconcileLeaseLostError):
-                    stores[0].complete_config_authority_delivery(old, {"status": "pass"})
+                    stores[0].complete_config_authority_delivery(
+                        old, {"status": "pass"}, publish=publisher
+                    )
+                publisher.assert_not_called()
                 stores[1].complete_config_authority_delivery(recovered, {"status": "fail"})
                 self.assertEqual(
                     stores[0]

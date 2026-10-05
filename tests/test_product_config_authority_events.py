@@ -5,6 +5,7 @@ import subprocess
 from tempfile import TemporaryDirectory
 from typing import cast
 import unittest
+from pydantic import JsonValue
 from unittest.mock import patch
 
 from control_plane.config_authority_audit import (
@@ -243,6 +244,11 @@ class ConfigAuthorityEventTests(unittest.TestCase):
         entry["github_token"] = {
             "github_app": {"app_id": 77, "repository_id": 424242, "private_key_context": "test-app"}
         }
+        from copy import deepcopy
+
+        second = deepcopy(entry)
+        second["base_branch"] = "release"
+        payload["policies"].append(second)
         store = PostgresRecordStore(database_url=sqlite_database_url(self.root / "lp.sqlite"))
         self.addCleanup(store.close)
         with patch("control_plane.github_app_webhook._wake_merge_train", return_value=False):
@@ -257,11 +263,49 @@ class ConfigAuthorityEventTests(unittest.TestCase):
                 )
             )
             body = json.dumps(
-                {"repository": {"id": 424242}, "before": self.base, "after": self.head}
+                {
+                    "repository": {"id": 424242},
+                    "ref": "refs/heads/main",
+                    "before": self.base,
+                    "after": self.head,
+                }
             ).encode()
             with patch(
                 "control_plane.product_config_authority_events.mint_build_provenance_installation_token"
             ) as mint:
+                for ref, before, created in (
+                    ("refs/heads/main", "0" * 40, True),
+                    ("refs/tags/release", self.base, False),
+                    ("refs/heads/work/new-feature", "0" * 40, True),
+                    ("refs/heads/launchplane/train/candidate", self.base, False),
+                ):
+                    event_body = json.dumps(
+                        {
+                            "repository": {"id": 424242},
+                            "ref": ref,
+                            "before": before,
+                            "after": self.head,
+                            "created": created,
+                        }
+                    ).encode()
+                    code, response = handle_github_app_webhook_request(
+                        event_body,
+                        "push",
+                        ref,
+                        _signature(event_body),
+                        store,
+                        Path("."),
+                        "trace",
+                        dependencies=GitHubAppWebhookDependencies(
+                            webhook_secret=lambda: "app-webhook-secret"
+                        ),
+                    )
+                    self.assertEqual(code, 202)
+                    self.assertEqual(
+                        cast(dict[str, object], response["result"])["status"], "ignored"
+                    )
+                    self.assertIsNone(store.claim_next_config_authority_delivery("worker", 600))
+                    mint.assert_not_called()
                 status, _ = handle_github_app_webhook_request(
                     body,
                     "push",
@@ -353,16 +397,19 @@ class ConfigAuthorityEventTests(unittest.TestCase):
                             check_status="completed",
                             conclusion="success" if status == "pass" else "failure",
                         )
-                        publish_product_config_authority_evidence(
-                            _inventory(),
-                            {
-                                "status": status,
-                                "event": event,
-                                "base_sha": self.base,
-                                "head_sha": self.head,
-                            },
-                            Path("."),
-                        )
+                        evidence: dict[str, JsonValue] = {
+                            "status": status,
+                            "event": event,
+                            "base_sha": self.base,
+                            "head_sha": self.head,
+                        }
+                        if status == "fail":
+                            findings: list[JsonValue] = [{"key": "😀" * 70000}] * 300
+                            evidence["gate"] = {
+                                "rejected_finding_count": len(findings),
+                                "rejected_findings": findings,
+                            }
+                        publish_product_config_authority_evidence(_inventory(), evidence, Path("."))
                         projection = writer.call_args.kwargs["projection"]
                         self.assertEqual(
                             projection.conclusion, "success" if status == "pass" else "failure"

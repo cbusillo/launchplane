@@ -31,6 +31,7 @@ from control_plane.contracts.repository_inventory import (
 from control_plane.product_repository_identity import stored_identity_matches_inventory
 from control_plane.product_config_authority_events import (
     config_authority_event_supported,
+    config_authority_event_request,
     request_product_config_authority_event,
 )
 from control_plane.repository_inventory import get_repository_inventory_read_model
@@ -191,9 +192,16 @@ def handle_github_app_webhook_request(
             ).current_record
             if inventory is None or inventory.inventory_state != "tracked":
                 return accepted("ignored", reason="repository_not_mapped")
-            config_authority = dependencies.config_authority(
-                record_store, inventory, normalized_event, payload
-            )
+            try:
+                config_authority = dependencies.config_authority(
+                    record_store, inventory, normalized_event, payload
+                )
+            except Exception:
+                config_authority = {
+                    "status": "pending",
+                    "request_error": "source_request_unavailable",
+                    "request": config_authority_event_request(normalized_event, payload),
+                }
         product, unmapped_reason = _product_for_repository(store=store, repository_id=repository_id)
     except Exception:
         logging.getLogger(__name__).warning("GitHub source event verification unavailable.")

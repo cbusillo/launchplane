@@ -104,6 +104,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
 from control_plane.release_review import require_unchanged_production_artifact
 from control_plane.product_config_authority_events import (
     ConfigAuthorityEventStore,
+    config_authority_events_enabled,
     run_product_config_authority_once,
 )
 from control_plane.product_reconcile import (
@@ -752,19 +753,6 @@ def run_odoo_stable_operation_worker_once(
             recovered_operation_ids=recovered_operation_ids,
             terminal_write_committed=terminal_write_committed,
         )
-    if hasattr(record_store, "claim_next_config_authority_delivery"):
-        config_delivery = run_product_config_authority_once(
-            cast(ConfigAuthorityEventStore, record_store),
-            normalized_lease_owner,
-        )
-        if config_delivery is not None:
-            return OdooStableOperationWorkerResult(
-                status="worked",
-                operation_kind="product_config_authority",
-                operation_id=config_delivery.delivery_id,
-                recovered_operation_ids=recovered_operation_ids,
-                terminal_write_committed=True,
-            )
     # Last, so a real deploy operation always wins over a plan.
     if hasattr(record_store, "claim_next_product_reconcile_request"):
         reconciled = run_product_reconcile_once(
@@ -779,6 +767,22 @@ def run_odoo_stable_operation_worker_once(
                 status="idle" if reconciled.state == "pending" else "worked",
                 operation_kind="product_reconcile",
                 operation_id=reconciled.target_key,
+                recovered_operation_ids=recovered_operation_ids,
+                terminal_write_committed=True,
+            )
+    if hasattr(
+        record_store, "claim_next_config_authority_delivery"
+    ) and config_authority_events_enabled(record_store):
+        config_delivery = run_product_config_authority_once(
+            cast(ConfigAuthorityEventStore, record_store),
+            normalized_lease_owner,
+            control_plane_root=control_plane_root_path,
+        )
+        if config_delivery is not None:
+            return OdooStableOperationWorkerResult(
+                status="worked",
+                operation_kind="product_config_authority",
+                operation_id=config_delivery.delivery_id,
                 recovered_operation_ids=recovered_operation_ids,
                 terminal_write_committed=True,
             )

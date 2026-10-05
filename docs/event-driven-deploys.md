@@ -14,7 +14,9 @@ events for the product's repository, verifies the build, and deploys it.
 Launchplane receives the webhook of the GitHub App its merge train already
 uses (the App is installed on every product repository). One receiver,
 `POST /v1/github/app-webhook`, takes `workflow_run` and `pull_request`
-deliveries. Everything else is acknowledged and ignored.
+deliveries for deploy reconciliation. Opted-in source checks also consume
+`push` and `merge_group` deliveries as described below. Other events are
+acknowledged and ignored.
 
 Events carry no instructions. An event only says which target to look at
 again:
@@ -352,17 +354,20 @@ of the expected build is what marks the preview ready, as for Odoo.
 
 Source implementation: #3021. Runtime activation and required-check policy are
 separate Owner decisions; consumer workflows remain until coverage is verified.
-A repository's DB-backed merge-train policy can opt in with
+An enrolled base branch's DB-backed merge-train policy can opt in with
 `config_authority_events_enabled`. Its default is false, and omitting it
 preserves historical policy digests. No checked-in product catalog or service
 environment variable activates it.
 
 For an opted-in, tracked inventory repository, the signed App receiver records
 an independent scan request for PR opened/reopened/synchronize/edited, push, or
-merge-group checks-requested events, even without a deploy profile or build.
+merge-group checks-requested events for that enrolled base branch, even without
+a deploy profile or build.
 It acknowledges after the transaction, without waiting for GitHub file reads.
-Redelivery preserves the original request. A branch deletion has no head and
-requests no scan; a creation push with no base refuses verification.
+Redelivery preserves the original request and deploy-target deduplication.
+Pushes are scanned only for enrolled base branches with an explicit nonzero
+before/head pair. Creation, deletion, tag and unrelated feature/train-candidate
+pushes request no scan; PR and merge-group events provide their comparisons.
 
 The existing operation worker leases each delivery and rereads repository
 identity. PRs use the API's current explicit base/head pair; push and merge-group
@@ -375,7 +380,11 @@ Dirty checkouts, workflow instructions, and product executables are never inputs
 A source read, identity mismatch, corrupt blob, truncated tree, or exceeded scan
 budget refuses verification. Scans have a four-minute read budget under a
 ten-minute lease; an expired lease is recovered and its older attempt cannot
-publish stored results. Ordinary operation work keeps priority over scans.
+publish a check or stored result. Publication holds the database delivery fence
+through the provider write and completion; different deliveries for one
+repository are serialized. Deploy operations and product reconciliation keep
+priority over scans. With no branch opted in, idle polling skips the scan table. The source migration
+adds a PostgreSQL index on scan state and receipt time for enabled queue reads.
 
 Completed results are projected through the existing checks-only App as
 `launchplane/config-authority/pull-request`, `/push`, or `/merge-group`.
@@ -393,8 +402,11 @@ An authorized inventory reader can retrieve a delivery's request, queue/lease
 state, commit pair, redacted gate findings, coverage gaps, hashes and projection
 receipt through `GET /v1/repository-inventory?repository_id=<id>&delivery_id=<id>`.
 The delivery must belong to that repository. Literal configuration values and
-file contents are absent. Failed scans remain visible; a new signed event queues
-a new scan, while an interrupted worker's expired lease is recoverable.
+file contents are absent. A rejected gate stays failed. Unavailable source or
+projection evidence retries three times with backoff (30 then 60 seconds); native
+signed redelivery can retry an exhausted unavailable scan without repeating its
+deploy targets. Summaries stay within the check API's size limit, with full
+evidence in the reader. Interrupted workers recover through their expired lease.
 
 Before removing the RepairShopr, VeriReel or SellYourOutboard workflow, verify
 runtime activation, event subscriptions, source reads and check projection for

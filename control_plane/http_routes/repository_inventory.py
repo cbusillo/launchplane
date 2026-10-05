@@ -136,6 +136,13 @@ def register_repository_inventory_read_routes(
                     code="not_found",
                     message="Source event delivery was not found for this repository.",
                 ) from error
+            except Exception as error:
+                raise dependencies.http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="source_evidence_unavailable",
+                    message="Source event delivery evidence is unavailable.",
+                ) from error
         return RepositoryInventoryReadResponse(
             trace_id=trace_id,
             read_model=read_model,

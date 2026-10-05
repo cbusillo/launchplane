@@ -15714,7 +15714,8 @@
           "config_authority_events_enabled": {
             "default": false,
             "title": "Config Authority Events Enabled",
-            "type": "boolean"
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           },
           "engineering_review_mode": {
             "default": "advisory",
@@ -15785,7 +15786,6 @@
         "required": [
           "base_branch",
           "blocked_label",
-          "config_authority_events_enabled",
           "engineering_review_mode",
           "enqueue",
           "enqueue_label",

@@ -98,6 +98,7 @@ class GitHubAppWebhookDeliveryRecord(BaseModel):
     config_authority_lease_owner: str = ""
     config_authority_lease_expires_at: str = ""
     config_authority_attempt: int = Field(default=0, ge=0)
+    config_authority_next_attempt_at: str = ""
 
 
 def _validate_target_shape(

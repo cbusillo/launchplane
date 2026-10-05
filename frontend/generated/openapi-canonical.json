@@ -10294,6 +10294,11 @@
             "title": "Config Authority Lease Owner",
             "type": "string"
           },
+          "config_authority_next_attempt_at": {
+            "default": "",
+            "title": "Config Authority Next Attempt At",
+            "type": "string"
+          },
           "config_authority_request": {
             "additionalProperties": {
               "$ref": "#/components/schemas/JsonValue"
@@ -17377,7 +17382,8 @@
           "config_authority_events_enabled": {
             "default": false,
             "title": "Config Authority Events Enabled",
-            "type": "boolean"
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           },
           "engineering_review_mode": {
             "default": "advisory",
@@ -17472,7 +17478,8 @@
           "config_authority_events_enabled": {
             "default": false,
             "title": "Config Authority Events Enabled",
-            "type": "boolean"
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           },
           "engineering_review_mode": {
             "default": "advisory",
@@ -69814,7 +69821,8 @@
                       "config_authority_events_enabled": {
                         "default": false,
                         "title": "Config Authority Events Enabled",
-                        "type": "boolean"
+                        "type": "boolean",
+                        "x-launchplane-optional-response": true
                       },
                       "engineering_review_mode": {
                         "default": "advisory",

@@ -160,6 +160,7 @@ def scan_product_config_authority_event(
     inventory: RepositoryInventoryRecord,
     event: str,
     payload: dict[str, object],
+    expected_base_branch: str = "",
 ) -> dict[str, JsonValue]:
     source = GitHubConfigAuthoritySource(transport, inventory.repository)
     repository = _object(source.read(source.prefix))
@@ -177,6 +178,8 @@ def scan_product_config_authority_event(
         base = _object(pr.get("base"))
         if str(_object(base.get("repo")).get("id")) != inventory.repository_id:
             raise ValueError("Source pull request targets another repository.")
+        if expected_base_branch and base.get("ref") != expected_base_branch:
+            return {"status": "superseded"}
         base_sha, head_sha = _sha(base.get("sha")), _sha(_object(pr.get("head")).get("sha"))
     elif event == "push":
         base_sha, head_sha = _sha(payload.get("before")), _sha(payload.get("after"))
@@ -210,33 +213,71 @@ def scan_product_config_authority_event(
     )
 
 
+def config_authority_event_request(event: str, payload: dict[str, object]) -> dict[str, JsonValue]:
+    """Keep only source selectors from the verified delivery, never instructions."""
+    if event == "pull_request":
+        pr = payload.get("pull_request")
+        pr = pr if isinstance(pr, dict) else {}
+        base, head = pr.get("base"), pr.get("head")
+        return {
+            "number": cast(JsonValue, payload.get("number")),
+            "base_branch": cast(JsonValue, base.get("ref") if isinstance(base, dict) else None),
+            "head_sha": cast(JsonValue, head.get("sha") if isinstance(head, dict) else None),
+        }
+    if event == "push":
+        ref = payload.get("ref")
+        return {
+            "before": cast(JsonValue, payload.get("before")),
+            "after": cast(JsonValue, payload.get("after")),
+            "base_branch": ref.removeprefix("refs/heads/")
+            if isinstance(ref, str) and ref.startswith("refs/heads/")
+            else "",
+        }
+    group = payload.get("merge_group")
+    group = group if isinstance(group, dict) else {}
+    ref = group.get("base_ref")
+    return {
+        "merge_group": {
+            "base_sha": cast(JsonValue, group.get("base_sha")),
+            "head_sha": cast(JsonValue, group.get("head_sha")),
+        },
+        "base_branch": ref.removeprefix("refs/heads/")
+        if isinstance(ref, str) and ref.startswith("refs/heads/")
+        else "",
+    }
+
+
 def request_product_config_authority_event(
     record_store: object,
     inventory: RepositoryInventoryRecord,
     event: str,
     payload: dict[str, object],
 ) -> dict[str, JsonValue]:
-    """Select dormant DB-backed activation without making any provider read."""
-    if _enabled_policy(record_store, inventory) is None:
+    """Select dormant branch policy without making any provider read."""
+    if event == "push" and (
+        payload.get("deleted") is True
+        or payload.get("created") is True
+        or payload.get("before") == "0" * 40
+    ):
         return {}
-    if event == "pull_request":
-        pr = _object(payload.get("pull_request"))
-        request = {"number": payload.get("number"), "head_sha": _object(pr.get("head")).get("sha")}
-    elif event == "push":
-        # A branch deletion has no head to scan; creation's missing base refuses in the worker.
-        if payload.get("deleted") is True:
-            return {}
-        request = {"before": payload.get("before"), "after": payload.get("after")}
-    else:
-        group = _object(payload.get("merge_group"))
-        request = {
-            "merge_group": {"base_sha": group.get("base_sha"), "head_sha": group.get("head_sha")}
-        }
-    return cast(dict[str, JsonValue], {"status": "pending", "request": request})
+    request = config_authority_event_request(event, payload)
+    if _enabled_policy(record_store, inventory, str(request.get("base_branch") or "")) is None:
+        return {}
+    return {"status": "pending", "request": request}
+
+
+def config_authority_events_enabled(record_store: object) -> bool:
+    try:
+        return any(
+            entry.config_authority_events_enabled
+            for entry in resolve_merge_train_policy_record(record_store).policy.policies
+        )
+    except MergeTrainPolicyStoreMissingError:
+        return False
 
 
 def _enabled_policy(
-    record_store: object, inventory: RepositoryInventoryRecord
+    record_store: object, inventory: RepositoryInventoryRecord, base_branch: str
 ) -> MergeTrainRepositoryPolicy | None:
     try:
         policy = resolve_merge_train_policy_record(record_store).policy
@@ -246,6 +287,7 @@ def _enabled_policy(
         entry
         for entry in policy.policies
         if entry.repository.casefold() == inventory.repository.casefold()
+        and entry.base_branch == base_branch
         and entry.config_authority_events_enabled
     ]
     if not matches:
@@ -262,7 +304,7 @@ def run_product_config_authority_event(
     payload: dict[str, object],
 ) -> dict[str, JsonValue]:
     """Use the existing train App's read-only source token; never fall back."""
-    policy = _enabled_policy(record_store, inventory)
+    policy = _enabled_policy(record_store, inventory, str(payload.get("base_branch") or ""))
     if policy is None:
         return {"status": "disabled"}
     app = policy.github_token.github_app
@@ -283,6 +325,7 @@ def run_product_config_authority_event(
         inventory=inventory,
         event=event,
         payload=payload,
+        expected_base_branch=policy.base_branch,
     )
 
 
@@ -335,6 +378,32 @@ def publish_product_config_authority_evidence(
             sort_keys=True,
         ).encode()
     ).hexdigest()
+    gate = evidence.get("gate")
+    coverage = evidence.get("coverage")
+    gate = gate if isinstance(gate, dict) else {}
+    coverage = coverage if isinstance(coverage, dict) else {}
+    summary = (
+        f"Source comparison: {evidence.get('base_sha', 'unavailable')} → {head}.\n"
+        + (
+            "Product-repo configuration gate passed."
+            if evidence.get("status") == "pass"
+            else "Verification failed or source evidence is unavailable."
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "rejected_finding_count": gate.get("rejected_finding_count"),
+                "coverage_gap_count": coverage.get("coverage_gap_count"),
+                "hashes": evidence.get("hashes"),
+                "rejected_findings_sample": cast(
+                    list[JsonValue], gate.get("rejected_findings") or []
+                )[:10],
+            },
+            sort_keys=True,
+        )
+    )
+    summary = summary.encode()[:60000].decode("utf-8", errors="ignore")
+    summary += "\nFull evidence: GET /v1/repository-inventory with repository_id and delivery_id."
     projection = ConfigAuthorityCheckProjection(
         name=f"{CONFIG_AUTHORITY_CHECK_NAME}/{str(evidence.get('event')).replace('_', '-')}",
         repository=inventory.repository,
@@ -343,18 +412,7 @@ def publish_product_config_authority_evidence(
         external_id=identity,
         details_url=f"https://github.com/{inventory.repository}/commit/{head}",
         title="Product configuration authority",
-        summary=(
-            f"Source comparison: {evidence.get('base_sha', 'unavailable')} → {head}.\n"
-            + (
-                "The existing product-repo configuration gate passed."
-                if evidence.get("status") == "pass"
-                else "Verification failed or source evidence is unavailable."
-            )
-            + "\n"
-            + json.dumps(
-                {key: evidence.get(key) for key in ("gate", "coverage", "hashes")}, sort_keys=True
-            )
-        ),
+        summary=summary,
         conclusion="success" if evidence.get("status") == "pass" else "failure",
     )
     return cast(
@@ -377,6 +435,7 @@ class ConfigAuthorityEventStore(Protocol):
         self,
         claimed: GitHubAppWebhookDeliveryRecord,
         evidence: dict[str, JsonValue],
+        publish: Callable[[], None] | None = None,
     ) -> GitHubAppWebhookDeliveryRecord: ...
 
     def list_repository_inventory_records(
@@ -420,7 +479,10 @@ def run_product_config_authority_once(
         # Provider errors can contain credentials; keep the refusal structured.
         evidence = {"status": "unavailable", "error_code": "source_evidence_unavailable"}
     evidence["event"] = claimed.event
-    if evidence.get("status") != "disabled" and inventory is not None:
+
+    def project() -> None:
+        if evidence.get("status") in {"disabled", "superseded"} or inventory is None:
+            return
         if not evidence.get("head_sha"):
             request = claimed.config_authority_request
             group = request.get("merge_group")
@@ -435,4 +497,6 @@ def run_product_config_authority_once(
             evidence["scan_status"] = evidence.get("status")
             evidence["status"] = "unavailable"
             evidence["projection_status"] = "unavailable"
-    return record_store.complete_config_authority_delivery(claimed, evidence)
+
+    # The storage fence is held through publication and terminal persistence.
+    return record_store.complete_config_authority_delivery(claimed, evidence, publish=project)
