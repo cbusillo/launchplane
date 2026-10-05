@@ -10304,6 +10304,100 @@
         "title": "GitHubActionsPolicyRule",
         "type": "object"
       },
+      "GitHubAppWebhookDeliveryRecord": {
+        "additionalProperties": false,
+        "description": "A processed GitHub App delivery, kept so a redelivery is recognized.",
+        "properties": {
+          "action": {
+            "default": "",
+            "title": "Action",
+            "type": "string"
+          },
+          "config_authority": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Config Authority",
+            "type": "object"
+          },
+          "config_authority_attempt": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Config Authority Attempt",
+            "type": "integer"
+          },
+          "config_authority_lease_expires_at": {
+            "default": "",
+            "title": "Config Authority Lease Expires At",
+            "type": "string"
+          },
+          "config_authority_lease_owner": {
+            "default": "",
+            "title": "Config Authority Lease Owner",
+            "type": "string"
+          },
+          "config_authority_next_attempt_at": {
+            "default": "",
+            "title": "Config Authority Next Attempt At",
+            "type": "string"
+          },
+          "config_authority_request": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Config Authority Request",
+            "type": "object"
+          },
+          "config_authority_state": {
+            "default": "",
+            "enum": [
+              "",
+              "pending",
+              "running",
+              "done",
+              "failed"
+            ],
+            "title": "Config Authority State",
+            "type": "string"
+          },
+          "delivery_id": {
+            "minLength": 1,
+            "title": "Delivery Id",
+            "type": "string"
+          },
+          "event": {
+            "minLength": 1,
+            "title": "Event",
+            "type": "string"
+          },
+          "received_at": {
+            "minLength": 1,
+            "title": "Received At",
+            "type": "string"
+          },
+          "repository_id": {
+            "pattern": "^[1-9][0-9]*$",
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "target_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Target Keys",
+            "type": "array"
+          }
+        },
+        "required": [
+          "delivery_id",
+          "event",
+          "repository_id",
+          "received_at"
+        ],
+        "title": "GitHubAppWebhookDeliveryRecord",
+        "type": "object"
+      },
       "GitHubHumanAccessPrincipal": {
         "additionalProperties": false,
         "properties": {
@@ -17327,6 +17421,12 @@
             "title": "Blocked Label",
             "type": "string"
           },
+          "config_authority_events_enabled": {
+            "default": false,
+            "title": "Config Authority Events Enabled",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
+          },
           "engineering_review_mode": {
             "default": "advisory",
             "enum": [
@@ -17416,6 +17516,12 @@
           "blocked_label": {
             "title": "Blocked Label",
             "type": "string"
+          },
+          "config_authority_events_enabled": {
+            "default": false,
+            "title": "Config Authority Events Enabled",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           },
           "engineering_review_mode": {
             "default": "advisory",
@@ -37008,6 +37114,17 @@
       "RepositoryInventoryReadResponse": {
         "additionalProperties": false,
         "properties": {
+          "config_authority_delivery": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GitHubAppWebhookDeliveryRecord"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "read_model": {
             "$ref": "#/components/schemas/RepositoryInventoryReadModel"
           },
@@ -70311,6 +70428,12 @@
                         "title": "Blocked Label",
                         "type": "string"
                       },
+                      "config_authority_events_enabled": {
+                        "default": false,
+                        "title": "Config Authority Events Enabled",
+                        "type": "boolean",
+                        "x-launchplane-optional-response": true
+                      },
                       "engineering_review_mode": {
                         "default": "advisory",
                         "enum": [
@@ -84336,6 +84459,16 @@
             }
           },
           {
+            "in": "query",
+            "name": "delivery_id",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Delivery Id",
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "Authorization",
             "required": false,
@@ -84396,6 +84529,16 @@
               }
             },
             "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "409": {
             "content": {

@@ -3320,6 +3320,116 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_source_scan_delivery_has_one_lease_and_recovers_without_stale_publication(
+        self,
+    ) -> None:
+        from control_plane.contracts.product_reconcile import (
+            GitHubAppWebhookDeliveryRecord,
+            ProductReconcileLeaseLostError,
+        )
+        from control_plane.storage.postgres import (
+            LaunchplaneGitHubAppWebhookDeliveryRow,
+            CONFIG_AUTHORITY_QUEUE_INDEX,
+        )
+
+        with _head_postgres_database() as url:
+            stores = [PostgresRecordStore(database_url=url) for _ in range(2)]
+            try:
+                from control_plane.storage.migrations.versions import (
+                    f3021a0b1c2d_index_config_authority_delivery_queue as scan_migration,
+                )
+                from control_plane.storage.schema_migration import alembic_config
+
+                # Exercise the migration from its predecessor, rather than merely
+                # accepting the index a fresh baseline creates from current metadata.
+                alembic_command.downgrade(alembic_config(url), scan_migration.down_revision)
+                alembic_command.upgrade(alembic_config(url), scan_migration.revision)
+                realized_indexes = {
+                    entry["name"]
+                    for entry in inspect(stores[0]._engine).get_indexes(
+                        LaunchplaneGitHubAppWebhookDeliveryRow.__tablename__
+                    )
+                }
+                self.assertIn(CONFIG_AUTHORITY_QUEUE_INDEX.name, realized_indexes)
+                delivery = GitHubAppWebhookDeliveryRecord(
+                    delivery_id="source-scan",
+                    event="push",
+                    repository_id="42",
+                    received_at="2026-10-05T00:00:00Z",
+                    config_authority_state="pending",
+                )
+                stores[0].record_github_app_webhook_delivery(delivery, (), delivery.received_at)
+                followup = delivery.model_copy(update={"delivery_id": "source-scan-followup"})
+                stores[0].record_github_app_webhook_delivery(followup, (), followup.received_at)
+                with ThreadPoolExecutor(max_workers=2) as workers:
+                    futures = [
+                        workers.submit(
+                            store.claim_next_config_authority_delivery, "same-worker", 60
+                        )
+                        for store in stores
+                    ]
+                    claims = [future.result(timeout=10) for future in futures]
+                old = next(claim for claim in claims if claim is not None)
+                self.assertEqual(sum(claim is not None for claim in claims), 1)
+                with stores[0]._session_factory() as session:
+                    row = session.get(LaunchplaneGitHubAppWebhookDeliveryRow, delivery.delivery_id)
+                    assert row is not None
+                    row.payload = {
+                        **row.payload,
+                        "config_authority_lease_expires_at": "2000-01-01T00:00:00Z",
+                    }
+                    session.commit()
+                recovered = stores[1].claim_next_config_authority_delivery("same-worker", 60)
+                assert recovered is not None
+                publisher = Mock()
+                with self.assertRaises(ProductReconcileLeaseLostError):
+                    stores[0].complete_config_authority_delivery(
+                        old, {"status": "pass"}, publish=publisher
+                    )
+                publisher.assert_not_called()
+                publication_started, release_publication = threading.Event(), threading.Event()
+
+                def publish() -> None:
+                    publication_started.set()
+                    if not release_publication.wait(10):
+                        raise AssertionError("Publication test was not released.")
+
+                with ThreadPoolExecutor(max_workers=1) as worker:
+                    publication = worker.submit(
+                        stores[1].complete_config_authority_delivery,
+                        recovered,
+                        {"status": "fail"},
+                        publish,
+                    )
+                    try:
+                        self.assertTrue(publication_started.wait(10))
+                        # Even after this observer's clock crosses the lease, the
+                        # repository fence prevents another delivery's publication.
+                        after_expiry = (
+                            datetime.fromisoformat(
+                                recovered.config_authority_lease_expires_at.replace("Z", "+00:00")
+                            )
+                            + timedelta(seconds=1)
+                        ).isoformat()
+                        with patch.object(
+                            stores[0], "_database_mutation_timestamp", return_value=after_expiry
+                        ):
+                            self.assertIsNone(
+                                stores[0].claim_next_config_authority_delivery("another", 60)
+                            )
+                    finally:
+                        release_publication.set()
+                    publication.result(timeout=10)
+                self.assertEqual(
+                    stores[0]
+                    .read_github_app_webhook_delivery(delivery.delivery_id)
+                    .config_authority["status"],
+                    "fail",
+                )
+            finally:
+                for store in stores:
+                    store.close()
+
     def test_standing_acceptance_creation_race_returns_one_immutable_decision(self) -> None:
         from tests.test_release_review_storage import standing_decision
 

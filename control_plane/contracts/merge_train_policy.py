@@ -331,6 +331,11 @@ class MergeTrainRepositoryPolicy(BaseModel):
     enqueue: MergeTrainEnqueuePolicy
     merge_identity: MergeTrainIdentity
     service_authz: MergeTrainServiceAuthz = Field(default_factory=MergeTrainServiceAuthz)
+    config_authority_events_enabled: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     github_token: MergeTrainGitHubTokenSource = Field(default_factory=MergeTrainGitHubTokenSource)
     scheduler: MergeTrainSchedulerPolicy = Field(default_factory=MergeTrainSchedulerPolicy)
     provider_delivery_protection_expectation: ProviderDeliveryProtectionExpectationV1 | None = (

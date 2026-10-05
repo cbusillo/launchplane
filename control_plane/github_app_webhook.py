@@ -14,6 +14,8 @@ import logging
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
+from pydantic import JsonValue
+
 import click
 
 from control_plane import secrets
@@ -27,6 +29,11 @@ from control_plane.contracts.repository_inventory import (
     normalize_repository,
 )
 from control_plane.product_repository_identity import stored_identity_matches_inventory
+from control_plane.product_config_authority_events import (
+    config_authority_event_supported,
+    config_authority_event_request,
+    request_product_config_authority_event,
+)
 from control_plane.repository_inventory import get_repository_inventory_read_model
 from control_plane.workflows.launchplane import verify_github_webhook_signature
 from control_plane.workflows.ship import utc_now_timestamp
@@ -85,6 +92,9 @@ class GitHubAppWebhookDependencies:
     verify_signature: Callable[..., None] = verify_github_webhook_signature
     now: Callable[[], str] = utc_now_timestamp
     wake_merge_train: Callable[[object, str, dict[str, object]], bool] = _wake_merge_train
+    config_authority: Callable[
+        [object, RepositoryInventoryRecord, str, dict[str, object]], dict[str, JsonValue]
+    ] = request_product_config_authority_event
 
 
 def handle_github_app_webhook_request(
@@ -108,13 +118,20 @@ def handle_github_app_webhook_request(
             "error": {"code": code, "message": message},
         }
 
+    config_authority: dict[str, JsonValue] = {}
+
     def accepted(
         status: GitHubAppWebhookStatus, *, reason: str = "", target_keys: tuple[str, ...] = ()
     ) -> tuple[int, dict[str, object]]:
         return 202, {
             "status": "accepted",
             "trace_id": trace_id,
-            "result": {"status": status, "reason": reason, "target_keys": list(target_keys)},
+            "result": {
+                "status": status,
+                "reason": reason,
+                "target_keys": list(target_keys),
+                **({"config_authority": config_authority} if config_authority else {}),
+            },
         }
 
     normalized_delivery_id = delivery_id.strip()
@@ -157,7 +174,8 @@ def handle_github_app_webhook_request(
         )
         train_woken = False
     target_shapes = _target_shapes(event_name=normalized_event, action=action, payload=payload)
-    if not target_shapes:
+    scan_event = config_authority_event_supported(normalized_event, payload)
+    if not target_shapes and not scan_event:
         return accepted(
             "ignored", reason="merge_train_woken" if train_woken else "unsupported_event"
         )
@@ -168,16 +186,38 @@ def handle_github_app_webhook_request(
         return error(503, "github_app_webhook_unavailable", "Webhook storage is unavailable.")
     store = cast(GitHubAppWebhookStore, record_store)
     try:
+        if scan_event:
+            inventory = get_repository_inventory_read_model(
+                repository_id=repository_id, store=store
+            ).current_record
+            if inventory is None or inventory.inventory_state != "tracked":
+                return accepted("ignored", reason="repository_not_mapped")
+            try:
+                config_authority = dependencies.config_authority(
+                    record_store, inventory, normalized_event, payload
+                )
+            except Exception:
+                config_authority = {
+                    "status": "pending",
+                    "request_error": "source_request_unavailable",
+                    "request": config_authority_event_request(normalized_event, payload),
+                }
         product, unmapped_reason = _product_for_repository(store=store, repository_id=repository_id)
     except Exception:
-        return error(503, "github_app_webhook_unavailable", "Webhook storage is unavailable.")
-    if not product:
+        logging.getLogger(__name__).warning("GitHub App webhook verification unavailable.")
+        return error(
+            503, "github_app_webhook_unavailable", "GitHub App webhook verification is unavailable."
+        )
+    if not product and not config_authority:
         return accepted("ignored", reason=unmapped_reason)
+    if not config_authority and not target_shapes:
+        return accepted("ignored", reason="config_authority_disabled")
     targets = tuple(
         ProductReconcileTarget(
             product=product, target_kind=target_kind, pull_request_number=pull_request_number
         )
         for target_kind, pull_request_number in target_shapes
+        if product
     )
     target_keys = tuple(dict.fromkeys(target.target_key for target in targets))
     received_at = dependencies.now()
@@ -188,6 +228,11 @@ def handle_github_app_webhook_request(
         repository_id=repository_id,
         received_at=received_at,
         target_keys=target_keys,
+        config_authority={
+            key: value for key, value in config_authority.items() if key != "request"
+        },
+        config_authority_request=cast(dict[str, JsonValue], config_authority.get("request", {})),
+        config_authority_state="pending" if config_authority.get("status") == "pending" else "",
     )
     try:
         status = store.record_github_app_webhook_delivery(delivery, targets, received_at)

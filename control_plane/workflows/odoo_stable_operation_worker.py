@@ -102,6 +102,11 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     execute_odoo_stable_target_replacement_apply,
 )
 from control_plane.release_review import require_unchanged_production_artifact
+from control_plane.product_config_authority_events import (
+    ConfigAuthorityEventStore,
+    config_authority_events_enabled,
+    run_product_config_authority_once,
+)
 from control_plane.product_reconcile import (
     PRODUCT_RECONCILE_LEASE_SECONDS,
     PRODUCT_RECONCILE_SWEEP_SECONDS,
@@ -870,6 +875,7 @@ def run_odoo_stable_operation_worker_loop(
     last_sweep_at: float | None = None
     last_client_release_advance_at: float | None = None
     client_release_thread: Thread | None = None
+    config_scan_thread: Thread | None = None
     standing_review_backoff = StandingReleaseReviewBackoff()
 
     def advance_releases() -> None:
@@ -882,6 +888,16 @@ def run_odoo_stable_operation_worker_loop(
             )
         except Exception:
             logging.exception("Client release advance failed.")
+
+    def scan_source() -> None:
+        try:
+            run_product_config_authority_once(
+                cast(ConfigAuthorityEventStore, record_store),
+                lease_owner,
+                control_plane_root=control_plane_root_path,
+            )
+        except Exception:
+            logging.exception("Product config-authority scan failed.")
 
     try:
         while not worker_stop_event.is_set():
@@ -938,11 +954,28 @@ def run_odoo_stable_operation_worker_loop(
                 worked_count += 1
                 continue
             idle_count += 1
+            try:
+                if (
+                    not worker_stop_event.is_set()
+                    and hasattr(record_store, "claim_next_config_authority_delivery")
+                    and (config_scan_thread is None or not config_scan_thread.is_alive())
+                    and config_authority_events_enabled(record_store)
+                ):
+                    # Admit after deploy/reconcile polling; provider reads never block
+                    # the next poll, including a rollback queued during this scan.
+                    config_scan_thread = Thread(
+                        target=scan_source, name="product-config-authority", daemon=False
+                    )
+                    config_scan_thread.start()
+            except Exception:
+                logging.warning("Product config-authority scan admission unavailable.")
             worker_stop_event.wait(timeout=float(poll_seconds))
     finally:
         # Shutdown must not abandon an admitted promotion/rollback.
         if client_release_thread is not None:
             client_release_thread.join()
+        if config_scan_thread is not None:
+            config_scan_thread.join()
     return OdooStableOperationWorkerLoopResult(
         status="stopped" if worker_stop_event.is_set() else "completed",
         iterations=iterations,
