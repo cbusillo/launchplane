@@ -1,5 +1,7 @@
 from control_plane.generic_web_promotion_provider_adapter import (
     GenericWebProdPromotionProviderMutationAdapter,
+    PromotionTargetChanged,
+    require_generic_web_promotion_target,
 )
 import asyncio
 import logging
@@ -341,33 +343,18 @@ def build_generic_web_write_route_handlers(
                 message="Live generic-web promotion requires Launchplane database storage.",
             )
         try:
-            current_target = record_store.read_provider_target_record(
-                context_name=lane.context,
-                instance_name=lane.instance,
+            require_generic_web_promotion_target(
+                record_store=record_store,
+                lane=lane,
+                resolved_deploy_target=resolved_deploy_target,
             )
-        except FileNotFoundError as error:
+        except PromotionTargetChanged as error:
             raise dependencies.http_error(
                 status_code=409,
                 trace_id=trace_id,
                 code="promotion_target_changed",
-                message="The reviewed production provider target is no longer available.",
+                message=str(error),
             ) from error
-        expected_target = resolved_deploy_target.deployed_target
-        resolved_target = resolved_deploy_target.resolved_target
-        if (
-            expected_target is None
-            or current_target.to_deployed_target_reference() != expected_target
-            or resolved_target.target_id != expected_target.target_id
-            or resolved_target.target_name != expected_target.display_name
-            or resolved_target.target_type
-            != (expected_target.provider_target_type or expected_target.target_category)
-        ):
-            raise dependencies.http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="promotion_target_changed",
-                message="The production provider target changed before promotion execution.",
-            )
 
     def read_current_release_review(
         *,

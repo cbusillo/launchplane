@@ -865,59 +865,78 @@ def run_odoo_stable_operation_worker_loop(
     consecutive_errors = 0
     last_sweep_at: float | None = None
     last_client_release_advance_at: float | None = None
-    while not worker_stop_event.is_set():
-        if max_iterations is not None and iterations >= max_iterations:
-            break
-        if hasattr(record_store, "request_product_reconcile") and (
-            last_sweep_at is None or monotonic() - last_sweep_at >= reconcile_sweep_seconds
-        ):
-            # In-memory timer: another replica's sweep only folds into the same requests.
-            last_sweep_at = monotonic()
-            try:
-                request_product_reconcile_sweep(
-                    cast(ProductReconcileStore, record_store), _utc_now_timestamp()
-                )
-            except Exception:
-                logging.exception("Product reconcile sweep failed.")
-        if (
-            last_client_release_advance_at is None
-            or monotonic() - last_client_release_advance_at >= CLIENT_RELEASE_ADVANCE_SECONDS
-        ):
-            # Queues the next step of each Client release; a second replica finds the
-            # same operation ids, so a race queues nothing twice.
-            last_client_release_advance_at = monotonic()
-            try:
-                advance_client_releases(
-                    store=record_store, control_plane_root=control_plane_root_path
-                )
-            except Exception:
-                logging.exception("Client release advance failed.")
+    client_release_thread: Thread | None = None
+
+    def advance_releases() -> None:
         try:
-            result = run_odoo_stable_operation_worker_once(
-                record_store=record_store,
-                control_plane_root_path=control_plane_root_path,
-                lease_owner=lease_owner,
-                lease_seconds=lease_seconds,
-                heartbeat_seconds=heartbeat_seconds,
-                max_attempts=max_attempts,
+            advance_client_releases(
+                store=record_store,
+                control_plane_root=control_plane_root_path,
+                stop_event=worker_stop_event,
             )
         except Exception:
-            error_count += 1
-            consecutive_errors += 1
-            logging.exception("Odoo stable operation worker iteration failed.")
-            if consecutive_errors >= max_consecutive_errors:
-                raise
-            worker_stop_event.wait(timeout=float(error_backoff_seconds))
-            continue
-        iterations += 1
-        consecutive_errors = 0
-        if iteration_callback is not None:
-            iteration_callback(result)
-        if result.status == "worked":
-            worked_count += 1
-            continue
-        idle_count += 1
-        worker_stop_event.wait(timeout=float(poll_seconds))
+            logging.exception("Client release advance failed.")
+
+    try:
+        while not worker_stop_event.is_set():
+            if max_iterations is not None and iterations >= max_iterations:
+                break
+            if hasattr(record_store, "request_product_reconcile") and (
+                last_sweep_at is None or monotonic() - last_sweep_at >= reconcile_sweep_seconds
+            ):
+                # In-memory timer: another replica's sweep only folds into the same requests.
+                last_sweep_at = monotonic()
+                try:
+                    request_product_reconcile_sweep(
+                        cast(ProductReconcileStore, record_store), _utc_now_timestamp()
+                    )
+                except Exception:
+                    logging.exception("Product reconcile sweep failed.")
+            if (
+                last_client_release_advance_at is None
+                or monotonic() - last_client_release_advance_at >= CLIENT_RELEASE_ADVANCE_SECONDS
+            ) and (client_release_thread is None or not client_release_thread.is_alive()):
+                # Queues the next step of each Client release; a second replica finds the
+                # same operation ids, so a race queues nothing twice.
+                last_client_release_advance_at = monotonic()
+                # Generic-web promotions may wait for deploy and rollback. Keep queued
+                # Odoo operations responsive, with only one release pass on this replica.
+                client_release_thread = Thread(
+                    target=advance_releases,
+                    name="client-release-advance",
+                    daemon=False,
+                )
+                client_release_thread.start()
+            try:
+                result = run_odoo_stable_operation_worker_once(
+                    record_store=record_store,
+                    control_plane_root_path=control_plane_root_path,
+                    lease_owner=lease_owner,
+                    lease_seconds=lease_seconds,
+                    heartbeat_seconds=heartbeat_seconds,
+                    max_attempts=max_attempts,
+                )
+            except Exception:
+                error_count += 1
+                consecutive_errors += 1
+                logging.exception("Odoo stable operation worker iteration failed.")
+                if consecutive_errors >= max_consecutive_errors:
+                    raise
+                worker_stop_event.wait(timeout=float(error_backoff_seconds))
+                continue
+            iterations += 1
+            consecutive_errors = 0
+            if iteration_callback is not None:
+                iteration_callback(result)
+            if result.status == "worked":
+                worked_count += 1
+                continue
+            idle_count += 1
+            worker_stop_event.wait(timeout=float(poll_seconds))
+    finally:
+        # Shutdown must not abandon an admitted promotion/rollback.
+        if client_release_thread is not None:
+            client_release_thread.join()
     return OdooStableOperationWorkerLoopResult(
         status="stopped" if worker_stop_event.is_set() else "completed",
         iterations=iterations,

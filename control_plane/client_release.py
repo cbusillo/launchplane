@@ -20,11 +20,11 @@ its own and a second worker replica finds the same operations.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 from datetime import UTC, datetime
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event
 from typing import Literal, cast
 
 import click
@@ -66,9 +66,12 @@ from control_plane.generic_web_promotion_http import (
 )
 from control_plane.generic_web_promotion_provider_adapter import (
     GenericWebProdPromotionProviderMutationAdapter,
+    require_generic_web_promotion_target,
 )
+from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
 from control_plane.provider_operations import run_durable_provider_operation
 from control_plane.workflows.generic_web_promotion import GenericWebProdPromotionRequest
+from control_plane.workflows.generic_web_deploy_provider import GenericWebResolvedDeployTarget
 from control_plane.workflows.production_promotion_backup import GENERIC_WEB_PROMOTION_BACKUP_ACTION
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.odoo_prod_promotion_run import (
@@ -342,6 +345,10 @@ def _step_status(
                 if reservation.state == "reconcile_required":
                     return "reconciliation_required", reservation
                 if reservation.state == "running":
+                    if parse_launchplane_mutation_timestamp(
+                        reservation.lease_expires_at, field_name="lease_expires_at"
+                    ) <= datetime.now(UTC):
+                        return "reconciliation_required", reservation
                     return "running", reservation
                 outcome = reservation.response_payload.get("result", {})
                 return (
@@ -421,9 +428,6 @@ def _record_standing_acceptance(
     # Stamp before reads: a human decision made while GitHub is being read remains
     # newer than this standing decision even if its DB write finishes first.
     decided_at = datetime.now(UTC).isoformat()
-    newest = store.list_release_review_decision_records(product=profile.product, limit=1)
-    if newest and newest[0].decision != "accepted":
-        return
     review = current_release_review(
         control_plane_root=control_plane_root, record_store=store, profile=profile
     )
@@ -435,16 +439,17 @@ def _record_standing_acceptance(
     ):
         return
     existing = review.latest_decision
+    if existing is not None and existing.decision != "accepted":
+        return
+    record_key = review.checklist_digest
+    expected_record_id = f"release-review-standing-{record_key}"
     if existing is not None and existing.release_issue_url and existing.release_start:
         return
     if existing is not None and not existing.release_issue_url:
         decision = existing
     else:
-        record_key = hashlib.sha256(
-            json.dumps([review.checklist_digest, profile.updated_at]).encode()
-        ).hexdigest()
         decision = ReleaseReviewDecisionRecord(
-            record_id=f"release-review-standing-{record_key}",
+            record_id=expected_record_id,
             product=profile.product,
             checklist=checklist,
             checklist_digest=review.checklist_digest,
@@ -493,7 +498,7 @@ def _run_generic_web_promotion(
         if not client_release_grant_allows(store, grant):
             raise click.ClickException("The release is no longer accepted.")
 
-    def validate_before_effect(_target: object) -> None:
+    def validate_before_effect(target: GenericWebResolvedDeployTarget) -> None:
         validate_checkpoint()
         covered = _covering_decision(store, profile.product, decision_record_id=decision.record_id)
         if covered is None:
@@ -502,6 +507,11 @@ def _run_generic_web_promotion(
             _require_current_release(store, control_plane_root, *covered)
         except ClientReleaseNotReady as error:
             raise click.ClickException("The accepted release changed.") from error
+        require_generic_web_promotion_target(
+            record_store=store,
+            lane=lane,
+            resolved_deploy_target=target,
+        )
 
     adapter = GenericWebProdPromotionProviderMutationAdapter(
         control_plane_root=control_plane_root,
@@ -514,11 +524,12 @@ def _run_generic_web_promotion(
         trace_id=f"client-release-{decision.record_id}",
         validate_before_effect=validate_before_effect,
         validate_before_checkpoint=validate_checkpoint,
+        settle_pre_effect_failure=True,
     )
     # This is Launchplane's own worker, never a route or a caller promotion grant.
     # The shared runner fences the provider target, heartbeats, preserves uncertain
     # outcomes for reconciliation, and stores the #2743 rollback outcome.
-    run_durable_provider_operation(
+    result = run_durable_provider_operation(
         store=store,
         scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
         route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
@@ -528,10 +539,20 @@ def _run_generic_web_promotion(
         response_trace_id=f"client-release-{decision.record_id}",
         adapter=adapter,
     )
-    return client_release_step_operation_id(profile=profile, decision=decision, step=step)
+    operation_id = client_release_step_operation_id(profile=profile, decision=decision, step=step)
+    return (
+        operation_id
+        if result.record is not None and result.record.record_id == operation_id
+        else ""
+    )
 
 
-def advance_client_releases(*, store: object, control_plane_root: Path) -> tuple[str, ...]:
+def advance_client_releases(
+    *,
+    store: object,
+    control_plane_root: Path,
+    stop_event: Event | None = None,
+) -> tuple[str, ...]:
     """Queue the next step of every Client release that is ready for one.
 
     Returns the operation ids it queued. A step whose evidence no longer matches the
@@ -542,6 +563,8 @@ def advance_client_releases(*, store: object, control_plane_root: Path) -> tuple
         return ()
     queued: list[str] = []
     for profile in store.list_product_profile_records():
+        if stop_event is not None and stop_event.is_set():
+            break
         if profile.driver_id not in {"odoo", "generic-web"}:
             continue
         try:
@@ -554,10 +577,19 @@ def advance_client_releases(*, store: object, control_plane_root: Path) -> tuple
             continue
         try:
             operation_id = _advance(store, control_plane_root, *covered)
-        except (ClientReleaseNotReady, FileNotFoundError, ValueError, click.ClickException):
-            _LOGGER.info("client release not advanced product=%s", profile.product)
+        except ClientReleaseNotReady as reason:
+            _LOGGER.info(
+                "client release not advanced product=%s reason=%s", profile.product, reason
+            )
             continue
         except OdooStableLaneOperationConflictError:
+            continue
+        except Exception as error:
+            _LOGGER.error(
+                "client release failed product=%s error_type=%s",
+                profile.product,
+                type(error).__name__,
+            )
             continue
         if operation_id:
             queued.append(operation_id)

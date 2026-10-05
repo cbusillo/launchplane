@@ -67,6 +67,43 @@ def _apply(expected: str) -> dict[str, object]:
 
 
 class ProductProductionUseHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_raw_profile_write_cannot_enable_standing_or_replace_its_client(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            self.addCleanup(store.close)
+            original = store.read_product_profile_record(_PRODUCT)
+            standing = original.model_copy(
+                update={
+                    "owner": ProductOwnerProfile(github_login="example-client", github_id="1234"),
+                    "release_on_acceptance": "director_standing",
+                }
+            )
+            app = _app(store)
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/product-profiles",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=standing.model_dump(mode="json"),
+            )
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(store.read_product_profile_record(_PRODUCT), original)
+            store.write_product_profile_record(standing)
+            replacement = standing.model_copy(
+                update={
+                    "owner": ProductOwnerProfile(github_login="another-client", github_id="5678"),
+                }
+            )
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/product-profiles",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=replacement.model_dump(mode="json"),
+            )
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(store.read_product_profile_record(_PRODUCT), standing)
+
     async def test_standing_acceptance_requires_signed_in_admin_and_reviewed_profile(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))

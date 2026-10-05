@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
+from typing import Any, cast
 import unittest
 from unittest.mock import patch
 
@@ -23,6 +23,11 @@ from control_plane.contracts.release_review import (
 )
 from control_plane.contracts.production_backup_gate import ProductionBackupGateRequest
 from control_plane.workflows.runtime_identity_health import HealthcheckPass
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.workflows.generic_web_deploy_provider import GenericWebResolvedDeployTarget
+from control_plane.client_release import CLIENT_RELEASE_IDEMPOTENCY_SCOPE
+from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
+from datetime import timedelta
 from control_plane.product_owner_setting import ProductOwnerIdentity, updated_product_owner_profile
 from control_plane.release_review import build_release_review
 from control_plane.storage.postgres import PostgresRecordStore
@@ -117,6 +122,27 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         )
         setup_memory_files(self)
         self.provider = _ProductionProvider()
+        self.target = ProviderTargetRecord(
+            context=self.context,
+            instance="prod",
+            provider_id="dokploy",
+            target_category="application",
+            target_id="app-123",
+            provider_target_type="application",
+            display_name="syo-prod-app",
+            updated_at=datetime.now(UTC).isoformat(),
+            source_label="test",
+        )
+        self.store.write_provider_target_record(self.target)
+        resolver = self.provider.resolve_deploy_target
+
+        def resolve(**kwargs: Any) -> GenericWebResolvedDeployTarget:
+            target = resolver(**kwargs)
+            return target.model_copy(
+                update={"deployed_target": self.target.to_deployed_target_reference()}
+            )
+
+        self.enterContext(patch.object(self.provider, "resolve_deploy_target", side_effect=resolve))
         self.fail_health = False
         self.raw_read = github_read
         self.publish = self.enterContext(
@@ -348,6 +374,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         operation = self.store.list_verireel_prod_backup_gate_operation_records()[0]
         record = self.store.read_backup_gate_record(operation.backup_record_id)
         self.store.write_backup_gate_record(record.model_copy(update={"status": "fail"}))
+        self.assertEqual(len(self.advance()), 1)
         self.assertEqual(self.advance(), ())
         self.assertEqual(self.provider.deployed_artifacts, [])
 
@@ -371,6 +398,54 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         self.store.write_product_profile_record(changed)
         self.assertEqual(self.advance(), ())
 
+    def test_new_candidate_after_requested_changes_gets_standing_acceptance(self) -> None:
+        self.switch("director_standing")
+        previous = self.accept("changes_requested")
+        self.assertEqual(self.advance(), ())
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        assert inventory.runtime_identity is not None
+        self.store.write_environment_inventory(
+            inventory.model_copy(
+                update={
+                    "runtime_identity": inventory.runtime_identity.model_copy(
+                        update={"source_git_ref": "d" * 40}
+                    ),
+                }
+            )
+        )
+        self.assertEqual(len(self.advance()), 1)
+        accepted = self.store.list_release_review_decision_records(product=self.profile.product)[0]
+        self.assertEqual(accepted.decision, "accepted")
+        self.assertNotEqual(accepted.checklist_digest, previous.checklist_digest)
+        self.assertEqual(accepted.checklist.candidate.source_commit, "d" * 40)
+
+    def test_profile_metadata_change_does_not_retry_failed_standing_release(self) -> None:
+        self.switch("director_standing")
+        self.advance()
+        self.capture()
+        with patch(
+            "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
+            side_effect=click.ClickException("Testing is unhealthy"),
+        ):
+            self.advance()
+        profile = self.store.read_product_profile_record(self.profile.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "updated_at": datetime.now(UTC).isoformat(),
+                    "source_label": "metadata update",
+                }
+            )
+        )
+        self.assertEqual(self.advance(), ())
+        self.assertEqual(
+            len(self.store.list_release_review_decision_records(product=self.profile.product)), 1
+        )
+        self.assertEqual(len(self.store.list_promotion_records()), 1)
+        self.assertEqual(self.provider.deployed_artifacts, [])
+
     def test_hold_after_a_failed_deploy_still_allows_automatic_rollback(self) -> None:
         from typing import Any
 
@@ -393,6 +468,62 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             [accepted.checklist.candidate.artifact_id, accepted.checklist.production.artifact_id],
         )
         self.assertEqual(self.store.list_promotion_records()[0].rollback.status, "pass")
+
+    def test_failed_source_health_is_terminal_and_never_auto_retries(self) -> None:
+        accepted = self.accept()
+        self.advance()
+        self.capture()
+        with patch(
+            "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
+            side_effect=click.ClickException("Testing is unhealthy"),
+        ):
+            self.advance()
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
+        assert run is not None
+        self.assertEqual(run.state, "stopped")
+        self.assertEqual(self.advance(), ())
+        self.assertEqual(len(self.store.list_promotion_records()), 1)
+        self.assertEqual(self.provider.deployed_artifacts, [])
+
+    def test_target_change_after_resolution_is_refused_before_provider(self) -> None:
+        accepted = self.accept()
+        self.advance()
+        self.capture()
+        original = self.provider.resolve_deploy_target
+
+        def retarget(**kwargs: Any) -> GenericWebResolvedDeployTarget:
+            target = original(**kwargs)
+            self.store.write_provider_target_record(
+                self.target.model_copy(update={"target_id": "replacement"})
+            )
+            return target
+
+        with patch.object(self.provider, "resolve_deploy_target", side_effect=retarget):
+            self.advance()
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
+        assert run is not None
+        self.assertEqual(run.state, "stopped")
+        self.assertEqual(self.provider.deployed_artifacts, [])
+
+    def test_expired_running_promotion_reports_reconciliation(self) -> None:
+        accepted = self.accept()
+        self.advance()
+        self.capture()
+        self.store.reserve_mutation(
+            scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+            route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+            idempotency_key=f"{accepted.record_id}:promote-1",
+            request_fingerprint="f" * 64,
+            lease_owner="crashed-worker",
+            lease_seconds=300,
+        )
+        # Rehearsal DB clock advances past the acquired lease.
+        with patch("control_plane.client_release.datetime") as clock:
+            clock.now.return_value = datetime.now(UTC) + timedelta(seconds=600)
+            run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
+        assert run is not None
+        self.assertEqual(run.state, "stopped")
+        self.assertEqual(run.steps[-1].status, "reconciliation_required")
 
 
 if __name__ == "__main__":

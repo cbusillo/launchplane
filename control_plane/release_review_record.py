@@ -30,7 +30,7 @@ def release_decision_issue_body(decision: ReleaseReviewDecisionRecord) -> str:
         f"Recorded at: {decision.decided_at}",
         "Acceptance source: Director standing acceptance recorded in Client settings."
         if decision.acceptance_source == "director_standing"
-        else "Acceptance source: Client session.",
+        else "Decision source: signed-in human session.",
         "",
         "This records a decision in Launchplane. It does not publish the site, and editing this issue does not change approval.",
         "",

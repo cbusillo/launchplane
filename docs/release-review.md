@@ -166,11 +166,25 @@ decision under the recorded Client's identity, with
 It publishes that exact checklist through the existing release-record path
 before queueing the backup. Publication retries reuse the saved decision.
 Missing notes, missing lane identities or a Client, a held or prelaunch product,
-and a latest request for changes or admin override start nothing. A failed
+and a request for changes or admin override on that checklist start nothing. A failed
 release is not automatically retried with another acceptance of the same
 checklist. No agent receives a promotion grant and no product workflow calls
 Launchplane. Enabling this setting is a production-release activation; prepare
 and verify the Client, testing lane and backup policy before applying it.
+Changing unrelated profile metadata does not re-accept or retry that checklist.
+A Client can explicitly Accept again after a stopped release; a repeated Accept
+while a release is running still returns the original decision.
+
+The stable worker advances Client releases on one background thread per replica,
+so a generic-web deploy or rollback wait does not block queued Odoo operations.
+Shutdown finishes an admitted operation and starts no further product release.
+Failures before any provider effect are recorded as terminal failures for this
+release rather than silently retried. An expired promotion lease is shown as
+`reconciliation_required`; the provider fence stays in place. Recovery of generic-web
+promotion reservations is not yet supported by the deploy-only recovery route,
+so [#3002](https://github.com/cbusillo/launchplane/issues/3002) tracks the
+administrator recovery capability needed before relying on unattended crash
+recovery.
 
 With `promote_with_rollback_drill` it then runs the rollback drill:
 

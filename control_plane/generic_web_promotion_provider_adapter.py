@@ -26,6 +26,8 @@ from control_plane.provider_operations import (
     provider_operation_title,
     provider_operation_response_payload as _provider_operation_response_payload,
 )
+from control_plane.storage.postgres import PostgresRecordStore
+
 from control_plane.workflows.generic_web_deploy import normalize_generic_web_artifact_id
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebDeployProvider,
@@ -38,6 +40,41 @@ from control_plane.workflows.generic_web_promotion import (
     GenericWebPromotionStore,
     resolve_generic_web_promotion_inputs,
 )
+
+
+class PromotionTargetChanged(click.ClickException):
+    """The cached provider target no longer names production's recorded target."""
+
+
+def require_generic_web_promotion_target(
+    *,
+    record_store: object,
+    lane: ProductLaneProfile,
+    resolved_deploy_target: GenericWebResolvedDeployTarget,
+) -> None:
+    if not isinstance(record_store, PostgresRecordStore):
+        raise TypeError("Live generic-web promotion requires Launchplane database storage.")
+    try:
+        current = record_store.read_provider_target_record(
+            context_name=lane.context,
+            instance_name=lane.instance,
+        )
+    except FileNotFoundError as error:
+        raise PromotionTargetChanged(
+            "The production provider target is no longer available."
+        ) from error
+    expected = resolved_deploy_target.deployed_target
+    resolved = resolved_deploy_target.resolved_target
+    if (
+        expected is None
+        or current.to_deployed_target_reference() != expected
+        or resolved.target_id != expected.target_id
+        or resolved.target_name != expected.display_name
+        or resolved.target_type != (expected.provider_target_type or expected.target_category)
+    ):
+        raise PromotionTargetChanged(
+            "The production provider target changed before promotion execution."
+        )
 
 
 class GenericWebProdPromotionProviderMutationAdapter:
@@ -53,6 +90,7 @@ class GenericWebProdPromotionProviderMutationAdapter:
         validate_before_effect: Callable[[GenericWebResolvedDeployTarget], None],
         deploy_provider: GenericWebDeployProvider | None = None,
         validate_before_checkpoint: Callable[[], None] | None = None,
+        settle_pre_effect_failure: bool = False,
     ) -> None:
         self._control_plane_root = control_plane_root
         self._record_store = record_store
@@ -63,6 +101,7 @@ class GenericWebProdPromotionProviderMutationAdapter:
         self._validate_before_effect = validate_before_effect
         self._deploy_provider = deploy_provider or default_generic_web_deploy_provider()
         self._validate_before_checkpoint = validate_before_checkpoint
+        self._settle_pre_effect_failure = settle_pre_effect_failure
         self._resolved_deploy_target: GenericWebResolvedDeployTarget | None = None
 
     def resolve_deploy_target(self) -> GenericWebResolvedDeployTarget:
@@ -147,6 +186,17 @@ class GenericWebProdPromotionProviderMutationAdapter:
         except (FileNotFoundError, ValueError, click.ClickException) as error:
             if provider_effect_attempted:
                 raise ProviderMutationUnknownError(str(error)) from error
+            if self._settle_pre_effect_failure:
+                return ProviderMutationOutcome(
+                    response_status_code=202,
+                    response_payload=_provider_operation_response_payload(
+                        trace_id=self._trace_id,
+                        records={},
+                        result={"promotion_status": "fail", "error_code": "promotion_not_ready"},
+                    ),
+                    durable=True,
+                    provider_effect_performed=False,
+                )
             raise ProviderMutationRejectedError(error) from error
         return ProviderMutationOutcome(
             response_status_code=202,
@@ -155,6 +205,7 @@ class GenericWebProdPromotionProviderMutationAdapter:
                 records=records.model_dump(mode="json"),
                 result=result.model_dump(mode="json"),
             ),
-            durable=generic_web_promotion_outcome_is_settled(result),
+            durable=generic_web_promotion_outcome_is_settled(result)
+            or (self._settle_pre_effect_failure and not provider_effect_attempted),
             provider_effect_performed=provider_effect_attempted,
         )
