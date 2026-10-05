@@ -877,6 +877,10 @@ class AuthzPolicySchemaConflictError(AuthzPolicyConflictError):
     pass
 
 
+class AuthzPolicyReviewedPlanConflictError(AuthzPolicyConflictError):
+    pass
+
+
 class AuthzPolicySafetyError(AuthzPolicyConflictError):
     def __init__(self, *, code: str, message: str) -> None:
         super().__init__(message)
@@ -1996,6 +2000,7 @@ def plan_managed_authz_policy_reconcile(
     *,
     record_store: AuthzPolicyRecordStore,
     request: AuthzManagedPolicyReconcileEnvelope,
+    authorized_policy_sha256: str = "",
 ) -> tuple[
     LaunchplaneAuthzPolicy,
     LaunchplaneAuthzPolicyRecord,
@@ -2008,6 +2013,10 @@ def plan_managed_authz_policy_reconcile(
     if len(active_records) > 1:
         raise AuthzPolicyConflictError("Multiple active Launchplane authz policy records found.")
     current_record = active_records[0]
+    _require_expected_authz_policy(
+        current_record=current_record,
+        expected_policy_sha256=authorized_policy_sha256,
+    )
     current_policy = current_record.policy
     base_policy = _resolve_managed_authz_reconcile_base(
         current_policy=current_policy,
@@ -2093,7 +2102,7 @@ def plan_managed_authz_policy_reconcile(
         json.dumps(plan_payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     if request.mode == "apply" and request.reviewed_plan_sha256 != plan_sha256:
-        raise AuthzPolicyConflictError(
+        raise AuthzPolicyReviewedPlanConflictError(
             "Managed authz policy reviewed_plan_sha256 no longer matches the active policy "
             "and desired managed rule set."
         )
@@ -2265,6 +2274,7 @@ def execute_managed_authz_policy_reconcile(
         plan_managed_authz_policy_reconcile(
             record_store=record_store,
             request=request,
+            authorized_policy_sha256=authorized_policy_sha256,
         )
     )
     _require_expected_authz_policy(
