@@ -29,6 +29,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane import secrets
 from control_plane.runtime_environments import RuntimeEnvironmentRecordStore
+from control_plane.dokploy.api import DokployRequestFailed
 from control_plane.build_provenance import (
     BUILD_WORKFLOW_PATH,
     BuildProvenanceError,
@@ -192,6 +193,7 @@ PRODUCT_RECONCILE_SWEEP_SECONDS = 30 * 60
 PRODUCT_RECONCILE_LEASE_SECONDS = 20 * 60
 RECONCILE_SOURCE = "launchplane-reconcile"
 TESTING_DEPLOY_MAX_FAILED_ATTEMPTS = 3
+PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS = 3
 TESTING_DEPLOY_MAX_ATTEMPT_CHAIN = 20
 PREVIEW_APPLY_TIMEOUT_SECONDS = 600
 # A generic-web refresh waits for the deploy and then for health, each up to this
@@ -1214,27 +1216,83 @@ def reconcile_preview_target(
         return ReconcileOutcome(plan)
     if control_plane_root is None:
         raise ProductReconcileError("A preview reconcile needs the control-plane root.")
-    if not odoo:
-        return _run_generic_web_preview_operation(
-            record_store=record_store,
-            profile=profile,
-            transport=transport,
-            decision=decision,
-            pull_request_number=pull_request_number,
-            control_plane_root=control_plane_root,
-            preview_hooks=preview_hooks,
-            previous_plan=previous_plan or {},
-            lease_held=lease_held,
+    previous = previous_plan or {}
+    failed_attempts = 0
+    if plan["action"] == "destroy":
+        retry_key = _fingerprint(
+            {
+                "lifecycle": decision.lifecycle_token,
+                "profile_updated_at": profile.updated_at,
+                "context": plan["context"],
+                "reason": plan["reason"],
+            }
         )
-    return _run_preview_operation(
-        record_store=record_store,
-        profile=profile,
-        transport=transport,
-        decision=decision,
-        pull_request_number=pull_request_number,
-        control_plane_root=control_plane_root,
-        preview_hooks=preview_hooks,
-    )
+        if previous.get("destroy_retry_key") == retry_key:
+            count = previous.get("destroy_failed_attempts", 0)
+            if isinstance(count, int) and not isinstance(count, bool):
+                failed_attempts = max(0, count)
+        plan.update(destroy_retry_key=retry_key, destroy_failed_attempts=failed_attempts)
+        if failed_attempts >= PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS:
+            plan.update(
+                held=True,
+                reason="preview_destroy_retry_limit",
+                last_failed_error_code=previous.get(
+                    "last_failed_error_code", "preview_apply_failed"
+                ),
+                last_failed_error_summary=previous.get("last_failed_error_summary", ""),
+                destroy_retry_stop_reason=(
+                    f"Preview destroy failed {failed_attempts} times; Launchplane stops retrying "
+                    "until the preview lifecycle record, product profile, or destroy reason changes. "
+                    "The preview remains recorded; retirement requires an operator."
+                ),
+            )
+            return ReconcileOutcome(plan)
+    count_failure = True
+    try:
+        if not odoo:
+            outcome = _run_generic_web_preview_operation(
+                record_store=record_store,
+                profile=profile,
+                transport=transport,
+                decision=decision,
+                pull_request_number=pull_request_number,
+                control_plane_root=control_plane_root,
+                preview_hooks=preview_hooks,
+                previous_plan=previous,
+                lease_held=lease_held,
+            )
+        else:
+            outcome = _run_preview_operation(
+                record_store=record_store,
+                profile=profile,
+                transport=transport,
+                decision=decision,
+                pull_request_number=pull_request_number,
+                control_plane_root=control_plane_root,
+                preview_hooks=preview_hooks,
+            )
+    except Exception as error:
+        if plan["action"] != "destroy" or (
+            isinstance(error, ProductReconcileError) and error.code == "preview_lease_lost"
+        ):
+            raise
+        _LOGGER.warning("Preview destroy of %s raised: %s", profile.product, error)
+        count_failure = isinstance(error, FileNotFoundError) or not isinstance(
+            error, (OSError, BuildProvenanceError, SQLAlchemyError)
+        )
+        code = (
+            error.code if isinstance(error, ProductReconcileError) else "preview_reconcile_failed"
+        )
+        outcome = _preview_failure(plan, code)
+    if (
+        plan["action"] == "destroy"
+        and outcome.error
+        and count_failure
+        and plan.get("preview_operation_status") != "reconcile_required"
+        and not plan.get("preview_transport_retryable")
+    ):
+        plan["destroy_failed_attempts"] = failed_attempts + 1
+    return outcome
 
 
 def _plan_preview_target(
@@ -1461,7 +1519,9 @@ def _run_preview_operation(
         return _preview_failure(plan, "preview_config_refused")
     except OdooPreviewPlanProvenanceError:
         return _preview_failure(plan, "preview_provenance_refused")
-    except (FileNotFoundError, ValueError, click.ClickException):
+    except (FileNotFoundError, ValueError, click.ClickException) as error:
+        if isinstance(error, DokployRequestFailed) and error.retryable:
+            plan["preview_transport_retryable"] = True
         return _preview_failure(plan, "preview_apply_failed")
     return ReconcileOutcome(plan)
 
@@ -1577,6 +1637,8 @@ def _run_generic_web_preview_operation(
             )
             status = str(result.get("destroy_status") or "")
     except (FileNotFoundError, ValueError, click.ClickException) as error:
+        if isinstance(error, DokployRequestFailed) and error.retryable:
+            plan["preview_transport_retryable"] = True
         _LOGGER.warning(
             "Generic-web preview %s of %s refused: %s", operation, profile.product, error
         )
@@ -1734,6 +1796,10 @@ def run_product_reconcile_once(
         _LOGGER.warning("Product reconcile of %s failed: %s", request.target_key, error)
         failed_plan: dict[str, object] = {"target": request.target_kind}
         if request.target_kind == "preview":
+            # A failed read or lost lease must not re-arm a previously exhausted destroy.
+            for key in ("destroy_retry_key", "destroy_failed_attempts"):
+                if key in request.last_plan:
+                    failed_plan[key] = request.last_plan[key]
             failed_plan["last_failed_error_code"] = getattr(error, "code", "")
         outcome = ReconcileOutcome(failed_plan, error=_error_text(error))
     else:
@@ -1756,6 +1822,11 @@ def run_product_reconcile_once(
         }:
             code = "preview_reconcile_failed"
         outcome = _preview_failure(dict(outcome.plan), str(code))
+        if "action" not in outcome.plan and "destroy_retry_key" in outcome.plan:
+            # A pre-plan read failure is not the destroy failure that exhausted the budget.
+            for key in ("last_failed_error_code", "last_failed_error_summary"):
+                if key in request.last_plan:
+                    outcome.plan[key] = request.last_plan[key]
     plan = dict(outcome.plan)
     feedback = post_reconcile_feedback(
         record_store=record_store,

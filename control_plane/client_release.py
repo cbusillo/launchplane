@@ -21,14 +21,18 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from dataclasses import dataclass
+from datetime import UTC, datetime
+from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Event
+from time import monotonic
 from typing import Literal, cast
 
 import click
 from pydantic import BaseModel, ConfigDict
 
 from control_plane.contracts.deployment_record import deployment_record_passed
+from control_plane.contracts.idempotency_record import build_launchplane_mutation_reservation_id
 from control_plane.contracts.durable_operation_authorization import (
     DurableOperationAuthorization,
     DurableOperationCallerIdentity,
@@ -55,7 +59,21 @@ from control_plane.contracts.production_backup_gate import (
 )
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord, ReleaseStart
 from control_plane.odoo_stable_lane import OdooStableLaneOperationConflictError
-from control_plane.release_review import current_release_review
+from control_plane.release_review import current_release_review, release_version, checklist_blockers
+from control_plane.release_review_record import publish_release_decision
+from control_plane.generic_web_promotion_http import (
+    GENERIC_WEB_PROD_PROMOTION_ROUTE,
+    GenericWebProdPromotionEnvelope,
+)
+from control_plane.generic_web_promotion_provider_adapter import (
+    GenericWebProdPromotionProviderMutationAdapter,
+    require_generic_web_promotion_target,
+)
+from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
+from control_plane.provider_operations import run_durable_provider_operation
+from control_plane.workflows.generic_web_promotion import GenericWebProdPromotionRequest
+from control_plane.workflows.generic_web_deploy_provider import GenericWebResolvedDeployTarget
+from control_plane.workflows.production_promotion_backup import GENERIC_WEB_PROMOTION_BACKUP_ACTION
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.odoo_prod_promotion_run import (
     OdooProdPromotionRunStore,
@@ -78,6 +96,13 @@ ClientReleaseStepStatus = Literal[
 ]
 ClientReleaseRunState = Literal["waiting", "running", "passed", "stopped"]
 _STOPPED_STATUSES = frozenset({"fail", "cancelled", "reconciliation_required"})
+
+
+@dataclass(slots=True)
+class StandingReleaseReviewBackoff:
+    """Delay incomplete standing reviews; never cache acceptance authority."""
+
+    blocked: dict[str, tuple[str, float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +176,12 @@ def client_release_step_operation_id(
     key = _step_key(decision, step)
     if step.kind == "backup":
         return production_backup_gate_operation_id(f"{CLIENT_RELEASE_IDEMPOTENCY_SCOPE}|{key}")
+    if profile.driver_id == "generic-web" and step.kind == "promote":
+        return build_launchplane_mutation_reservation_id(
+            scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+            route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+            idempotency_key=key,
+        )
     builder = (
         build_odoo_prod_promotion_operation_id
         if step.kind == "promote"
@@ -177,10 +208,14 @@ def release_start_for_acceptance(
     mode = profile.release_on_acceptance
     if (
         mode == "held"
-        or profile.driver_id != "odoo"
+        or profile.driver_id not in {"odoo", "generic-web"}
         or profile.production_use == "prelaunch"
         or not _prod_context(profile)
     ):
+        return ""
+    if profile.driver_id == "generic-web":
+        return "promote" if mode in {"promote", "director_standing"} else ""
+    if mode == "director_standing":
         return ""
     if mode == "promote_with_rollback_drill" and _product_drill_passed(store, profile):
         return "promote"
@@ -236,7 +271,7 @@ def _covering_decision(
         return None
     if (
         not profile.is_active
-        or profile.driver_id != "odoo"
+        or profile.driver_id not in {"odoo", "generic-web"}
         or profile.production_use == "prelaunch"
         or profile.release_on_acceptance == "held"
         or not profile.owner.github_id
@@ -253,6 +288,10 @@ def _covering_decision(
         or not decision.release_issue_url
         or decision.actor_github_id != profile.owner.github_id
         or decision.checklist.owner_github_id != profile.owner.github_id
+        or (
+            decision.acceptance_source == "director_standing"
+            and profile.release_on_acceptance != "director_standing"
+        )
     ):
         return None
     return profile, decision
@@ -277,13 +316,9 @@ def client_release_grant_allows(
     checklist = decision.checklist
     try:
         record_store = cast(PostgresRecordStore, store)
-        testing = record_store.read_release_tuple_record(
-            context_name=context, channel_name="testing"
-        )
-        production = record_store.read_release_tuple_record(
-            context_name=context, channel_name="prod"
-        )
-    except FileNotFoundError:
+        testing = release_version(store=record_store, profile=profile, instance="testing")
+        production = release_version(store=record_store, profile=profile, instance="prod")
+    except (FileNotFoundError, ValueError):
         return False
     # Every step happens while testing carries the accepted candidate, and production
     # runs either the checklist's production version or that candidate.
@@ -291,9 +326,8 @@ def client_release_grant_allows(
         authorization.context == context
         and str(authorization.caller.github_id) == decision.actor_github_id
         and authorization.caller.role == "client"
-        and testing.artifact_id == checklist.candidate.artifact_id
-        and production.artifact_id
-        in {checklist.production.artifact_id, checklist.candidate.artifact_id}
+        and testing == checklist.candidate
+        and production in (checklist.production, checklist.candidate)
     )
 
 
@@ -308,6 +342,26 @@ def _step_status(
         if step.kind == "backup":
             operation: object = store.read_verireel_prod_backup_gate_operation_record(operation_id)
         elif step.kind == "promote":
+            if profile.driver_id == "generic-web":
+                reservation = store.read_idempotency_record(
+                    scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+                    route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                    idempotency_key=_step_key(decision, step),
+                )
+                if reservation is None:
+                    return "not_started", None
+                if reservation.state == "reconcile_required":
+                    return "reconciliation_required", reservation
+                if reservation.state == "running":
+                    if parse_launchplane_mutation_timestamp(
+                        reservation.lease_expires_at, field_name="lease_expires_at"
+                    ) <= datetime.now(UTC):
+                        return "reconciliation_required", reservation
+                    return "running", reservation
+                outcome = reservation.response_payload.get("result", {})
+                return (
+                    "pass" if outcome.get("promotion_status") == "pass" else "fail"
+                ), reservation
             operation = store.read_odoo_prod_promotion_operation_record(operation_id)
         else:
             operation = store.read_odoo_prod_rollback_operation_record(operation_id)
@@ -360,7 +414,197 @@ class ClientReleaseNotReady(Exception):
     """The next step cannot be queued now; nothing was queued."""
 
 
-def advance_client_releases(*, store: object, control_plane_root: Path) -> tuple[str, ...]:
+def _record_standing_acceptance(
+    store: PostgresRecordStore,
+    control_plane_root: Path,
+    profile: LaunchplaneProductProfileRecord,
+    backoff: StandingReleaseReviewBackoff | None = None,
+) -> None:
+    """Materialize the Director's recorded standing acceptance for one exact checklist.
+
+    The profile switch is the explicit admin-recorded assertion that this Client
+    is the Director. Admin permission alone never supplies that assertion.
+    """
+
+    if (
+        profile.driver_id != "generic-web"
+        or profile.release_on_acceptance != "director_standing"
+        or not profile.is_active
+        or not profile.owner.is_set
+        or profile.production_use == "prelaunch"
+    ):
+        return
+    production = release_version(store=store, profile=profile, instance="prod")
+    candidate = release_version(store=store, profile=profile, instance="testing")
+    if production == candidate:
+        return
+    latest = store.list_release_review_decision_records(product=profile.product, limit=1)
+    if latest:
+        previous = latest[0]
+        if (
+            previous.checklist.production == production
+            and previous.checklist.candidate == candidate
+            and previous.checklist.owner_github_id == profile.owner.github_id
+            and previous.checklist.repository == profile.repository
+            and (
+                previous.decision != "accepted"
+                or (
+                    previous.release_issue_url
+                    and previous.release_start
+                    and (
+                        run := read_client_release_run(
+                            store=store, profile=profile, decision=previous
+                        )
+                    )
+                    is not None
+                    and run.state != "waiting"
+                )
+            )
+        ):
+            return
+    fingerprint = hashlib.sha256(
+        (
+            profile.model_dump_json() + production.model_dump_json() + candidate.model_dump_json()
+        ).encode()
+    ).hexdigest()
+    if backoff is not None:
+        blocked = backoff.blocked.get(profile.product)
+        if blocked is not None and blocked[0] == fingerprint and monotonic() < blocked[1]:
+            return
+        backoff.blocked[profile.product] = (fingerprint, monotonic() + 300)
+    # Stamp before reads: a human decision made while GitHub is being read remains
+    # newer than this standing decision even if its DB write finishes first.
+    decided_at = datetime.now(UTC).isoformat()
+    review = current_release_review(
+        control_plane_root=control_plane_root, record_store=store, profile=profile
+    )
+    checklist = review.checklist
+    if (
+        checklist is None
+        or checklist.production == checklist.candidate
+        or checklist_blockers(checklist)
+    ):
+        return
+    existing = review.latest_decision
+    if existing is not None and existing.decision != "accepted":
+        return
+    record_key = hashlib.sha256(
+        (review.checklist_digest + (existing.record_id if existing is not None else "")).encode()
+    ).hexdigest()
+    expected_record_id = f"release-review-standing-{record_key}"
+    if existing is not None and existing.release_issue_url and existing.release_start:
+        return
+    if existing is not None and not existing.release_issue_url:
+        decision = existing
+    else:
+        decision = ReleaseReviewDecisionRecord(
+            record_id=expected_record_id,
+            product=profile.product,
+            checklist=checklist,
+            checklist_digest=review.checklist_digest,
+            decision="accepted",
+            actor_github_id=profile.owner.github_id,
+            actor_github_login=profile.owner.github_login,
+            decided_at=decided_at,
+            release_start="promote",
+            acceptance_source="director_standing",
+        )
+        store.write_release_review_decision_record(decision)
+    # Use the existing publication/recovery path. An unpublished decision cannot
+    # queue a backup or promotion, and a retry keeps the same decision id.
+    issue_url = publish_release_decision(
+        control_plane_root=control_plane_root, profile=profile, decision=decision
+    )
+    if issue_url:
+        store.write_release_review_decision_record(
+            decision.model_copy(update={"release_issue_url": issue_url})
+        )
+        if backoff is not None:
+            backoff.blocked.pop(profile.product, None)
+
+
+def _run_generic_web_promotion(
+    store: PostgresRecordStore,
+    control_plane_root: Path,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    step: ClientReleaseStep,
+    backup_record_id: str,
+) -> str:
+    request = GenericWebProdPromotionRequest(
+        product=profile.product,
+        artifact_id=decision.checklist.candidate.artifact_id,
+        source_git_ref=decision.checklist.candidate.source_commit,
+        backup_record_id=backup_record_id,
+    )
+    lane = next(lane for lane in profile.lanes if lane.instance == "prod")
+    grant = client_release_grant(
+        decision=decision,
+        action="generic_web_prod_promotion.execute",
+        context=lane.context,
+        authorized_at=utc_now_timestamp(),
+    )
+
+    def validate_checkpoint() -> None:
+        if not client_release_grant_allows(store, grant):
+            raise click.ClickException("The release is no longer accepted.")
+
+    def validate_before_effect(target: GenericWebResolvedDeployTarget) -> None:
+        validate_checkpoint()
+        covered = _covering_decision(store, profile.product, decision_record_id=decision.record_id)
+        if covered is None:
+            raise click.ClickException("The release is no longer accepted.")
+        try:
+            _require_current_release(store, control_plane_root, *covered)
+        except ClientReleaseNotReady as error:
+            raise click.ClickException("The accepted release changed.") from error
+        require_generic_web_promotion_target(
+            record_store=store,
+            lane=lane,
+            resolved_deploy_target=target,
+        )
+
+    adapter = GenericWebProdPromotionProviderMutationAdapter(
+        control_plane_root=control_plane_root,
+        record_store=store,
+        promotion_request=GenericWebProdPromotionEnvelope(
+            product=profile.product, promotion=request
+        ),
+        profile=profile,
+        lane=lane,
+        trace_id=f"client-release-{decision.record_id}",
+        validate_before_effect=validate_before_effect,
+        validate_before_checkpoint=validate_checkpoint,
+        settle_pre_effect_failure=True,
+    )
+    # This is Launchplane's own worker, never a route or a caller promotion grant.
+    # The shared runner fences the provider target, heartbeats, preserves uncertain
+    # outcomes for reconciliation, and stores the #2743 rollback outcome.
+    result = run_durable_provider_operation(
+        store=store,
+        scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+        route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+        idempotency_key=_step_key(decision, step),
+        request_fingerprint=hashlib.sha256(request.model_dump_json().encode()).hexdigest(),
+        lease_owner=f"client-release-{decision.record_id}-{datetime.now(UTC).isoformat()}",
+        response_trace_id=f"client-release-{decision.record_id}",
+        adapter=adapter,
+    )
+    operation_id = client_release_step_operation_id(profile=profile, decision=decision, step=step)
+    return (
+        operation_id
+        if result.record is not None and result.record.record_id == operation_id
+        else ""
+    )
+
+
+def advance_client_releases(
+    *,
+    store: object,
+    control_plane_root: Path,
+    stop_event: Event | None = None,
+    standing_review_backoff: StandingReleaseReviewBackoff | None = None,
+) -> tuple[str, ...]:
     """Queue the next step of every Client release that is ready for one.
 
     Returns the operation ids it queued. A step whose evidence no longer matches the
@@ -370,7 +614,16 @@ def advance_client_releases(*, store: object, control_plane_root: Path) -> tuple
     if not isinstance(store, PostgresRecordStore):
         return ()
     queued: list[str] = []
-    for profile in store.list_product_profile_records(driver_id="odoo"):
+    for profile in store.list_product_profile_records():
+        if stop_event is not None and stop_event.is_set():
+            break
+        if profile.driver_id not in {"odoo", "generic-web"}:
+            continue
+        try:
+            _record_standing_acceptance(store, control_plane_root, profile, standing_review_backoff)
+        except (FileNotFoundError, ValueError, click.ClickException):
+            _LOGGER.info("standing acceptance not ready product=%s", profile.product)
+            continue
         covered = _covering_decision(store, profile.product)
         if covered is None:
             continue
@@ -382,6 +635,13 @@ def advance_client_releases(*, store: object, control_plane_root: Path) -> tuple
             )
             continue
         except OdooStableLaneOperationConflictError:
+            continue
+        except Exception as error:
+            _LOGGER.error(
+                "client release failed product=%s error_type=%s",
+                profile.product,
+                type(error).__name__,
+            )
             continue
         if operation_id:
             queued.append(operation_id)
@@ -409,7 +669,7 @@ def _advance(
             return _queue_rollback(store, profile, decision, step, context, authorized_at)
         _require_current_release(store, control_plane_root, profile, decision)
         if step.kind == "backup":
-            return _queue_backup(store, decision, step, context, authorized_at)
+            return _queue_backup(store, profile, decision, step, context, authorized_at)
         backup_record_id = str(getattr(previous, "backup_record_id", ""))
         return _queue_promotion(
             store,
@@ -433,17 +693,13 @@ def _require_current_release(
     """The release on the lanes now is exactly the one the Client accepted."""
 
     checklist = decision.checklist
-    context = _prod_context(profile)
     # Cheap reads first, so a stale acceptance does not read GitHub on every poll.
     try:
-        production = store.read_release_tuple_record(context_name=context, channel_name="prod")
-        candidate = store.read_release_tuple_record(context_name=context, channel_name="testing")
-    except FileNotFoundError as error:
+        production = release_version(store=store, profile=profile, instance="prod")
+        candidate = release_version(store=store, profile=profile, instance="testing")
+    except (FileNotFoundError, ValueError) as error:
         raise ClientReleaseNotReady("release_record_missing") from error
-    if (production.artifact_id, candidate.artifact_id) != (
-        checklist.production.artifact_id,
-        checklist.candidate.artifact_id,
-    ):
+    if (production, candidate) != (checklist.production, checklist.candidate):
         raise ClientReleaseNotReady("release_changed")
     review = current_release_review(
         control_plane_root=control_plane_root, record_store=store, profile=profile
@@ -459,6 +715,7 @@ def _require_current_release(
 
 def _queue_backup(
     store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
     step: ClientReleaseStep,
     context: str,
@@ -471,7 +728,11 @@ def _queue_backup(
                 product=decision.product,
                 context=context,
                 instance="prod",
-                promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
+                promotion_action=(
+                    GENERIC_WEB_PROMOTION_BACKUP_ACTION
+                    if profile.driver_id == "generic-web"
+                    else ODOO_PROMOTION_BACKUP_ACTION
+                ),
                 backup_record_id=_backup_record_id(context, decision, step.attempt),
             ),
             authorization=client_release_grant(
@@ -498,6 +759,10 @@ def _queue_promotion(
     authorized_at: str,
 ) -> str:
     key = _step_key(decision, step)
+    if profile.driver_id == "generic-web":
+        return _run_generic_web_promotion(
+            store, control_plane_root, profile, decision, step, backup_record_id
+        )
     request = OdooProdPromotionRunRequest(
         context=context,
         product=profile.product,

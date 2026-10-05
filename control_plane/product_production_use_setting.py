@@ -29,7 +29,8 @@ class ProductProductionUseApplyRequest(BaseModel):
     schema_version: Literal[1] = 1
     mode: ProductionUseMode = "dry-run"
     production_use: ProductionUse
-    # Omitted: unchanged. Only an Odoo product's acceptance starts a release.
+    # Omitted: unchanged. Standing acceptance is an explicit admin attestation
+    # that the recorded Client is the Director; it is never inferred from admin access.
     release_on_acceptance: ReleaseOnAcceptance | None = None
     reviewed_plan_sha256: str = ""
     reason: str
@@ -80,6 +81,18 @@ def build_product_production_use_plan(
     if request.release_on_acceptance is not None:
         evidence["release_on_acceptance"] = request.release_on_acceptance
     release_on_acceptance_after = request.release_on_acceptance or profile.release_on_acceptance
+    if release_on_acceptance_after == "director_standing":
+        if profile.driver_id != "generic-web" or not profile.owner.is_set:
+            raise ValueError(
+                "Director standing acceptance requires a generic-web product with a recorded Client."
+            )
+    if (
+        profile.driver_id == "generic-web"
+        and release_on_acceptance_after == "promote_with_rollback_drill"
+    ):
+        raise ValueError(
+            "Generic-web releases use automatic rollback; the optional drill is Odoo-only."
+        )
     digest = hashlib.sha256(
         json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()

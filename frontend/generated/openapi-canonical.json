@@ -12626,7 +12626,8 @@
             "enum": [
               "held",
               "promote",
-              "promote_with_rollback_drill"
+              "promote_with_rollback_drill",
+              "director_standing"
             ],
             "title": "Release On Acceptance",
             "type": "string"
@@ -28990,6 +28991,7 @@
               "private_endpoint_not_found",
               "private_url",
               "monitoring_intent_changed",
+              "monitor_run_missed",
               "provider_check_unavailable",
               "redirect_loop",
               "self_redirect",
@@ -29168,6 +29170,7 @@
                   "private_endpoint_not_found",
                   "private_url",
                   "monitoring_intent_changed",
+                  "monitor_run_missed",
                   "provider_check_unavailable",
                   "redirect_loop",
                   "self_redirect",
@@ -29414,6 +29417,7 @@
               "private_endpoint_not_found",
               "private_url",
               "monitoring_intent_changed",
+              "monitor_run_missed",
               "provider_check_unavailable",
               "redirect_loop",
               "self_redirect",
@@ -36069,6 +36073,15 @@
       "ReleaseReviewDecisionRecord": {
         "additionalProperties": false,
         "properties": {
+          "acceptance_source": {
+            "default": "client_session",
+            "enum": [
+              "client_session",
+              "director_standing"
+            ],
+            "title": "Acceptance Source",
+            "type": "string"
+          },
           "actor_github_id": {
             "pattern": "^[0-9]+$",
             "title": "Actor Github Id",
@@ -36222,7 +36235,8 @@
             "enum": [
               "held",
               "promote",
-              "promote_with_rollback_drill"
+              "promote_with_rollback_drill",
+              "director_standing"
             ],
             "title": "Release On Acceptance",
             "type": "string"
@@ -79092,7 +79106,8 @@
                         "enum": [
                           "held",
                           "promote",
-                          "promote_with_rollback_drill"
+                          "promote_with_rollback_drill",
+                          "director_standing"
                         ],
                         "type": "string"
                       },

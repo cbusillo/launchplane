@@ -864,7 +864,7 @@ export type LaunchplaneProductProfileRecord = {
     product: string;
     production_use: 'unknown' | 'prelaunch' | 'live';
     promotion_workflow: ProductPromotionWorkflowProfile;
-    release_on_acceptance: 'held' | 'promote' | 'promote_with_rollback_drill';
+    release_on_acceptance: 'held' | 'promote' | 'promote_with_rollback_drill' | 'director_standing';
     repository: string;
     repository_id: string;
     repository_owner_id: string;
@@ -2944,7 +2944,7 @@ export type ProductIncidentEventSummary = {
 export type ProductIncidentMaterialEvidence = {
     affected_targets: Array<'base_url' | 'health_url' | 'private_health_url' | 'monitoring_intent' | 'provider' | 'tls_domain'>;
     check_kind: 'public_http' | 'private_http' | 'provider' | 'tls';
-    failure_code: 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
+    failure_code: 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'monitor_run_missed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
     failure_layer: 'configuration' | 'dns' | 'network' | 'redirect' | 'http' | 'tls' | 'runtime_identity' | 'provider' | 'unknown';
     route_authority_kind: string;
     runtime_identity_mismatched_fields: Array<string>;
@@ -2967,7 +2967,7 @@ export type ProductIncidentNotificationAttemptSummary = {
 };
 
 export type ProductIncidentObservationSummary = {
-    failure_code: 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error' | '';
+    failure_code: 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'monitor_run_missed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error' | '';
     incident_event_id: string;
     material_fingerprint_sha256: string;
     notification_sent: boolean;
@@ -3009,7 +3009,7 @@ export type ProductIncidentSummary = {
     context: string;
     display_name: string;
     environment: string;
-    failure_code: 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
+    failure_code: 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'monitor_run_missed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
     failure_layer: 'configuration' | 'dns' | 'network' | 'redirect' | 'http' | 'tls' | 'runtime_identity' | 'provider' | 'unknown';
     incident_id: string;
     instance: string;
@@ -3856,6 +3856,7 @@ export type ReleaseReviewDecisionEnvelope = {
 };
 
 export type ReleaseReviewDecisionRecord = {
+    acceptance_source: 'client_session' | 'director_standing';
     actor_github_id: string;
     actor_github_login: string;
     checklist: ReleaseChecklist;
@@ -3885,7 +3886,7 @@ export type ReleaseReviewResponse = {
     live_site_url: string;
     owner_github_login: string;
     product: string;
-    release_on_acceptance: 'held' | 'promote' | 'promote_with_rollback_drill';
+    release_on_acceptance: 'held' | 'promote' | 'promote_with_rollback_drill' | 'director_standing';
     release_run: ClientReleaseRunView | null;
     review: ReleaseReviewStatus;
     trace_id: string;
@@ -5960,7 +5961,7 @@ export type ApplyProductProductionUseData = {
         mode?: 'dry-run' | 'apply';
         production_use: 'unknown' | 'prelaunch' | 'live';
         reason: string;
-        release_on_acceptance?: 'held' | 'promote' | 'promote_with_rollback_drill' | null;
+        release_on_acceptance?: 'held' | 'promote' | 'promote_with_rollback_drill' | 'director_standing' | null;
         reviewed_plan_sha256?: string;
         schema_version?: 1;
     };

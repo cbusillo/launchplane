@@ -3244,7 +3244,7 @@ export function releaseDecisionForFixture(
   const checklist = response.review.checklist;
   if (!checklist) return response;
   const releaseStart = decision === "accepted" && published && response.release_on_acceptance !== "held"
-    ? response.release_on_acceptance : "";
+    ? response.release_on_acceptance === "director_standing" ? "promote" : response.release_on_acceptance : "";
   const steps = releaseStart === "promote_with_rollback_drill"
     ? (["backup", "promote", "rollback", "backup", "promote"] as const) : (["backup", "promote"] as const);
   return { ...response, release_run: releaseStart ? {
@@ -3261,6 +3261,7 @@ export function releaseDecisionForFixture(
       actor_github_login: decision === "overridden" ? "site-operator" : "site-owner",
       decided_at: "2026-09-26T12:00:00Z", release_issue_url: published ? "https://github.com/example/site/issues/43" : "",
       release_start: releaseStart,
+      acceptance_source: "client_session",
     },
   } };
 }

@@ -291,12 +291,12 @@ class ClientReleaseTests(unittest.TestCase):
             release_start_for_acceptance(store=self.store, profile=profile_record), "promote"
         )
 
-    def test_nothing_starts_when_held_prelaunch_overridden_or_not_odoo(self) -> None:
+    def test_nothing_starts_when_held_prelaunch_overridden_or_unsupported(self) -> None:
         self.assertEqual(self.accept().release_start, "")
         self.assertEqual(self.advance(), ())
         self.switch("promote")
         current = self.store.read_product_profile_record(PRODUCT)
-        for update in ({"production_use": "prelaunch"}, {"driver_id": "generic-web"}):
+        for update in ({"production_use": "prelaunch"}, {"driver_id": "unsupported"}):
             with self.subTest(update=update):
                 self.assertEqual(
                     release_start_for_acceptance(

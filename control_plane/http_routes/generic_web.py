@@ -1,5 +1,9 @@
+from control_plane.generic_web_promotion_provider_adapter import (
+    GenericWebProdPromotionProviderMutationAdapter,
+    PromotionTargetChanged,
+    require_generic_web_promotion_target,
+)
 import asyncio
-import hashlib
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -10,7 +14,6 @@ import click
 from fastapi import Depends, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
-from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from control_plane.contracts.generic_web_deploy_recovery import (
     GenericWebDeployRecoveryApplyResponse,
@@ -27,10 +30,6 @@ from control_plane.drivers import native_routes
 from control_plane.release_review import (
     ProductionChangeRequiresPromotion,
     require_unchanged_production_artifact,
-)
-from control_plane.workflows.generic_web_promotion import (
-    GenericWebPromotionStore,
-    resolve_generic_web_promotion_inputs,
 )
 from control_plane.generic_web_deploy_http import (
     GENERIC_WEB_DEPLOY_ROUTE as _GENERIC_WEB_DEPLOY_ROUTE,
@@ -85,7 +84,6 @@ from control_plane.generic_web_promotion_http import (
     execute_generic_web_prod_promotion_result,
     resolve_generic_web_promotion_destination_lane,
     resolve_generic_web_promotion_workflow_lane,
-    generic_web_promotion_outcome_is_settled,
     should_store_generic_web_promotion_idempotency,
     validate_generic_web_prod_promotion_lanes,
 )
@@ -119,7 +117,6 @@ from control_plane.http_routes.mutation_support import (
     AcceptedEvidenceResponse,
     accepted_evidence_response,
     idempotency_scope,
-    provider_operation_response_payload as _provider_operation_response_payload,
 )
 from control_plane.http_routes.support import (
     ApiRouteRegistrar,
@@ -130,14 +127,6 @@ from control_plane.http_routes.support import (
 from control_plane.product_promotion_http import (
     build_product_promotion_status,
     product_promotion_intent_matches,
-)
-from control_plane.provider_operations import (
-    ProviderMutationOutcome,
-    ProviderMutationRejectedError,
-    ProviderMutationUnknownError,
-    ProviderObservation,
-    ProviderOperationLease,
-    provider_operation_title,
 )
 from control_plane.service_auth import (
     GitHubHumanIdentity,
@@ -151,10 +140,7 @@ from control_plane.workflows.generic_web_deploy import (
     normalize_generic_web_artifact_id,
 )
 from control_plane.workflows.generic_web_deploy_provider import (
-    GenericWebDeployProvider,
     GenericWebResolvedDeployTarget,
-    build_generic_web_provider_reconciliation_key,
-    build_generic_web_provider_target_key,
     default_generic_web_deploy_provider,
 )
 from control_plane.workflows.generic_web_preview import (
@@ -187,120 +173,6 @@ def _log_masked_promotion_error(error: BaseException, *, trace_id: str) -> None:
         error,
         exc_info=error,
     )
-
-
-class _GenericWebProdPromotionProviderMutationAdapter:
-    def __init__(
-        self,
-        *,
-        control_plane_root: FilePath,
-        record_store: object,
-        promotion_request: GenericWebProdPromotionEnvelope,
-        profile: LaunchplaneProductProfileRecord,
-        lane: ProductLaneProfile,
-        trace_id: str,
-        validate_before_effect: Callable[[GenericWebResolvedDeployTarget], None],
-    ) -> None:
-        self._control_plane_root = control_plane_root
-        self._record_store = record_store
-        self._promotion_request = promotion_request
-        self._profile = profile
-        self._lane = lane
-        self._trace_id = trace_id
-        self._validate_before_effect = validate_before_effect
-        self._deploy_provider: GenericWebDeployProvider = default_generic_web_deploy_provider()
-        self._resolved_deploy_target: GenericWebResolvedDeployTarget | None = None
-
-    def resolve_deploy_target(self) -> GenericWebResolvedDeployTarget:
-        if self._resolved_deploy_target is None:
-            # A workflow may leave the artifact to Launchplane; resolve it from
-            # testing inventory exactly as the promotion itself does, so the
-            # target is resolved for the build that will be deployed.
-            promotion = resolve_generic_web_promotion_inputs(
-                record_store=cast(GenericWebPromotionStore, self._record_store),
-                request=self._promotion_request.promotion,
-            )
-            self._resolved_deploy_target = self._deploy_provider.resolve_deploy_target(
-                control_plane_root=self._control_plane_root,
-                request_artifact_id=promotion.artifact_id,
-                request_source_git_ref=promotion.source_git_ref,
-                request_timeout_seconds=promotion.timeout_seconds,
-                request_no_cache=promotion.no_cache,
-                record_store=self._record_store,
-                profile=self._profile,
-                lane=self._lane,
-                normalized_artifact_id=normalize_generic_web_artifact_id(
-                    profile=self._profile,
-                    artifact_id=promotion.artifact_id,
-                ),
-                fallback_target_name=f"{self._profile.product}-{self._lane.instance}",
-                request_deploy_reference=promotion.deploy_reference,
-            )
-        return self._resolved_deploy_target
-
-    def reconciliation_key(self) -> str:
-        return build_generic_web_provider_reconciliation_key(
-            self.resolve_deploy_target(),
-            product=self._profile.product,
-        )
-
-    def target_key(self) -> str:
-        return build_generic_web_provider_target_key(self.resolve_deploy_target())
-
-    def observe(
-        self,
-        provider_operation_key: str,
-        provider_effect_phase: str,
-        reconciliation_key: str,
-    ) -> ProviderObservation:
-        del provider_operation_key, provider_effect_phase, reconciliation_key
-        return ProviderObservation(outcome="unknown")
-
-    def _deployment_record_id(self, provider_operation_key: str) -> str:
-        operation_digest = hashlib.sha256(provider_operation_key.encode("utf-8")).hexdigest()[:24]
-        return (
-            f"deployment-provider-operation-{operation_digest}-"
-            f"{self._lane.context}-{self._lane.instance}"
-        )
-
-    def apply(
-        self, provider_operation_key: str, lease: ProviderOperationLease
-    ) -> ProviderMutationOutcome:
-        provider_effect_attempted = False
-
-        def checkpoint_provider_effect(phase: str) -> None:
-            nonlocal provider_effect_attempted
-            lease.checkpoint_effect(phase)
-            provider_effect_attempted = True
-
-        try:
-            self._validate_before_effect(self.resolve_deploy_target())
-            records, result = execute_generic_web_prod_promotion_result(
-                control_plane_root=self._control_plane_root,
-                record_store=self._record_store,
-                request=self._promotion_request,
-                deploy_provider=self._deploy_provider,
-                resolved_deploy_target=self.resolve_deploy_target(),
-                provider_operation_title=provider_operation_title(provider_operation_key),
-                deployment_record_id=self._deployment_record_id(provider_operation_key),
-                provider_effect_checkpoint=checkpoint_provider_effect,
-            )
-        except StarletteHTTPException as error:
-            raise ProviderMutationRejectedError(error) from error
-        except (FileNotFoundError, ValueError, click.ClickException) as error:
-            if provider_effect_attempted:
-                raise ProviderMutationUnknownError(str(error)) from error
-            raise ProviderMutationRejectedError(error) from error
-        return ProviderMutationOutcome(
-            response_status_code=202,
-            response_payload=_provider_operation_response_payload(
-                trace_id=self._trace_id,
-                records=records.model_dump(mode="json"),
-                result=result.model_dump(mode="json"),
-            ),
-            durable=generic_web_promotion_outcome_is_settled(result),
-            provider_effect_performed=provider_effect_attempted,
-        )
 
 
 class PreviewDesiredStateWriteStore(Protocol):
@@ -471,33 +343,18 @@ def build_generic_web_write_route_handlers(
                 message="Live generic-web promotion requires Launchplane database storage.",
             )
         try:
-            current_target = record_store.read_provider_target_record(
-                context_name=lane.context,
-                instance_name=lane.instance,
+            require_generic_web_promotion_target(
+                record_store=record_store,
+                lane=lane,
+                resolved_deploy_target=resolved_deploy_target,
             )
-        except FileNotFoundError as error:
+        except PromotionTargetChanged as error:
             raise dependencies.http_error(
                 status_code=409,
                 trace_id=trace_id,
                 code="promotion_target_changed",
-                message="The reviewed production provider target is no longer available.",
+                message=str(error),
             ) from error
-        expected_target = resolved_deploy_target.deployed_target
-        resolved_target = resolved_deploy_target.resolved_target
-        if (
-            expected_target is None
-            or current_target.to_deployed_target_reference() != expected_target
-            or resolved_target.target_id != expected_target.target_id
-            or resolved_target.target_name != expected_target.display_name
-            or resolved_target.target_type
-            != (expected_target.provider_target_type or expected_target.target_category)
-        ):
-            raise dependencies.http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="promotion_target_changed",
-                message="The production provider target changed before promotion execution.",
-            )
 
     def read_current_release_review(
         *,
@@ -1587,7 +1444,7 @@ def build_generic_web_write_route_handlers(
                         trace_id=trace_id,
                     )
 
-            adapter = _GenericWebProdPromotionProviderMutationAdapter(
+            adapter = GenericWebProdPromotionProviderMutationAdapter(
                 control_plane_root=dependencies.control_plane_root,
                 record_store=record_store,
                 promotion_request=promotion_request,
@@ -1595,6 +1452,7 @@ def build_generic_web_write_route_handlers(
                 lane=lane,
                 trace_id=trace_id,
                 validate_before_effect=validate_live_promotion,
+                deploy_provider=default_generic_web_deploy_provider(),
             )
             try:
                 durable_response = await dependencies.run_provider_mutation(

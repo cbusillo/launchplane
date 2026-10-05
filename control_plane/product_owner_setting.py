@@ -163,6 +163,12 @@ def updated_product_owner_profile(
     updated_profile = profile.model_copy(
         update={
             "owner": updated_owner,
+            "release_on_acceptance": (
+                "held"
+                if profile.release_on_acceptance == "director_standing"
+                and profile.owner.github_id != resolved_owner.github_id
+                else profile.release_on_acceptance
+            ),
             "updated_at": updated_at,
             "source": PRODUCT_OWNER_SETTING_SOURCE,
         }

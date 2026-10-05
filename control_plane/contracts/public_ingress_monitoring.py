@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Literal
+from typing import Literal, cast
 from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -89,6 +89,7 @@ PublicIngressFailureCode = Literal[
     "private_endpoint_not_found",
     "private_url",
     "monitoring_intent_changed",
+    "monitor_run_missed",
     "provider_check_unavailable",
     "redirect_loop",
     "self_redirect",
@@ -118,11 +119,22 @@ PublicIngressTlsNameMatchSource = Literal["san", "subject", "none"]
 PublicIngressRouteBindingSourceKind = Literal["operator", "backfill", "service"]
 
 PUBLIC_TLS_EXPIRING_DAYS = 14
+PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS = 30 * 60
 PUBLIC_HTTP_STALE_AFTER_SECONDS = 2 * 60 * 60
 PUBLIC_TLS_STALE_AFTER_SECONDS = 2 * 60 * 60
 PUBLIC_INGRESS_DEFAULT_REMINDER_INTERVAL_SECONDS = 6 * 60 * 60
 PUBLIC_INGRESS_MIN_REMINDER_INTERVAL_SECONDS = 15 * 60
 PUBLIC_INGRESS_MAX_REMINDER_INTERVAL_SECONDS = 7 * 24 * 60 * 60
+MONITOR_CADENCE_CHECK_PREFIX = "monitor-cadence:"
+
+
+def monitored_check_identity(check_name: str) -> tuple[PublicIngressCheckKind, str] | None:
+    if not check_name.startswith(MONITOR_CADENCE_CHECK_PREFIX):
+        return None
+    kind, separator, name = check_name[len(MONITOR_CADENCE_CHECK_PREFIX) :].partition(":")
+    if not separator or not name or kind not in {"public_http", "private_http", "provider", "tls"}:
+        return None
+    return cast(PublicIngressCheckKind, kind), name
 
 
 class PublicIngressTlsRecordedEvidence(BaseModel):
@@ -859,6 +871,8 @@ class PublicIngressNotificationPolicyRecord(BaseModel):
         return self
 
     def matches(self, incident: PublicIngressIncidentRecord) -> bool:
+        monitored = monitored_check_identity(incident.check_name)
+        check_kind, check_name = monitored or (incident.check_kind, incident.check_name)
         return (
             (not self.product or self.product == incident.product)
             and (not self.context or self.context == incident.context)
@@ -866,9 +880,9 @@ class PublicIngressNotificationPolicyRecord(BaseModel):
             and (
                 not self.check_name
                 or canonical_health_check_record_token(self.check_name)
-                == canonical_health_check_record_token(incident.check_name)
+                == canonical_health_check_record_token(check_name)
             )
-            and (not self.check_kind or self.check_kind == incident.check_kind)
+            and (not self.check_kind or self.check_kind == check_kind)
         )
 
 

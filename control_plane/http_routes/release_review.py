@@ -247,6 +247,7 @@ def register_release_review_routes(
             and previous.decision == decision.decision
             and previous.reason == decision.reason
             and previous.release_start == decision.release_start
+            and (current.release_run is None or current.release_run.state != "stopped")
         )
         if repeated and previous and not previous.release_issue_url:
             decision = previous
