@@ -320,6 +320,55 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             self.provider.deployed_artifacts, [decision.checklist.candidate.artifact_id]
         )
 
+    def test_late_standing_writer_keeps_publication_and_admitted_backup_authorized(self) -> None:
+        self.switch("director_standing")
+        create = self.store.create_release_review_decision_record_if_absent
+        winner: ReleaseReviewDecisionRecord | None = None
+
+        def race(contender: ReleaseReviewDecisionRecord) -> ReleaseReviewDecisionRecord:
+            nonlocal winner
+            earlier = contender.model_copy(
+                update={
+                    "decided_at": (
+                        datetime.fromisoformat(contender.decided_at) - timedelta(seconds=1)
+                    ).isoformat(),
+                    "actor_github_login": "client-before-rename",
+                }
+            )
+            create(earlier)
+            winner = self.store.record_release_review_decision_publication(
+                record_id=earlier.record_id,
+                release_issue_url="https://github.com/example/site/issues/98",
+            )
+            # The other worker has published and admitted its backup before this
+            # stale contender reaches the insertion point.
+            (backup_id,) = self.advance()
+            backup = self.store.read_verireel_prod_backup_gate_operation_record(backup_id)
+            assert backup.authorization is not None
+            self.assertEqual(backup.authorization.release_decision_record_id, winner.record_id)
+            recovered = create(contender)
+            self.assertEqual(recovered, winner)
+            self.assertEqual(
+                self.store.list_release_review_decision_records(product=self.profile.product)[0],
+                winner,
+            )
+            # Verify before the late creator returns: the real backup worker
+            # must retain its authorization throughout the contention window.
+            self.capture()
+            return recovered
+
+        with patch.object(
+            self.store, "create_release_review_decision_record_if_absent", side_effect=race
+        ):
+            self.advance()
+        self.publish.assert_not_called()
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=self.profile.product), (winner,)
+        )
+        self.assertIsNotNone(winner)
+        assert winner is not None
+        self.assertEqual(self.provider.deployed_artifacts, [winner.checklist.candidate.artifact_id])
+
     def test_missing_acceptance_hold_override_or_changes_requested_starts_nothing(self) -> None:
         self.assertEqual(self.advance(), ())
         for outcome in ("overridden", "changes_requested"):

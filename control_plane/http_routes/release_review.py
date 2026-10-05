@@ -264,20 +264,24 @@ def register_release_review_routes(
             decision = previous
             issue_url = previous.release_issue_url
         else:
-            store.write_release_review_decision_record(decision)
-            try:
-                issue_url = dependencies.publish_decision(profile, decision)
-            except (
-                AttributeError,
-                FileNotFoundError,
-                StopIteration,
-                ValueError,
-                click.ClickException,
-            ):
-                issue_url = ""
+            decision = store.create_release_review_decision_record_if_absent(decision)
+            issue_url = decision.release_issue_url
+            if not issue_url:
+                try:
+                    issue_url = dependencies.publish_decision(profile, decision)
+                except (
+                    AttributeError,
+                    FileNotFoundError,
+                    StopIteration,
+                    ValueError,
+                    click.ClickException,
+                ):
+                    issue_url = ""
         if issue_url and not decision.release_issue_url:
-            decision = decision.model_copy(update={"release_issue_url": issue_url})
-            store.write_release_review_decision_record(decision)
+            decision = store.record_release_review_decision_publication(
+                record_id=decision.record_id, release_issue_url=issue_url
+            )
+            issue_url = decision.release_issue_url
         blockers: tuple[str, ...] = (
             ("The Client requested changes.",) if decision.decision == "changes_requested" else ()
         )
