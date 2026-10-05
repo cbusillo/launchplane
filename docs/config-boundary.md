@@ -334,6 +334,15 @@ reintroduced
 Launchplane-owned authz, route, provider-target, domain, runtime-environment,
 managed-secret, topology, or workflow-default fixtures before merge.
 
+Repository-owned GHCR publishing uses `password: ${{ github.token }}` in
+`publish-image.yml`, which the gate classifies as an artifact-publishing mechanic.
+In `cleanup-ghcr.yml`, `inputs.package_names.default` may name only the lower-case
+repository name derived from the audited checkout's GitHub `origin` URL (HTTPS,
+SSH, or SCP form). Missing or unrecognized origins, other package names, and
+package lists remain findings. This recognizes repository build/package ownership;
+it grants no package permissions and does not allow arbitrary secret bindings,
+image metadata credentials, or Launchplane runtime authority.
+
 When admins need to inspect or mutate tracked Dokploy target records, use the
 DB-backed Launchplane CLI surface rather than editing any repo-local file:
 
