@@ -461,6 +461,29 @@ class GitHubAppWebhookTests(unittest.TestCase):
         self.assertNotIn("private storage detail", json.dumps(response))
         self.assertIn("github_app_webhook_unavailable", json.dumps(response))
 
+    def test_retired_repository_is_neither_scanned_nor_published(self) -> None:
+        from control_plane.contracts.product_reconcile import GitHubAppWebhookDeliveryRecord
+        from control_plane.product_config_authority_events import run_product_config_authority_once
+
+        delivery = GitHubAppWebhookDeliveryRecord(
+            delivery_id="untracked-source",
+            event="push",
+            repository_id=str(_REPOSITORY_ID),
+            received_at=self.clock,
+            config_authority_state="pending",
+            config_authority_request={"before": "a" * 40, "after": "b" * 40, "base_branch": "main"},
+        )
+        self.store.record_github_app_webhook_delivery(delivery, (), self.clock)
+        self.store.write_repository_inventory_record(
+            _inventory(inventory_state="retired", inventory_revision=2)
+        )
+        scan, publish = Mock(), Mock()
+        result = run_product_config_authority_once(self.store, "worker", scan=scan, publish=publish)
+        assert result is not None
+        self.assertEqual(result.config_authority["status"], "unavailable")
+        scan.assert_not_called()
+        publish.assert_not_called()
+
     def test_busy_repository_backlog_does_not_starve_another_repository(self) -> None:
         from control_plane.contracts.product_reconcile import GitHubAppWebhookDeliveryRecord
 

@@ -111,9 +111,12 @@ class GitHubConfigAuthoritySource:
         before, after = self.trees[base], self.trees[head]
         return sorted(
             path
-            for path, entry in after.items()
-            if entry["mode"] != "040000"
-            and (entry["sha"], entry["mode"])
+            for path in before.keys() | after.keys()
+            if any(
+                tree.get(path, {}).get("mode") in {"100644", "100755", "120000", "160000"}
+                for tree in (before, after)
+            )
+            and (after.get(path, {}).get("sha"), after.get(path, {}).get("mode"))
             != (before.get(path, {}).get("sha"), before.get(path, {}).get("mode"))
         )
 
@@ -500,6 +503,7 @@ def run_product_config_authority_once(
             store=record_store,
         ).current_record
         if inventory is None or inventory.inventory_state != "tracked":
+            inventory = None
             raise ValueError("Source repository is no longer tracked.")
         evidence = scan(
             record_store,

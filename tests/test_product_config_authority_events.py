@@ -222,6 +222,31 @@ class ConfigAuthorityEventTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             source.read_blob(self.head, "settings.json")
 
+    def test_unchanged_symlink_tracks_edited_and_deleted_extensionless_target(self) -> None:
+        (self.root / "authority").write_text("# empty\n")
+        (self.root / "alias.env").symlink_to("authority")
+        _commit_all(self.root)
+        base = _git(self.root, "rev-parse", "HEAD")
+        (self.root / "authority").write_text("PRODUCT_DOMAIN=new.example\n")
+        _commit_all(self.root)
+        head = _git(self.root, "rev-parse", "HEAD")
+        actual = self.scan(payload={"before": base, "after": head})
+        audit = build_config_authority_audit(
+            control_plane_root=self.root,
+            mode="changed-files-gate",
+            base_sha=base,
+            head_sha=head,
+        )
+        self.assertEqual(
+            actual["gate"], evaluate_config_authority_gate(audit, profile="product-repo")
+        )
+        self.assertEqual(actual["status"], "fail")
+        (self.root / "authority").unlink()
+        _commit_all(self.root)
+        head = _git(self.root, "rev-parse", "HEAD")
+        with self.assertRaises(ValueError):
+            self.scan(payload={"before": base, "after": head})
+
     def test_baseline_read_error_refuses_and_symlink_matches_cli(self) -> None:
         (self.root / "runtime.env").write_text("PRODUCT_DOMAIN=changed.example\n")
         _commit_all(self.root)

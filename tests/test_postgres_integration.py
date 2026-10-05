@@ -28,6 +28,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from tests.test_odoo_addon_settings_override import _existing_record as _addon_override_record
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -3428,6 +3429,80 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             finally:
                 for store in stores:
                     store.close()
+
+    def test_standing_acceptance_creation_race_returns_one_immutable_decision(self) -> None:
+        from tests.test_release_review_storage import standing_decision
+
+        with _store_for_fresh_head_database() as store:
+            original = standing_decision(store)
+            contender = original.model_copy(
+                update={
+                    "decided_at": "2026-09-23T02:00:00Z",
+                    "actor_github_login": "renamed-client",
+                }
+            )
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def create(
+                active_store: PostgresRecordStore, record: ReleaseReviewDecisionRecord
+            ) -> ReleaseReviewDecisionRecord:
+                barrier.wait(timeout=5)
+                return active_store.create_release_review_decision_record_if_absent(record)
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as workers:
+                    first = workers.submit(create, store, original)
+                    second = workers.submit(create, second_store, contender)
+                    saved = first.result(timeout=10)
+                    self.assertEqual(second.result(timeout=10), saved)
+                self.assertIn(saved, (original, contender))
+                published = store.record_release_review_decision_publication(
+                    record_id=saved.record_id,
+                    release_issue_url="https://github.com/example/site/issues/99",
+                )
+                self.assertEqual(
+                    second_store.create_release_review_decision_record_if_absent(original),
+                    published,
+                )
+                self.assertEqual(
+                    store.list_release_review_decision_records(product=saved.product), (published,)
+                )
+            finally:
+                second_store.close()
+
+    def test_standing_acceptance_publication_race_preserves_first_stored_url(self) -> None:
+        from tests.test_release_review_storage import standing_decision
+
+        with _store_for_fresh_head_database() as store:
+            original = standing_decision(store)
+            store.create_release_review_decision_record_if_absent(original)
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+            urls = (
+                "https://github.com/example/site/issues/99",
+                "https://github.com/example/site/issues/100",
+            )
+
+            def publish(active_store: PostgresRecordStore, url: str) -> ReleaseReviewDecisionRecord:
+                barrier.wait(timeout=5)
+                return active_store.record_release_review_decision_publication(
+                    record_id=original.record_id, release_issue_url=url
+                )
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as workers:
+                    first = workers.submit(publish, store, urls[0])
+                    second = workers.submit(publish, second_store, urls[1])
+                    saved = first.result(timeout=10)
+                    self.assertEqual(second.result(timeout=10), saved)
+                self.assertIn(saved.release_issue_url, urls)
+                self.assertEqual(saved.model_copy(update={"release_issue_url": ""}), original)
+                self.assertEqual(
+                    store.list_release_review_decision_records(product=original.product), (saved,)
+                )
+            finally:
+                second_store.close()
 
     def test_owner_feedback_publishers_serialize_and_recover_one_receipt(self) -> None:
         from tests.test_product_review_status import _GitHub, _decision, _profile, _publisher
