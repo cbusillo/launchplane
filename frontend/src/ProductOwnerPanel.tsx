@@ -657,7 +657,7 @@ function ProfileMutationRecovery({ product, fixtureMode, field, operation, onCom
       if (controller.signal.aborted) return;
       if (receipt.state !== "completed" || receipt.product !== product || receipt.field !== field ||
           receipt.idempotency_key !== identity.idempotencyKey || !receipt.original_trace_id) {
-        setMessage("Launchplane cannot yet prove the original operation completed. Keep this tab and key; check again later. Another change remains locked.");
+        setMessage("No matching completed receipt was found. Keep this tab and key; another change remains locked. This check cannot settle keys without a completed receipt.");
         return;
       }
       // Refresh first: a failed read keeps the recovery action available.
