@@ -3972,7 +3972,10 @@ current tracked inventory ID. Missing or ambiguous inventory, an absent key,
 missing accepted permissions, or a mismatched token fails closed. Neither a
 context PAT nor a merge-train credential is a fallback. The event reconciler's
 existing merge-train App paths are separate; this switch does not rewrite live
-merge policy.
+merge policy. Before activation, read the active policy and confirm every live
+target already uses `github_app`; historical `runtime_context` records are readable
+but cannot execute. If any live target still uses that source, migrate it through
+the existing supported App policy import before activation.
 
 In the Launchplane service's DB-backed `launchplane` context, the administrator
 sets the non-secret `LAUNCHPLANE_DELIVERY_GITHUB_APP_ID` and

@@ -325,7 +325,7 @@ def pull_request_has_label(
         repository=f"{github_reference['owner']}/{github_reference['repo']}"
         if github_reference
         else "",
-        purpose="pull_request_feedback",
+        purpose="repository_read",
     )
     if not normalized_label or github_reference is None or not github_token:
         return False

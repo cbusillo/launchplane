@@ -293,7 +293,9 @@ is empty, so existing owner/admin-only policies remain fail-closed and unchanged
 Logins are diagnostic labels, not policy identity, because logins can be renamed.
 
 PRs labelled for Client review require the newest `launchplane/owner-review`
-commit status on their current head. Missing status is pending, even if check
+check from the service's configured Advisory App on their current head.
+Missing App configuration or check is pending; only a completed successful check
+passes, and another App or a legacy commit status cannot satisfy Client review, even if technical check
 runs already passed; pending or failed review cannot admit the PR. Only active
 product profiles' configured review labels mark this boundary; an unrelated
 label on a repository without such a profile creates no review requirement.

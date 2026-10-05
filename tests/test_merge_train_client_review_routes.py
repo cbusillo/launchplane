@@ -23,6 +23,8 @@ from tests.merge_train_policy_fixtures import (
 )
 from tests.test_merge_train_github import (
     _check_run,
+    _owner_review_check,
+    _advisory_runtime_records,
     _combined_status,
     _conversation_rule,
     _github_branch,
@@ -42,6 +44,7 @@ def _review_store(*, review_label: str = "owner-review") -> Any:
     )
     return SimpleNamespace(
         list_product_profile_records=lambda: (profile,),
+        list_runtime_environment_records=_advisory_runtime_records,
         list_merge_train_branch_refresh_records=lambda **_: (),
     )
 
@@ -58,8 +61,8 @@ def _labelled_pull_request_transport(
             pull,
             {"permission": "admin"},
             _label_events(),
-            _combined_status(statuses=({"context": "ci", "state": "success"}, *client_statuses)),
-            {"check_runs": [_check_run("completed", "success")]},
+            _combined_status(statuses=({"context": "ci", "state": "success"},)),
+            {"check_runs": [_check_run("completed", "success"), *client_statuses]},
             _conversation_rule(),
             [],  # no active branch rules
         )
@@ -70,12 +73,12 @@ CLIENT_REVIEW_CASES: tuple[tuple[str, tuple[dict[str, object], ...], str], ...] 
     ("missing current-head review waits", (), "wait_for_checks"),
     (
         "requested changes block",
-        ({"context": CLIENT_STATUS, "state": "failure"},),
+        (_owner_review_check("failure"),),
         "block",
     ),
     (
         "accepted review keeps normal gates",
-        ({"context": CLIENT_STATUS, "state": "success"},),
+        (_owner_review_check("success"),),
         "merge",
     ),
 )
@@ -124,19 +127,12 @@ class LegacyRunOnceClientReviewTests(unittest.TestCase):
     def test_mutating_run_once_rechecks_review_on_the_head_it_merges(self) -> None:
         pull = _github_pull_request(42)
         pull["labels"] = [{"name": "ready-to-merge"}, {"name": "owner-review"}]
-        transport = _labelled_pull_request_transport(
-            ({"context": CLIENT_STATUS, "state": "success"},)
-        )
+        transport = _labelled_pull_request_transport((_owner_review_check("success"),))
         # Between the snapshot and the merge, the Client requests changes.
         transport.responses.extend(
             [
                 pull,
-                _combined_status(
-                    statuses=(
-                        {"context": CLIENT_STATUS, "state": "failure"},
-                        {"context": CLIENT_STATUS, "state": "success"},
-                    )
-                ),
+                {"check_runs": [_owner_review_check("failure"), _owner_review_check("success")]},
             ]
         )
         with patch(

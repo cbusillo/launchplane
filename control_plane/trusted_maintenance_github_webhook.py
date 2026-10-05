@@ -218,7 +218,7 @@ def handle_trusted_maintenance_github_webhook(
             control_plane_root=control_plane_root,
             context_name=authority.classification.context,
             repository=signed.repository,
-            purpose="admission_read",
+            purpose="repository_read",
         )
     except click.ClickException:
         return _retryable("github_token_unavailable")

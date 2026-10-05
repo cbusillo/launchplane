@@ -77,7 +77,11 @@ run. It creates a new in-progress run when an already completed run must wait
 again. The short-lived Checks-only token is revoked after each attempt.
 
 This check is excluded from technical-check aggregation just like engineering
-review. Historical PAT-authored statuses are left as history; the service no
+review. The train's existing separately labelled Client-review gate reads the
+current-head check pinned to the service's configured Advisory App ID; it does
+not accept another App or a legacy commit status. That preserves the existing
+Client veto and does not grant enqueue, merge or deployment power. Historical
+PAT-authored statuses are left as history; the service no
 longer writes commit statuses to neutralize a retired manager signal.
 
 Delivery App credentials for feedback and release-record issues are described in
