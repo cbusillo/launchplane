@@ -122,19 +122,22 @@ class _PermissiveMergeAdmissionGuard:
     def record_landed(self, **kwargs: object) -> None:
         self.landed_calls.append(kwargs)
 
-    def record_provider_failure(self, **_: object) -> None:
+    @staticmethod
+    def record_provider_failure(**_: object) -> None:
         return None
 
     def record_reconcile_required(self, **kwargs: object) -> None:
         self.reconcile_required_calls.append(kwargs)
 
-    def reconcile_existing_landed(self, **_: object) -> None:
+    @staticmethod
+    def reconcile_existing_landed(**_: object) -> None:
         return None
 
     def reconcile_existing_no_effect(self, **_: object) -> None:
         self.no_effect_reconciliations += 1
 
-    def update_landing_plan(self, _: MergeTrainBatchLandingPlan) -> None:
+    @staticmethod
+    def update_landing_plan(_: MergeTrainBatchLandingPlan) -> None:
         return None
 
 
