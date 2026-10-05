@@ -79,7 +79,9 @@ def verify_worker_pins(root: Path, revision: str, repository: str) -> list[str]:
             else:
                 keys = () if name == "mode" else ("default",)
             for key in keys:
-                if key in worker_input and caller_input.get(key) != worker_input[key]:
+                if (key in worker_input or key in caller_input) and caller_input.get(
+                    key
+                ) != worker_input.get(key):
                     violations.append(f"{path}: {name} {key} disagrees")
     return violations
 

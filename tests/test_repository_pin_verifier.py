@@ -49,6 +49,17 @@ class RepositoryPinVerifierTests(unittest.TestCase):
             self.assertEqual(verify_worker_pins(root, revision, "example/launchplane"), [])
             with self.assertRaises(ValueError):
                 verify_worker_pins(root, "HEAD", "fork/other")
+            wrapper.write_text(
+                wrapper.read_text().replace(
+                    "required: false", "required: true\n        default: unforwarded"
+                )
+            )
+            _commit(root, "wrapper-only default")
+            self.assertTrue(verify_worker_pins(root, "HEAD", "example/launchplane"))
+            wrapper.write_text(wrapper.read_text().replace(pin, "f" * 40))
+            _commit(root, "missing pinned worker")
+            with self.assertRaises(ValueError):
+                verify_worker_pins(root, "HEAD", "example/launchplane")
 
     def test_action_verification_ignores_dirty_consumers_and_fork_remote(self) -> None:
         with TemporaryDirectory() as directory:
@@ -74,3 +85,45 @@ class RepositoryPinVerifierTests(unittest.TestCase):
                 ).violations,
                 (),
             )
+
+    def test_reusable_gate_uses_exact_pr_pair_and_explicitly_skips_other_events(self) -> None:
+        from tests.support.workflows import load_workflow
+        import subprocess
+
+        step = load_workflow(
+            ".github/workflows/reusable-product-repo-config-authority.yml"
+        ).step_named("launchplane-config-authority", "Run Launchplane config authority gate")
+        assert step is not None
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            stub = root / "uv"
+            stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CAPTURE"\n')
+            stub.chmod(0o755)
+            capture = root / "capture"
+            base, head = "a" * 40, "b" * 40
+            env = os.environ | {
+                "PATH": f"{root}:{os.environ['PATH']}",
+                "CAPTURE": str(capture),
+                "EVENT_NAME": "pull_request",
+                "BASE_SHA": base,
+                "HEAD_SHA": head,
+                "FAIL_ON_FINDINGS": "true",
+            }
+            result = subprocess.run(
+                ["bash", "-c", step.run], env=env, capture_output=True, text=True
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            arguments = capture.read_text().splitlines()
+            self.assertEqual(arguments[arguments.index("--base-sha") + 1], base)
+            self.assertEqual(arguments[arguments.index("--head-sha") + 1], head)
+            capture.unlink()
+            for event in ("push", "merge_group", "workflow_dispatch"):
+                result = subprocess.run(
+                    ["bash", "-c", step.run],
+                    env=env | {"EVENT_NAME": event},
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(capture.exists())
+                self.assertIn("skipping", result.stdout)

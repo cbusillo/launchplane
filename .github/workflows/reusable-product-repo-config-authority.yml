@@ -78,11 +78,16 @@ jobs:
       - name: Run Launchplane config authority gate
         working-directory: launchplane
         env:
+          EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
         run: |
           set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "Changed-files authority gate applies only to pull-request commit pairs; skipping ${EVENT_NAME}."
+            exit 0
+          fi
           args=(
             uv run launchplane service audit-config-authority
             --control-plane-root ../product-repo

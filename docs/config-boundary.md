@@ -293,7 +293,11 @@ gate profile rejects a finding. In changed-file mode, findings that already
 existed at the explicit base commit remain in the report as
 `preexisting_changed_file_finding`, but only new unclassified findings block the
 gate. Both commit SHAs must be supplied; missing commits or failed git reads
-fail closed. The scan ignores dirty and untracked files. Allowed docs, tests, schema examples, Launchplane self-bootstrap wiring,
+fail closed. The scan ignores dirty and untracked files. It compares the two
+supplied snapshots exactly, rather than calculating a merge base: a PR behind
+its base can report authority absent from the newer base but present in its head.
+The reusable changed-files gate explicitly skips non-PR events; use the CLI
+with an explicit commit pair, or full-audit, for those events. Allowed docs, tests, schema examples, Launchplane self-bootstrap wiring,
 admin-supplied inputs, and thin connector mechanics keep explicit allow
 reasons and do not fail the default gate. Runner mechanic selectors use the same
 allowed labels in scalar, JSON, and YAML flow-list forms (for example,

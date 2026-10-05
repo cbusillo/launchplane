@@ -122,7 +122,8 @@ second runs:
 
 ```bash
 uv run launchplane action-pins update --release-sha <first-commit-sha>
-uv run launchplane action-pins check --repo-root . --revision "$REVISION" --repository "$REPOSITORY"
+# Commit the consumer sweep with the repository's automation commit helper.
+uv run launchplane action-pins check --repo-root . --revision HEAD --repository "$REPOSITORY"
 ```
 
 The release SHA must be an ancestor of the pull-request head and contain the
@@ -178,6 +179,6 @@ repository name; it does not infer authority from a fork remote or local edits.
 `action-pins check` and `report` read workflows and action content at the same
 revision. Only `update` reads and rewrites local workflows. CI runs
 `uv run --extra dev python scripts/verify_repository_pins.py --repo-root .
---revision "$REVISION" --repository "$REPOSITORY"` in its full-history policy
+--revision "$REVISION" --repository "$REPOSITORY"` in its full-history pin-verification
 job to verify action content and retirement wrapper/pinned-worker input agreement.
 Unit tests use temporary repositories; unittest jobs use shallow checkouts.

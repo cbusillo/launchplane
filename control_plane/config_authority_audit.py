@@ -1696,10 +1696,28 @@ def _committed_source_files(
                 CoverageGap(relative_path, "skipped_dependency_manifest", "Dependency lockfile.")
             )
             continue
-        text = _git_output(root, "show", f"{revision}:{relative_path}", strict=True)
-        content = text.encode("utf-8")
-        if len(content) > MAX_SCANNED_FILE_BYTES or _looks_binary(content):
-            raise ValueError(f"Cannot scan committed file {relative_path}.")
+        content = _git_bytes(root, "show", f"{revision}:{relative_path}", strict=True)
+        if len(content) > MAX_SCANNED_FILE_BYTES:
+            gaps.append(
+                CoverageGap(
+                    relative_path,
+                    "skipped_large_file",
+                    "Committed file exceeds scanner size limit.",
+                )
+            )
+            continue
+        if _looks_binary(content):
+            gaps.append(
+                CoverageGap(
+                    relative_path, "skipped_binary_file", "Committed file contains NUL bytes."
+                )
+            )
+            continue
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError as error:
+            gaps.append(CoverageGap(relative_path, "decode_failure", str(error)))
+            continue
         digest = hashlib.sha256(content).hexdigest()
         files.append(
             AuditSourceFile(
@@ -3944,24 +3962,27 @@ def _git_status_entries(root: Path) -> list[tuple[str, str]]:
 
 
 def _git_output(root: Path, *args: str, strict: bool = False) -> str:
+    return _git_bytes(root, *args, strict=strict).decode("utf-8").rstrip("\n")
+
+
+def _git_bytes(root: Path, *args: str, strict: bool = False) -> bytes:
     try:
         result = subprocess.run(
             ("git", *args),
             cwd=root,
             check=False,
             capture_output=True,
-            text=True,
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         if strict:
             raise ValueError(f"Config authority git read failed: {args[0]}") from error
-        return ""
+        return b""
     if result.returncode != 0:
         if strict:
             raise ValueError(f"Config authority git read failed: {args[0]}")
-        return ""
-    return result.stdout if strict and args[0] == "show" else result.stdout.rstrip("\n")
+        return b""
+    return result.stdout
 
 
 def _is_text_scan_candidate(path: Path) -> bool:

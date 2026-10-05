@@ -22,12 +22,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'push' || (startsWith(github.ref, 'refs/heads/launchplane/train/') && !github.event.created && !github.event.forced) }}
 
 jobs:
-  audit_policy:
+  repository_pins:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    outputs:
-      python_gate: ${{ steps.policy.outputs.python_gate }}
-      image_gate: ${{ steps.policy.outputs.image_gate }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -44,6 +41,18 @@ jobs:
         run: >-
           uv run --extra dev python scripts/verify_repository_pins.py
           --repo-root . --revision "$PIN_REVISION" --repository "$PIN_REPOSITORY"
+
+  audit_policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      python_gate: ${{ steps.policy.outputs.python_gate }}
+      image_gate: ${{ steps.policy.outputs.image_gate }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Classify audit inputs
         id: policy
@@ -899,6 +908,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs:
+      - repository_pins
       - audit_policy
       - verified_tree
       - static_checks
@@ -973,12 +983,17 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
           TEST_FORK_RESULT: ${{ needs.test_fork.result }}
           POSTGRES_INTEGRATION_RESULT: ${{ needs.postgres_integration.result }}
+          REPOSITORY_PINS_RESULT: ${{ needs.repository_pins.result }}
           AUDIT_POLICY_RESULT: ${{ needs.audit_policy.result }}
           VERIFIED_TREE: ${{ needs.verified_tree.outputs.verified }}
         run: |
           set -euo pipefail
           if [ "${AUDIT_POLICY_RESULT}" != "success" ]; then
             echo "audit_policy concluded with: ${AUDIT_POLICY_RESULT}" >&2
+            exit 1
+          fi
+          if [ "${REPOSITORY_PINS_RESULT}" != "success" ]; then
+            echo "repository_pins concluded with: ${REPOSITORY_PINS_RESULT}" >&2
             exit 1
           fi
           if [ "${VERIFIED_TREE}" = "true" ]; then

@@ -85,3 +85,37 @@ class CommittedConfigAuthorityGateTests(unittest.TestCase):
             (root / "untracked.env").write_text("PRODUCT_DOMAIN=dirty.example\n")
             with self.assertRaisesRegex(ValueError, "requires explicit"):
                 build_config_authority_audit(control_plane_root=root, mode="changed-files-gate")
+
+    def test_committed_bytes_preserve_hash_and_existing_coverage_gaps(self) -> None:
+        import hashlib
+        from control_plane.config_authority_audit import MAX_SCANNED_FILE_BYTES
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _init_repo(root)
+            (root / ".gitattributes").write_text("*.env -text\n")
+            (root / "settings.env").write_bytes(b"# empty\n")
+            _commit_all(root)
+            base = _git(root, "rev-parse", "HEAD")
+            content = b"# unchanged authority\r\n"
+            (root / "settings.env").write_bytes(content)
+            (root / "large.json").write_bytes(b" " * (MAX_SCANNED_FILE_BYTES + 1))
+            (root / "binary.env").write_bytes(b"bad\x00content")
+            (root / "encoding.env").write_bytes(b"# Latin-1 \xff\n")
+            _commit_all(root)
+            payload = build_config_authority_audit(
+                control_plane_root=root,
+                mode="changed-files-gate",
+                base_sha=base,
+                head_sha=_git(root, "rev-parse", "HEAD"),
+            )
+            files = payload["source_files"]
+            assert isinstance(files, list)
+            self.assertEqual(files[0]["sha256"], hashlib.sha256(content).hexdigest())
+            self.assertEqual(files[0]["size"], len(content))
+            coverage = payload["coverage"]
+            assert isinstance(coverage, dict)
+            self.assertEqual(
+                {item["reason"] for item in coverage["gaps"]},
+                {"skipped_large_file", "skipped_binary_file", "decode_failure"},
+            )
