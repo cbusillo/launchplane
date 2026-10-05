@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from uuid import uuid4
 
 from collections.abc import Callable, Iterator, Sequence
@@ -19716,6 +19718,22 @@ class PostgresRecordStore(HumanSessionStore):
                 return ReleaseReviewDecisionRecord.model_validate(existing.payload)
             session.refresh(row)
             return ReleaseReviewDecisionRecord.model_validate(row.payload)
+
+    @contextmanager
+    def release_review_publication_lock(self, *, record_id: str) -> Iterator[None]:
+        if self.database_dialect_name == "sqlite":
+            database = self._engine.url.database
+            if not database or database == ":memory:":
+                raise ValueError("Release publication requires file-backed SQLite or PostgreSQL.")
+            database_path = Path(database).resolve()
+            with FilesystemRecordStore(database_path.parent).release_review_publication_lock(
+                record_id=f"{database_path}:{record_id}"
+            ):
+                yield
+            return
+        with self._session_factory() as session, session.begin():
+            self._lock_landing_authority(session, f"release-review-publication:{record_id}")
+            yield
 
     def record_release_review_decision_publication(
         self, *, record_id: str, release_issue_url: str

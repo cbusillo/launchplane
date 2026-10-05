@@ -26392,7 +26392,8 @@ def create_launchplane_fastapi_app(
                 include_prelaunch=True,
                 trace_id=trace_id,
             ),
-            publish_decision=lambda profile, decision: publish_release_decision(
+            publish_decision=lambda store, profile, decision: publish_release_decision(
+                store=store,
                 control_plane_root=resolved_control_plane_root,
                 profile=profile,
                 decision=decision,

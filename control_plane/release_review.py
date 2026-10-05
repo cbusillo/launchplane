@@ -1,6 +1,7 @@
 """Compile and evaluate release review from current Launchplane lane records."""
 
 import hashlib
+from contextlib import AbstractContextManager
 import json
 import logging
 from dataclasses import dataclass
@@ -31,6 +32,10 @@ from control_plane.workflows.launchplane import github_api_request, resolve_laun
 
 
 class ReleaseReviewStore(Protocol):
+    def release_review_publication_lock(
+        self, *, record_id: str
+    ) -> AbstractContextManager[None]: ...
+
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
     def read_release_tuple_record(

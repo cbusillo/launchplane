@@ -81,6 +81,13 @@ same decision ID, including recovery when GitHub accepted a write whose response
 was lost. Repeating the product's newest published decision records nothing new,
 so a second Accept never replaces the acceptance a running release depends on. GitHub issue contents and membership never decide release contents or
 approval; the saved Launchplane decision remains authoritative.
+Publishers of the same saved decision serialize lookup, issue creation and the
+stored URL acknowledgement with a per-decision storage lock. After waiting, a
+publisher reads the saved decision again and reuses its authoritative URL. The
+PostgreSQL transaction lock and local file lock release when their worker exits;
+an interrupted acknowledgement recovers the existing issue by its marker before
+any new creation. Local SQLite publication requires a file-backed database so
+separate processes share the file lock.
 The complete record uses one issue body. If GitHub rejects publication, the
 decision remains saved and promotion stays blocked; records are not split into
 comments. Retry recovery finds the earlier issue by the marker on its first

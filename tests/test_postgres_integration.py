@@ -3320,6 +3320,35 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_release_publication_lock_recovers_after_worker_exit(self) -> None:
+        from tests.test_release_review_record import publication_lock_recovers_after_worker_exit
+
+        with _head_postgres_database() as database_url, TemporaryDirectory() as directory:
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                publication_lock_recovers_after_worker_exit(store, Path(directory))
+            finally:
+                store.close()
+
+    def test_release_decision_publishers_create_one_issue_across_connections(self) -> None:
+        from tests.test_release_review_record import concurrent_publication
+
+        with _head_postgres_database() as database_url, TemporaryDirectory() as directory:
+            stores = (
+                PostgresRecordStore(database_url=database_url),
+                PostgresRecordStore(database_url=database_url),
+            )
+            try:
+                urls, github = concurrent_publication(stores, Path(directory))
+                self.assertEqual(len(github.issues), 1)
+                self.assertEqual(urls[0], urls[1])
+                for store in stores:
+                    saved = store.list_release_review_decision_records(product="example-site")
+                    self.assertEqual(saved[0].release_issue_url, urls[0])
+            finally:
+                for store in stores:
+                    store.close()
+
     def test_standing_acceptance_creation_race_returns_one_immutable_decision(self) -> None:
         from tests.test_release_review_storage import standing_decision
 
