@@ -43,13 +43,13 @@ Treat this file as the launch checklist for each engineering session in
 ## Delivery Boundary
 
 - Follow [DIRECTION.md](DIRECTION.md) for delivery authority and retired designs.
-  After required checks pass and review findings are accounted for, comment
-  `Ready for the merge train` on the PR and hand it off to the direction or
-  Supervisor session. That comment is a handoff, not automatic enqueueing;
-  the authorized session applies the configured enqueue label and uses the
-  `launchplane` skill to route the PR through the train.
-  An executing agent does not merge by hand or operate the train without
-  explicit authority for that task.
+  After required checks pass and review findings are accounted for, use the
+  `launchplane` skill to drive the train if the task explicitly authorizes it.
+  Otherwise comment `Ready for the merge train` on the PR and hand it off to
+  the direction or Supervisor session. That comment is a handoff, not automatic
+  enqueueing; the authorized session applies the configured enqueue label and
+  routes the PR through the train. An executing agent does not merge by hand
+  or operate the train without explicit authority for that task.
 - Use [event-driven deploys](docs/event-driven-deploys.md) and
   [artifact provenance](docs/artifact-provenance.md) for the product build handoff,
   and [Client review](docs/owner-acceptance.md) and

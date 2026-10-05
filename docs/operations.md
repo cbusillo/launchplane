@@ -1749,6 +1749,10 @@ Browser login uses GitHub OAuth with these Launchplane self-bootstrap inputs:
   verified GitHub email addresses for initial admin access
 
 These inputs configure Launchplane's own login, not product runtime authority.
+For `Deploy Launchplane`, the client ID, public URL, cookie setting, and bootstrap
+admin emails come from repository variables; the client secret and session
+secret come from repository secrets. The workflow projects them into the service
+target environment.
 See [human authentication](service-boundary.md#authentication) for DB-backed
 sessions, policy enforcement, and claim refresh. Never put their values in git.
 
@@ -1800,6 +1804,7 @@ testing environment of its own.
 Required GitHub configuration for that workflow:
 
 - repository variables:
+  - `LAUNCHPLANE_RUNNER_LABEL`, the self-hosted runner label used by both deploy jobs
   - `LAUNCHPLANE_PUBLIC_URL`
   - optional `LAUNCHPLANE_SERVICE_AUDIENCE`; when unset, trusted workflows
     derive the GitHub OIDC audience from `LAUNCHPLANE_PUBLIC_URL`'s host.

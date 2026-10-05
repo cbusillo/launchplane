@@ -4,8 +4,10 @@ title: Launchplane Docs
 
 Use these docs as the source of truth for `launchplane`.
 
-Start with [DIRECTION.md](../DIRECTION.md): the current direction, roles, stop
-boundaries, and delivery path. It wins over any issue, milestone, or older page.
+Start with the Director's [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md),
+then [DIRECTION.md](../DIRECTION.md) for this repository's direction, roles, stop
+boundaries, and delivery path. Overall direction takes precedence; these files
+win over any issue, milestone, or older page.
 Some pages below still describe targets rather than live behavior; a target does
 not describe runtime authority until it is implemented, deployed, and activated.
 
