@@ -30899,6 +30899,16 @@
             "default": "",
             "title": "Target Deployment Record Id",
             "type": "string"
+          },
+          "target_promoted_from_instance": {
+            "default": "",
+            "title": "Target Promoted From Instance",
+            "type": "string"
+          },
+          "target_promotion_record_id": {
+            "default": "",
+            "title": "Target Promotion Record Id",
+            "type": "string"
           }
         },
         "title": "RollbackExecutionEvidence",
@@ -30911,7 +30921,9 @@
           "snapshot_name",
           "started_at",
           "status",
-          "target_deployment_record_id"
+          "target_deployment_record_id",
+          "target_promoted_from_instance",
+          "target_promotion_record_id"
         ]
       },
       "RuntimeEnvironmentRecord": {
