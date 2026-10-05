@@ -6,6 +6,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
+from pydantic import JsonValue
+
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_reconcile import ProductReconcileTarget
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
@@ -368,9 +370,11 @@ class GitHubAppWebhookTests(unittest.TestCase):
         self.assertEqual(pending.config_authority_state, "pending")
         self.assertEqual(pending.config_authority_attempt, 0)
         scan = Mock(side_effect=OSError("private provider error"))
-        pending_states = []
+        pending_states: list[JsonValue] = []
 
-        def publish(_inventory: object, evidence: dict[str, object], _root: Path) -> dict[str, str]:
+        def publish(
+            _inventory: RepositoryInventoryRecord, evidence: dict[str, JsonValue], _root: Path
+        ) -> dict[str, JsonValue]:
             pending_states.append(evidence["retry_pending"])
             self.assertEqual(evidence["head_sha"], "b" * 40)
             return {"status": "projected"}
