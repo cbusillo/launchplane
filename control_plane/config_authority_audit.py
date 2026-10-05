@@ -3998,7 +3998,9 @@ def _is_launchplane_metadata_routing(key: str, value: object) -> bool:
     if key in {"launchplane.service.contextUrlEnv", "launchplane.service.operatorUrlEnv"}:
         return re.fullmatch(r"[A-Z][A-Z0-9_]*", value) is not None
     if key == "launchplane.mergeTrain.githubActionsRunner.repo":
-        return re.fullmatch(r"[A-Za-z0-9_-]+/[A-Za-z0-9_-][A-Za-z0-9_.-]*", value) is not None
+        return re.fullmatch(r"[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+", value) is not None and value.split(
+            "/", 1
+        )[1] not in {".", ".."}
     if key == "launchplane.mergeTrain.githubActionsRunner.workflow":
         return re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*\.ya?ml", value) is not None
     if key in {
@@ -4024,7 +4026,12 @@ def _is_launchplane_metadata_routing(key: str, value: object) -> bool:
             and not value.startswith(("/", "~", "\\"))
             and "://" not in value
             and "//" not in value
-            and not re.search(r"(?:[A-Za-z0-9-]+\.)+[A-Za-z0-9-]+:\d+(?:/|$)", value)
+            and not re.search(r":\d+(?:[/?#]|$)", value)
+            and not re.match(r"[A-Za-z]:[\\/]", value)
+            and not re.match(r"(?:[A-Za-z0-9-]+\.)+[A-Za-z0-9-]+(?:/|:|$)", value)
+            and not PROVIDER_TARGET_PATTERN.search(value)
+            and all(part not in {".", ".."} for part in value.split("/"))
+            and not re.search(r"/[^/]+\.(?:json|env|toml|ya?ml|pem|key)$", value, re.I)
         )
     if key == "launchplane.mergeTrain.githubActionsRunner.runnerMode":
         return value == "controller"

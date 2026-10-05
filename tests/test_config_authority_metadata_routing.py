@@ -119,6 +119,15 @@ class LaunchplaneMetadataRoutingTests(unittest.TestCase):
             {"mergeTrain": {"readyLabel": "control.example.test:8443/admin"}},
             {"mergeTrain": {"readyLabel": "10.0.0.5:8069/web"}},
             {"mergeTrain": {"readyLabel": "/private/credentials.json"}},
+            {"mergeTrain": {"readyLabel": "../private/operator.local.json"}},
+            {"mergeTrain": {"readyLabel": "private/credentials.json"}},
+            {"mergeTrain": {"readyLabel": "C:/private/credentials.json"}},
+            {"mergeTrain": {"readyLabel": "control.example.test/admin"}},
+            {"mergeTrain": {"readyLabel": "localhost:8069/web"}},
+            {"mergeTrain": {"readyLabel": "control.example.test:8443?x"}},
+            {"mergeTrain": {"readyLabel": "provider-live"}},
+            {"mergeTrain": {"readyLabel": ""}},
+            {"operator": {"enabled": False, "helper": None}},
             {"product": "real-product"},
             {"publicName": "Real Product"},
             {"repository": "example/runtime"},
@@ -146,7 +155,10 @@ class LaunchplaneMetadataRoutingTests(unittest.TestCase):
                             "skills/launchplane/references/launchplane-operator.local.example.json"
                         ),
                     },
-                    "mergeTrain": {"readyLabel": "status/ready"},
+                    "mergeTrain": {
+                        "readyLabel": "status/ready",
+                        "githubActionsRunner": {"repo": "example/.github"},
+                    },
                 },
             }
         )

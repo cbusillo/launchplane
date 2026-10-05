@@ -324,6 +324,7 @@ field/value shapes are accepted;
 URLs, private credential paths, product/provider/runtime coordinates, malformed
 routing values and unknown Launchplane fields remain findings. The workflow
 repository allowance applies only to its exact catalog field in this file.
+Omit unused optional fields rather than supplying null or empty routing values.
 
 Runner mechanic selectors use the same
 allowed labels in scalar, JSON, and YAML flow-list forms (for example,
