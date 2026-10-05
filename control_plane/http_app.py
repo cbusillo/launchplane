@@ -17157,6 +17157,18 @@ def create_launchplane_fastapi_app(
                     code="authz_policy_schema_conflict",
                     message=str(error),
                 ) from error
+            if isinstance(
+                error, control_plane_authz_grant_service.AuthzPolicyReviewedPlanConflictError
+            ):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="authz_policy_reviewed_plan_conflict",
+                    message=(
+                        "Reviewed plan digest does not match the current policy and requested "
+                        "changes. Generate a new dry run and review its plan before applying."
+                    ),
+                ) from error
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,

@@ -877,6 +877,10 @@ class AuthzPolicySchemaConflictError(AuthzPolicyConflictError):
     pass
 
 
+class AuthzPolicyReviewedPlanConflictError(AuthzPolicyConflictError):
+    pass
+
+
 class AuthzPolicySafetyError(AuthzPolicyConflictError):
     def __init__(self, *, code: str, message: str) -> None:
         super().__init__(message)
@@ -2093,7 +2097,7 @@ def plan_managed_authz_policy_reconcile(
         json.dumps(plan_payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     if request.mode == "apply" and request.reviewed_plan_sha256 != plan_sha256:
-        raise AuthzPolicyConflictError(
+        raise AuthzPolicyReviewedPlanConflictError(
             "Managed authz policy reviewed_plan_sha256 no longer matches the active policy "
             "and desired managed rule set."
         )

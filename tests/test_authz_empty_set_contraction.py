@@ -20,6 +20,7 @@ from control_plane.contracts.authz_policy_write_transition import (
     AuthzPolicySchemaV3MaintenanceEvidence,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.http_routes.mutation_support import idempotency_scope
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.auth import _StubVerifier
@@ -196,6 +197,85 @@ class EmptySetContractionTests(unittest.TestCase):
 
 
 class EmptySetContractionHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_wrong_reviewed_digest_on_stable_policy_is_not_reported_as_drift(self) -> None:
+        policy = _policy()
+        active = _active_record_for_policy(policy)
+        with (
+            TemporaryDirectory() as directory,
+            closing(
+                PostgresRecordStore(
+                    database_url=_sqlite_database_url(Path(directory) / "state.sqlite")
+                )
+            ) as store,
+        ):
+            store.ensure_schema()
+            with patch.object(store, "list_authz_policy_records", return_value=(active,)):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    record_store_factory=lambda: store,
+                )
+                request = _request(
+                    mode="apply",
+                    desired_policy={"schema_version": policy.schema_version},
+                    reviewed_plan_sha256="0" * 64,
+                )
+                async with lifespan_client(app) as client:
+                    response = await client.post(
+                        "/v1/authz-policies/managed-rule-sets/reconcile",
+                        headers={
+                            "Authorization": "Bearer valid-token",
+                            "Idempotency-Key": "mistyped-reviewed-digest",
+                        },
+                        json=request.model_dump(mode="json"),
+                    )
+                self.assertEqual(response.status_code, 409, response.text)
+                error = response.json()["error"]
+                self.assertEqual(error["code"], "authz_policy_reviewed_plan_conflict")
+                self.assertIn("Reviewed plan digest", error["message"])
+                self.assertNotIn("changed", error["message"])
+                self.assertNotIn("retry", error["message"])
+                self.assertNotIn(active.policy_sha256, response.text)
+                self.assertNotIn(request.managed_set_id, response.text)
+                self.assertNotIn(_identity().workflow_ref, response.text)
+                self.assertIsNone(
+                    store.read_idempotency_record(
+                        scope=idempotency_scope(_identity()),
+                        route_path="/v1/authz-policies/managed-rule-sets/reconcile",
+                        idempotency_key="mistyped-reviewed-digest",
+                    )
+                )
+
+    async def test_policy_drift_after_authorization_keeps_drift_diagnosis(self) -> None:
+        policy = _policy()
+        changed = _active_record_for_policy(policy.model_copy(update={"administrator_quorum": 2}))
+        with (
+            TemporaryDirectory() as directory,
+            closing(
+                PostgresRecordStore(
+                    database_url=_sqlite_database_url(Path(directory) / "state.sqlite")
+                )
+            ) as store,
+        ):
+            store.ensure_schema()
+            with patch.object(store, "list_authz_policy_records", return_value=(changed,)):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    record_store_factory=lambda: store,
+                )
+                async with lifespan_client(app) as client:
+                    response = await client.post(
+                        "/v1/authz-policies/managed-rule-sets/reconcile",
+                        headers={"Authorization": "Bearer valid-token"},
+                        json=_request().model_dump(mode="json"),
+                    )
+                self.assertEqual(response.status_code, 409, response.text)
+                error = response.json()["error"]
+                self.assertEqual(error["code"], "authz_policy_conflict")
+                self.assertIn("changed", error["message"])
+                self.assertNotIn(changed.policy_sha256, response.text)
+
     async def test_schema_mismatch_reports_incompatibility_without_retry_advice(self) -> None:
         policy = _policy()
         active = _active_record_for_policy(policy)
