@@ -186,11 +186,13 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
             return "https://github.com/example/site/issues/100"
 
         self.publisher.side_effect = publish
+        publication_count = self.publisher.call_count
         with patch(
             "control_plane.http_app.current_release_review",
             side_effect=review_while_another_writer_publishes,
         ):
             retry = await self.post()
+        self.assertEqual(self.publisher.call_count, publication_count)
         self.assertEqual(retry.status_code, 200, retry.text)
         self.assertEqual(
             retry.json()["review"]["latest_decision"]["release_issue_url"],

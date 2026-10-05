@@ -509,7 +509,7 @@ def _record_standing_acceptance(
             release_start="promote",
             acceptance_source="director_standing",
         )
-        decision = store.create_release_review_decision_record_if_absent(decision)
+    decision = store.create_release_review_decision_record_if_absent(decision)
     # Use the existing publication/recovery path. An unpublished decision cannot
     # queue a backup or promotion, and a retry keeps the same decision id.
     issue_url = decision.release_issue_url or publish_release_decision(

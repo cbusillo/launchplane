@@ -47,10 +47,6 @@ class ReleaseReviewStore(Protocol):
         self, *, repository: str, pull_request_number: int, limit: int | None = None
     ) -> tuple[ProductReviewDecisionRecord, ...]: ...
 
-    def write_release_review_decision_record(
-        self, record: ReleaseReviewDecisionRecord
-    ) -> object: ...
-
     def create_release_review_decision_record_if_absent(
         self, record: ReleaseReviewDecisionRecord
     ) -> ReleaseReviewDecisionRecord: ...
