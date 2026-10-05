@@ -204,7 +204,7 @@ export type AuthorizationCandidatePolicyProvenance = {
 };
 
 export type AuthorizationCandidatePrepareEnvelope = {
-    candidate_id: 'ordinary-agent-delivery-administration' | 'administrator-product-evidence-read' | 'ordinary-agent-enrollment-requester' | 'agent-product-setup';
+    candidate_id: 'agent-policy-proposer' | 'ordinary-agent-delivery-administration' | 'administrator-product-evidence-read' | 'ordinary-agent-enrollment-requester' | 'agent-product-setup';
     intent: 'add' | 'remove';
     products?: Array<string>;
     source_event_id: string;
@@ -2414,7 +2414,7 @@ export type PrivilegedOperationApprovalEnvelope = {
 
 export type PrivilegedOperationEventRecord = {
     action: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled';
-    actor: PrivilegedOperationActor | PrivilegedOperationAgentActor;
+    actor: PrivilegedOperationActor | PrivilegedOperationAgentActor | PrivilegedOperationLocalOperatorActor;
     event_id: string;
     occurred_at: string;
     operation_id: string;
@@ -2453,6 +2453,12 @@ export type PrivilegedOperationListResponse = {
     trace_id: string;
 };
 
+export type PrivilegedOperationLocalOperatorActor = {
+    identity_type: 'local_operator';
+    login: 'local-operator';
+    principal_sha256: string;
+};
+
 export type PrivilegedOperationRecord = {
     approval: PrivilegedOperationApproval | null;
     created_at: string;
@@ -2469,7 +2475,7 @@ export type PrivilegedOperationRecord = {
     operation_id: string;
     request: ManagedSecretReencryptionPlanInput | ManagedAuthzPolicySetProposalInputOutput | ManagedMergeTrainPolicyImportProposalInputOutput | OrdinaryAgentDeliveryActivationSetupRequest | OrdinaryAgentDeliveryActivationRevokeRequest;
     request_digest: string;
-    requested_by: PrivilegedOperationActor | PrivilegedOperationAgentActor;
+    requested_by: PrivilegedOperationActor | PrivilegedOperationAgentActor | PrivilegedOperationLocalOperatorActor;
     safety_class: 'secret_backed' | 'policy_admin';
     schema_version: number;
     source_event_id: string;
@@ -2501,7 +2507,7 @@ export type PrivilegedOperationSemanticReview = {
     operation_class: 'managed_secret_reencryption' | 'managed_authz_policy_set' | 'managed_merge_train_policy_import' | 'ordinary_agent_delivery_activation';
     operation_id: string;
     persists_state: false;
-    requested_by_kind: 'github_human' | 'terminal_agent';
+    requested_by_kind: 'github_human' | 'terminal_agent' | 'local_operator';
     rollback: PrivilegedOperationSemanticReviewRollback;
     safety_class: 'secret_backed' | 'policy_admin';
     schema_version: number;
@@ -2510,7 +2516,7 @@ export type PrivilegedOperationSemanticReview = {
 
 export type PrivilegedOperationSemanticReviewActivityEntry = {
     action: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled';
-    actor_type: 'github_human' | 'terminal_agent' | 'system';
+    actor_type: 'github_human' | 'terminal_agent' | 'local_operator' | 'system';
     event_id: string;
     occurred_at: string;
     reason_available: boolean;
