@@ -55,6 +55,142 @@ def _gaps(payload: dict[str, object]) -> list[dict[str, object]]:
 
 
 class ConfigAuthorityAuditTest(unittest.TestCase):
+    def test_repository_owned_publishing_and_cleanup_gate(self) -> None:
+        cases = (
+            (
+                "https://github.com/example/Example-App.git",
+                "example-app",
+                "${{ github.token }}",
+                True,
+            ),
+            ("git@github.com:example/example-app.git", "example-app", "${{ github.token }}", True),
+            (
+                "ssh://git@github.com/example/example-app.git",
+                "example-app",
+                "${{ github.token }}",
+                True,
+            ),
+            (
+                "https://github.com/example/example-app.git",
+                "another-app",
+                "${{ github.token }}",
+                False,
+            ),
+            (
+                "https://github.com/example/example-app.git",
+                "example-app,another-app",
+                "${{ github.token }}",
+                False,
+            ),
+            (
+                "https://github.com/example/example-app.git",
+                "example-app",
+                "${{ secrets.PUBLISH_TOKEN }}",
+                False,
+            ),
+            (
+                "https://github.com/example/example-app.git",
+                "example-app",
+                "${{ vars.RUNTIME_TOKEN }}",
+                False,
+            ),
+            (
+                "https://github.com/example/example-app.git",
+                "example-app",
+                "${{ github.token || secrets.PUBLISH_TOKEN }}",
+                False,
+            ),
+            (
+                "https://other.invalid/example/example-app.git",
+                "example-app",
+                "${{ github.token }}",
+                False,
+            ),
+            ("", "example-app", "${{ github.token }}", False),
+        )
+        for origin, package, password, accepted in cases:
+            with self.subTest(origin=origin, package=package, password=password):
+                with TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    _init_repo(root)
+                    if origin:
+                        _git(root, "remote", "add", "origin", origin)
+                    workflows = root / ".github" / "workflows"
+                    workflows.mkdir(parents=True)
+                    cleanup = workflows / "cleanup-ghcr.yml"
+                    publish = workflows / "publish-image.yml"
+                    cleanup.write_text("name: Cleanup\n", encoding="utf-8")
+                    publish.write_text("name: Publish\n", encoding="utf-8")
+                    _commit_all(root)
+                    base_sha = _git(root, "rev-parse", "HEAD")
+                    _git(root, "branch", "-M", "main")
+                    _checkout_branch(root, "feature/publishing")
+                    cleanup.write_text(
+                        '"on":\n  workflow_dispatch:\n    inputs:\n'
+                        f"      package_names:\n        default: {package}\n",
+                        encoding="utf-8",
+                    )
+                    publish.write_text(
+                        "jobs:\n  publish:\n    steps:\n"
+                        "      - uses: docker/login-action@" + "a" * 40 + "\n"
+                        "        with:\n          registry: ghcr.io\n"
+                        "          username: ${{ github.actor }}\n"
+                        f"          password: {password}\n",
+                        encoding="utf-8",
+                    )
+                    _commit_all(root)
+                    head_sha = _git(root, "rev-parse", "HEAD")
+                    result = CliRunner().invoke(
+                        CLI_MAIN,
+                        [
+                            "service",
+                            "audit-config-authority",
+                            "--control-plane-root",
+                            str(root),
+                            "--mode",
+                            "changed-files-gate",
+                            "--base-sha",
+                            base_sha,
+                            "--head-sha",
+                            head_sha,
+                            "--gate-profile",
+                            "product-repo",
+                            "--fail-on-findings",
+                        ],
+                    )
+                    payload = json.loads(result.stdout)
+                self.assertEqual(result.exit_code == 0, accepted, result.output)
+                if accepted:
+                    allowed = {
+                        f["key"]
+                        for f in _findings(payload)
+                        if f["allow_reason"] == "thin_connector_input"
+                    }
+                    self.assertIn("password", allowed)
+                    self.assertIn("inputs.package_names.default", allowed)
+                else:
+                    self.assertTrue(payload["gate"]["rejected_findings"])
+
+    def test_publishing_allowance_does_not_accept_other_authority(self) -> None:
+        for path, key, value in (
+            (".github/workflows/maintenance.yml", "password", "${{ github.token }}"),
+            (".github/workflows/publish-image.yml", "IMAGE_REPOSITORY", "${{ github.token }}"),
+            (".github/workflows/publish-image.yml", "runtime_environment", "production"),
+            (".github/workflows/publish-image.yml", "provider_target", "live-app"),
+            (".github/workflows/cleanup-ghcr.yml", "inputs.provider_target.default", "example-app"),
+            (".github/workflows/maintenance.yml", "inputs.package_names.default", "example-app"),
+        ):
+            with self.subTest(path=path, key=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path=path,
+                        key=key,
+                        value=value,
+                        allow_context={"repository_package": "example-app"},
+                    ),
+                    "",
+                )
+
     def test_python_repo_policy_default_is_reported_and_redacted(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
