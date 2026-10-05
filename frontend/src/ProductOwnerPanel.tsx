@@ -1,7 +1,7 @@
 import { Eye, LoaderCircle, RotateCcw, Save, UserCheck, UserX } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { applyProductImageRepository, applyProductProductionUse, applyProductOwner, LaunchplaneApiError, readProductProfile } from "./api";
+import { applyProductImageRepository, applyProductProductionUse, applyProductOwner, LaunchplaneApiError, readProductProfile, readProductProfileMutationReceipt } from "./api";
 import { recoverBrowserOperationState, type BrowserOperationFailureCertainty } from "./browser-operation";
 import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
 import {
@@ -26,7 +26,7 @@ import {
   type ProductOwnerIdentity,
   type ProductOwnerPlan,
 } from "./product-owner-operation";
-import { useBrowserOperationController } from "./use-browser-operation";
+import { type BrowserOperationController, useBrowserOperationController } from "./use-browser-operation";
 
 import type { AcceptedEvidenceResponse, ApplyProductImageRepositoryData, ApplyProductProductionUseData, ApplyProductOwnerData } from "./generated/openapi.ts";
 
@@ -277,8 +277,19 @@ export function ProductOwnerPanel({
           </fieldset>
           <OperationNotice state={planOperation.state} label="Preview" />
           <OperationNotice state={applyOperation.state} label="Save" />
+          {applyOperation.state.receipt?.originalTraceId ? <p role="status">
+            Original operation completed. Original trace: {applyOperation.state.receipt.originalTraceId}
+          </p> : null}
           {applyOperation.state.requiresIdempotencyContinuity && !plannedDraft ? (
-            <InlineFormError message="An earlier Save is uncertain, but its reviewed request is unavailable. Keep this tab and operation key; reconcile the original operation before another change." />
+            <InlineFormError message="An earlier Save is uncertain, but its reviewed request is unavailable. Keep this tab and operation key. Check the original Save below before another change." />
+          ) : null}
+          {applyOperation.state.requiresIdempotencyContinuity && !plannedDraft ? (
+            <ProfileMutationRecovery product={product} field="owner" operation={applyOperation}
+              onCompleted={async () => {
+                const { profile } = await readProductProfile(product);
+                setResource({ error: "", owner: productOwnerFromRecord(profile.owner), status: "ready" });
+                clearPlan();
+              }} />
           ) : null}
           {localError ? <InlineFormError message={localError} /> : null}
           {plan && (saved || planMatchesDraft) ? (
@@ -581,8 +592,20 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
       </fieldset>
       <OperationNotice state={previewOperation.state} label="Dry run" />
       <OperationNotice state={applyOperation.state} label="Apply" />
+      {applyOperation.state.receipt?.originalTraceId ? <p role="status">
+        Original operation completed. Original trace: {applyOperation.state.receipt.originalTraceId}
+      </p> : null}
       {applyOperation.state.requiresIdempotencyContinuity && !reviewed ?
-        <InlineFormError message="An earlier Apply is uncertain, and its reviewed draft is unavailable. Read the profile and reconcile that operation before another change." /> : null}
+        <InlineFormError message="An earlier Apply is uncertain, and its reviewed draft is unavailable. Keep this tab and operation key. Check the original Apply below before another change." /> : null}
+      {applyOperation.state.requiresIdempotencyContinuity && !reviewed ? (
+        <ProfileMutationRecovery product={product}
+          field={field === "image" ? "image-repository" : "production-use"}
+          operation={applyOperation} onCompleted={async () => {
+            const next = await readValue();
+            setCurrent(next.value); setValue(next.suggested); setReason("");
+            setReviewed(null);
+          }} />
+      ) : null}
       {error ? <InlineFormError message={error} /> : null}
       {notice ? <p role="status">{notice}</p> : null}
       {reviewed && matches ? <div className="product-owner-plan">
@@ -608,4 +631,41 @@ function profileApplyFailureCertainty(error: unknown, dispatched: boolean): Brow
     return "settled";
   }
   return productConfigFailureCertainty(error, dispatched);
+}
+
+function ProfileMutationRecovery({ product, field, operation, onCompleted }: {
+  product: string;
+  field: "owner" | "image-repository" | "production-use";
+  operation: BrowserOperationController<never, AcceptedEvidenceResponse>;
+  onCompleted: () => Promise<void>;
+}) {
+  const [checking, setChecking] = useState(false);
+  const [message, setMessage] = useState("");
+  async function check() {
+    const identity = operation.state.identity;
+    if (!identity || checking) return;
+    setChecking(true); setMessage("");
+    try {
+      const receipt = await readProductProfileMutationReceipt(product, field, identity.idempotencyKey);
+      if (receipt.state !== "completed" || receipt.product !== product || receipt.field !== field ||
+          receipt.idempotency_key !== identity.idempotencyKey || !receipt.original_trace_id) {
+        setMessage("Launchplane cannot yet prove the original operation completed. Keep this tab and key; check again later. Another change remains locked.");
+        return;
+      }
+      // Refresh first: a failed read keeps the recovery action available.
+      await onCompleted();
+      if (!operation.reconcile(identity, { trace_id: receipt.trace_id,
+        original_trace_id: receipt.original_trace_id, replayed: true })) {
+        setMessage("The retained operation changed while checking. Keep its key and check again.");
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "The original operation could not be checked. Keep this tab and key.");
+    } finally { setChecking(false); }
+  }
+  return <div>
+    <button className="button" disabled={checking} onClick={() => void check()} type="button">
+      {checking ? "Checking original operation" : "Check original operation"}
+    </button>
+    {message ? <p role="status">{message}</p> : null}
+  </div>;
 }

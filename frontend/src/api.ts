@@ -73,6 +73,7 @@ import type {
   ReadProductOperationalReadinessData,
   ReadProductProfileData,
   ReadProductProfileResponse,
+  ReadProductProfileMutationReceiptResponse,
   ReadTenantAdmissionEvaluationData,
   RevokeHumanPrivilegedOperationData,
   RevokeHumanPrivilegedOperationResponse,
@@ -605,6 +606,17 @@ export function readProductProfile(
     "GET",
     undefined,
     signal,
+  );
+}
+
+export function readProductProfileMutationReceipt(
+  product: string,
+  field: "owner" | "image-repository" | "production-use",
+  operationKey: string,
+): Promise<ReadProductProfileMutationReceiptResponse> {
+  return requestJson<ReadProductProfileMutationReceiptResponse>(
+    `/v1/product-profiles/${encodeURIComponent(product)}/mutation-receipts/${field}?operation_key=${encodeURIComponent(operationKey)}`,
+    "GET",
   );
 }
 

@@ -192,3 +192,82 @@ test(`Client-login uncertain Apply recovers after ${recovery} with the same requ
   if (held) await held.abort().catch(() => {});
 });
 }
+
+for (const evidence of ["completed", "unresolved", "denied", "lost", "wrong-key", "wrong-product", "wrong-field", "refresh-failed"] as const) {
+  test(`legacy missing-draft Save checks original receipt: ${evidence}`, async ({ page }, testInfo) => {
+    await mockProduct(page);
+    await page.goto("/ui/products/atlas-commerce");
+    await page.evaluate(() => sessionStorage.setItem("launchplane.browser-operation.atlas-commerce-owner-apply", JSON.stringify({
+      phase: "uncertain", requiresIdempotencyContinuity: true,
+      identity: { idempotencyKey: "legacy-original", requestFingerprint: "legacy-fingerprint" },
+    })));
+    let writes = 0;
+    await page.route("**/v1/product-profiles/atlas-commerce/owner", async route => {
+      writes += 1; await respondWithPlan(route);
+    });
+    await page.route("**/mutation-receipts/owner?*", async route => {
+      expect(route.request().method()).toBe("GET");
+      expect(new URL(route.request().url()).searchParams.get("operation_key")).toBe("legacy-original");
+      if (evidence === "lost") { await route.abort(); return; }
+      if (evidence === "denied") { await route.fulfill({ status: 403, json: { trace_id: "denied", error: { code: "authorization_denied", message: "Receipt read refused." } } }); return; }
+      if (evidence === "refresh-failed") {
+        await page.route("**/v1/product-profiles/atlas-commerce", route => route.abort());
+      }
+      await route.fulfill({ json: { trace_id: "receipt-read", product: evidence === "wrong-product" ? "other" : "atlas-commerce",
+        field: evidence === "wrong-field" ? "image-repository" : "owner",
+        idempotency_key: evidence === "wrong-key" ? "other" : "legacy-original",
+        state: evidence === "unresolved" ? "unresolved" : "completed", original_trace_id: "original-save" } });
+    });
+    await page.reload();
+    const panel = page.getByRole("region", { name: "example-owner (id 9001)", exact: true });
+    await expect(panel.getByLabel("GitHub login")).toBeDisabled();
+    if (evidence === "completed") await panel.screenshot({ path: testInfo.outputPath("legacy-save-recovery.png") });
+    await panel.getByRole("button", { name: "Check original operation", exact: true }).click();
+    if (evidence === "completed") {
+      await expect(panel.getByLabel("GitHub login")).toBeEnabled();
+      await expect(panel.getByRole("status").filter({ hasText: "Original trace: original-save" })).toBeVisible();
+      await page.reload();
+      await expect(panel.getByLabel("GitHub login")).toBeEnabled();
+      await panel.getByLabel("GitHub login").fill("next-client");
+      await panel.getByLabel("Change reason").fill("Review the next request.");
+      await panel.getByRole("button", { name: "Preview change", exact: true }).click();
+      await expect.poll(() => writes).toBe(1); // Only the explicitly requested new dry run.
+    } else {
+      await expect(panel.getByRole("button", { name: "Check original operation", exact: true })).toBeEnabled();
+      await expect(panel.getByLabel("GitHub login")).toBeDisabled();
+      await expect.poll(() => panel.getByRole("status").count()).toBeGreaterThan(1);
+      await page.reload();
+      if (evidence === "refresh-failed") {
+        await expect(page.getByRole("region", { name: "Client unavailable", exact: true })).toBeVisible();
+      } else await expect(panel.getByLabel("GitHub login")).toBeDisabled();
+      expect(writes).toBe(0);
+      expect(await page.evaluate(() => JSON.parse(sessionStorage.getItem("launchplane.browser-operation.atlas-commerce-owner-apply")!).identity.idempotencyKey)).toBe("legacy-original");
+    }
+  });
+}
+
+for (const field of ["image", "production", "release"] as const) {
+  test(`legacy ${field} Apply uses the original field receipt`, async ({ page }) => {
+    await mockProduct(page);
+    await page.goto("/ui/products/atlas-commerce");
+    await page.evaluate(({ field }) => sessionStorage.setItem(`launchplane.browser-operation.atlas-commerce-${field}-apply`, JSON.stringify({
+      phase: "uncertain", requiresIdempotencyContinuity: true,
+      identity: { idempotencyKey: "legacy-field", requestFingerprint: "field-fingerprint" },
+    })), { field });
+    const routeField = field === "image" ? "image-repository" : "production-use";
+    let writes = 0;
+    page.on("request", request => { if (request.method() === "POST") writes += 1; });
+    await page.route(`**/mutation-receipts/${routeField}?*`, route => route.fulfill({ json: {
+      trace_id: "read", product: "atlas-commerce", field: routeField,
+      idempotency_key: "legacy-field", state: "completed", original_trace_id: "original-field",
+    } }));
+    await page.reload();
+    const title = field === "image" ? "Image repository" : field === "production" ? "Production use" : "Releases on acceptance";
+    const panel = page.getByRole("region", { name: title, exact: true });
+    await expect(panel.getByLabel(title, { exact: true })).toBeDisabled();
+    await panel.getByRole("button", { name: "Check original operation", exact: true }).click();
+    await expect(panel.getByLabel(title, { exact: true })).toBeEnabled();
+    await expect(panel.getByRole("status").filter({ hasText: "Original trace: original-field" })).toBeVisible();
+    expect(writes).toBe(0);
+  });
+}

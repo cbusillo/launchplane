@@ -659,3 +659,20 @@ abortable request lifecycle. Initial
 loading, denied, empty, unavailable, and cancelled states are distinct. A failed
 or cancelled refresh may retain the last accepted response only when the page
 marks it as cached evidence and preserves the service trace where available.
+
+### Missing reviewed profile requests
+
+Tabs opened before reviewed-request persistence may retain an uncertain Client
+Save or profile Apply key without its reviewed request. **Check original
+operation** reads `/v1/product-profiles/{product}/mutation-receipts/{field}` with
+that original `operation_key`. This is a read, not a retry or reset. The existing
+`product_profile.read` permission applies; the receipt lookup is bound to the
+original caller's idempotency scope and the allowlisted profile write route.
+Only a completed, atomically persisted applied response for that product allows
+the panel to refresh the current profile and unlock a new preview. The original
+trace remains visible; the current profile does not stand in for the receipt.
+Missing, running, reconciliation-required, denied or unavailable evidence leaves
+the original key locked. Keep the tab and check again later. Switching caller
+identity cannot recover another caller's receipt. No new key or guessed request
+is sent, and an expired lease or matching current profile alone never unlocks
+an alternate mutation.
