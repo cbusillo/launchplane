@@ -116,6 +116,9 @@ class LaunchplaneMetadataRoutingTests(unittest.TestCase):
                 }
             },
             {"mergeTrain": {"readyLabel": "https://control.example.test"}},
+            {"mergeTrain": {"readyLabel": "control.example.test:8443/admin"}},
+            {"mergeTrain": {"readyLabel": "10.0.0.5:8069/web"}},
+            {"mergeTrain": {"readyLabel": "/private/credentials.json"}},
             {"product": "real-product"},
             {"publicName": "Real Product"},
             {"repository": "example/runtime"},
@@ -149,10 +152,28 @@ class LaunchplaneMetadataRoutingTests(unittest.TestCase):
         )
         self.assertEqual(cast("dict[str, object]", payload["gate"])["status"], "pass")
 
-        namespaced_label = self._gate(
-            {"launchplane": {"mergeTrain": {"readyLabel": "merge: ready"}}}
-        )
-        self.assertEqual(cast("dict[str, object]", namespaced_label["gate"])["status"], "pass")
+        for label in (
+            "merge: ready",
+            "🚀 ready",
+            "Ready to merge!",
+            "merge (ready)",
+            "ready+merge",
+        ):
+            with self.subTest(label=label):
+                namespaced_label = self._gate(
+                    {
+                        "launchplane": {
+                            "mergeTrain": {
+                                "readyLabel": label,
+                                "baseBranch": "release+hotfix",
+                                "githubActionsRunner": {"ref": "feature@2"},
+                            }
+                        }
+                    }
+                )
+                self.assertEqual(
+                    cast("dict[str, object]", namespaced_label["gate"])["status"], "pass"
+                )
 
     def test_workflow_repository_allowance_is_scoped_to_metadata_field(self) -> None:
         routing = {

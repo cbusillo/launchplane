@@ -318,7 +318,8 @@ variable names, the catalog context/admin helpers and local config example,
 and merge-train label, branch, workflow repository/name/ref, controller mode
 and revision-response field paths. These are hints to the supported surfaces,
 not records of live state. Catalog paths may include the catalog-root `skills/`
-prefix; labels may use spaces and namespace punctuation. Only the documented
+prefix; literal labels may use Unicode, spaces and namespace punctuation while
+URLs, host-and-port endpoints and absolute paths remain findings. Only the documented
 field/value shapes are accepted;
 URLs, private credential paths, product/provider/runtime coordinates, malformed
 routing values and unknown Launchplane fields remain findings. The workflow

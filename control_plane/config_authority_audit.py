@@ -4006,15 +4006,25 @@ def _is_launchplane_metadata_routing(key: str, value: object) -> bool:
         "launchplane.mergeTrain.githubActionsRunner.ref",
     }:
         return (
-            re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_./-]*", value) is not None
+            re.fullmatch(r"[^\x00-\x20\x7f~^:?*\[\\]+", value) is not None
             and ".." not in value
             and "//" not in value
-            and not value.endswith(("/", ".lock"))
+            and "@{" not in value
+            and value != "@"
+            and not value.startswith("/")
+            and not value.endswith(("/", "."))
+            and all(
+                not part.startswith(".") and not part.endswith(".lock") for part in value.split("/")
+            )
         )
     if key == "launchplane.mergeTrain.readyLabel":
         return (
-            re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.:/ -]*", value) is not None
+            bool(value.strip())
+            and not re.search(r"[\x00-\x1f\x7f]", value)
+            and not value.startswith(("/", "~", "\\"))
+            and "://" not in value
             and "//" not in value
+            and not re.search(r"(?:[A-Za-z0-9-]+\.)+[A-Za-z0-9-]+:\d+(?:/|$)", value)
         )
     if key == "launchplane.mergeTrain.githubActionsRunner.runnerMode":
         return value == "controller"
