@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timezone
 import logging
-from threading import Event, Lock, Thread
+from threading import Event, Thread
 import time
 import uuid
 
@@ -15,6 +15,7 @@ from control_plane.contracts.idempotency_record import (
     complete_launchplane_mutation_reservation,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.provider_operations import _ReservationHeartbeat
 from control_plane.workflows.public_ingress_monitor import (
     public_ingress_notification_drivers,
     record_monitor_cadence,
@@ -52,8 +53,6 @@ class HealthMonitorScheduler:
         self.report_cadence = report_cadence or self._report_cadence
         self._owner = str(uuid.uuid4())
         self._stop = Event()
-        self._lock = Lock()
-        self._reservation: LaunchplaneIdempotencyRecord | None = None
         self._threads: list[Thread] = []
         self._last_report: tuple[int, bool] | None = None
 
@@ -79,7 +78,7 @@ class HealthMonitorScheduler:
             )
         )
 
-    def start(self) -> None:
+    def _ensure_enabled(self) -> None:
         # A durable start marker distinguishes first activation from an outage.
         result = self.store.reserve_mutation(
             scope=_SCOPE,
@@ -89,7 +88,7 @@ class HealthMonitorScheduler:
             lease_owner=self._owner,
         )
         if result.status == "acquired":
-            self.store.complete_mutation_reservation(
+            completion = self.store.complete_mutation_reservation(
                 completion=complete_launchplane_mutation_reservation(
                     result.record,
                     response_status_code=200,
@@ -98,6 +97,11 @@ class HealthMonitorScheduler:
                     response_payload={},
                 )
             )
+            if completion.status != "completed":
+                raise RuntimeError("Health monitor activation could not be recorded")
+
+    def start(self) -> None:
+        self._ensure_enabled()
         self._stop.clear()
         # Watch before probing: restart after an outage must report the missed slot.
         self.watch_once()
@@ -139,44 +143,40 @@ class HealthMonitorScheduler:
         )
         if claim.status != "acquired":
             return False
-        with self._lock:
-            self._reservation = claim.record
+        heartbeat = _ReservationHeartbeat(
+            store=self.store,
+            reservation=claim.record,
+            lease_seconds=MONITOR_POLL_SECONDS * 4,
+            interval_seconds=MONITOR_POLL_SECONDS,
+        )
+        heartbeat.start()
         try:
             # Another replica may have finished this slot while we waited for the lease.
             if self._read(key) is not None:
                 return False
             self.run_monitor()
-            with self._lock:
-                if self._reservation is None:
-                    raise RuntimeError("Health monitor lost its scheduler lease")
-                renewed = self.store.renew_mutation_reservation(
-                    reservation=self._reservation, lease_seconds=MONITOR_POLL_SECONDS * 4
-                )
-                if renewed.status != "updated":
-                    raise RuntimeError("Health monitor completion lease is not held")
-                self._reservation = renewed.record
-                self._write_completion(key, self.clock())
+            heartbeat.assert_current()
+            _reservation, failure = heartbeat.stop()
+            if failure:
+                raise RuntimeError("Health monitor completion lease is not held")
+            self._write_completion(key, self.clock())
             _LOGGER.info("Health monitor slot %s completed", key)
             return True
         finally:
-            with self._lock:
-                if self._reservation is not None:
-                    self.store.release_mutation_reservation(reservation=self._reservation)
-                self._reservation = None
+            reservation, _failure = heartbeat.stop()
+            self.store.release_mutation_reservation(reservation=reservation)
 
     def watch_once(self) -> bool:
-        with self._lock:
-            if self._reservation is not None:
-                renewed = self.store.renew_mutation_reservation(
-                    reservation=self._reservation, lease_seconds=MONITOR_POLL_SECONDS * 4
-                )
-                self._reservation = renewed.record if renewed.status == "updated" else None
         now = self.clock()
         enabled = self._read("enabled")
         if enabled is None or enabled.state != "completed":
-            return False
+            # A replica may have stopped while recording first activation.
+            self._ensure_enabled()
+            enabled = self._read("enabled")
+            if enabled is None or enabled.state != "completed":
+                return False
         due_slot = monitor_slot(now - MONITOR_COMPLETION_GRACE_SECONDS)
-        enabled_at = datetime.fromisoformat(enabled.recorded_at.replace("Z", "+00:00")).timestamp()
+        enabled_at = datetime.fromisoformat(enabled.created_at.replace("Z", "+00:00")).timestamp()
         if now < enabled_at + MONITOR_COMPLETION_GRACE_SECONDS:
             return False
         enabled_slot = monitor_slot(enabled_at)

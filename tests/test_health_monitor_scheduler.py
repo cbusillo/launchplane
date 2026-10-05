@@ -12,6 +12,8 @@ from control_plane.health_monitor_scheduler import (
     MONITOR_COMPLETION_GRACE_SECONDS,
     MONITOR_INTERVAL_SECONDS,
 )
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.provider_operations import _ReservationHeartbeat, DurableProviderOperationStore
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationDestination,
     PublicIngressNotificationPolicyRecord,
@@ -93,7 +95,8 @@ class HealthMonitorSchedulerTests(unittest.TestCase):
                 raise TimeoutError("test failed to release the probe")
 
         self.probe.side_effect = blocked_probe
-        thread = Thread(target=self.scheduler.run_once)
+        results: list[bool] = []
+        thread = Thread(target=lambda: results.append(self.scheduler.run_once()))
         thread.start()
         try:
             self.assertTrue(entered.wait(5))
@@ -105,6 +108,7 @@ class HealthMonitorSchedulerTests(unittest.TestCase):
             release.set()
             thread.join(5)
         self.assertFalse(thread.is_alive())
+        self.assertEqual(results, [True])
 
     def test_restart_reports_gap_before_first_probe(self) -> None:
         self.scheduler.run_once()
@@ -119,6 +123,74 @@ class HealthMonitorSchedulerTests(unittest.TestCase):
         self.assertEqual(order, ["missed"])
         scheduler.run_once()
         self.assertEqual(order[-1], "probe")
+
+    def test_slow_alert_delivery_cannot_block_probe_lease_renewal(self) -> None:
+        probing = Event()
+        reporting = Event()
+        renewed = Event()
+        release = Event()
+
+        def hold_probe() -> None:
+            probing.set()
+            if not release.wait(5):
+                raise TimeoutError("probe was not released")
+
+        def hold_alert(_missed: bool, _at: str) -> None:
+            reporting.set()
+            if not release.wait(5):
+                raise TimeoutError("alert was not released")
+
+        def heartbeat_factory(
+            *,
+            store: DurableProviderOperationStore,
+            reservation: LaunchplaneIdempotencyRecord,
+            lease_seconds: int,
+            interval_seconds: float,
+        ) -> _ReservationHeartbeat:
+            return _ReservationHeartbeat(
+                store=store,
+                reservation=reservation,
+                lease_seconds=lease_seconds,
+                interval_seconds=0.01,
+            )
+
+        original_renew = self.store.renew_mutation_reservation
+
+        def track_renewal(
+            *, reservation: LaunchplaneIdempotencyRecord, lease_seconds: int = 300
+        ) -> object:
+            result = original_renew(reservation=reservation, lease_seconds=lease_seconds)
+            if reporting.is_set() and result.status == "updated":
+                renewed.set()
+            return result
+
+        self.scheduler.run_monitor = hold_probe
+        self.scheduler.report_cadence = hold_alert
+        results: list[bool] = []
+        runner = Thread(target=lambda: results.append(self.scheduler.run_once()))
+        watcher = Thread(target=self.scheduler.watch_once)
+        with (
+            patch(
+                "control_plane.health_monitor_scheduler._ReservationHeartbeat", heartbeat_factory
+            ),
+            patch.object(self.store, "renew_mutation_reservation", side_effect=track_renewal),
+        ):
+            runner.start()
+            try:
+                self.assertTrue(probing.wait(5))
+                self.now += MONITOR_COMPLETION_GRACE_SECONDS
+                watcher.start()
+                self.assertTrue(reporting.wait(5))
+                self.assertTrue(renewed.wait(5))
+                self.assertFalse(self.make_scheduler().run_once())
+            finally:
+                release.set()
+                runner.join(5)
+                if watcher.ident is not None:
+                    watcher.join(5)
+        self.assertFalse(runner.is_alive())
+        self.assertFalse(watcher.is_alive())
+        self.assertEqual(results, [True])
 
 
 class MonitorCadenceIncidentTests(unittest.TestCase):
