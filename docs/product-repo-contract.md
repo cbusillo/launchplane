@@ -204,6 +204,7 @@ When a product repository runs the gate from GitHub Actions, use a dedicated
 Launchplane-owned reusable gate:
 
 ```yaml
+on: [pull_request, merge_group]
 jobs:
   launchplane-config-authority:
     uses: cbusillo/launchplane/.github/workflows/reusable-product-repo-config-authority.yml@<launchplane-sha>

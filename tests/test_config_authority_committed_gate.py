@@ -14,6 +14,17 @@ from tests.test_config_authority_audit import _init_repo, _commit_all, _git
 
 
 class CommittedConfigAuthorityGateTests(unittest.TestCase):
+    def test_full_audit_refuses_commit_arguments(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _init_repo(root)
+            for base_sha, head_sha in (("a" * 40, None), (None, "b" * 40)):
+                with self.subTest(base_sha=base_sha, head_sha=head_sha):
+                    with self.assertRaisesRegex(ValueError, "require changed-files-gate"):
+                        build_config_authority_audit(
+                            control_plane_root=root, base_sha=base_sha, head_sha=head_sha
+                        )
+
     def test_dirty_edits_cannot_hide_committed_authority(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

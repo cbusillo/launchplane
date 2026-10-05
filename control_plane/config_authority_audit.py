@@ -1493,6 +1493,8 @@ def build_config_authority_audit(
 ) -> dict[str, object]:
     if mode not in SCAN_MODES:
         raise ValueError(f"Unsupported config authority audit mode: {mode}")
+    if mode != "changed-files-gate" and (base_sha is not None or head_sha is not None):
+        raise ValueError("Commit arguments require changed-files-gate mode.")
 
     root = control_plane_root.resolve()
     repo_metadata: dict[str, object]
