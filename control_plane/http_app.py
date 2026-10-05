@@ -17172,6 +17172,18 @@ def create_launchplane_fastapi_app(
                         "changes. Generate a new dry run and review its plan before applying."
                     ),
                 ) from error
+            if isinstance(
+                error, control_plane_authz_grant_service.AuthzPolicyUnmanagedAdoptionConflictError
+            ):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="authz_policy_unmanaged_adoption_conflict",
+                    message=(
+                        "Requested changes would adopt an unmanaged rule, but unmanaged adoption "
+                        "was not enabled for this request."
+                    ),
+                ) from error
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
