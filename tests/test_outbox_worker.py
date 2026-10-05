@@ -259,6 +259,37 @@ class OutboxWorkerTests(unittest.TestCase):
         self.assertEqual(loaded.payload["run_conclusion"], "")
         self.assertEqual([method for method, _path in requests], ["GET"])
 
+    def test_fresh_dispatch_mint_failure_retries_before_any_provider_effect(self) -> None:
+        from control_plane.launchplane_github_delivery import DeliveryGitHubTokenUnavailable
+        from control_plane.workflows.generic_web_promotion_workflow import (
+            dispatch_generic_web_promotion_workflow_delivery,
+        )
+
+        error = DeliveryGitHubTokenUnavailable("Temporary provider outage")
+        error.__cause__ = TimeoutError("provider timeout")
+
+        def started(_record: OutboxDeliveryRecord, _operation_key: str, _provider_id: str) -> None:
+            self.fail("Mint failure must not start a provider operation")
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
+                side_effect=error,
+            ) as resolver,
+            patch(
+                "control_plane.workflows.generic_web_promotion_workflow.github_api_request"
+            ) as provider,
+        ):
+            result = dispatch_generic_web_promotion_workflow_delivery(
+                record=_workflow_delivery(),
+                control_plane_root=Path("."),
+                mark_provider_started=started,
+            )
+        self.assertEqual(result.state, "pending")
+        self.assertEqual(result.provider_operation_key, "")
+        self.assertTrue(resolver.call_args.kwargs["retry_provider_errors"])
+        provider.assert_not_called()
+
     def test_missing_or_temporary_mint_failure_keeps_existing_dispatch_reconcilable(self) -> None:
         from control_plane.launchplane_github_delivery import DeliveryGitHubTokenUnavailable
         from control_plane.workflows.generic_web_promotion_workflow import (

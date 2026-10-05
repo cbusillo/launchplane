@@ -4016,7 +4016,9 @@ An installation may have other grants, but each issued token must match the
 requested subset and exactly one repository. Missing accepted grants never
 cause a permission change or a token fallback. Temporary provider/rate-limit
 failures remain retryable; an existing workflow dispatch marker stays eligible
-for reconciliation and cannot be resent merely because credentials are unavailable. Only already accepted capabilities
+for reconciliation within the outbox retry budget and cannot be resent merely
+because credentials are unavailable. Other existing token consumers retain their
+unavailable-credential result rather than receiving a new exception. Only already accepted capabilities
 may run; this PR grants none. Promotion-status polling checks configuration and
 tracked inventory without minting a write token; the actual operation verifies
 the accepted grants when it mints its token.

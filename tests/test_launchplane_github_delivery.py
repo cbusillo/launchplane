@@ -78,7 +78,7 @@ class DeliveryGitHubTokenTests(unittest.TestCase):
         self.token_repository = "example/site"
         self.extra_token_permissions: dict[str, str] = {}
         self.revoked = False
-        self.provider_error: HTTPError | None = None
+        self.provider_error: Exception | None = None
         self.now = datetime.now(UTC)
         self.identity = GitHubAppIdentity(app_id=76, private_key=self.key)
         database = patch(
@@ -116,7 +116,9 @@ class DeliveryGitHubTokenTests(unittest.TestCase):
             }
         raise AssertionError(f"Unexpected provider call {path}")
 
-    def resolve(self, purpose: str, *, repository: str = "example/site") -> str:
+    def resolve(
+        self, purpose: str, *, repository: str = "example/site", retry_provider_errors: bool = False
+    ) -> str:
         def mint(
             *,
             identity: GitHubAppIdentity,
@@ -148,6 +150,7 @@ class DeliveryGitHubTokenTests(unittest.TestCase):
                 context_name="site",
                 repository=repository,
                 purpose=purpose,
+                retry_provider_errors=retry_provider_errors,
             )
 
     def test_each_operation_mints_only_its_permissions_for_the_inventory_repository(self) -> None:
@@ -179,7 +182,13 @@ class DeliveryGitHubTokenTests(unittest.TestCase):
                     "https://api.example/app", code, "provider error", headers, None
                 )
                 with self.assertRaises(DeliveryGitHubTokenUnavailable):
-                    self.resolve("workflow_dispatch")
+                    self.resolve("workflow_dispatch", retry_provider_errors=True)
+        for error in (TimeoutError("slow provider"), ConnectionResetError("dropped connection")):
+            with self.subTest(error=type(error).__name__):
+                self.provider_error = error
+                with self.assertRaises(DeliveryGitHubTokenUnavailable):
+                    self.resolve("workflow_dispatch", retry_provider_errors=True)
+                self.assertEqual(self.resolve("repository_read"), "")
         self.provider_error = HTTPError(
             "https://api.example/app", 404, "not installed", Message(), None
         )

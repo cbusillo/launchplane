@@ -2,6 +2,7 @@
 
 import logging
 from email.message import Message
+from http.client import HTTPException
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
@@ -76,7 +77,9 @@ def _temporary_failure(error: BaseException) -> bool:
                     )
                 )
             )
-        if isinstance(error, (URLError, SQLAlchemyError)):
+        if isinstance(
+            error, (URLError, TimeoutError, ConnectionError, HTTPException, SQLAlchemyError)
+        ):
             return True
         if error.__cause__ is None:
             return False
@@ -137,7 +140,12 @@ def delivery_github_credentials_ready(*, control_plane_root: Path, repository: s
 
 
 def resolve_delivery_github_token(
-    *, control_plane_root: Path, context_name: str, repository: str, purpose: str
+    *,
+    control_plane_root: Path,
+    context_name: str,
+    repository: str,
+    purpose: str,
+    retry_provider_errors: bool = False,
 ) -> str:
     if not repository.strip():
         return ""
@@ -156,11 +164,12 @@ def resolve_delivery_github_token(
         click.ClickException,
         SQLAlchemyError,
         OSError,
+        HTTPException,
         TypeError,
         ValueError,
         KeyError,
     ) as error:
-        if _temporary_failure(error):
+        if retry_provider_errors and _temporary_failure(error):
             raise DeliveryGitHubTokenUnavailable(
                 "Delivery App provider is temporarily unavailable."
             ) from error

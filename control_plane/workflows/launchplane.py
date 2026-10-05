@@ -496,6 +496,7 @@ def resolve_launchplane_github_token(
     context_name: str,
     repository: str = "",
     purpose: str = "repository_read",
+    retry_provider_errors: bool = False,
 ) -> str:
     """Resolve a repository-scoped Delivery App token; never a context PAT."""
     # The identity module uses this module's provider transport.
@@ -506,6 +507,7 @@ def resolve_launchplane_github_token(
         context_name=context_name,
         repository=repository,
         purpose=purpose,
+        retry_provider_errors=retry_provider_errors,
     )
 
 

@@ -179,6 +179,7 @@ def dispatch_generic_web_promotion_workflow_delivery(
             context_name=credential_context,
             repository=f"{owner}/{repo}",
             purpose="workflow_dispatch",
+            retry_provider_errors=True,
         )
         if not token:
             if record.provider_operation_key:
