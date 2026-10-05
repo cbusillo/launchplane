@@ -2361,6 +2361,29 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                 [],
             ),
             (
+                "map_media_push_and_data_credentials",
+                {},
+                (
+                    ("context_instance", "MAPBOX_API_KEY"),
+                    ("context_instance", "UNSPLASH_ACCESS_TOKEN"),
+                    ("context_instance", "TENOR_API_KEY"),
+                    ("context_instance", "WEB_PUSH_VAPID_PRIVATE_KEY"),
+                    (
+                        "context_instance",
+                        "ODOO_OVERRIDE_SECRET__CONFIG_PARAM__CM_DATA__DB__PASSWORD",
+                    ),
+                ),
+                (unrelated_rule,),
+                [
+                    "MAPBOX_API_KEY",
+                    "UNSPLASH_ACCESS_TOKEN",
+                    "TENOR_API_KEY",
+                    "WEB_PUSH_VAPID_PRIVATE_KEY",
+                    "ODOO_OVERRIDE_SECRET__CONFIG_PARAM__CM_DATA__DB__PASSWORD",
+                ],
+                [],
+            ),
+            (
                 "site_secret_with_preview_rule",
                 {},
                 (site_shopify,),
