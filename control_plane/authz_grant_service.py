@@ -881,6 +881,10 @@ class AuthzPolicyReviewedPlanConflictError(AuthzPolicyConflictError):
     pass
 
 
+class AuthzPolicyUnmanagedAdoptionConflictError(AuthzPolicyConflictError):
+    pass
+
+
 class AuthzPolicySafetyError(AuthzPolicyConflictError):
     def __init__(self, *, code: str, message: str) -> None:
         super().__init__(message)
@@ -1793,7 +1797,7 @@ def _reconcile_managed_policy(
                 )
             continue
         if unmanaged_adoption != "adopt_matching":
-            raise AuthzPolicyConflictError(
+            raise AuthzPolicyUnmanagedAdoptionConflictError(
                 "Managed authz policy would adopt an unmanaged rule; repeat the reviewed plan "
                 "with unmanaged_adoption='adopt_matching'."
             )
