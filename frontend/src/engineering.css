@@ -2240,6 +2240,7 @@
 
 .privileged-operation-card {
   display: grid;
+  min-width: 0;
   gap: 1rem;
   padding: clamp(1rem, 2vw, 1.4rem);
   border: 1px solid var(--border);
@@ -2356,9 +2357,16 @@
 }
 
 .privileged-operation-policy-review {
+  min-width: 0;
   border: 1px solid var(--border);
   border-radius: 0.8rem;
   background: rgb(0 0 0 / 12%);
+}
+
+.privileged-operation-policy-review > h3,
+.privileged-operation-policy-review > h4 {
+  margin: 0;
+  padding: 0.85rem 0.9rem;
 }
 
 .privileged-operation-policy-review summary {
