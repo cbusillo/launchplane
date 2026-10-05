@@ -12213,6 +12213,22 @@ def create_launchplane_fastapi_app(
             existing_profile = profile_store.read_product_profile_record(profile.product)
         except (FileNotFoundError, KeyError):
             existing_profile = None
+        if profile.release_on_acceptance != (
+            existing_profile.release_on_acceptance if existing_profile is not None else "held"
+        ) or (
+            existing_profile is not None
+            and existing_profile.release_on_acceptance == "director_standing"
+            and profile.owner.github_id != existing_profile.owner.github_id
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="release_acceptance_bounded_apply_required",
+                message=(
+                    "Change release acceptance through the reviewed production-use endpoint; "
+                    "change the Client through the Client setting endpoint."
+                ),
+            )
         try:
             validate_product_profile_history_transition(
                 existing_profile=existing_profile,
@@ -13306,6 +13322,17 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message="Caller cannot change the production use of the requested product.",
             )
+        if (
+            production_use_request.mode == "apply"
+            and production_use_request.release_on_acceptance == "director_standing"
+            and not (isinstance(identity, GitHubHumanIdentity) and identity.role == "admin")
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Only a signed-in admin can record the Director's standing acceptance.",
+            )
         normalized_idempotency_key = idempotency_key.strip()
         if production_use_request.mode == "apply" and not normalized_idempotency_key:
             raise _launchplane_http_error(
@@ -13396,6 +13423,13 @@ def create_launchplane_fastapi_app(
                 status_code=409,
                 trace_id=trace_id,
                 code="stale",
+                message=str(error),
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
                 message=str(error),
             ) from error
         records = {"product_profile": profile.product}

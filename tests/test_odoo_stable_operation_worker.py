@@ -247,6 +247,50 @@ def _restore_operation(
 
 
 class OdooStableOperationWorkerTests(unittest.TestCase):
+    def test_client_release_wait_does_not_block_odoo_operation_poll(self) -> None:
+        started = Event()
+        polled = Event()
+        release = Event()
+        finished = Event()
+        stop = Event()
+
+        def advance(**_kwargs: object) -> tuple[str, ...]:
+            started.set()
+            if not release.wait(10):
+                raise AssertionError("Odoo operation poll did not release the Client pass")
+            finished.set()
+            return ()
+
+        def poll(**_kwargs: object) -> object:
+            self.assertTrue(started.wait(10))
+            polled.set()
+            release.set()
+            stop.set()
+            return type("Idle", (), {"status": "idle"})()
+
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            with (
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.advance_client_releases",
+                    side_effect=advance,
+                ),
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.run_odoo_stable_operation_worker_once",
+                    side_effect=poll,
+                ),
+            ):
+                result = run_odoo_stable_operation_worker_loop(
+                    record_store=store,
+                    control_plane_root_path=Path(directory),
+                    lease_owner="worker",
+                    stop_event=stop,
+                    max_iterations=1,
+                )
+        self.assertTrue(polled.is_set())
+        self.assertTrue(finished.is_set())
+        self.assertEqual(result.status, "stopped")
+
     def setUp(self) -> None:
         self.authorization_policy_record = durable_operation_policy_record(
             _BOOTSTRAP_AUTHORIZATION,

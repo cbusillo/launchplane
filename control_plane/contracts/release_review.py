@@ -61,6 +61,10 @@ class ReleaseReviewDecisionRecord(BaseModel):
     # serialize as they did.
     release_start: ReleaseStart = Field(default="", exclude_if=lambda value: value == "")
 
+    acceptance_source: Literal["client_session", "director_standing"] = Field(
+        default="client_session", exclude_if=lambda value: value == "client_session"
+    )
+
     @model_validator(mode="after")
     def validate_decision(self) -> "ReleaseReviewDecisionRecord":
         if self.product != self.checklist.product:
@@ -69,6 +73,8 @@ class ReleaseReviewDecisionRecord(BaseModel):
             raise ValueError("Requesting changes or overriding requires a reason.")
         if self.decision != "overridden" and self.actor_github_id != self.checklist.owner_github_id:
             raise ValueError("Only the product's Client can accept or request changes.")
+        if self.acceptance_source == "director_standing" and self.decision != "accepted":
+            raise ValueError("Standing acceptance can only record acceptance.")
         if self.release_start and self.decision != "accepted":
             raise ValueError("Only the Client's acceptance starts a release.")
         return self
