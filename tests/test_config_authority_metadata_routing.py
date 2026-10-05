@@ -117,16 +117,37 @@ class LaunchplaneMetadataRoutingTests(unittest.TestCase):
             },
             {"mergeTrain": {"readyLabel": "https://control.example.test"}},
             {"product": "real-product"},
+            {"publicName": "Real Product"},
             {"repository": "example/runtime"},
             {"provider": "provider-live"},
             {"lane": "production"},
             {"unknown": "innocent-looking"},
+            {"notes": ["unknown field"]},
         ]
         for routing in cases:
             with self.subTest(routing=routing):
                 payload = self._gate({"launchplane": routing})
                 self.assertEqual(cast("dict[str, object]", payload["gate"])["status"], "fail")
                 self.assertTrue(cast("dict[str, object]", payload["gate"])["rejected_findings"])
+
+    def test_catalog_root_paths_and_namespaced_labels_pass(self) -> None:
+        payload = self._gate(
+            {
+                "launchplane": {
+                    "context": {"helper": "skills/launchplane/scripts/launchplane-context.py"},
+                    "operator": {
+                        "helper": "skills/launchplane/scripts/launchplane-write-action.py"
+                    },
+                    "service": {
+                        "localConfigExample": (
+                            "skills/launchplane/references/launchplane-operator.local.example.json"
+                        ),
+                    },
+                    "mergeTrain": {"readyLabel": "merge: ready"},
+                },
+            }
+        )
+        self.assertEqual(cast("dict[str, object]", payload["gate"])["status"], "pass")
 
     def test_workflow_repository_allowance_is_scoped_to_metadata_field(self) -> None:
         routing = {

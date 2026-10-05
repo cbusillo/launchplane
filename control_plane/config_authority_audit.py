@@ -3994,7 +3994,7 @@ def _is_launchplane_metadata_routing(key: str, value: object) -> bool:
         ),
     }
     if key in catalog_paths:
-        return value == catalog_paths[key]
+        return value.removeprefix("skills/") == catalog_paths[key]
     if key in {"launchplane.service.contextUrlEnv", "launchplane.service.operatorUrlEnv"}:
         return re.fullmatch(r"[A-Z][A-Z0-9_]*", value) is not None
     if key == "launchplane.mergeTrain.githubActionsRunner.repo":
@@ -4012,7 +4012,7 @@ def _is_launchplane_metadata_routing(key: str, value: object) -> bool:
             and not value.endswith(("/", ".lock"))
         )
     if key == "launchplane.mergeTrain.readyLabel":
-        return re.fullmatch(r"[A-Za-z0-9_-]+", value) is not None
+        return re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.: -]*", value) is not None
     if key == "launchplane.mergeTrain.githubActionsRunner.runnerMode":
         return value == "controller"
     evidence_fields = {

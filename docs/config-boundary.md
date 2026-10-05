@@ -317,7 +317,9 @@ The `.github/github.json` catalog's Launchplane routing fields also retain
 variable names, the catalog context/admin helpers and local config example,
 and merge-train label, branch, workflow repository/name/ref, controller mode
 and revision-response field paths. These are hints to the supported surfaces,
-not records of live state. Only the documented field/value shapes are accepted;
+not records of live state. Catalog paths may include the catalog-root `skills/`
+prefix; labels may use spaces and namespace punctuation. Only the documented
+field/value shapes are accepted;
 URLs, private credential paths, product/provider/runtime coordinates, malformed
 routing values and unknown Launchplane fields remain findings. The workflow
 repository allowance applies only to its exact catalog field in this file.
