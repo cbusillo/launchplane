@@ -148,7 +148,8 @@ reservation. The webhook request never waits on a deploy.
     exhausted, successful reconciliation passes record a held destroy with reason
     `preview_destroy_retry_limit` and complete the request
     without attempting another provider mutation. Odoo destroy attempts that return
-    an unknown outcome consume the budget when fenced execution runs, including
+    an unknown outcome consume the budget when a durable provider-effect checkpoint
+    is reached, including
     retries proved safe by provider observation and execution that raises instead
     of returning a result. The runner
     continues to observe the fenced operation after exhaustion and can adopt its
@@ -156,6 +157,12 @@ reservation. The webhook request never waits on a deploy.
     preflight or destination refusals while that operation needs observation do
     not consume attempts or prevent observation after the refusal is repaired;
     those passes still report the refusal rather than completing as held.
+    Observation first uses the original issued destroy plan retained in the reconcile
+    record, so removing the domain during destroy does not prevent observing the
+    original compose. Fresh planning and destination checks still precede any
+    mutation retry. Pre-checkpoint provider read outages do not consume attempts.
+    Older requests without a retained plan still need ready inputs; no target is
+    guessed from a name or an error message.
     The plan retains `destroy_failed_attempts`,
     `last_failed_error_code`, `last_failed_error_summary`, and
     `destroy_retry_stop_reason`; the preview is not marked destroyed or removed.

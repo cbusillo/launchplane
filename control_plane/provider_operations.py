@@ -403,13 +403,12 @@ def run_durable_provider_operation(
     lease_seconds: int = 300,
     heartbeat_interval_seconds: float | None = None,
     target_supersession: ProviderTargetSupersession | None = None,
-    allow_reconciled_retry: bool = True,
+    allow_mutation: bool = True,
 ) -> DurableProviderOperationResult:
     """Run or observe a fenced operation.
 
-    ``allow_reconciled_retry=False`` keeps observation and completion adoption,
-    but forbids reacquiring an unknown operation for another mutation. Fresh
-    reservations still run; callers own admission of new operations.
+    ``allow_mutation=False`` keeps observation and completion adoption,
+    but forbids applying either a fresh or reacquired reservation.
     """
     resolved_heartbeat_interval = _resolve_heartbeat_interval(
         lease_seconds=lease_seconds,
@@ -494,10 +493,14 @@ def run_durable_provider_operation(
             lease_owner=lease_owner,
             lease_seconds=lease_seconds,
             heartbeat_interval_seconds=resolved_heartbeat_interval,
-            allow_reconciled_retry=allow_reconciled_retry,
+            allow_mutation=allow_mutation,
         )
     if decision != "acquired":
         raise RuntimeError(f"Unsupported mutation reservation decision: {decision}")
+    if not allow_mutation:
+        return _mark_reconcile_required(
+            store=store, reservation=reservation, reconciliation_key=reconciliation_key
+        )
 
     provider_operation_key = build_provider_operation_key(
         scope=scope,
@@ -758,7 +761,7 @@ def _reconcile(
     lease_owner: str,
     lease_seconds: int,
     heartbeat_interval_seconds: float,
-    allow_reconciled_retry: bool,
+    allow_mutation: bool,
 ) -> DurableProviderOperationResult:
     bound_reconciliation_key = (
         fallback_record.reconciliation_key
@@ -795,7 +798,7 @@ def _reconcile(
         fallback_record is not None and fallback_record.provider_effect_started_at
     )
     if (
-        allow_reconciled_retry
+        allow_mutation
         and observation.outcome == "absent"
         and (not provider_effect_started or observation.retry_safe)
     ):

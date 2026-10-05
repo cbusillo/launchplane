@@ -122,7 +122,7 @@ class _StoreFixture:
         idempotency_key: str = _KEY,
         request_fingerprint: str = _FINGERPRINT,
         target_supersession: ProviderTargetSupersession | None = None,
-        allow_reconciled_retry: bool = True,
+        allow_mutation: bool = True,
     ) -> DurableProviderOperationResult:
         return run_durable_provider_operation(
             store=self.store,
@@ -136,7 +136,7 @@ class _StoreFixture:
             lease_seconds=lease_seconds,
             heartbeat_interval_seconds=heartbeat_interval_seconds,
             target_supersession=target_supersession,
-            allow_reconciled_retry=allow_reconciled_retry,
+            allow_mutation=allow_mutation,
         )
 
     def maybe_stored(self) -> LaunchplaneIdempotencyRecord | None:
@@ -765,13 +765,21 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
             recovery = _FakeAdapter(
                 observation=ProviderObservation(outcome="absent", retry_safe=True)
             )
-            held = fixture.run(recovery, allow_reconciled_retry=False)
+            held = fixture.run(recovery, allow_mutation=False)
             self.assertEqual(held.status, "reconcile_required")
             self.assertEqual(recovery.apply_calls, 0)
             self.assertEqual(fixture.stored(), before)
             completed = fixture.run(recovery)
             self.assertEqual(completed.status, "completed")
             self.assertEqual(recovery.apply_calls, 1)
+
+    def test_observation_only_does_not_apply_a_new_reservation(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            adapter = _FakeAdapter()
+            result = fixture.run(adapter, allow_mutation=False)
+            self.assertEqual(result.status, "reconcile_required")
+            self.assertEqual(adapter.apply_calls, 0)
 
     def test_reconcile_retries_once_when_adapter_proves_effect_absent(self) -> None:
         with TemporaryDirectory() as directory:

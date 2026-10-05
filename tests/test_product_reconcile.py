@@ -73,6 +73,7 @@ from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_ROUTE,
     OdooPreviewApplyConfigError,
     OdooPreviewApplyEnvelope,
+    build_odoo_preview_apply_inputs_result,
     observe_odoo_preview_apply_result,
 )
 from control_plane.product_reconcile_read import product_reconcile_request_view
@@ -129,7 +130,10 @@ from control_plane.workflows.generic_web_preview import (
 from tests.support.profiles import _odoo_preview_profile_payload, product_profile_payload
 from tests.test_generic_web_deploy import _FakeGenericWebDeployProvider
 from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
-from tests.support.stores import sqlite_database_url
+from tests.support.stores import (
+    _write_odoo_preview_template_runtime_environment,
+    sqlite_database_url,
+)
 
 REPOSITORY = "example/site"
 REPOSITORY_ID = "101"
@@ -1673,17 +1677,32 @@ class _MinuteClock(datetime):
 
 class ProductReconcilePreviewTests(ProductReconcileTestCase):
     def install_refused_domain_provider(
-        self, refused_path: str = "/api/domain.delete"
+        self, refused_path: str = "/api/domain.delete", *, real_inputs: bool = False
     ) -> list[str]:
         calls: list[str] = []
+        domain_exists = True
 
         def provider_request(*, path: str, **_kwargs: object) -> object:
+            nonlocal domain_exists
             calls.append(path)
-            if path == "/api/domain.byComposeId":
-                return [{"domainId": "preview-domain", "host": "pr-5.example.test"}]
             if path == refused_path:
+                if path == "/api/domain.byComposeId":
+                    raise DokployRequestFailed(
+                        method="GET", path=path, detail="Unavailable", status_code=503
+                    )
                 raise click.ClickException("Persistent delete refusal")
+            if path == "/api/domain.byComposeId":
+                return (
+                    [{"domainId": "preview-domain", "host": "pr-5.example.test"}]
+                    if domain_exists
+                    else []
+                )
+            if path == "/api/project.all":
+                return []
+            if path == "/api/compose.search":
+                return [{"composeId": "cm-odoo-preview-pr-5", "name": "cm-odoo-preview-pr-5"}]
             if path == "/api/domain.delete":
+                domain_exists = False
                 return None
             if path == "/api/compose.one":
                 return {"composeId": "cm-odoo-preview-pr-5"}
@@ -1720,6 +1739,23 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
             self.addCleanup(provider_patcher.stop)
         self.write_preview()
         self.github.pull_request["state"] = "closed"
+        if real_inputs:
+            _write_odoo_preview_template_runtime_environment(store=self.store)
+            inputs_patcher = patch.object(
+                self.provider, "build_inputs", build_odoo_preview_apply_inputs_result
+            )
+            inputs_patcher.start()
+            self.addCleanup(inputs_patcher.stop)
+            for target, value in (
+                ("resolve_odoo_preview_url", "https://pr-5.example.test"),
+                ("_preview_template_compose_id", ""),
+                ("_preview_environment_id", ("", "")),
+            ):
+                bootstrap_patcher = patch(
+                    f"control_plane.workflows.odoo_preview_runtime.{target}", return_value=value
+                )
+                bootstrap_patcher.start()
+                self.addCleanup(bootstrap_patcher.stop)
         return calls
 
     def test_refused_domain_mutations_stop_but_unknown_destroy_is_observed(self) -> None:
@@ -1736,7 +1772,7 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
             self.assertEqual(held.state, "done")
         self.assertEqual(calls.count("/api/domain.delete"), PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS)
         self.assertEqual(
-            calls.count("/api/compose.one"), PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS - 1 + 2
+            calls.count("/api/compose.one"), 2 * (PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS - 1) + 2
         )
         self.assertNotIn("/api/compose.delete", calls)
         reservation = self.store.read_idempotency_record(
@@ -1782,7 +1818,7 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.request("preview", 5)
         with self.assertLogs("control_plane.product_reconcile", "WARNING"):
             resumed = self.run_once()
-        self.assertEqual(calls.count("/api/compose.one"), 1)
+        self.assertEqual(calls.count("/api/compose.one"), PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 3)
         self.assertEqual(
             resumed.last_plan["destroy_failed_attempts"],
             first_attempts + 1,
@@ -1805,11 +1841,11 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
                     observed.last_plan["destroy_failed_attempts"],
                     first.last_plan["destroy_failed_attempts"],
                 )
-        self.assertEqual(reads.call_count, PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1)
+        self.assertEqual(reads.call_count, 2 * (PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1))
         self.assertEqual(calls.count("/api/domain.delete"), 1)
 
     def test_unresolved_compose_destroy_is_observed_without_consuming_attempts(self) -> None:
-        calls = self.install_refused_domain_provider("/api/compose.delete")
+        calls = self.install_refused_domain_provider("/api/compose.delete", real_inputs=True)
         self.request("preview", 5)
         with self.assertLogs("control_plane.product_reconcile", "WARNING"):
             first = self.run_once()
@@ -1824,6 +1860,24 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
             )
         self.assertEqual(calls.count("/api/compose.delete"), 1)
         self.assertEqual(calls.count("/api/compose.one"), PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1)
+        # Fresh discovery now refuses because destroy already removed the domain.
+        self.assertEqual(observed.last_plan["last_failed_error_code"], "preview_plan_blocked")
+        self.request("preview", 5)
+        with patch(
+            "control_plane.dokploy.api.fetch_dokploy_target_payload",
+            side_effect=click.ClickException("Dokploy request failed (404): missing compose"),
+        ):
+            completed = self.run_once()
+        self.assertEqual(completed.last_plan["preview_operation_status"], "adopted")
+        self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
+
+    def test_retryable_domain_lookup_outage_does_not_consume_mutation_attempts(self) -> None:
+        self.install_refused_domain_provider("/api/domain.byComposeId")
+        for _attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1):
+            self.request("preview", 5)
+            with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                failed = self.run_once()
+            self.assertEqual(failed.last_plan["destroy_failed_attempts"], 0)
 
     def test_raised_failure_after_safe_destroy_retry_consumes_attempts(self) -> None:
         self.install_refused_domain_provider()
