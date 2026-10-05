@@ -44,7 +44,7 @@ test("historical runtime match cannot show green without current monitor proof",
   await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", trace_id: "products", products } }));
   await page.route(`**/v1/products/${detail.product}`, route => route.fulfill({ json: { status: "ok", trace_id: "product", product: products[0] } }));
   await page.route(`**/v1/products/${detail.product}/environments/testing`, route => route.fulfill({ json: { status: "ok", trace_id: "environment", environment: detail } }));
-  await page.route(`**/v1/products/${detail.product}/environments/testing/public-ingress/incidents`, route => route.fulfill({ json: incidents }));
+  await page.route(`**/v1/products/${detail.product}/environments/testing/public-ingress/incidents`, route => route.fulfill({ json: { status: "ok", trace_id: "incidents", incident_list: incidents } }));
   await page.goto(`/ui/products/${detail.product}/environments/testing`);
   const signal = page.locator(".condition-tile").filter({ hasText: /^Runtime identity/i });
   await expect(signal).toContainText("Match");
