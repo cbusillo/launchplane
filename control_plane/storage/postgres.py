@@ -22,7 +22,7 @@ from typing import (
     overload,
 )
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, JsonValue, TypeAdapter
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -19629,6 +19629,111 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             session.commit()
             return "recorded"
+
+    def claim_next_config_authority_delivery(
+        self,
+        lease_owner: str,
+        lease_seconds: int,
+    ) -> GitHubAppWebhookDeliveryRecord | None:
+        if not lease_owner.strip():
+            raise ValueError("Config-authority claim requires a lease owner.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            now = self._database_mutation_timestamp(session)
+            row_model = LaunchplaneGitHubAppWebhookDeliveryRow
+            statement = (
+                select(row_model)
+                .where(
+                    or_(
+                        row_model.payload["config_authority_state"].as_string() == "pending",
+                        and_(
+                            row_model.payload["config_authority_state"].as_string() == "running",
+                            row_model.payload["config_authority_lease_expires_at"].as_string()
+                            < now,
+                        ),
+                    )
+                )
+                .order_by(row_model.received_at, row_model.delivery_id)
+                .limit(20)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update(skip_locked=True)
+            for row in session.scalars(statement).all():
+                if not self._try_lock_landing_authority(
+                    session, f"launchplane:github-app-webhook-delivery:{row.delivery_id}"
+                ):
+                    continue
+                record = self._read_payload(
+                    model_type=GitHubAppWebhookDeliveryRecord, payload=row.payload
+                )
+                claimed = record.model_copy(
+                    update={
+                        "config_authority_state": "running",
+                        "config_authority_lease_owner": lease_owner.strip(),
+                        "config_authority_lease_expires_at": self._mutation_lease_expiry(
+                            observed_at=now,
+                            lease_seconds=lease_seconds,
+                        ),
+                        "config_authority_attempt": record.config_authority_attempt + 1,
+                    }
+                )
+                row.payload = self._payload_dict(claimed)
+                session.commit()
+                return claimed
+            session.rollback()
+            return None
+
+    def complete_config_authority_delivery(
+        self,
+        claimed: GitHubAppWebhookDeliveryRecord,
+        evidence: dict[str, JsonValue],
+    ) -> GitHubAppWebhookDeliveryRecord:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_landing_authority(
+                session, f"launchplane:github-app-webhook-delivery:{claimed.delivery_id}"
+            )
+            statement = select(LaunchplaneGitHubAppWebhookDeliveryRow).where(
+                LaunchplaneGitHubAppWebhookDeliveryRow.delivery_id == claimed.delivery_id
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(claimed.delivery_id)
+            current = self._read_payload(
+                model_type=GitHubAppWebhookDeliveryRecord, payload=row.payload
+            )
+            if (
+                current.config_authority_state != "running"
+                or current.config_authority_lease_owner != claimed.config_authority_lease_owner
+                or current.config_authority_attempt != claimed.config_authority_attempt
+                or current.config_authority_lease_expires_at
+                <= self._database_mutation_timestamp(session)
+            ):
+                raise ProductReconcileLeaseLostError("Config-authority delivery lease was lost.")
+            completed = current.model_copy(
+                update={
+                    "config_authority_state": "failed"
+                    if evidence.get("status") in {"unavailable", "fail"}
+                    else "done",
+                    "config_authority": evidence,
+                    "config_authority_lease_owner": "",
+                    "config_authority_lease_expires_at": "",
+                }
+            )
+            row.payload = self._payload_dict(completed)
+            session.commit()
+            return completed
+
+    def read_github_app_webhook_delivery(self, delivery_id: str) -> GitHubAppWebhookDeliveryRecord:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneGitHubAppWebhookDeliveryRow, delivery_id)
+            if row is None:
+                raise FileNotFoundError(delivery_id)
+            return self._read_payload(
+                model_type=GitHubAppWebhookDeliveryRecord, payload=row.payload
+            )
 
     def request_product_reconcile(
         self, target: ProductReconcileTarget, requested_at: str

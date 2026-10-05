@@ -23,7 +23,7 @@ AdvisoryCheckRunStatus = Literal["in_progress", "completed"]
 AdvisoryCheckConclusion = Literal["neutral", "success", "failure", "action_required"]
 
 
-class AdvisoryCheckProjection(BaseModel):
+class GitHubCheckProjection(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: int = Field(default=1, ge=1)
@@ -39,14 +39,9 @@ class AdvisoryCheckProjection(BaseModel):
     conclusion: AdvisoryCheckConclusion | None = "neutral"
 
     @model_validator(mode="after")
-    def _validate_projection(self) -> "AdvisoryCheckProjection":
+    def _validate_projection(self) -> "GitHubCheckProjection":
         if self.schema_version != 1:
             raise ValueError("Unsupported advisory check projection schema version.")
-        if self.name not in {
-            ENGINEERING_REVIEW_CHECK_NAME,
-            OWNER_ACCEPTANCE_CHECK_NAME,
-        }:
-            raise ValueError("Advisory check projection uses an unreserved check name.")
         if self.repository.strip() != self.repository or self.repository.count("/") != 1:
             raise ValueError("Advisory check projection repository must use owner/name.")
         if not all(part.strip() for part in self.repository.split("/", 1)):
@@ -74,6 +69,28 @@ class AdvisoryCheckProjection(BaseModel):
             raise ValueError("Completed advisory checks require a conclusion.")
         if self.check_status == "in_progress" and self.conclusion is not None:
             raise ValueError("In-progress advisory checks cannot have a conclusion.")
+        return self
+
+
+class AdvisoryCheckProjection(GitHubCheckProjection):
+    @model_validator(mode="after")
+    def _validate_advisory_name(self) -> "AdvisoryCheckProjection":
+        if self.name not in {ENGINEERING_REVIEW_CHECK_NAME, OWNER_ACCEPTANCE_CHECK_NAME}:
+            raise ValueError("Advisory check projection uses an unreserved check name.")
+        return self
+
+
+CONFIG_AUTHORITY_CHECK_NAME: Final = "launchplane/config-authority"
+
+
+class ConfigAuthorityCheckProjection(GitHubCheckProjection):
+    @model_validator(mode="after")
+    def _validate_source_name(self) -> "ConfigAuthorityCheckProjection":
+        if self.name not in {
+            f"{CONFIG_AUTHORITY_CHECK_NAME}/{scope}"
+            for scope in ("pull-request", "push", "merge-group")
+        }:
+            raise ValueError("Config-authority check uses an unreserved source name.")
         return self
 
 

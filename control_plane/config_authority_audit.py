@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import tomllib
-from typing import cast
+from typing import Protocol, cast
 
 
 MAX_SCANNED_FILE_BYTES = 1_000_000
@@ -1481,6 +1481,19 @@ class CoverageGap:
         return {"path": self.path, "reason": self.reason, "detail": self.detail}
 
 
+class CommittedConfigAuthoritySource(Protocol):
+    """Immutable source snapshots supplied by a source-control adapter."""
+
+    repository_package: str
+
+    def resolve_commit(self, revision: str) -> str: ...
+    def changed_paths(self, base: str, head: str) -> list[str]: ...
+    def file_modes(self, revision: str) -> dict[str, str]: ...
+    def blob_size(self, revision: str, path: str) -> int: ...
+    def read_blob(self, revision: str, path: str) -> bytes: ...
+    def blob_sha(self, revision: str, path: str) -> str: ...
+
+
 def build_config_authority_audit(
     *,
     control_plane_root: Path,
@@ -1490,14 +1503,19 @@ def build_config_authority_audit(
     include_untracked: bool = False,
     include_ignored: bool = False,
     paths: Sequence[Path] = (),
+    committed_source: CommittedConfigAuthoritySource | None = None,
 ) -> dict[str, object]:
     if mode not in SCAN_MODES:
         raise ValueError(f"Unsupported config authority audit mode: {mode}")
     if mode != "changed-files-gate" and (base_sha is not None or head_sha is not None):
         raise ValueError("Commit arguments require changed-files-gate mode.")
 
+    if committed_source is not None and mode != "changed-files-gate":
+        raise ValueError("A committed source requires changed-files-gate mode.")
     root = control_plane_root.resolve()
-    repository_package = _repository_package_name(root)
+    repository_package = (
+        committed_source.repository_package if committed_source else _repository_package_name(root)
+    )
     repo_metadata: dict[str, object]
     baseline_fingerprint_counts: Counter[tuple[str, str, str, str]] = Counter()
     if mode == "changed-files-gate":
@@ -1509,28 +1527,45 @@ def build_config_authority_audit(
             raise ValueError(
                 "Changed-files gate scans committed changes only; use full-audit for local paths."
             )
-        base_sha = _git_output(root, "rev-parse", "--verify", f"{base_sha}^{{commit}}", strict=True)
-        head_sha = _git_output(root, "rev-parse", "--verify", f"{head_sha}^{{commit}}", strict=True)
-        changed_paths = _git_output(
-            root,
-            "diff",
-            "--name-only",
-            "-z",
-            "--no-renames",
-            "--diff-filter=ACMT",
-            base_sha,
-            head_sha,
-            "--",
-            strict=True,
-        ).split("\0")
-        source_files, coverage_gaps = _committed_source_files(root, head_sha, changed_paths)
+        if committed_source is None:
+            base_sha = _git_output(
+                root, "rev-parse", "--verify", f"{base_sha}^{{commit}}", strict=True
+            )
+            head_sha = _git_output(
+                root, "rev-parse", "--verify", f"{head_sha}^{{commit}}", strict=True
+            )
+            changed_paths = _git_output(
+                root,
+                "diff",
+                "--name-only",
+                "-z",
+                "--no-renames",
+                "--diff-filter=ACMT",
+                base_sha,
+                head_sha,
+                "--",
+                strict=True,
+            ).split("\0")
+            base_modes = _git_file_modes(root, base_sha)
+        else:
+            base_sha = committed_source.resolve_commit(base_sha)
+            head_sha = committed_source.resolve_commit(head_sha)
+            changed_paths = committed_source.changed_paths(base_sha, head_sha)
+            base_modes = committed_source.file_modes(base_sha)
+        source_files, coverage_gaps = _committed_source_files(
+            root, head_sha, changed_paths, source=committed_source
+        )
         base_paths = {
             path
-            for path, file_mode in _git_file_modes(root, base_sha).items()
+            for path, file_mode in base_modes.items()
             if file_mode in {"100644", "100755", "120000"}
         }
         baseline_files, _ = _committed_source_files(
-            root, base_sha, [path for path in changed_paths if path in base_paths], baseline=True
+            root,
+            base_sha,
+            [path for path in changed_paths if path in base_paths],
+            baseline=True,
+            source=committed_source,
         )
         for source_file in baseline_files:
             baseline_findings, _ = _scan_source_file(
@@ -1703,7 +1738,13 @@ class _CommittedPathUnavailable(ValueError):
     pass
 
 
-def _resolve_committed_path(root: Path, revision: str, path: str, modes: Mapping[str, str]) -> str:
+def _resolve_committed_path(
+    root: Path,
+    revision: str,
+    path: str,
+    modes: Mapping[str, str],
+    source: CommittedConfigAuthoritySource | None = None,
+) -> str:
     pending = deque(path.split("/"))
     resolved: list[str] = []
     hops = 0
@@ -1722,7 +1763,11 @@ def _resolve_committed_path(root: Path, revision: str, path: str, modes: Mapping
             hops += 1
             if hops > MAX_COMMITTED_SYMLINK_HOPS:
                 raise _CommittedPathUnavailable(f"Too many committed symlink hops at {path}.")
-            content = _git_bytes(root, "show", f"{revision}:{candidate}", strict=True)
+            content = (
+                source.read_blob(revision, candidate)
+                if source
+                else _git_bytes(root, "show", f"{revision}:{candidate}", strict=True)
+            )
             try:
                 target = content.decode("utf-8")
             except UnicodeDecodeError as error:
@@ -1751,10 +1796,11 @@ def _committed_source_files(
     relative_paths: Sequence[str],
     *,
     baseline: bool = False,
+    source: CommittedConfigAuthoritySource | None = None,
 ) -> tuple[list[AuditSourceFile], list[CoverageGap]]:
     files: list[AuditSourceFile] = []
     gaps: list[CoverageGap] = []
-    modes = _git_file_modes(root, revision)
+    modes = source.file_modes(revision) if source else _git_file_modes(root, revision)
     for relative_path in sorted(set(relative_paths) - {""}):
         path = root / relative_path
         if not _is_text_scan_candidate(path):
@@ -1768,7 +1814,7 @@ def _committed_source_files(
             )
             continue
         try:
-            blob_path = _resolve_committed_path(root, revision, relative_path, modes)
+            blob_path = _resolve_committed_path(root, revision, relative_path, modes, source)
         except _CommittedPathUnavailable as error:
             if not baseline:
                 raise
@@ -1799,7 +1845,11 @@ def _committed_source_files(
             raise ValueError(
                 f"Committed authority path {relative_path} does not resolve to an available regular file."
             )
-        size = int(_git_output(root, "cat-file", "-s", f"{revision}:{blob_path}", strict=True))
+        size = (
+            source.blob_size(revision, blob_path)
+            if source
+            else int(_git_output(root, "cat-file", "-s", f"{revision}:{blob_path}", strict=True))
+        )
         if size > MAX_SCANNED_FILE_BYTES:
             gaps.append(
                 CoverageGap(
@@ -1809,7 +1859,11 @@ def _committed_source_files(
                 )
             )
             continue
-        content = _git_bytes(root, "show", f"{revision}:{blob_path}", strict=True)
+        content = (
+            source.read_blob(revision, blob_path)
+            if source
+            else _git_bytes(root, "show", f"{revision}:{blob_path}", strict=True)
+        )
         if _looks_binary(content):
             gaps.append(
                 CoverageGap(
@@ -1831,11 +1885,10 @@ def _committed_source_files(
                 mtime_ns=0,
                 sha256=digest,
                 git_status="committed",
-                head_blob_sha=_git_output(
-                    root,
-                    "rev-parse",
-                    f"{revision}:{blob_path}",
-                    strict=True,
+                head_blob_sha=(
+                    source.blob_sha(revision, blob_path)
+                    if source
+                    else _git_output(root, "rev-parse", f"{revision}:{blob_path}", strict=True)
                 ),
                 index_blob_sha="",
                 worktree_sha256="",

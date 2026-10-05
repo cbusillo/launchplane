@@ -347,3 +347,57 @@ For SellYourOutboard and VeriReel (#2740): each repository's
 own `.github/workflows/build.yml`, then its `preview` label. Product-run preview
 verification went with `launchplane-preview.yml`; Launchplane's own health check
 of the expected build is what marks the preview ready, as for Odoo.
+
+## Product configuration authority from source events
+
+Source implementation: #3021. Runtime activation and required-check policy are
+separate Owner decisions; consumer workflows remain until coverage is verified.
+A repository's DB-backed merge-train policy can opt in with
+`config_authority_events_enabled`. Its default is false, and omitting it
+preserves historical policy digests. No checked-in product catalog or service
+environment variable activates it.
+
+For an opted-in, tracked inventory repository, the signed App receiver records
+an independent scan request for PR opened/reopened/synchronize/edited, push, or
+merge-group checks-requested events, even without a deploy profile or build.
+It acknowledges after the transaction, without waiting for GitHub file reads.
+Redelivery preserves the original request. A branch deletion has no head and
+requests no scan; a creation push with no base refuses verification.
+
+The existing operation worker leases each delivery and rereads repository
+identity. PRs use the API's current explicit base/head pair; push and merge-group
+use the signed event's explicit pair, confirmed as commits through the API.
+Two complete immutable Git trees supply the changed paths, rather than GitHub
+compare's merge-base diff. Verified blob bytes feed the same scanner and
+`product-repo` gate as the CLI. Inherited findings, file classifications,
+symlink handling, and reported coverage gaps retain that scanner's behavior.
+Dirty checkouts, workflow instructions, and product executables are never inputs.
+A source read, identity mismatch, corrupt blob, truncated tree, or exceeded scan
+budget refuses verification. Scans have a four-minute read budget under a
+ten-minute lease; an expired lease is recovered and its older attempt cannot
+publish stored results. Ordinary operation work keeps priority over scans.
+
+Completed results are projected through the existing checks-only App as
+`launchplane/config-authority/pull-request`, `/push`, or `/merge-group`.
+Separate event names prevent a narrower push comparison from overwriting a PR's
+result on the same head. A failed gate or unavailable source produces failure;
+these checks are not excluded from normal check readiness as advisory governance
+projections are. A missing projection credential/permission or failed projection
+is stored as unavailable, with the scan outcome preserved separately. No token
+fallback or access grant is created. Source reads use the repository's existing
+train App with its read-only build-provenance token; projection uses the existing
+checks-only identity. Both installations and managed-key bindings need to be
+verified before activation. Requiring these check names is an Owner decision.
+
+An authorized inventory reader can retrieve a delivery's request, queue/lease
+state, commit pair, redacted gate findings, coverage gaps, hashes and projection
+receipt through `GET /v1/repository-inventory?repository_id=<id>&delivery_id=<id>`.
+The delivery must belong to that repository. Literal configuration values and
+file contents are absent. Failed scans remain visible; a new signed event queues
+a new scan, while an interrupted worker's expired lease is recoverable.
+
+Before removing the RepairShopr, VeriReel or SellYourOutboard workflow, verify
+runtime activation, event subscriptions, source reads and check projection for
+that product, and account for any required-check change. Source fixture parity
+and read-only scans of their commits demonstrate scanner coverage; they do not
+prove deployed activation or authorize any live change.

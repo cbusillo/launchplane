@@ -3319,6 +3319,59 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_source_scan_delivery_has_one_lease_and_recovers_without_stale_publication(
+        self,
+    ) -> None:
+        from control_plane.contracts.product_reconcile import (
+            GitHubAppWebhookDeliveryRecord,
+            ProductReconcileLeaseLostError,
+        )
+        from control_plane.storage.postgres import LaunchplaneGitHubAppWebhookDeliveryRow
+
+        with _head_postgres_database() as url:
+            stores = [PostgresRecordStore(database_url=url) for _ in range(2)]
+            try:
+                delivery = GitHubAppWebhookDeliveryRecord(
+                    delivery_id="source-scan",
+                    event="push",
+                    repository_id="42",
+                    received_at="2026-10-05T00:00:00Z",
+                    config_authority_state="pending",
+                )
+                stores[0].record_github_app_webhook_delivery(delivery, (), delivery.received_at)
+                with ThreadPoolExecutor(max_workers=2) as workers:
+                    futures = [
+                        workers.submit(
+                            store.claim_next_config_authority_delivery, "same-worker", 60
+                        )
+                        for store in stores
+                    ]
+                    claims = [future.result(timeout=10) for future in futures]
+                old = next(claim for claim in claims if claim is not None)
+                self.assertEqual(sum(claim is not None for claim in claims), 1)
+                with stores[0]._session_factory() as session:
+                    row = session.get(LaunchplaneGitHubAppWebhookDeliveryRow, delivery.delivery_id)
+                    assert row is not None
+                    row.payload = {
+                        **row.payload,
+                        "config_authority_lease_expires_at": "2000-01-01T00:00:00Z",
+                    }
+                    session.commit()
+                recovered = stores[1].claim_next_config_authority_delivery("same-worker", 60)
+                assert recovered is not None
+                with self.assertRaises(ProductReconcileLeaseLostError):
+                    stores[0].complete_config_authority_delivery(old, {"status": "pass"})
+                stores[1].complete_config_authority_delivery(recovered, {"status": "fail"})
+                self.assertEqual(
+                    stores[0]
+                    .read_github_app_webhook_delivery(delivery.delivery_id)
+                    .config_authority["status"],
+                    "fail",
+                )
+            finally:
+                for store in stores:
+                    store.close()
+
     def test_owner_feedback_publishers_serialize_and_recover_one_receipt(self) -> None:
         from tests.test_product_review_status import _GitHub, _decision, _profile, _publisher
 

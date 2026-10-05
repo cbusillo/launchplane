@@ -1,10 +1,11 @@
 from dataclasses import dataclass
 from collections.abc import Callable
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal, Protocol, cast
 
 from fastapi import Depends, Header, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from control_plane.contracts.product_reconcile import GitHubAppWebhookDeliveryRecord
 from control_plane.contracts.repository_inventory import (
     REPOSITORY_INVENTORY_READ_ACTION,
     REPOSITORY_INVENTORY_WRITE_ACTION,
@@ -49,6 +50,11 @@ class RepositoryInventoryReadResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     read_model: RepositoryInventoryReadModel
+    config_authority_delivery: GitHubAppWebhookDeliveryRecord | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class RepositoryInventoryApplyResponse(BaseModel):
@@ -66,6 +72,12 @@ class RepositoryInventoryApplyResponse(BaseModel):
     )
 
 
+class _ConfigAuthorityDeliveryReadStore(Protocol):
+    def read_github_app_webhook_delivery(
+        self, delivery_id: str
+    ) -> GitHubAppWebhookDeliveryRecord: ...
+
+
 def register_repository_inventory_read_routes(
     app: ApiRouteRegistrar, *, dependencies: ReadRouteDependencies
 ) -> None:
@@ -73,6 +85,7 @@ def register_repository_inventory_read_routes(
         repository_id: Annotated[str, Query(...)],
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        delivery_id: Annotated[str, Query()] = "",
     ) -> RepositoryInventoryReadResponse:
         trace_id = dependencies.next_trace_id()
         if not dependencies.authorization_allows(
@@ -101,7 +114,33 @@ def register_repository_inventory_read_routes(
                 else "invalid_request",
                 message=str(error),
             ) from error
-        return RepositoryInventoryReadResponse(trace_id=trace_id, read_model=read_model)
+        delivery = None
+        if delivery_id:
+            if not callable(getattr(record_store, "read_github_app_webhook_delivery", None)):
+                raise dependencies.http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="database_storage_required",
+                    message="Source event delivery storage is unavailable.",
+                )
+            try:
+                delivery = cast(
+                    _ConfigAuthorityDeliveryReadStore, record_store
+                ).read_github_app_webhook_delivery(delivery_id)
+                if delivery.repository_id != read_model.repository_id:
+                    raise FileNotFoundError(delivery_id)
+            except FileNotFoundError as error:
+                raise dependencies.http_error(
+                    status_code=404,
+                    trace_id=trace_id,
+                    code="not_found",
+                    message="Source event delivery was not found for this repository.",
+                ) from error
+        return RepositoryInventoryReadResponse(
+            trace_id=trace_id,
+            read_model=read_model,
+            config_authority_delivery=delivery,
+        )
 
     app.add_api_route(
         REPOSITORY_INVENTORY_READ_ROUTE,
@@ -112,7 +151,7 @@ def register_repository_inventory_read_routes(
         summary="Read the current inert repository inventory record",
         responses={
             status_code: {"model": dependencies.error_response_model}
-            for status_code in (400, 401, 403, 503)
+            for status_code in (400, 401, 403, 404, 503)
         },
     )
 

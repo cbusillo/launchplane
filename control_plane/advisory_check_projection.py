@@ -10,6 +10,7 @@ from control_plane.contracts.advisory_check_projection import (
     AdvisoryCheckProjection,
     AdvisoryCheckProjectionResult,
     AdvisoryCheckProjectionStatus,
+    GitHubCheckProjection,
 )
 from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.github_payload import json_object, required_positive_int, required_string_text
@@ -27,6 +28,19 @@ class AdvisoryCheckProjectionError(ValueError):
 def write_advisory_check_projection(
     *,
     projection: AdvisoryCheckProjection,
+    installation_token: GitHubAppInstallationToken,
+    api_request: GitHubApiRequest = github_api_request,
+) -> AdvisoryCheckProjectionResult:
+    return write_github_check_projection(
+        projection=projection,
+        installation_token=installation_token,
+        api_request=api_request,
+    )
+
+
+def write_github_check_projection(
+    *,
+    projection: GitHubCheckProjection,
     installation_token: GitHubAppInstallationToken,
     api_request: GitHubApiRequest = github_api_request,
 ) -> AdvisoryCheckProjectionResult:
@@ -153,7 +167,7 @@ def write_advisory_check_projection(
     )
 
 
-def _matches_projection(check_run: dict[str, object], projection: AdvisoryCheckProjection) -> bool:
+def _matches_projection(check_run: dict[str, object], projection: GitHubCheckProjection) -> bool:
     output = check_run.get("output")
     return (
         check_run.get("status") == projection.check_status
@@ -169,7 +183,7 @@ def _matches_projection(check_run: dict[str, object], projection: AdvisoryCheckP
 def _result(
     *,
     status: AdvisoryCheckProjectionStatus,
-    projection: AdvisoryCheckProjection,
+    projection: GitHubCheckProjection,
     installation_token: GitHubAppInstallationToken,
     check_run: dict[str, object],
 ) -> AdvisoryCheckProjectionResult:
@@ -221,7 +235,7 @@ def _result(
     )
 
 
-def _conclusion_matches(check_run: dict[str, object], projection: AdvisoryCheckProjection) -> bool:
+def _conclusion_matches(check_run: dict[str, object], projection: GitHubCheckProjection) -> bool:
     if projection.conclusion is None:
         return check_run.get("conclusion") is None
     return check_run.get("conclusion") == projection.conclusion

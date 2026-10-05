@@ -331,6 +331,7 @@ class MergeTrainRepositoryPolicy(BaseModel):
     enqueue: MergeTrainEnqueuePolicy
     merge_identity: MergeTrainIdentity
     service_authz: MergeTrainServiceAuthz = Field(default_factory=MergeTrainServiceAuthz)
+    config_authority_events_enabled: bool = Field(default=False, exclude_if=lambda value: not value)
     github_token: MergeTrainGitHubTokenSource = Field(default_factory=MergeTrainGitHubTokenSource)
     scheduler: MergeTrainSchedulerPolicy = Field(default_factory=MergeTrainSchedulerPolicy)
     provider_delivery_protection_expectation: ProviderDeliveryProtectionExpectationV1 | None = (
@@ -494,6 +495,10 @@ def load_merge_train_policy(policy_file: Path) -> MergeTrainPolicy:
 def merge_train_policy_sha256(policy: MergeTrainPolicy) -> str:
     policy_payload = policy.model_dump(mode="json")
     for repository_policy in policy_payload.get("policies", ()):
+        if isinstance(repository_policy, dict) and not repository_policy.get(
+            "config_authority_events_enabled"
+        ):
+            repository_policy.pop("config_authority_events_enabled", None)
         enqueue_policy = (
             repository_policy.get("enqueue") if isinstance(repository_policy, dict) else None
         )
