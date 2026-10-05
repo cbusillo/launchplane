@@ -23,6 +23,30 @@ from tests.test_release_review import github_read, profile, seed
 
 
 class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_client_can_accept_again_after_a_stopped_release(self) -> None:
+        from control_plane.client_release import ClientReleaseRunView
+
+        self.store.write_product_profile_record(
+            profile().model_copy(update={"release_on_acceptance": "promote"})
+        )
+        accepted = await self.post()
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        previous = self.store.list_release_review_decision_records(product="example-site")[0]
+        with patch(
+            "control_plane.http_routes.release_review.read_client_release_run",
+            return_value=ClientReleaseRunView(
+                decision_record_id=previous.record_id,
+                rollback_drill=False,
+                state="stopped",
+                steps=(),
+            ),
+        ):
+            repeated = await self.post()
+        self.assertEqual(repeated.status_code, 200, repeated.text)
+        latest = self.store.list_release_review_decision_records(product="example-site")[0]
+        self.assertNotEqual(previous.record_id, latest.record_id)
+        self.assertEqual(latest.checklist_digest, previous.checklist_digest)
+
     def setUp(self) -> None:
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)

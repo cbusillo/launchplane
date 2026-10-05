@@ -10,7 +10,7 @@ for (const field of ["Image repository", "Production use", "Releases on acceptan
     const apply = panel.getByRole("button", { name: "Apply", exact: true });
     await expect(apply).toBeDisabled();
     if (field === "Image repository") await panel.getByLabel(field, { exact: true }).fill("ghcr.io/example/atlas-commerce");
-    else await panel.getByLabel(field, { exact: true }).selectOption(field === "Production use" ? "live" : "promote");
+    else await panel.getByLabel(field, { exact: true }).selectOption(field === "Production use" ? "live" : "director_standing");
     await panel.getByLabel("Change reason").fill("Review the classification or package move.");
     await panel.getByRole("button", { name: "Dry run", exact: true }).click();
     await expect(apply).toBeEnabled();

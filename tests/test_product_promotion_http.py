@@ -1765,8 +1765,8 @@ class GenericWebPromotionAdapterInventoryTests(unittest.TestCase):
         # adapter must resolve the target for testing's inventory build instead
         # of failing on the empty request artifact.
         from control_plane.drivers.generic_web_dispatch import GenericWebProdPromotionEnvelope
-        from control_plane.http_routes.generic_web import (
-            _GenericWebProdPromotionProviderMutationAdapter,
+        from control_plane.generic_web_promotion_provider_adapter import (
+            GenericWebProdPromotionProviderMutationAdapter,
         )
 
         with TemporaryDirectory() as temporary_directory_name:
@@ -1790,10 +1790,10 @@ class GenericWebPromotionAdapterInventoryTests(unittest.TestCase):
             lane = next(candidate for candidate in profile.lanes if candidate.instance == "prod")
             provider = Mock()
             with patch(
-                "control_plane.http_routes.generic_web.default_generic_web_deploy_provider",
+                "control_plane.generic_web_promotion_provider_adapter.default_generic_web_deploy_provider",
                 return_value=provider,
             ):
-                adapter = _GenericWebProdPromotionProviderMutationAdapter(
+                adapter = GenericWebProdPromotionProviderMutationAdapter(
                     control_plane_root=Path(temporary_directory_name),
                     record_store=store,
                     promotion_request=GenericWebProdPromotionEnvelope.model_validate(
@@ -1823,8 +1823,8 @@ class GenericWebPromotionAdapterRollbackTests(unittest.TestCase):
     def _apply(*, rollback_status: ReleaseStatus) -> bool:
         from control_plane.drivers.generic_web_dispatch import GenericWebProdPromotionEnvelope
         from control_plane.generic_web_promotion_http import GenericWebProdPromotionRecords
-        from control_plane.http_routes.generic_web import (
-            _GenericWebProdPromotionProviderMutationAdapter,
+        from control_plane.generic_web_promotion_provider_adapter import (
+            GenericWebProdPromotionProviderMutationAdapter,
         )
         from control_plane.workflows.generic_web_promotion import GenericWebProdPromotionResult
 
@@ -1844,20 +1844,20 @@ class GenericWebPromotionAdapterRollbackTests(unittest.TestCase):
         )
         with (
             patch(
-                "control_plane.http_routes.generic_web.default_generic_web_deploy_provider",
+                "control_plane.generic_web_promotion_provider_adapter.default_generic_web_deploy_provider",
                 return_value=Mock(),
             ),
             patch(
-                "control_plane.http_routes.generic_web.execute_generic_web_prod_promotion_result",
+                "control_plane.generic_web_promotion_provider_adapter.execute_generic_web_prod_promotion_result",
                 return_value=(GenericWebProdPromotionRecords(), result),
             ),
             patch.object(
-                _GenericWebProdPromotionProviderMutationAdapter,
+                GenericWebProdPromotionProviderMutationAdapter,
                 "resolve_deploy_target",
                 return_value=Mock(),
             ),
         ):
-            adapter = _GenericWebProdPromotionProviderMutationAdapter(
+            adapter = GenericWebProdPromotionProviderMutationAdapter(
                 control_plane_root=Path("."),
                 record_store=Mock(),
                 promotion_request=GenericWebProdPromotionEnvelope.model_validate(

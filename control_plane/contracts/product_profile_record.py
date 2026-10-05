@@ -532,7 +532,7 @@ class ProductOwnerProfile(BaseModel):
         return bool(self.github_id)
 
 
-ReleaseOnAcceptance = Literal["held", "promote", "promote_with_rollback_drill"]
+ReleaseOnAcceptance = Literal["held", "promote", "promote_with_rollback_drill", "director_standing"]
 
 
 class LaunchplaneProductProfileRecord(BaseModel):
