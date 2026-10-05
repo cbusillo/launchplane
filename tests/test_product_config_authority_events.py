@@ -195,6 +195,19 @@ class ConfigAuthorityEventTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.scan(payload={"before": "0" * 40, "after": self.head})
 
+    def test_cached_blob_is_reused_but_conflicting_tree_size_refuses(self) -> None:
+        from control_plane.product_config_authority_events import GitHubConfigAuthoritySource
+
+        source = GitHubConfigAuthoritySource(self.transport, "example/site")
+        source.resolve_commit(self.head)
+        original = source.read_blob(self.head, "settings.json")
+        source.read_blob(self.head, "settings.json")
+        blob_reads = [path for path in self.transport.reads if "/git/blobs/" in path]
+        self.assertEqual(len(blob_reads), 1)
+        source.trees[self.head]["settings.json"]["size"] = len(original) + 1
+        with self.assertRaises(ValueError):
+            source.read_blob(self.head, "settings.json")
+
     def test_baseline_read_error_refuses_and_symlink_matches_cli(self) -> None:
         (self.root / "runtime.env").write_text("PRODUCT_DOMAIN=changed.example\n")
         _commit_all(self.root)

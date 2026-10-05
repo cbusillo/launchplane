@@ -136,7 +136,10 @@ class GitHubConfigAuthoritySource:
         if size > MAX_SCANNED_FILE_BYTES:
             raise ValueError("Source blob exceeds scanner size limit.")
         if sha in self.blobs:
-            return self.blobs[sha]
+            data = self.blobs[sha]
+            if len(data) != size:
+                raise ValueError("Source blob size does not match its immutable identity.")
+            return data
         blob = _object(self.read(f"{self.prefix}/git/blobs/{sha}"))
         content = blob.get("content")
         if (
