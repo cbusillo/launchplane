@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from control_plane.contracts.record_failures import record_failure_summary
 
+from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
-import time
 import unittest
 from unittest.mock import patch
 
@@ -20,8 +20,12 @@ from control_plane.provider_operations import (
     run_durable_provider_operation,
     resume_acquired_provider_operation,
 )
-from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.idempotency_record import (
+    LaunchplaneIdempotencyRecord,
+    format_launchplane_mutation_timestamp,
+    parse_launchplane_mutation_timestamp,
+)
+from control_plane.storage.postgres import MutationReservationUpdateResult, PostgresRecordStore
 
 
 _SCOPE = "github-actions:provider-operation-test"
@@ -43,7 +47,6 @@ class _FakeAdapter:
         apply_outcome: ProviderMutationOutcome | None = None,
         apply_error: BaseException | None = None,
         observation: ProviderObservation | None = None,
-        apply_delay_seconds: float = 0,
         apply_started: Event | None = None,
         apply_release: Event | None = None,
         checkpoint_before_rejection: bool = False,
@@ -55,7 +58,6 @@ class _FakeAdapter:
         )
         self._apply_error = apply_error
         self._observation = observation or ProviderObservation(outcome="unknown")
-        self._apply_delay_seconds = apply_delay_seconds
         self._apply_started = apply_started
         self._apply_release = apply_release
         self._checkpoint_before_rejection = checkpoint_before_rejection
@@ -97,8 +99,6 @@ class _FakeAdapter:
             self._apply_started.set()
         if self._apply_release is not None:
             self._apply_release.wait(timeout=5)
-        if self._apply_delay_seconds:
-            time.sleep(self._apply_delay_seconds)
         if self._apply_error is not None:
             raise self._apply_error
         return self._apply_outcome
@@ -308,29 +308,46 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
     def test_long_apply_renews_lease_and_completes_with_latest_reservation(self) -> None:
         with TemporaryDirectory() as directory:
             fixture = _StoreFixture(directory)
-            adapter = _FakeAdapter(apply_delay_seconds=0.05)
-            with patch.object(
-                fixture.store,
-                "renew_mutation_reservation",
-                wraps=fixture.store.renew_mutation_reservation,
-            ) as renew:
-                result = fixture.run(
-                    adapter,
-                    lease_seconds=2,
-                    heartbeat_interval_seconds=0.01,
-                )
+            renewal_committed = Event()
+            adapter = _FakeAdapter(apply_release=renewal_committed)
+            observed_at = "2026-09-01T00:00:00Z"
+            original_expiry = ""
+            renew_reservation = fixture.store.renew_mutation_reservation
 
-            self.assertEqual(result.status, "completed")
-            self.assertGreaterEqual(renew.call_count, 1)
+            def database_timestamp(_session: object) -> str:
+                return observed_at
 
-    def test_successful_outcome_survives_transient_heartbeat_failure(self) -> None:
-        with TemporaryDirectory() as directory:
-            fixture = _StoreFixture(directory)
-            adapter = _FakeAdapter(apply_delay_seconds=0.03)
-            with patch.object(
-                fixture.store,
-                "renew_mutation_reservation",
-                side_effect=RuntimeError("temporary database outage"),
+            def renew_after_effect_started(
+                *, reservation: LaunchplaneIdempotencyRecord, lease_seconds: int
+            ) -> MutationReservationUpdateResult:
+                nonlocal observed_at, original_expiry
+                if reservation.provider_effect_started_at and not renewal_committed.is_set():
+                    original_expiry = reservation.lease_expires_at
+                    observed_at = format_launchplane_mutation_timestamp(
+                        parse_launchplane_mutation_timestamp(
+                            original_expiry, field_name="lease_expires_at"
+                        )
+                        - timedelta(seconds=1)
+                    )
+                    renewal = renew_reservation(
+                        reservation=reservation, lease_seconds=lease_seconds
+                    )
+                    if renewal.status == "updated":
+                        # Finish at original expiry: only the committed renewal permits completion.
+                        observed_at = original_expiry
+                        renewal_committed.set()
+                    return renewal
+                return renew_reservation(reservation=reservation, lease_seconds=lease_seconds)
+
+            with (
+                patch.object(
+                    fixture.store, "_database_mutation_timestamp", side_effect=database_timestamp
+                ),
+                patch.object(
+                    fixture.store,
+                    "renew_mutation_reservation",
+                    side_effect=renew_after_effect_started,
+                ),
             ):
                 result = fixture.run(
                     adapter,
@@ -338,8 +355,118 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
                     heartbeat_interval_seconds=0.01,
                 )
 
+            self.assertTrue(renewal_committed.is_set(), "No post-effect renewal committed")
+            self.assertEqual(result.status, "completed")
+            stored = fixture.stored()
+            self.assertEqual(stored.state, "completed")
+            self.assertGreater(stored.lease_expires_at, original_expiry)
+            self.assertEqual(adapter.apply_calls, 1)
+
+    def test_successful_outcome_survives_transient_heartbeat_failure(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            renewal_failed = Event()
+            adapter = _FakeAdapter(apply_release=renewal_failed)
+            renew_reservation = fixture.store.renew_mutation_reservation
+
+            def fail_after_effect_started(
+                *, reservation: LaunchplaneIdempotencyRecord, lease_seconds: int
+            ) -> MutationReservationUpdateResult:
+                if reservation.provider_effect_started_at:
+                    renewal_failed.set()
+                    raise RuntimeError("temporary database outage")
+                return renew_reservation(reservation=reservation, lease_seconds=lease_seconds)
+
+            with (
+                patch.object(
+                    fixture.store,
+                    "_database_mutation_timestamp",
+                    return_value="2026-09-01T00:00:00Z",
+                ),
+                patch.object(
+                    fixture.store,
+                    "renew_mutation_reservation",
+                    side_effect=fail_after_effect_started,
+                ),
+            ):
+                result = fixture.run(
+                    adapter,
+                    lease_seconds=2,
+                    heartbeat_interval_seconds=0.01,
+                )
+
+            self.assertTrue(renewal_failed.is_set(), "No post-effect renewal failure observed")
             self.assertEqual(result.status, "completed")
             self.assertEqual(fixture.stored().state, "completed")
+            self.assertEqual(adapter.apply_calls, 1)
+
+    def test_heartbeat_recovers_after_transient_failure_while_effect_runs(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            renewal_failed = Event()
+            renewal_committed = Event()
+            adapter = _FakeAdapter(apply_release=renewal_committed)
+            observed_at = "2026-09-01T00:00:00Z"
+            original_expiry = ""
+            recovered_records: list[LaunchplaneIdempotencyRecord] = []
+            renew_reservation = fixture.store.renew_mutation_reservation
+
+            def database_timestamp(_session: object) -> str:
+                return observed_at
+
+            def fail_once_then_renew(
+                *, reservation: LaunchplaneIdempotencyRecord, lease_seconds: int
+            ) -> MutationReservationUpdateResult:
+                nonlocal observed_at, original_expiry
+                if reservation.provider_effect_started_at and not renewal_failed.is_set():
+                    original_expiry = reservation.lease_expires_at
+                    observed_at = format_launchplane_mutation_timestamp(
+                        parse_launchplane_mutation_timestamp(
+                            original_expiry, field_name="lease_expires_at"
+                        )
+                        - timedelta(seconds=1)
+                    )
+                    renewal_failed.set()
+                    raise RuntimeError("temporary database outage")
+                renewal = renew_reservation(reservation=reservation, lease_seconds=lease_seconds)
+                if (
+                    renewal_failed.is_set()
+                    and not renewal_committed.is_set()
+                    and renewal.status == "updated"
+                ):
+                    recovered_records.append(fixture.stored())
+                    # Completion at original expiry requires the recovered lease.
+                    observed_at = original_expiry
+                    renewal_committed.set()
+                return renewal
+
+            with (
+                patch.object(
+                    fixture.store, "_database_mutation_timestamp", side_effect=database_timestamp
+                ),
+                patch.object(
+                    fixture.store,
+                    "renew_mutation_reservation",
+                    side_effect=fail_once_then_renew,
+                ),
+            ):
+                result = fixture.run(
+                    adapter,
+                    lease_seconds=2,
+                    heartbeat_interval_seconds=0.01,
+                )
+
+            self.assertTrue(renewal_failed.is_set(), "No post-effect renewal failure observed")
+            self.assertTrue(renewal_committed.is_set(), "No renewal recovered while apply waited")
+            recovered = recovered_records[0]
+            self.assertEqual(recovered.state, "running")
+            self.assertTrue(recovered.provider_effect_started_at)
+            self.assertGreater(recovered.lease_expires_at, original_expiry)
+            self.assertEqual(result.status, "completed")
+            stored = fixture.stored()
+            self.assertEqual(stored.state, "completed")
+            self.assertGreaterEqual(stored.lease_expires_at, recovered.lease_expires_at)
+            self.assertEqual(adapter.apply_calls, 1)
 
     def test_active_target_fence_blocks_different_idempotency_key(self) -> None:
         with TemporaryDirectory() as directory:
@@ -838,8 +965,9 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
 
 
 class MutationReservationAdoptionStorageTests(unittest.TestCase):
+    @staticmethod
     def _reconcile_required_store(
-        self, directory: str
+        directory: str,
     ) -> tuple[PostgresRecordStore, LaunchplaneIdempotencyRecord]:
         store = PostgresRecordStore(
             database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
@@ -858,8 +986,9 @@ class MutationReservationAdoptionStorageTests(unittest.TestCase):
             reservation=reservation,
             reconciliation_key=_RECONCILIATION_KEY,
         )
-        assert marked.record is not None
-        return store, marked.record
+        marked_record = marked.record
+        assert marked_record is not None
+        return store, marked_record
 
     def test_adopts_reconcile_required_with_matching_key(self) -> None:
         with TemporaryDirectory() as directory:
@@ -932,10 +1061,11 @@ class MutationReservationAdoptionStorageTests(unittest.TestCase):
                 lease_owner="instance-b",
                 lease_seconds=300,
             )
-            assert retry.record is not None
+            retry_record = retry.record
+            assert retry_record is not None
             second_reconcile = store.mark_mutation_reconcile_required(
-                reservation=retry.record,
-                reconciliation_key=retry.record.reconciliation_key,
+                reservation=retry_record,
+                reconciliation_key=retry_record.reconciliation_key,
             )
 
             adoption = store.adopt_reconciled_mutation(
@@ -947,9 +1077,10 @@ class MutationReservationAdoptionStorageTests(unittest.TestCase):
 
             self.assertEqual(second_reconcile.status, "updated")
             self.assertEqual(adoption.status, "reservation_mismatch")
-            assert adoption.record is not None
-            self.assertEqual(adoption.record.attempt, first_reconcile.attempt + 1)
-            self.assertEqual(adoption.record.state, "reconcile_required")
+            adoption_record = adoption.record
+            assert adoption_record is not None
+            self.assertEqual(adoption_record.attempt, first_reconcile.attempt + 1)
+            self.assertEqual(adoption_record.state, "reconcile_required")
 
     def test_release_removes_own_running_reservation(self) -> None:
         with TemporaryDirectory() as directory:

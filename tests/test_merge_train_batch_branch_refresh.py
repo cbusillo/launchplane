@@ -74,7 +74,7 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
             snapshot = snapshot.model_copy(update={"base_sha": "previous-base"})
         with (
             TemporaryDirectory() as directory,
-            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
             patch(
                 "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
                 _FakeMergeTrainGitHubClient,

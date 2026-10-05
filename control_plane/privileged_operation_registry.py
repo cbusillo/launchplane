@@ -437,6 +437,7 @@ def plan_managed_merge_train_policy_import(
         )
     try:
         request.record.policy.require_advisory_review()
+        request.record.policy.require_supported_token_sources()
     except ValueError as error:
         raise PrivilegedOperationPlannerError(str(error)) from error
     list_records = getattr(record_store, "list_merge_train_policy_records", None)

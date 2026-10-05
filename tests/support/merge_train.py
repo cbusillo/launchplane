@@ -791,7 +791,7 @@ product = "launchplane"
 context = "launchplane"
 
 [policies.github_token]
-env_var = "GH_TOKEN"
+runtime_context = "example_context"
 {scheduler_table}
 """
 

@@ -3319,6 +3319,15 @@ export type ProductProfileListResponse = {
     trace_id: string;
 };
 
+export type ProductProfileMutationReceipt = {
+    field: 'owner' | 'image-repository' | 'production-use';
+    idempotency_key: string;
+    original_trace_id: string;
+    product: string;
+    state: 'completed' | 'unresolved';
+    trace_id: string;
+};
+
 export type ProductProfileResponse = {
     profile: LaunchplaneProductProfileRecord;
     status: 'ok';
@@ -4900,6 +4909,37 @@ export type ReadProductProfileResponses = {
 };
 
 export type ReadProductProfileResponse = ReadProductProfileResponses[keyof ReadProductProfileResponses];
+
+export type ReadProductProfileMutationReceiptData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+        field: 'owner' | 'image-repository' | 'production-use';
+    };
+    query: {
+        operation_key: string;
+    };
+    url: '/v1/product-profiles/{product}/mutation-receipts/{field}';
+};
+
+export type ReadProductProfileMutationReceiptErrors = {
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadProductProfileMutationReceiptError = ReadProductProfileMutationReceiptErrors[keyof ReadProductProfileMutationReceiptErrors];
+
+export type ReadProductProfileMutationReceiptResponses = {
+    200: ProductProfileMutationReceipt;
+};
+
+export type ReadProductProfileMutationReceiptResponse = ReadProductProfileMutationReceiptResponses[keyof ReadProductProfileMutationReceiptResponses];
 
 export type ReadProductReviewData = {
     body?: never;

@@ -159,7 +159,10 @@ class MergeAdmissionEvidenceFailureHttpTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "test-token"}, clear=True),
+            patch(
+                "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                return_value="test-token",
+            ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
@@ -235,7 +238,10 @@ class MergeAdmissionEvidenceFailureHttpTests(unittest.IsolatedAsyncioTestCase):
         repository = "cbusillo/Mixed_Case_Repo"
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "test-token"}, clear=True),
+            patch(
+                "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                return_value="test-token",
+            ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(
@@ -287,7 +293,10 @@ class MergeAdmissionEvidenceFailureHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_admission_reads_evidence_with_the_policy_credential(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GH_TOKEN": "policy-token"}, clear=True),
+            patch(
+                "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                return_value="policy-token",
+            ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)

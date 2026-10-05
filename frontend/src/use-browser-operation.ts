@@ -11,6 +11,8 @@ import {
   prepareBrowserOperation,
   recoverBrowserOperationState,
   resetBrowserOperation,
+  reconcileBrowserOperation,
+  type BrowserOperationIdentity,
   retryBrowserOperation,
   type BrowserOperationEnvelope,
   type BrowserOperationFailure,
@@ -21,6 +23,7 @@ import {
 
 export interface BrowserOperationController<TPayload, TResponse> {
   cancel: () => void;
+  reconcile: (identity: BrowserOperationIdentity, envelope: BrowserOperationEnvelope) => boolean;
   reset: () => boolean;
   run: (payload: TPayload) => Promise<TResponse | null>;
   state: BrowserOperationState;
@@ -169,7 +172,15 @@ export function useBrowserOperationController<
     }
   }
 
-  return { cancel, reset, run, state };
+  function reconcile(identity: BrowserOperationIdentity, envelope: BrowserOperationEnvelope) {
+    if (!mountedRef.current || scopeRef.current !== scope) return false;
+    try {
+      updateState(reconcileBrowserOperation(stateRef.current, identity, envelope));
+      return true;
+    } catch { return false; }
+  }
+
+  return { cancel, reconcile, reset, run, state };
 }
 
 function recoverControllerState(scope: string, readOnly: boolean): BrowserOperationState {
