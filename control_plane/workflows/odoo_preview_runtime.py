@@ -1260,6 +1260,7 @@ def execute_odoo_preview_dokploy_apply(
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     provider_lease_check: Callable[[], None] | None = None,
     expected_runtime_identity: RuntimeIdentity | None = None,
+    propagate_domain_lookup_error: bool = False,
 ) -> OdooPreviewDokployApplyResult:
     plan = request.dry_run_plan
     if plan.status != "ready":
@@ -1292,6 +1293,7 @@ def execute_odoo_preview_dokploy_apply(
             token=token,
             request=request,
             provider_effect_checkpoint=provider_effect_checkpoint,
+            propagate_domain_lookup_error=propagate_domain_lookup_error,
         )
     return _execute_refresh(
         host=host,
@@ -1738,6 +1740,7 @@ def _execute_destroy(
     token: str,
     request: OdooPreviewDokployApplyRequest,
     provider_effect_checkpoint: Callable[[str], None] | None,
+    propagate_domain_lookup_error: bool,
 ) -> OdooPreviewDokployApplyResult:
     plan = request.dry_run_plan
     compose_id = plan.compose_ref
@@ -1749,6 +1752,7 @@ def _execute_destroy(
         domain_host=plan.domain_host,
         delete_volumes=plan.delete_volumes,
         continue_after_domain_cleanup_error=False,
+        propagate_domain_lookup_error=propagate_domain_lookup_error,
         missing_resource_is_clean=True,
         before_provider_mutation=provider_effect_checkpoint,
     )
