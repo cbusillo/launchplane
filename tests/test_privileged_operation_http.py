@@ -2082,6 +2082,40 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             {AUTHZ_POLICY_OPERATION_PROPOSE_ACTION, MERGE_TRAIN_POLICY_OPERATION_PROPOSE_ACTION},
         )
 
+    async def test_agent_proposer_removal_prepares_realistic_drift_without_applying(self) -> None:
+        from control_plane.authz_candidate_preparation import (
+            compile_agent_policy_proposer_candidate,
+        )
+
+        _, grant = compile_agent_policy_proposer_candidate(
+            current_policy=_policy(), identity=_SETUP_IDENTITY, intent="add"
+        )
+        assert grant is not None
+        payload = _policy().model_dump(mode="json")
+        drifted_rule = grant.desired_policy.local_operators[0].model_dump(mode="json")
+        drifted_rule["actions"].append(AUTHZ_POLICY_OPERATION_READ_ACTION)
+        payload["local_operators"] = [drifted_rule]
+        drifted_policy = LaunchplaneAuthzPolicy.model_validate(payload)
+        results, records, reviews = await self._prepare_agent_product_setup(
+            policy=drifted_policy,
+            payloads=(
+                {
+                    "candidate_id": "agent-policy-proposer",
+                    "intent": "remove",
+                    "source_event_id": "ui:remove-drifted-proposer",
+                },
+            ),
+        )
+        self.assertEqual(results[0]["status"], 200, results)
+        record = records[0]
+        assert isinstance(record, PrivilegedOperationRecord)
+        assert isinstance(record.request, ManagedAuthzPolicySetProposalInput)
+        assert isinstance(record.evidence, ManagedAuthzPolicySetHumanEvidence)
+        self.assertEqual(record.status, "planned")
+        self.assertEqual(record.request.desired_policy.local_operators, ())
+        self.assertGreater(record.evidence.diff.removed_rule_count, 0)
+        self.assertIn("unexpected rules", reviews[0])
+
     async def test_terminal_agent_proposes_and_reads_only_its_redacted_policy_summary(
         self,
     ) -> None:

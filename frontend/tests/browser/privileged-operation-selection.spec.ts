@@ -79,7 +79,7 @@ test("agent proposal approval waits for matching visible policy details", async 
   const review = {
     schema_version: 1, operation_id: operationId,
     descriptor_id: "managed-authz-policy-set", descriptor_version: 1,
-    operation_class: "managed_authz_policy_set", safety_class: "secret_free",
+    operation_class: "managed_authz_policy_set", safety_class: "policy_admin",
     title: "Review agent policy proposal", requested_by_kind: "local_operator",
     lifecycle: { status: "planned", created_at: "2026-10-05T12:00:00Z", updated_at: "2026-10-05T12:00:00Z", expires_at: "2026-10-06T12:00:00Z", expiry_state: "active" },
     blockers: { state: "clear" },
@@ -106,7 +106,7 @@ test("agent proposal approval waits for matching visible policy details", async 
         await route.fulfill({ json: { status: "ok", record: {
           operation_id: detailMode === "mismatch" ? "another-plan" : operationId,
           requested_by: { identity_type: "local_operator", principal_sha256: "a".repeat(64) },
-          request: { managed_set_id: "example.proposed-access", desired_policy: { local_operator_rules: [{ subjects: ["example-policy-agent"], token_labels: ["example-policy-token"], actions: ["example.read"], products: ["example-product"] }] } },
+          request: { managed_set_id: "example.proposed-access", desired_policy: { local_operators: [{ subjects: ["example-policy-agent"], token_labels: ["example-policy-token"], actions: ["example.read"], products: ["example-product"] }] } },
           evidence: { diff: { rules_added: 1, rules_removed: 0 } },
         }, events: [] } });
       }
