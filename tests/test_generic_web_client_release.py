@@ -406,6 +406,38 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         read.assert_called_once()
         self.assertEqual(self.provider.deployed_artifacts, [])
 
+    @patch(
+        "control_plane.workflows.verireel_prod_backup_gate_operation_worker._utc_now_timestamp",
+        side_effect=lambda: datetime.now(UTC).isoformat(),
+    )
+    def test_changed_notes_while_waiting_get_fresh_acceptance_and_backup(self, _clock: Any) -> None:
+        self.switch("director_standing")
+        self.advance()
+        prior = self.store.list_release_review_decision_records(product=self.profile.product)[0]
+        self.capture()
+        original_read = self.raw_read
+
+        def changed_read(path: str) -> object:
+            result = original_read(path)
+            if isinstance(result, list):
+                return [
+                    {**item, "body": "## Client test notes\nCheck the updated behavior."}
+                    for item in result
+                ]
+            return result
+
+        self.raw_read = changed_read
+        self.advance()
+        latest = self.store.list_release_review_decision_records(product=self.profile.product)[0]
+        self.assertNotEqual(latest.record_id, prior.record_id)
+        self.assertNotEqual(latest.checklist_digest, prior.checklist_digest)
+        self.assertEqual(latest.checklist.candidate, prior.checklist.candidate)
+        self.assertEqual(len(self.store.list_verireel_prod_backup_gate_operation_records()), 2)
+        self.assertEqual(self.provider.deployed_artifacts, [])
+        self.capture()
+        self.advance()
+        self.assertEqual(self.provider.deployed_artifacts, [latest.checklist.candidate.artifact_id])
+
     def test_stale_candidate_or_hold_after_backup_never_deploys(self) -> None:
         self.accept()
         self.advance()

@@ -448,7 +448,17 @@ def _record_standing_acceptance(
             and previous.checklist.repository == profile.repository
             and (
                 previous.decision != "accepted"
-                or (previous.release_issue_url and previous.release_start)
+                or (
+                    previous.release_issue_url
+                    and previous.release_start
+                    and (
+                        run := read_client_release_run(
+                            store=store, profile=profile, decision=previous
+                        )
+                    )
+                    is not None
+                    and run.state != "waiting"
+                )
             )
         ):
             return
