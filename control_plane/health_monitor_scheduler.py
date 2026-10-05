@@ -15,6 +15,7 @@ from control_plane.contracts.idempotency_record import (
     complete_launchplane_mutation_reservation,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.public_ingress_monitoring import PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS
 from control_plane.provider_operations import _ReservationHeartbeat
 from control_plane.workflows.public_ingress_monitor import (
     public_ingress_notification_drivers,
@@ -22,7 +23,7 @@ from control_plane.workflows.public_ingress_monitor import (
     run_public_ingress_monitor_once,
 )
 
-MONITOR_INTERVAL_SECONDS = 30 * 60
+MONITOR_INTERVAL_SECONDS = PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS
 MONITOR_COMPLETION_GRACE_SECONDS = 5 * 60
 MONITOR_POLL_SECONDS = 30
 _SCOPE = "launchplane:health-monitor-scheduler"
