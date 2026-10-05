@@ -4030,26 +4030,30 @@ record layers, with service-context values taking precedence; secret overlays
 are never App-selector authority. It publishes the
 `launchplane/owner-review` check run with Checks write only. The Delivery App
 publishes release-record issues and the other service feedback described above.
-Client-review decision comments temporarily retain their pre-migration managed
+The Client-review publisher temporarily retains its pre-migration managed
 context `GITHUB_TOKEN` credential under the Director-authorized partial rollback
 tracked by [#3064](https://github.com/cbusillo/launchplane/issues/3064), while the
 Delivery selector activation is pending. That publisher verifies the credential's
 numeric user id and reconciles its own comment receipt; it never uses `/user`
 with an installation token and has no automatic App-to-PAT fallback. The App-only
-resolver for every other service consumer remains unchanged. Missing feedback
-credentials leave the saved decision pending without changing it.
+resolver for every other service consumer remains unchanged. This context credential
+also supplies its PR facts and acceptance-carry reads. Missing credentials leave
+the saved decision pending and prevent its Advisory check from being refreshed.
 
 After shipment, Chris configures the Delivery selector through the supported
 service path. [#3020](https://github.com/cbusillo/launchplane/issues/3020) owns
 resuming the decision publisher's App migration after selection, including numeric
 `performed_via_github_app.id` receipt matching, before retiring its context token.
-Confirm the next `launchplane/owner-review` check, decision/preview comment and
-release-record issue have the intended App identity. Verify Advisory
+Until that publisher migration ships, decision comments intentionally retain the
+context token's user identity, even after selecting the Delivery App. Confirm the
+next `launchplane/owner-review` check, preview comment and release-record issue
+have the intended App identity. Verify Advisory
 installation coverage and accepted operation grants wherever those paths run;
 source tests are not live installation evidence. Apply the selector promptly
 after deployment and resend feedback for queued Client-labelled PRs through the
 existing product-review feedback retry route, so their current-head checks are
-republished. Only after these receipts and
-remaining-consumer checks should Chris delete the obsolete per-context
+republished. Only after #3020's resumed publisher migration ships, decision-comment
+App receipts are verified, and remaining-consumer checks pass should Chris delete
+the obsolete per-context
 `GITHUB_TOKEN` secrets and revoke the old PAT. Other-token migrations keep their
 separate issue scopes; the hold on the shared Odoo Docker token still applies.
