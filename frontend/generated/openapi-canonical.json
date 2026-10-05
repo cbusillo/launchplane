@@ -1152,6 +1152,7 @@
         "properties": {
           "candidate_id": {
             "enum": [
+              "agent-policy-proposer",
               "ordinary-agent-delivery-administration",
               "administrator-product-evidence-read",
               "ordinary-agent-enrollment-requester",
@@ -25819,6 +25820,9 @@
               },
               {
                 "$ref": "#/components/schemas/PrivilegedOperationAgentActor"
+              },
+              {
+                "$ref": "#/components/schemas/PrivilegedOperationLocalOperatorActor"
               }
             ],
             "title": "Actor"
@@ -26028,6 +26032,32 @@
         "title": "PrivilegedOperationListResponse",
         "type": "object"
       },
+      "PrivilegedOperationLocalOperatorActor": {
+        "additionalProperties": false,
+        "properties": {
+          "identity_type": {
+            "const": "local_operator",
+            "default": "local_operator",
+            "title": "Identity Type",
+            "type": "string"
+          },
+          "login": {
+            "const": "local-operator",
+            "default": "local-operator",
+            "title": "Login",
+            "type": "string"
+          },
+          "principal_sha256": {
+            "title": "Principal Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "principal_sha256"
+        ],
+        "title": "PrivilegedOperationLocalOperatorActor",
+        "type": "object"
+      },
       "PrivilegedOperationPlanEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -26216,6 +26246,9 @@
               },
               {
                 "$ref": "#/components/schemas/PrivilegedOperationAgentActor"
+              },
+              {
+                "$ref": "#/components/schemas/PrivilegedOperationLocalOperatorActor"
               }
             ],
             "title": "Requested By"
@@ -26401,7 +26434,8 @@
           "requested_by_kind": {
             "enum": [
               "github_human",
-              "terminal_agent"
+              "terminal_agent",
+              "local_operator"
             ],
             "title": "Requested By Kind",
             "type": "string"
@@ -26483,6 +26517,7 @@
             "enum": [
               "github_human",
               "terminal_agent",
+              "local_operator",
               "system"
             ],
             "title": "Actor Type",

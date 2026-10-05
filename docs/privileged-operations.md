@@ -70,6 +70,44 @@ inert standard import plan; the form does not require a full policy body or
 routine reasons, record IDs, timestamps, or hashes. The prepared target has no
 ambient token binding or enabled scheduler, and is not execution-ready.
 
+## Agent Policy Proposals
+
+The configured `local_operator` identity may submit prepared access-policy and merge-train
+policy requests to `POST /v1/agent/privileged-operations/plans`. This requires
+exactly one explicit managed proposal rule in both runtime policy and a fresh
+active policy record. The two existing descriptors are
+`managed-authz-policy-set` and `managed-merge-train-policy-import`; secret
+rotation and retired delivery descriptors are not accepted by this surface.
+
+The request carries the descriptor, request, reason, related issue, and a stable
+`source_event_id`. Reuse that source event when a response is interrupted:
+identical retries return the same plan; changing the request conflicts. The
+response contains only a redacted summary and operation ID. Read the full record
+or semantic review through the existing explicit read grants, and open
+`/ui/engineering/privileged-operations?operation_id=<id>` for Director review.
+The [Launchplane skill helper](https://github.com/cbusillo/codex-skills/tree/main/skills/launchplane)
+provides `privileged-policy-propose --payload-file <private-file>`; it submits
+the proposal and returns the review link without approving or applying it.
+
+Creation persists a `planned` record and its event only. It installs no rule,
+changes no merge policy, and schedules no execution. The signed-in Director
+reviews the proposer, redacted change evidence and counts, then approves or
+rejects through the existing browser lifecycle. Callers with a `local_operator` identity cannot approve,
+cancel, revoke, or execute a plan, even if a policy mistakenly lists those
+actions. The independent `local_operator` requester stores only a domain-separated
+principal fingerprint, so its history and replay do not depend on terminal-agent
+credentials or ordinary-agent enrollment, sessions or leases.
+
+Before first use, the Director prepares **agent proposal access** in the Access
+policy tab and approves that separate managed authorization plan. See
+[the proposer grant](authorization-authority.md#preparing-agent-proposal-access).
+Code landing does not install it. Removing proposer access does not cancel
+already pending plans; those still need separate Director approval before expiry.
+After the first `local_operator` requester record is persisted, rollback must
+retain a reader that supports that requester type. Older records remain readable.
+Stage 2 scheduler activation remains a separate
+later proposal and approval.
+
 ## Approval And Execution Boundary
 
 Planning remains typed and dry-run-only. Phase 2 adds a separate finite human
@@ -150,7 +188,7 @@ time. The approval record has no approval-time policy-schema field, so this
 check carries current policy provenance and does not claim a capture-time schema
 transition.
 
-The mutation routes use a named GitHub-human browser dependency that:
+Human planning and transition routes use a named GitHub-human browser dependency that:
 
 1. authenticates the Launchplane GitHub session;
 2. enforces same-origin/fetch-metadata and single-use CSRF checks for writes;
@@ -177,13 +215,13 @@ The planning and approval actions are:
 | `privileged_secret_operation.approve`      | `secret_backed` | GitHub-human browser approval                   |
 | `privileged_secret_operation.revoke`       | `secret_backed` | GitHub-human browser revocation                 |
 | `privileged_operation_summary.read`        | `read`          | Counts-only agent projection                    |
-| `authz_policy_operation.propose`           | `policy_admin`  | Inert GitHub-human or terminal-agent proposal   |
+| `authz_policy_operation.propose`           | `policy_admin`  | Inert human or explicitly authorized agent proposal   |
 | `authz_policy_operation.read`              | `policy_admin`  | Explicitly authorized policy-plan reads         |
 | `authz_policy_operation.cancel`            | `policy_admin`  | GitHub-human policy-plan cancellation           |
 | `authz_policy_operation.approve`           | `policy_admin`  | GitHub-human browser approval                   |
 | `authz_policy_operation.revoke`            | `policy_admin`  | GitHub-human browser revocation                 |
 | `privileged_policy_operation_summary.read` | `read`          | Proposal-author agent projection                |
-| `merge_train_policy_operation.propose`     | `policy_admin`  | Inert GitHub-human or terminal-agent proposal   |
+| `merge_train_policy_operation.propose`     | `policy_admin`  | Inert human or explicitly authorized agent proposal   |
 | `merge_train_policy_operation.read`        | `policy_admin`  | Explicitly authorized policy-plan reads         |
 | `merge_train_policy_operation.cancel`      | `policy_admin`  | GitHub-human policy-plan cancellation           |
 | `merge_train_policy_operation.approve`     | `policy_admin`  | GitHub-human browser approval                   |
@@ -352,7 +390,7 @@ The persisted human evidence may include:
   unchanged targets.
 
 It never persists managed-secret IDs, secret-version IDs, ciphertext,
-plaintext, raw terminal-agent subjects/token labels, or raw planner error
+plaintext, raw terminal-agent or `local_operator` subjects/token labels, or raw planner error
 strings. A terminal-agent requester is persisted only as a domain-separated
 SHA-256 principal fingerprint. Agent projections are narrower: they contain
 counts, bounded stable keys, status, descriptor/version, and timestamps only;
