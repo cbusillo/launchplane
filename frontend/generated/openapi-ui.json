@@ -2100,6 +2100,123 @@
         "summary": "Read a Launchplane product profile"
       }
     },
+    "/v1/product-profiles/{product}/mutation-receipts/{field}": {
+      "get": {
+        "operationId": "read_product_profile_mutation_receipt",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "field",
+            "required": true,
+            "schema": {
+              "enum": [
+                "owner",
+                "image-repository",
+                "production-use"
+              ],
+              "title": "Field",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "operation_key",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Operation Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductProfileMutationReceipt"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Check completion of the caller's retained profile mutation key"
+      }
+    },
     "/v1/product-review": {
       "get": {
         "operationId": "read_product_review",
@@ -26938,6 +27055,56 @@
           "trace_id"
         ],
         "title": "ProductProfileListResponse",
+        "type": "object"
+      },
+      "ProductProfileMutationReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "enum": [
+              "owner",
+              "image-repository",
+              "production-use"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "original_trace_id": {
+            "default": "",
+            "title": "Original Trace Id",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "state": {
+            "default": "unresolved",
+            "enum": [
+              "completed",
+              "unresolved"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "idempotency_key",
+          "original_trace_id",
+          "product",
+          "state",
+          "trace_id"
+        ],
+        "title": "ProductProfileMutationReceipt",
         "type": "object"
       },
       "ProductProfileResponse": {

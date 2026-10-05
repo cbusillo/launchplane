@@ -13,6 +13,7 @@ import {
   prepareBrowserOperation,
   recoverBrowserOperationState,
   resetBrowserOperation,
+  reconcileBrowserOperation,
   retryBrowserOperation,
   stableRequestFingerprint,
 } from "../src/browser-operation.ts";
@@ -192,4 +193,23 @@ test("only a settled failure clears continuity after a dispatched uncertain requ
   assert.equal(settled.failure.traceId, failure.traceId);
   const next = await prepareBrowserOperation("profile", { value: "prelaunch" }, resetBrowserOperation(settled));
   assert.notEqual(next.identity.idempotencyKey, prepared.identity.idempotencyKey);
+});
+
+test("receipt reconciliation settles only the retained uncertain identity", async () => {
+  const ready = await prepareBrowserOperation("demo:owner:apply", { mode: "apply" });
+  const uncertain = failBrowserOperation(markBrowserOperationDispatched(beginBrowserOperation(ready)),
+    { code: "network", message: "lost", statusCode: 0, traceId: "" }, "uncertain");
+  const receipt = { trace_id: "read", original_trace_id: "original", replayed: true };
+  for (const [identity, envelope] of [
+    [{ ...uncertain.identity, idempotencyKey: "another" }, receipt],
+    [{ ...uncertain.identity, requestFingerprint: "another" }, receipt],
+    [uncertain.identity, { ...receipt, original_trace_id: "" }],
+    [uncertain.identity, { ...receipt, replayed: false }],
+  ]) assert.throws(() => reconcileBrowserOperation(uncertain, identity, envelope));
+  assert.throws(() => reconcileBrowserOperation(ready, ready.identity, receipt));
+  const settled = reconcileBrowserOperation(uncertain, uncertain.identity, receipt);
+  assert.equal(settled.requiresIdempotencyContinuity, false);
+  assert.equal(settled.receipt.originalTraceId, "original");
+  const next = await prepareBrowserOperation("demo:owner:apply", { mode: "apply", next: true }, resetBrowserOperation(settled));
+  assert.notEqual(next.identity.idempotencyKey, uncertain.identity.idempotencyKey);
 });

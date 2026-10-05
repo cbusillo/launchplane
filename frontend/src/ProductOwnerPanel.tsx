@@ -1,7 +1,7 @@
 import { Eye, LoaderCircle, RotateCcw, Save, UserCheck, UserX } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import { applyProductImageRepository, applyProductProductionUse, applyProductOwner, LaunchplaneApiError, readProductProfile } from "./api";
+import { applyProductImageRepository, applyProductProductionUse, applyProductOwner, LaunchplaneApiError, readProductProfile, readProductProfileMutationReceipt } from "./api";
 import { recoverBrowserOperationState, type BrowserOperationFailureCertainty } from "./browser-operation";
 import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
 import {
@@ -26,7 +26,7 @@ import {
   type ProductOwnerIdentity,
   type ProductOwnerPlan,
 } from "./product-owner-operation";
-import { useBrowserOperationController } from "./use-browser-operation";
+import { type BrowserOperationController, useBrowserOperationController } from "./use-browser-operation";
 
 import type { AcceptedEvidenceResponse, ApplyProductImageRepositoryData, ApplyProductProductionUseData, ApplyProductOwnerData } from "./generated/openapi.ts";
 
@@ -277,8 +277,20 @@ export function ProductOwnerPanel({
           </fieldset>
           <OperationNotice state={planOperation.state} label="Preview" />
           <OperationNotice state={applyOperation.state} label="Save" />
+          {applyOperation.state.receipt?.originalTraceId ? <p role="status">
+            Original operation completed. Original trace: {applyOperation.state.receipt.originalTraceId}
+          </p> : null}
           {applyOperation.state.requiresIdempotencyContinuity && !plannedDraft ? (
-            <InlineFormError message="An earlier Save is uncertain, but its reviewed request is unavailable. Keep this tab and operation key; reconcile the original operation before another change." />
+            <InlineFormError message="An earlier Save is uncertain, but its reviewed request is unavailable. Keep this tab and operation key. Check the original Save below before another change." />
+          ) : null}
+          {applyOperation.state.requiresIdempotencyContinuity && !plannedDraft ? (
+            <ProfileMutationRecovery product={product} fixtureMode={fixtureMode} field="owner" operation={applyOperation}
+              onCompleted={async (signal) => {
+                const { profile } = await readProductProfile(product, signal);
+                if (signal.aborted) return;
+                setResource({ error: "", owner: productOwnerFromRecord(profile.owner), status: "ready" });
+                clearPlan();
+              }} />
           ) : null}
           {localError ? <InlineFormError message={localError} /> : null}
           {plan && (saved || planMatchesDraft) ? (
@@ -581,8 +593,21 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
       </fieldset>
       <OperationNotice state={previewOperation.state} label="Dry run" />
       <OperationNotice state={applyOperation.state} label="Apply" />
+      {applyOperation.state.receipt?.originalTraceId ? <p role="status">
+        Original operation completed. Original trace: {applyOperation.state.receipt.originalTraceId}
+      </p> : null}
       {applyOperation.state.requiresIdempotencyContinuity && !reviewed ?
-        <InlineFormError message="An earlier Apply is uncertain, and its reviewed draft is unavailable. Read the profile and reconcile that operation before another change." /> : null}
+        <InlineFormError message="An earlier Apply is uncertain, and its reviewed draft is unavailable. Keep this tab and operation key. Check the original Apply below before another change." /> : null}
+      {applyOperation.state.requiresIdempotencyContinuity && !reviewed ? (
+        <ProfileMutationRecovery product={product} fixtureMode={fixtureMode}
+          field={field === "image" ? "image-repository" : "production-use"}
+          operation={applyOperation} onCompleted={async (signal) => {
+            const next = await readValue(signal);
+            if (signal.aborted) return;
+            setCurrent(next.value); setValue(next.suggested); setReason("");
+            setReviewed(null);
+          }} />
+      ) : null}
       {error ? <InlineFormError message={error} /> : null}
       {notice ? <p role="status">{notice}</p> : null}
       {reviewed && matches ? <div className="product-owner-plan">
@@ -608,4 +633,52 @@ function profileApplyFailureCertainty(error: unknown, dispatched: boolean): Brow
     return "settled";
   }
   return productConfigFailureCertainty(error, dispatched);
+}
+
+function ProfileMutationRecovery({ product, fixtureMode, field, operation, onCompleted }: {
+  product: string;
+  fixtureMode: DevFixtureMode;
+  field: "owner" | "image-repository" | "production-use";
+  operation: BrowserOperationController<never, AcceptedEvidenceResponse>;
+  onCompleted: (signal: AbortSignal) => Promise<void>;
+}) {
+  const abortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => abortRef.current?.abort(), []);
+  const [checking, setChecking] = useState(false);
+  const [message, setMessage] = useState("");
+  async function check() {
+    const identity = operation.state.identity;
+    if (!identity || checking || fixtureMode) return;
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setChecking(true); setMessage("");
+    try {
+      const receipt = await readProductProfileMutationReceipt(product, field, identity.idempotencyKey, controller.signal);
+      if (controller.signal.aborted) return;
+      if (receipt.state !== "completed" || receipt.product !== product || receipt.field !== field ||
+          receipt.idempotency_key !== identity.idempotencyKey || !receipt.original_trace_id) {
+        setMessage("No matching completed receipt was found. Keep this tab and key; another change remains locked. This check cannot settle keys without a completed receipt.");
+        return;
+      }
+      // Refresh first: a failed read keeps the recovery action available.
+      await onCompleted(controller.signal);
+      if (controller.signal.aborted) return;
+      if (!operation.reconcile(identity, { trace_id: receipt.trace_id,
+        original_trace_id: receipt.original_trace_id, replayed: true })) {
+        setMessage("The retained operation changed while checking. Keep its key and check again.");
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) setMessage(error instanceof Error ? error.message : "The original operation could not be checked. Keep this tab and key.");
+    } finally {
+      if (abortRef.current === controller) abortRef.current = null;
+      if (!controller.signal.aborted) setChecking(false);
+    }
+  }
+  return <div>
+    <button className="button" disabled={checking || Boolean(fixtureMode)} onClick={() => void check()} type="button">
+      {checking ? "Checking original operation" : "Check original operation"}
+    </button>
+    {fixtureMode ? <p role="status">Receipts are unavailable in fixtures. Open the product without fixture mode to check the original operation.</p> : null}
+    {message ? <p role="status">{message}</p> : null}
+  </div>;
 }

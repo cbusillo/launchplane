@@ -40,6 +40,12 @@ from control_plane.contracts.product_incident_read_model import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_operational_readiness import ProductOperationalReadiness
+from control_plane.http_routes.mutation_support import idempotency_scope
+from control_plane.product_profile_mutation_receipt import (
+    ProductProfileMutationReceipt,
+    ProfileMutationField,
+    profile_mutation_receipt,
+)
 from control_plane.product_reconcile_read import (
     ProductReconcileRequestReader,
     ProductReconcileRequestView,
@@ -1429,6 +1435,61 @@ def register_product_profile_read_routes(
                 message="Workflow cannot read the requested product profile.",
             )
         return ProductProfileResponse(trace_id=trace_id, profile=profile)
+
+    def read_product_profile_mutation_receipt(
+        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        field: ProfileMutationField,
+        operation_key: Annotated[str, Query(min_length=1, max_length=256, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+    ) -> ProductProfileMutationReceipt:
+        trace_id = common.next_trace_id()
+        if not common.authorization_allows(
+            identity=identity,
+            action="product_profile.read",
+            product=product,
+            context=LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Caller cannot read the requested product profile receipt.",
+            )
+        if not isinstance(record_store, PostgresRecordStore):
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Profile mutation receipts require database storage.",
+            )
+        # The write routes reserve by route template, not by the concrete URL.
+        record = record_store.read_idempotency_record(
+            scope=idempotency_scope(identity),
+            route_path=f"/v1/product-profiles/{{product}}/{field}",
+            idempotency_key=operation_key,
+        )
+        return profile_mutation_receipt(
+            record=record,
+            trace_id=trace_id,
+            product=product,
+            field=field,
+            idempotency_key=operation_key,
+        )
+
+    app.add_api_route(
+        "/v1/product-profiles/{product}/mutation-receipts/{field}",
+        read_product_profile_mutation_receipt,
+        methods=["GET"],
+        response_model=ProductProfileMutationReceipt,
+        operation_id="read_product_profile_mutation_receipt",
+        summary="Check completion of the caller's retained profile mutation key",
+        responses={
+            401: {"model": common.error_response_model},
+            403: {"model": common.error_response_model},
+            503: {"model": common.error_response_model},
+        },
+    )
 
     # What the event reconciler last decided for each of the product's targets, so
     # an event-driven preview or testing deploy can be checked. Redacted in the view.

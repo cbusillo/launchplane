@@ -236,6 +236,22 @@ export function completeBrowserOperation(
   };
 }
 
+// Called only after a service receipt proves the retained mutation completed.
+export function reconcileBrowserOperation(
+  current: BrowserOperationState,
+  identity: BrowserOperationIdentity,
+  envelope: BrowserOperationEnvelope,
+): BrowserOperationState {
+  if (current.phase !== "uncertain" || !current.requiresIdempotencyContinuity ||
+      current.identity?.idempotencyKey !== identity.idempotencyKey ||
+      current.identity?.requestFingerprint !== identity.requestFingerprint ||
+      !envelope.original_trace_id || envelope.replayed !== true) {
+    throw new Error("Completion evidence does not match the retained uncertain operation.");
+  }
+  return { ...current, failure: null, phase: "succeeded",
+    receipt: browserOperationReceipt(envelope), requiresIdempotencyContinuity: false };
+}
+
 export function failBrowserOperation(
   current: BrowserOperationState,
   failure: BrowserOperationFailure,
