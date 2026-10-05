@@ -24,11 +24,11 @@ verifies which repository and commit an artifact came from, and deploys it
 with the site's runtime settings and secrets. The artifact is the only handoff
 between them.
 
-Launchplane works in its own terms: a proposed change, a note on it, a result
-on a commit, a merge. GitHub is the first source-control host those terms map
-onto, not the model. New code uses Launchplane's terms; existing GitHub code
-moves to them only when other work already touches it. Running a second host,
-or self-hosting one, is a milestone of its own when the Director chooses it.
+Launchplane should not depend on GitHub. GitHub is the git host we use
+today; others may follow, including one we run ourselves. New code talks to
+GitHub through Launchplane's own names for things (a change, a comment, a
+check result, a merge); old code moves over only when other work touches it.
+Adding another host is its own milestone, when the Director chooses it.
 
 Launchplane needs no caller grant for the work it starts from source-control
 events (verifying a build and deploying it to that site's previews and testing
