@@ -204,9 +204,9 @@ def handle_github_app_webhook_request(
                 }
         product, unmapped_reason = _product_for_repository(store=store, repository_id=repository_id)
     except Exception:
-        logging.getLogger(__name__).warning("GitHub source event verification unavailable.")
+        logging.getLogger(__name__).warning("GitHub App webhook verification unavailable.")
         return error(
-            503, "github_source_evidence_unavailable", "Source verification is unavailable."
+            503, "github_app_webhook_unavailable", "GitHub App webhook verification is unavailable."
         )
     if not product and not config_authority:
         return accepted("ignored", reason=unmapped_reason)

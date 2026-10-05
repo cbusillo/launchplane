@@ -342,7 +342,14 @@ def config_authority_event_supported(event: str, payload: dict[str, object]) -> 
         or (event == "merge_group" and payload.get("action") == "checks_requested")
         or (
             event == "pull_request"
-            and payload.get("action") in {"opened", "reopened", "synchronize", "edited"}
+            and (
+                payload.get("action") in {"opened", "reopened", "synchronize"}
+                or (
+                    payload.get("action") == "edited"
+                    and isinstance(payload.get("changes"), dict)
+                    and "base" in cast(dict[str, object], payload["changes"])
+                )
+            )
         )
     )
 
@@ -391,10 +398,13 @@ def publish_product_config_authority_evidence(
     coverage = evidence.get("coverage")
     gate = gate if isinstance(gate, dict) else {}
     coverage = coverage if isinstance(coverage, dict) else {}
+    pending = evidence.get("retry_pending") is True
     summary = (
         f"Source comparison: {evidence.get('base_sha', 'unavailable')} → {head}.\n"
         + (
-            "Product-repo configuration gate passed."
+            "Source verification is pending retry."
+            if pending
+            else "Product-repo configuration gate passed."
             if evidence.get("status") == "pass"
             else "Verification failed or source evidence is unavailable."
         )
@@ -430,7 +440,12 @@ def publish_product_config_authority_evidence(
         details_url=f"https://github.com/{inventory.repository}/commit/{head}",
         title="Product configuration authority",
         summary=summary,
-        conclusion="success" if evidence.get("status") == "pass" else "failure",
+        check_status="in_progress" if pending else "completed",
+        conclusion=None
+        if pending
+        else "success"
+        if evidence.get("status") == "pass"
+        else "failure",
     )
     return cast(
         dict[str, JsonValue],
@@ -510,6 +525,9 @@ def run_product_config_authority_once(
                 or request.get("head_sha")
                 or (group.get("head_sha") if isinstance(group, dict) else None)
             )
+        evidence["retry_pending"] = (
+            evidence.get("status") == "unavailable" and claimed.config_authority_attempt < 3
+        )
         try:
             evidence["projection"] = publish(inventory, evidence, control_plane_root)
         except Exception:

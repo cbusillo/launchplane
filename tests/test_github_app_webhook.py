@@ -368,7 +368,16 @@ class GitHubAppWebhookTests(unittest.TestCase):
         self.assertEqual(pending.config_authority_state, "pending")
         self.assertEqual(pending.config_authority_attempt, 0)
         scan = Mock(side_effect=OSError("private provider error"))
-        completed = run_product_config_authority_once(self.store, "worker", scan=scan)
+        pending_states = []
+
+        def publish(_inventory: object, evidence: dict[str, object], _root: Path) -> dict[str, str]:
+            pending_states.append(evidence["retry_pending"])
+            self.assertEqual(evidence["head_sha"], "b" * 40)
+            return {"status": "projected"}
+
+        completed = run_product_config_authority_once(
+            self.store, "worker", scan=scan, publish=publish
+        )
         assert completed is not None
         self.assertEqual(completed.config_authority_state, "pending")
         self.assertEqual(completed.config_authority["status"], "unavailable")
@@ -380,9 +389,12 @@ class GitHubAppWebhookTests(unittest.TestCase):
                 assert row is not None
                 row.payload = {**row.payload, "config_authority_next_attempt_at": ""}
                 session.commit()
-            completed = run_product_config_authority_once(self.store, "worker", scan=scan)
+            completed = run_product_config_authority_once(
+                self.store, "worker", scan=scan, publish=publish
+            )
         assert completed is not None
         self.assertEqual(completed.config_authority_state, "failed")
+        self.assertEqual(pending_states, [True, True, False])
         self.assertIsNone(run_product_config_authority_once(self.store, "worker", scan=scan))
         # Native signed redelivery resets only the failed unavailable scan, preserving deploy dedupe.
         status, _ = handle_github_app_webhook_request(
@@ -406,6 +418,27 @@ class GitHubAppWebhookTests(unittest.TestCase):
         self.assertEqual(repaired.config_authority_state, "done")
         self.assertEqual(repaired.config_authority["status"], "pass")
         self.assert_nothing_recorded()
+
+    def test_deploy_only_inventory_error_preserves_webhook_unavailable_contract(self) -> None:
+        body = json.dumps(_workflow_run(trigger="push")).encode()
+        with patch.object(
+            self.store,
+            "list_repository_inventory_records",
+            side_effect=OSError("private storage detail"),
+        ):
+            code, response = handle_github_app_webhook_request(
+                body,
+                "workflow_run",
+                "inventory-failed",
+                _signature(body),
+                self.store,
+                Path("."),
+                "trace",
+                dependencies=GitHubAppWebhookDependencies(webhook_secret=lambda: self.secret),
+            )
+        self.assertEqual(code, 503)
+        self.assertNotIn("private storage detail", json.dumps(response))
+        self.assertIn("github_app_webhook_unavailable", json.dumps(response))
 
     def test_busy_repository_backlog_does_not_starve_another_repository(self) -> None:
         from control_plane.contracts.product_reconcile import GitHubAppWebhookDeliveryRecord

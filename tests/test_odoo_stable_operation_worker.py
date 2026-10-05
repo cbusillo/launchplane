@@ -342,7 +342,43 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
         self.assertTrue(finished.is_set())
         scanner.assert_called_once()
 
+    def test_source_policy_read_failure_does_not_stop_deploy_worker(self) -> None:
+        class Store:
+            def claim_next_config_authority_delivery(self, *_args: object) -> None:
+                pass
+
+        with (
+            patch("control_plane.workflows.odoo_stable_operation_worker.advance_client_releases"),
+            patch(
+                "control_plane.workflows.odoo_stable_operation_worker.config_authority_events_enabled",
+                side_effect=[OSError("connection reset"), False],
+            ) as enabled,
+            patch(
+                "control_plane.workflows.odoo_stable_operation_worker.run_product_config_authority_once"
+            ) as scan,
+            patch(
+                "control_plane.workflows.odoo_stable_operation_worker.run_odoo_stable_operation_worker_once",
+                return_value=type("Idle", (), {"status": "idle"})(),
+            ) as poll,
+            self.assertLogs(level="WARNING"),
+        ):
+            result = run_odoo_stable_operation_worker_loop(
+                record_store=cast(OdooStableOperationWorkerStore, Store()),
+                control_plane_root_path=Path("."),
+                lease_owner="worker",
+                max_iterations=2,
+                poll_seconds=1,
+            )
+        self.assertEqual(result.iterations, 2)
+        self.assertEqual(poll.call_count, 2)
+        self.assertEqual(enabled.call_count, 2)
+        scan.assert_not_called()
+
     def test_disabled_source_scans_never_poll_queue(self) -> None:
+        class Store:
+            def claim_next_config_authority_delivery(self, *_args: object) -> None:
+                raise AssertionError("Disabled source queue must not be polled")
+
         with (
             patch("control_plane.workflows.odoo_stable_operation_worker.advance_client_releases"),
             patch(
@@ -358,7 +394,7 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             ),
         ):
             run_odoo_stable_operation_worker_loop(
-                record_store=cast("OdooStableOperationWorkerStore", object()),
+                record_store=cast(OdooStableOperationWorkerStore, Store()),
                 control_plane_root_path=Path("."),
                 lease_owner="worker",
                 max_iterations=1,

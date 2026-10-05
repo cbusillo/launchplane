@@ -353,7 +353,7 @@ of the expected build is what marks the preview ready, as for Odoo.
 ## Product configuration authority from source events
 
 Source implementation: #3021. Runtime activation and required-check policy are
-separate Owner decisions; consumer workflows remain until coverage is verified.
+separate Director decisions; consumer workflows remain until coverage is verified.
 An enrolled base branch's DB-backed merge-train policy can opt in with
 `config_authority_events_enabled`. Its default is false, and omitting it
 preserves historical policy digests. No checked-in product catalog or service
@@ -391,7 +391,8 @@ Completed results are projected through the existing checks-only App as
 `launchplane/config-authority/<event>/<encoded-base-branch>`, with event
 `pull-request`, `push`, or `merge-group` and a URL-encoded branch name.
 Separate event and branch names prevent a narrower comparison from overwriting a PR's
-result on the same head. A failed gate or unavailable source produces failure;
+result on the same head. A failed gate produces failure. An unavailable scan
+projects in-progress while a retry is pending, then failure on exhaustion;
 these checks are not excluded from normal check readiness as advisory governance
 projections are. A missing projection credential/permission or failed projection
 is stored as unavailable, with the scan outcome preserved separately. No token
@@ -399,7 +400,7 @@ fallback or access grant is created. Source reads use the repository's existing
 train App with a contents/pull-requests read token (a subset of the train's
 existing permissions); projection uses the existing
 checks-only identity. Both installations and managed-key bindings need to be
-verified before activation. Requiring these check names is an Owner decision.
+verified before activation. Requiring these check names is an Director decision.
 
 An authorized inventory reader can retrieve a delivery's request, queue/lease
 state, commit pair, redacted gate findings, coverage gaps, hashes and projection
@@ -416,3 +417,10 @@ runtime activation, event subscriptions, source reads and check projection for
 that product, and account for any required-check change. Source fixture parity
 and read-only scans of their commits demonstrate scanner coverage; they do not
 prove deployed activation or authorize any live change.
+
+The queue itself does not create a GitHub check: a delivery awaiting a worker
+has no source result yet. Existing checks alone therefore cannot prove that this
+scan finished before merge. Before consumer removal, the Director's required-check
+handling must account for a missing/queued source check and for irrelevant old
+branch contexts after a PR retarget. Source implementation does not change that
+live policy. Runtime proof must include a delayed scan, not only a completed pass.

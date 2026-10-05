@@ -148,6 +148,20 @@ class ConfigAuthorityEventTests(unittest.TestCase):
                 self.assertEqual(actual["status"], "fail")
                 self.assertNotIn("target-new", json.dumps(actual))
 
+    def test_only_source_edits_request_a_rescan(self) -> None:
+        from control_plane.product_config_authority_events import config_authority_event_supported
+
+        self.assertFalse(
+            config_authority_event_supported(
+                "pull_request", {"action": "edited", "changes": {"title": {"from": "old"}}}
+            )
+        )
+        self.assertTrue(
+            config_authority_event_supported(
+                "pull_request", {"action": "edited", "changes": {"base": {"ref": {"from": "old"}}}}
+            )
+        )
+
     def test_pr_rereads_authoritative_pair_and_merge_group_uses_exact_pair(self) -> None:
         self.transport.pr = {
             "base": {"sha": self.base, "repo": {"id": 424242}},
@@ -366,6 +380,7 @@ class ConfigAuthorityEventTests(unittest.TestCase):
 
     def test_projection_preserves_failure_and_separates_event_scopes(self) -> None:
         from control_plane.contracts.advisory_check_projection import (
+            AdvisoryCheckConclusion,
             AdvisoryCheckProjectionResult,
             is_launchplane_projected_check,
         )
@@ -376,7 +391,11 @@ class ConfigAuthorityEventTests(unittest.TestCase):
 
         names = set()
         for event in ("pull_request", "push", "merge_group"):
-            for status in ("pass", "fail", "unavailable"):
+            for status in ("pass", "fail", "unavailable", "unavailable-retry"):
+                pending = status == "unavailable-retry"
+                expected_conclusion: AdvisoryCheckConclusion | None = (
+                    None if pending else "success" if status == "pass" else "failure"
+                )
                 with self.subTest(event=event, status=status):
                     token = GitHubAppInstallationToken(
                         token="checks-only",
@@ -407,11 +426,12 @@ class ConfigAuthorityEventTests(unittest.TestCase):
                             app_id=77,
                             installation_id=5,
                             check_run_id=9,
-                            check_status="completed",
-                            conclusion="success" if status == "pass" else "failure",
+                            check_status="in_progress" if pending else "completed",
+                            conclusion=expected_conclusion,
                         )
                         evidence: dict[str, JsonValue] = {
-                            "status": status,
+                            "status": "unavailable" if pending else status,
+                            "retry_pending": pending,
                             "event": event,
                             "base_sha": self.base,
                             "head_sha": self.head,
@@ -426,8 +446,9 @@ class ConfigAuthorityEventTests(unittest.TestCase):
                             }
                         publish_product_config_authority_evidence(_inventory(), evidence, Path("."))
                         projection = writer.call_args.kwargs["projection"]
+                        self.assertEqual(projection.conclusion, expected_conclusion)
                         self.assertEqual(
-                            projection.conclusion, "success" if status == "pass" else "failure"
+                            projection.check_status, "in_progress" if pending else "completed"
                         )
                         self.assertFalse(is_launchplane_projected_check(projection.name))
                         self.assertIn(

@@ -954,18 +954,21 @@ def run_odoo_stable_operation_worker_loop(
                 worked_count += 1
                 continue
             idle_count += 1
-            if (
-                not worker_stop_event.is_set()
-                and hasattr(record_store, "claim_next_config_authority_delivery")
-                and (config_scan_thread is None or not config_scan_thread.is_alive())
-                and config_authority_events_enabled(record_store)
-            ):
-                # Admit after deploy/reconcile polling; provider reads never block
-                # the next poll, including a rollback queued during this scan.
-                config_scan_thread = Thread(
-                    target=scan_source, name="product-config-authority", daemon=False
-                )
-                config_scan_thread.start()
+            try:
+                if (
+                    not worker_stop_event.is_set()
+                    and hasattr(record_store, "claim_next_config_authority_delivery")
+                    and (config_scan_thread is None or not config_scan_thread.is_alive())
+                    and config_authority_events_enabled(record_store)
+                ):
+                    # Admit after deploy/reconcile polling; provider reads never block
+                    # the next poll, including a rollback queued during this scan.
+                    config_scan_thread = Thread(
+                        target=scan_source, name="product-config-authority", daemon=False
+                    )
+                    config_scan_thread.start()
+            except Exception:
+                logging.warning("Product config-authority scan admission unavailable.")
             worker_stop_event.wait(timeout=float(poll_seconds))
     finally:
         # Shutdown must not abandon an admitted promotion/rollback.
