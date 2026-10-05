@@ -4,6 +4,7 @@ import hashlib
 import json
 import unittest
 from datetime import timedelta
+from threading import Event, Thread, current_thread
 from typing import Any
 from unittest.mock import patch
 
@@ -21,9 +22,12 @@ from control_plane.generic_web_promotion_provider_adapter import (
 from control_plane.storage.postgres import MutationReservationCompletionResult
 from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
 from control_plane.workflows.generic_web_deploy_provider import GenericWebRuntimeArtifactObservation
+from control_plane.workflows import generic_web_promotion as promotion_workflow
 from tests import test_generic_web_client_release as fixtures
 from tests.test_generic_web_deploy_recovery import _create_recovery_app, _OPERATOR_TOKEN
 from tests.test_service import _invoke_app
+from tests.support.auth import local_operator_policy
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 
 
 class PromotionRecoveryTests(unittest.TestCase):
@@ -47,6 +51,19 @@ class PromotionRecoveryTests(unittest.TestCase):
                 return_value=self.provider,
             )
         )
+        if self.store.database_dialect_name == "postgresql":
+            self.store.seed_authz_policy_if_absent(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id="promotion-recovery-test-policy",
+                    source="test",
+                    updated_at=self.case.target.updated_at,
+                    policy=local_operator_policy(
+                        actions=("product_environment.read", "generic_web_prod_promotion.execute"),
+                        products=(self.case.profile.product,),
+                        contexts=(self.case.context,),
+                    ),
+                )
+            )
         self.app = _create_recovery_app(
             root=self.case.root,
             store=self.store,
@@ -135,6 +152,7 @@ class PromotionRecoveryTests(unittest.TestCase):
         self.interrupt_completion()
         before = self.snapshot()
         status, selected = self.request()
+        self.runtime.assert_not_called()
         plan = self.dry_run()
         self.assertEqual(status, 200, selected)
         self.assertEqual(selected["recovery_reference"], self.reservation().record_id)
@@ -295,6 +313,27 @@ class PromotionRecoveryTests(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
         self.runtime.assert_not_called()
 
+    def test_machine_workflow_identity_cannot_recover(self) -> None:
+        self.interrupt_completion()
+        before = self.snapshot()
+        for suffix in ("", "/dry-run", "/apply"):
+            status, response = _invoke_app(
+                self.app,
+                method="GET" if not suffix else "POST",
+                path=self.path + suffix,
+                authorization="Bearer valid-token",
+                payload={
+                    "reason": "Inspect",
+                    "recovery_reference": "untrusted",
+                    "expected_recovery_digest": "0" * 64,
+                }
+                if suffix == "/apply"
+                else ({"reason": "Inspect"} if suffix else None),
+            )
+            self.assertEqual(status, 403, response)
+        self.assertEqual(self.snapshot(), before)
+        self.runtime.assert_not_called()
+
     def test_expired_running_completion_adopts_atomically_without_intermediate_write(self) -> None:
         self.interrupt_completion(hold=False)
         expired_at = parse_launchplane_mutation_timestamp(
@@ -349,17 +388,35 @@ class PromotionRecoveryTests(unittest.TestCase):
         self.assertEqual(self.reservation().state, "reconcile_required")
 
     def test_interrupted_rollback_health_is_verified_without_redeploying(self) -> None:
-        self.interrupt_completion(rollback=True)
+        class InterruptedRollback(BaseException):
+            pass
+
+        self.case.fail_health = True
+        verify = promotion_workflow._verify_health_evidence_with_identity
+
+        def checked_crash(evidence: Any, **kwargs: Any) -> Any:
+            if (
+                kwargs["expected_runtime_identity"].artifact_id
+                == self.decision.checklist.production.artifact_id
+            ):
+                raise InterruptedRollback()
+            return verify(evidence, **kwargs)
+
+        with patch.object(
+            promotion_workflow, "_verify_health_evidence_with_identity", side_effect=checked_crash
+        ):
+            with self.assertRaises(InterruptedRollback):
+                self.case.advance()
+        held = self.reservation()
+        self.assertTrue(held.provider_effect_phase.startswith("rollback_"))
+        self.store.mark_mutation_reconcile_required(
+            reservation=held, reconciliation_key=held.reconciliation_key
+        )
         promotion = self.store.list_promotion_records()[0]
-        self.store.write_promotion_record(
-            promotion.model_copy(
-                update={
-                    "rollback": promotion.rollback.model_copy(update={"status": "pending"}),
-                    "rollback_health": promotion.rollback_health.model_copy(
-                        update={"status": "pending", "verified": False}
-                    ),
-                }
-            )
+        self.assertFalse(promotion.rollback.attempted)
+        self.assertEqual(
+            promotion.rollback.target_deployment_record_id,
+            self.initial_inventory.deployment_record_id,
         )
         effects = list(self.provider.deployed_artifacts)
         plan = self.dry_run()
@@ -368,6 +425,77 @@ class PromotionRecoveryTests(unittest.TestCase):
         result = self.reservation().response_payload["result"]
         self.assertEqual((result["promotion_status"], result["rollback_status"]), ("fail", "pass"))
         self.assertEqual(self.provider.deployed_artifacts, effects)
+        inventory = self.store.read_environment_inventory(
+            context_name=self.case.context, instance_name="prod"
+        )
+        self.assertEqual(inventory.promotion_record_id, self.initial_inventory.promotion_record_id)
+        self.assertEqual(
+            inventory.promoted_from_instance, self.initial_inventory.promoted_from_instance
+        )
+
+    def test_recorded_rollback_health_failure_is_not_rewritten(self) -> None:
+        import click
+
+        self.case.fail_health = True
+        with patch(
+            "control_plane.workflows.generic_web_promotion.wait_for_runtime_identity_healthcheck_with_retry",
+            side_effect=click.ClickException("Recorded health failure"),
+        ):
+            self.case.advance()
+        before = self.snapshot()
+        self.assertEqual(self.store.list_promotion_records()[0].rollback.status, "fail")
+        plan = self.dry_run()
+        self.assertEqual(plan["proposed_action"], "hold_unknown")
+        self.assertEqual(self.apply(plan)[0], 409)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_paused_original_worker_cannot_overwrite_recovered_evidence(self) -> None:
+        import click
+
+        reached = Event()
+        resume = Event()
+        self.addCleanup(resume.set)
+        verify = promotion_workflow._verify_health_evidence_with_identity
+
+        def stalled_check(evidence: Any, **kwargs: Any) -> Any:
+            if current_thread().name == "paused-original-promotion":
+                reached.set()
+                if not resume.wait(30):
+                    raise AssertionError("recovery never released paused worker")
+                raise click.ClickException("Late worker health failure")
+            return verify(evidence, **kwargs)
+
+        with (
+            patch.object(
+                promotion_workflow,
+                "_verify_health_evidence_with_identity",
+                side_effect=stalled_check,
+            ),
+            patch(
+                "control_plane.provider_operations._ReservationHeartbeat._run", return_value=None
+            ),
+        ):
+            worker = Thread(target=self.case.advance, name="paused-original-promotion")
+            worker.start()
+            self.assertTrue(reached.wait(30))
+            held = self.reservation()
+            expired = parse_launchplane_mutation_timestamp(
+                held.lease_expires_at, field_name="lease_expires_at"
+            ) + timedelta(seconds=1)
+            with patch.object(
+                self.store, "_database_mutation_timestamp", return_value=expired.isoformat()
+            ):
+                plan = self.dry_run()
+                self.assertEqual(plan["proposed_action"], "adopt_promotion")
+                self.assertEqual(self.apply(plan)[0], 202)
+            before = self.snapshot()
+            resume.set()
+            worker.join(30)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(
+            self.provider.deployed_artifacts, [self.decision.checklist.candidate.artifact_id]
+        )
 
     def test_ambiguous_promotion_and_unavailable_provider_remain_held(self) -> None:
         import click

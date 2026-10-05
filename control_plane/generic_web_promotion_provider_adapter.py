@@ -2,6 +2,7 @@
 
 import hashlib
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path as FilePath
 from typing import cast
 
@@ -23,6 +24,7 @@ from control_plane.provider_operations import (
     ProviderMutationUnknownError,
     ProviderObservation,
     ProviderOperationLease,
+    ProviderEvidenceLease,
     provider_operation_title,
     provider_operation_response_payload as _provider_operation_response_payload,
 )
@@ -174,16 +176,26 @@ class GenericWebProdPromotionProviderMutationAdapter:
 
         try:
             self._validate_before_effect(self.resolve_deploy_target())
-            records, result = execute_generic_web_prod_promotion_result(
-                control_plane_root=self._control_plane_root,
-                record_store=self._record_store,
-                request=self._promotion_request,
-                deploy_provider=self._deploy_provider,
-                resolved_deploy_target=self.resolve_deploy_target(),
-                provider_operation_title=provider_operation_title(provider_operation_key),
-                deployment_record_id=self._deployment_record_id(provider_operation_key),
-                provider_effect_checkpoint=checkpoint_provider_effect,
-            )
+            evidence_guard: AbstractContextManager[None]
+            if isinstance(self._record_store, PostgresRecordStore):
+                if not isinstance(lease, ProviderEvidenceLease):
+                    raise ValueError("Promotion requires an evidence-bound provider lease.")
+                evidence_guard = self._record_store.provider_evidence_guard(
+                    lease.evidence_reservation
+                )
+            else:
+                evidence_guard = nullcontext()
+            with evidence_guard:
+                records, result = execute_generic_web_prod_promotion_result(
+                    control_plane_root=self._control_plane_root,
+                    record_store=self._record_store,
+                    request=self._promotion_request,
+                    deploy_provider=self._deploy_provider,
+                    resolved_deploy_target=self.resolve_deploy_target(),
+                    provider_operation_title=provider_operation_title(provider_operation_key),
+                    deployment_record_id=self._deployment_record_id(provider_operation_key),
+                    provider_effect_checkpoint=checkpoint_provider_effect,
+                )
         except StarletteHTTPException as error:
             raise ProviderMutationRejectedError(error) from error
         except (FileNotFoundError, ValueError, click.ClickException) as error:

@@ -1,6 +1,7 @@
 """Scoped admin recovery with separate inspection and reviewed apply."""
 
 import asyncio
+from collections.abc import Callable
 from typing import Annotated
 from fastapi import Depends, Query
 
@@ -29,7 +30,10 @@ RECOVERY_ROUTE = "/v1/admin/generic-web/promotion-recovery/{product}/{decision_r
 
 
 def register_promotion_recovery_routes(
-    app: ApiRouteRegistrar, *, dependencies: GenericWebWriteRouteDependencies
+    app: ApiRouteRegistrar,
+    *,
+    dependencies: GenericWebWriteRouteDependencies,
+    read_identity: Callable[..., LaunchplaneIdentity],
 ) -> None:
     def authorized_store(
         product: str, identity: LaunchplaneIdentity, record_store: object, *, apply: bool
@@ -78,7 +82,12 @@ def register_promotion_recovery_routes(
         return record_store
 
     async def inspect(
-        store: PostgresRecordStore, product: str, decision_record_id: str, attempt: int
+        store: PostgresRecordStore,
+        product: str,
+        decision_record_id: str,
+        attempt: int,
+        *,
+        inspect_provider: bool = True,
     ) -> PromotionInspection:
         try:
             return await asyncio.to_thread(
@@ -88,6 +97,7 @@ def register_promotion_recovery_routes(
                 product=product,
                 decision_record_id=decision_record_id,
                 attempt=attempt,
+                inspect_provider=inspect_provider,
             )
         except FileNotFoundError as error:
             raise dependencies.http_error(
@@ -107,12 +117,14 @@ def register_promotion_recovery_routes(
     async def read_promotion_recovery(
         product: str,
         decision_record_id: str,
-        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
         attempt: Annotated[int, Query(ge=1, le=2)] = 1,
     ) -> PromotionRecoveryPlan:
         store = authorized_store(product, identity, record_store, apply=False)
-        return (await inspect(store, product, decision_record_id, attempt)).plan(product, "")
+        return (
+            await inspect(store, product, decision_record_id, attempt, inspect_provider=False)
+        ).plan(product, "")
 
     async def dry_run_promotion_recovery(
         product: str,

@@ -164,6 +164,8 @@ class RollbackExecutionEvidence(BaseModel):
     detail: str = ""
     snapshot_name: str = ""
     target_deployment_record_id: str = ""
+    target_promotion_record_id: str = Field(default="", exclude_if=lambda value: value == "")
+    target_promoted_from_instance: str = Field(default="", exclude_if=lambda value: value == "")
     deployment_record_id: str = ""
     started_at: str = ""
     finished_at: str = ""

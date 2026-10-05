@@ -28126,7 +28126,9 @@ def create_launchplane_fastapi_app(
         app,
         dependencies=product_read_route_dependencies,
     )
-    register_promotion_recovery_routes(app, dependencies=generic_web_write_route_dependencies)
+    register_promotion_recovery_routes(
+        app, dependencies=generic_web_write_route_dependencies, read_identity=read_identity
+    )
     app.add_exception_handler(HTTPException, launchplane_http_exception_handler)
     app.add_exception_handler(
         STARLETTE_HTTP_EXCEPTION,

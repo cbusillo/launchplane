@@ -37217,6 +37217,16 @@
             "default": "",
             "title": "Target Deployment Record Id",
             "type": "string"
+          },
+          "target_promoted_from_instance": {
+            "default": "",
+            "title": "Target Promoted From Instance",
+            "type": "string"
+          },
+          "target_promotion_record_id": {
+            "default": "",
+            "title": "Target Promotion Record Id",
+            "type": "string"
           }
         },
         "title": "RollbackExecutionEvidence",
@@ -45468,6 +45478,16 @@
             "schema": {
               "default": "",
               "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
               "type": "string"
             }
           }

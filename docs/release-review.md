@@ -210,6 +210,11 @@ failed. It completes the exact reservation, finishes promotion/deployment health
 evidence and repairs a lagging inventory in one compare-and-adopt transaction;
 changed stored evidence refuses the transition. Completed recovery replays without
 effects. No provider deployment, rollback, new reservation or grant is created.
+Original promotion workers also fence their evidence writes in the same database
+transaction as the lease check, so a paused worker cannot overwrite the recovered
+records after its lease expires. Before deploying, the pending promotion stores
+the previous production deployment and inventory lineage; a rollback checkpoint
+can then identify its exact recorded rollback deployment after a process crash.
 
 Active leases wait. Missing, ambiguous, changed or unknown evidence, no-effect
 reservations, unfinished deployments, failed health checks, and unproven or failed
@@ -217,6 +222,11 @@ rollback deployments remain held. A deployed image alone never proves the
 promotion or its checks succeeded. This is admin-assisted reconciliation, not
 unattended crash recovery or an automatic retry. Real recovery still requires
 the Director's separate authorization under [DIRECTION.md](../DIRECTION.md).
+Recovery also holds when the current lane has no verifiable health URL. Recorded
+failed health checks are retained as failures. Older interrupted rollback records
+without the saved target evidence remain held. Successful recovery settles the
+existing accepted release step; the release worker can continue any remaining
+steps under that decision's normal acceptance and hold checks.
 
 With `promote_with_rollback_drill` it then runs the rollback drill:
 

@@ -27,7 +27,8 @@ from control_plane.contracts.idempotency_record import (
 )
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.deployment_record import DeploymentRecord
-from control_plane.contracts.promotion_record import PromotionRecord
+from control_plane.contracts.promotion_record import PromotionRecord, promotion_failure
+from control_plane.contracts.record_failures import record_failure_summary
 from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
 from control_plane.generic_web_promotion_provider_adapter import (
     require_generic_web_promotion_target,
@@ -47,6 +48,8 @@ from control_plane.workflows.generic_web_promotion import (
     _result_from_record,
     _verify_health_evidence_with_identity,
     _health_evidence_for_lane,
+    _build_promotion_record,
+    _mark_health_failed,
 )
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.ship import utc_now_timestamp
@@ -89,18 +92,21 @@ class PromotionInspection:
 
 
 def inspect_promotion(
-    *, store: PostgresRecordStore, root: Path, product: str, decision_record_id: str, attempt: int
+    *,
+    store: PostgresRecordStore,
+    root: Path,
+    product: str,
+    decision_record_id: str,
+    attempt: int,
+    inspect_provider: bool = True,
 ) -> PromotionInspection:
     profile = store.read_product_profile_record(product)
     lane = next((item for item in profile.lanes if item.instance == "prod"), None)
-    decisions = tuple(
-        item
-        for item in store.list_release_review_decision_records(product=product)
-        if item.record_id == decision_record_id
+    decision = store.read_release_review_decision_record(
+        product=product, record_id=decision_record_id
     )
-    if len(decisions) != 1 or lane is None or profile.driver_id != "generic-web":
+    if lane is None or profile.driver_id != "generic-web":
         raise FileNotFoundError("Promotion release not found.")
-    decision = decisions[0]
     step = ClientReleaseStep("promote", attempt)
     if (
         decision.decision != "accepted"
@@ -144,6 +150,8 @@ def inspect_promotion(
         ) > parse_launchplane_mutation_timestamp(lookup.observed_at, field_name="observed_at"):
             inspection.action = "wait_for_active_lease"
             return inspection
+    if not inspect_provider:
+        return inspection
 
     # These reads deliberately do not materialize provider or deployment records.
     # A final promotion is evidence of finished checks; a pending check never
@@ -174,7 +182,12 @@ def inspect_promotion(
         promotions = tuple(
             item
             for item in store.list_promotion_records(
-                context_name=lane.context, from_instance_name="testing", to_instance_name="prod"
+                context_name=lane.context,
+                from_instance_name="testing",
+                to_instance_name="prod",
+                recovery_backup_record_id=promotion_request.backup_record_id,
+                recovery_deployment_record_id=deployment_id,
+                limit=2,
             )
             if item.deployment_record_id == deployment_id
             or (
@@ -213,19 +226,27 @@ def inspect_promotion(
             and not promotion.rollback.attempted
             and not reservation.provider_effect_phase.startswith("rollback_")
         )
-        finishing_rollback = promotion.rollback.attempted and promotion.rollback.status in {
-            "pending",
-            "pass",
-            "fail",
-        }
+        if promotion.rollback.status == "fail":
+            return inspection
+        interrupted_rollback = (
+            not promotion.rollback.attempted
+            and reservation.provider_effect_phase.startswith("rollback_")
+            and bool(promotion.rollback.target_deployment_record_id)
+        )
+        finishing_rollback = interrupted_rollback or (
+            promotion.rollback.attempted and promotion.rollback.status in {"pending", "pass"}
+        )
         if finishing_promotion:
             effective = deployed
             action: PromotionRecoveryAction = "adopt_promotion"
         elif finishing_rollback:
-            if promotion.rollback.deployment_record_id != deployment_id + "-rollback":
+            rollback_deployment_id = promotion.rollback.deployment_record_id
+            if interrupted_rollback:
+                rollback_deployment_id = deployment_id + "-rollback"
+            if rollback_deployment_id != deployment_id + "-rollback":
                 return inspection
             previous = store.read_deployment_record(promotion.rollback.target_deployment_record_id)
-            effective = store.read_deployment_record(promotion.rollback.deployment_record_id)
+            effective = store.read_deployment_record(rollback_deployment_id)
             inspection.evidence += (previous, effective)
             if (
                 previous.artifact_identity is None
@@ -314,22 +335,57 @@ def inspect_promotion(
             if checked.observed_runtime_identity is not None
             else None,
         }
-        effective = effective.model_copy(update={"destination_health": checked})
+        effective = effective.model_copy(
+            update={"destination_health": checked, "verify_destination_health": True}
+        )
         if finishing_promotion:
-            promotion = promotion.model_copy(
-                update={
-                    "deployment_record_id": deployed.record_id,
-                    "deploy": deployed.deploy,
-                    "destination_health": checked,
-                }
-            )
+            promotion = _build_promotion_record(
+                request=promotion_request,
+                promotion_record_id=promotion.record_id,
+                context=lane.context,
+                source_health=promotion.source_health,
+                backup_gate=promotion.backup_gate,
+                destination_health=checked,
+                deployment_record=deployed,
+                deployment_status="pass",
+                target_name=deployed.deploy.target_name,
+                target_type=deployed.deploy.target_type,
+                deployment_record_id=deployed.record_id,
+            ).model_copy(update={"rollback": promotion.rollback})
             deployed = effective
         else:
-            promotion = promotion.model_copy(
+            rollback = promotion.rollback.model_copy(
                 update={
-                    "rollback": promotion.rollback.model_copy(update={"status": "pass"}),
-                    "rollback_health": checked,
+                    "attempted": True,
+                    "status": "pass",
+                    "detail": record_failure_summary("rollback_passed"),
+                    "deployment_record_id": effective.record_id,
+                    "finished_at": effective.deploy.finished_at,
                 }
+            )
+            if interrupted_rollback:
+                # A rollback checkpoint proves the admitted promotion failed. Its
+                # exact deployment distinguishes deploy failure from health failure.
+                failure_code = (
+                    "destination_health_failed"
+                    if deployed.deploy.status == "pass"
+                    else "destination_deploy_failed"
+                )
+                promotion = _build_promotion_record(
+                    request=promotion_request,
+                    promotion_record_id=promotion.record_id,
+                    context=lane.context,
+                    source_health=promotion.source_health,
+                    backup_gate=promotion.backup_gate,
+                    destination_health=_mark_health_failed(promotion.destination_health),
+                    deployment_record=deployed,
+                    deployment_status="fail",
+                    target_name=deployed.deploy.target_name,
+                    target_type=deployed.deploy.target_type,
+                    deployment_record_id=deployed.record_id,
+                ).model_copy(update={"failure": promotion_failure(failure_code)})
+            promotion = promotion.model_copy(
+                update={"rollback": rollback, "rollback_health": checked}
             )
         inspection.promotion = promotion
         inspection.deployment = effective
@@ -338,10 +394,12 @@ def inspect_promotion(
             updated_at=utc_now_timestamp(),
             promotion_record_id=promotion.record_id
             if finishing_promotion
-            else inventory.promotion_record_id,
+            else (promotion.rollback.target_promotion_record_id or inventory.promotion_record_id),
             promoted_from_instance="testing"
             if finishing_promotion
-            else inventory.promoted_from_instance,
+            else (
+                promotion.rollback.target_promoted_from_instance or inventory.promoted_from_instance
+            ),
         )
         inspection.result = _result_from_record(
             request=promotion_request,

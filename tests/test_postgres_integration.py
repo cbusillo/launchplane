@@ -6011,10 +6011,43 @@ class RealPostgresProviderOperationTests(unittest.TestCase):
             "test_adopts_terminal_promotion_once_without_provider_effect",
             "test_adopts_verified_rollback_and_preserves_failed_release",
             "test_atomic_adoption_refuses_late_record_change",
+            "test_interrupted_rollback_health_is_verified_without_redeploying",
+            "test_paused_original_worker_cannot_overwrite_recovered_evidence",
         ):
             with self.subTest(scenario=scenario), _store_for_fresh_head_database() as store:
                 with patch.object(release_fixtures, "PostgresRecordStore", return_value=store):
                     PromotionRecoveryTests(scenario).debug()
+
+    def test_expired_running_promotion_recovery_uses_postgres_clock(self) -> None:
+        from tests import test_generic_web_client_release as release_fixtures
+        from tests.test_generic_web_promotion_recovery import PromotionRecoveryTests
+        from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
+        from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+
+        with _store_for_fresh_head_database() as store:
+            case = PromotionRecoveryTests()
+            with patch.object(release_fixtures, "PostgresRecordStore", return_value=store):
+                case.setUp()
+            try:
+                case.interrupt_completion(hold=False)
+                reservation = case.reservation()
+                expired = parse_launchplane_mutation_timestamp(
+                    reservation.created_at, field_name="created_at"
+                ) - timedelta(seconds=1)
+                with store._session_factory() as session:
+                    row = session.get(LaunchplaneIdempotencyRow, reservation.record_id)
+                    assert row is not None
+                    store._sync_idempotency_row(
+                        row,
+                        reservation.model_copy(update={"lease_expires_at": expired.isoformat()}),
+                    )
+                    session.commit()
+                plan = case.dry_run()
+                self.assertEqual(plan["proposed_action"], "adopt_promotion")
+                self.assertEqual(case.apply(plan)[0], 202)
+                self.assertEqual(case.reservation().state, "completed")
+            finally:
+                case.doCleanups()
 
     def test_two_instances_apply_provider_effect_exactly_once(self) -> None:
         with _store_for_fresh_head_database() as store:

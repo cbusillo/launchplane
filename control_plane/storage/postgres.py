@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 import hashlib
 import secrets
+from threading import local
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -5781,6 +5782,7 @@ class PostgresRecordStore(HumanSessionStore):
             postgres_statement_timeout_milliseconds=postgres_statement_timeout_milliseconds,
         )
         self._session_factory = sessionmaker(self._engine, expire_on_commit=False)
+        self._provider_evidence_context = local()
 
     @property
     def backend_name(self) -> str:
@@ -5892,8 +5894,68 @@ class PostgresRecordStore(HumanSessionStore):
 
     def _write_row(self, row: Base) -> None:
         with self._session_factory() as session:
+            reservation_reader = getattr(
+                self._provider_evidence_context, "reservation_reader", None
+            )
+            if reservation_reader is not None and isinstance(
+                row, LaunchplaneDeploymentRow | LaunchplanePromotionRow | LaunchplaneInventoryRow
+            ):
+                expected = reservation_reader()
+                self._begin_serialized_write(session)
+                held_row = session.scalar(
+                    self._idempotency_statement(
+                        scope=expected.scope,
+                        route_path=expected.route_path,
+                        idempotency_key=expected.idempotency_key,
+                        for_update=True,
+                    )
+                )
+                current = (
+                    self._read_payload(
+                        model_type=LaunchplaneIdempotencyRecord, payload=held_row.payload
+                    )
+                    if held_row is not None
+                    else None
+                )
+                if (
+                    current is None
+                    or current.state != "running"
+                    or any(
+                        getattr(current, name) != getattr(expected, name)
+                        for name in (
+                            "record_id",
+                            "scope",
+                            "route_path",
+                            "idempotency_key",
+                            "request_fingerprint",
+                            "lease_owner",
+                            "attempt",
+                            "provider_target_key",
+                            "reconciliation_key",
+                        )
+                    )
+                    or parse_launchplane_mutation_timestamp(
+                        current.lease_expires_at, field_name="lease_expires_at"
+                    )
+                    <= parse_launchplane_mutation_timestamp(
+                        self._database_mutation_timestamp(session), field_name="observed_at"
+                    )
+                ):
+                    raise ValueError("Provider operation no longer owns this evidence write.")
             session.merge(row)
             session.commit()
+
+    @contextmanager
+    def provider_evidence_guard(
+        self, reservation_reader: Callable[[], LaunchplaneIdempotencyRecord]
+    ) -> Iterator[None]:
+        """Fence this thread's promotion evidence writes against its exact live lease."""
+        previous = getattr(self._provider_evidence_context, "reservation_reader", None)
+        self._provider_evidence_context.reservation_reader = reservation_reader
+        try:
+            yield
+        finally:
+            self._provider_evidence_context.reservation_reader = previous
 
     def _lock_landing_authority(self, session: Any, *names: str) -> None:
         if self.database_dialect_name != "postgresql":
@@ -12097,6 +12159,8 @@ class PostgresRecordStore(HumanSessionStore):
         from_instance_name: str = "",
         to_instance_name: str = "",
         limit: int | None = None,
+        recovery_backup_record_id: str = "",
+        recovery_deployment_record_id: str = "",
     ) -> tuple[PromotionRecord, ...]:
         filters: list[object] = []
         if context_name:
@@ -12105,6 +12169,15 @@ class PostgresRecordStore(HumanSessionStore):
             filters.append(LaunchplanePromotionRow.from_instance == from_instance_name)
         if to_instance_name:
             filters.append(LaunchplanePromotionRow.to_instance == to_instance_name)
+        if recovery_backup_record_id or recovery_deployment_record_id:
+            filters.append(
+                or_(
+                    LaunchplanePromotionRow.payload["backup_record_id"].as_string()
+                    == recovery_backup_record_id,
+                    LaunchplanePromotionRow.payload["deployment_record_id"].as_string()
+                    == recovery_deployment_record_id,
+                )
+            )
         return self._list_models(
             model_type=PromotionRecord,
             orm_model=LaunchplanePromotionRow,
@@ -19615,6 +19688,18 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneReleaseReviewDecisionRow.record_id.desc(),
             ),
             limit=limit,
+        )
+
+    def read_release_review_decision_record(
+        self, *, product: str, record_id: str
+    ) -> ReleaseReviewDecisionRecord:
+        return self._read_model(
+            model_type=ReleaseReviewDecisionRecord,
+            orm_model=LaunchplaneReleaseReviewDecisionRow,
+            filters=(
+                LaunchplaneReleaseReviewDecisionRow.product == product,
+                LaunchplaneReleaseReviewDecisionRow.record_id == record_id,
+            ),
         )
 
     @contextmanager
