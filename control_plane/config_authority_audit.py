@@ -4012,7 +4012,10 @@ def _is_launchplane_metadata_routing(key: str, value: object) -> bool:
             and not value.endswith(("/", ".lock"))
         )
     if key == "launchplane.mergeTrain.readyLabel":
-        return re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.: -]*", value) is not None
+        return (
+            re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.:/ -]*", value) is not None
+            and "//" not in value
+        )
     if key == "launchplane.mergeTrain.githubActionsRunner.runnerMode":
         return value == "controller"
     evidence_fields = {

@@ -143,11 +143,16 @@ class LaunchplaneMetadataRoutingTests(unittest.TestCase):
                             "skills/launchplane/references/launchplane-operator.local.example.json"
                         ),
                     },
-                    "mergeTrain": {"readyLabel": "merge: ready"},
+                    "mergeTrain": {"readyLabel": "status/ready"},
                 },
             }
         )
         self.assertEqual(cast("dict[str, object]", payload["gate"])["status"], "pass")
+
+        namespaced_label = self._gate(
+            {"launchplane": {"mergeTrain": {"readyLabel": "merge: ready"}}}
+        )
+        self.assertEqual(cast("dict[str, object]", namespaced_label["gate"])["status"], "pass")
 
     def test_workflow_repository_allowance_is_scoped_to_metadata_field(self) -> None:
         routing = {
