@@ -46,6 +46,13 @@ class PromotionTargetChanged(click.ClickException):
     """The cached provider target no longer names production's recorded target."""
 
 
+def generic_web_promotion_deployment_id(
+    provider_operation_key: str, lane: ProductLaneProfile
+) -> str:
+    operation_digest = hashlib.sha256(provider_operation_key.encode("utf-8")).hexdigest()[:24]
+    return f"deployment-provider-operation-{operation_digest}-{lane.context}-{lane.instance}"
+
+
 def require_generic_web_promotion_target(
     *,
     record_store: object,
@@ -150,11 +157,7 @@ class GenericWebProdPromotionProviderMutationAdapter:
         return ProviderObservation(outcome="unknown")
 
     def _deployment_record_id(self, provider_operation_key: str) -> str:
-        operation_digest = hashlib.sha256(provider_operation_key.encode("utf-8")).hexdigest()[:24]
-        return (
-            f"deployment-provider-operation-{operation_digest}-"
-            f"{self._lane.context}-{self._lane.instance}"
-        )
+        return generic_web_promotion_deployment_id(provider_operation_key, self._lane)
 
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease

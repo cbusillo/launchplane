@@ -8377,6 +8377,10 @@ class PostgresRecordStore(HumanSessionStore):
         response_status_code: int,
         response_trace_id: str,
         response_payload: dict[str, Any],
+        expected_promotion_evidence: tuple[BaseModel, ...] = (),
+        promotion_recovery_inventory: EnvironmentInventory | None = None,
+        promotion_recovery_record: PromotionRecord | None = None,
+        promotion_recovery_deployment: DeploymentRecord | None = None,
     ) -> MutationReservationAdoptionResult:
         normalized_response_trace_id = response_trace_id.strip()
         if not reservation.reconciliation_key or not normalized_response_trace_id:
@@ -8409,7 +8413,17 @@ class PostgresRecordStore(HumanSessionStore):
                     status="replayed",
                     record=current_record,
                 )
-            if current_record.state != "reconcile_required":
+            expired_promotion = (
+                bool(expected_promotion_evidence)
+                and current_record.state == "running"
+                and parse_launchplane_mutation_timestamp(
+                    current_record.lease_expires_at, field_name="lease_expires_at"
+                )
+                <= parse_launchplane_mutation_timestamp(
+                    self._database_mutation_timestamp(session), field_name="observed_at"
+                )
+            )
+            if current_record.state != "reconcile_required" and not expired_promotion:
                 return MutationReservationAdoptionResult(
                     status="not_reconcile_required",
                     record=current_record,
@@ -8419,6 +8433,53 @@ class PostgresRecordStore(HumanSessionStore):
                     status="reservation_mismatch",
                     record=current_record,
                 )
+            # Recovery adopts only the reviewed records. Lock and compare them in
+            # the same transaction that completes the exact reservation; an expired
+            # running promotion need not first change state in a separate write.
+            for evidence in expected_promotion_evidence:
+                statement: Any
+                if isinstance(evidence, LaunchplaneProductProfileRecord):
+                    statement = select(LaunchplaneProductProfileRow).where(
+                        LaunchplaneProductProfileRow.product == evidence.product
+                    )
+                elif isinstance(evidence, ReleaseReviewDecisionRecord):
+                    statement = select(LaunchplaneReleaseReviewDecisionRow).where(
+                        LaunchplaneReleaseReviewDecisionRow.record_id == evidence.record_id
+                    )
+                elif isinstance(evidence, ProviderTargetRecord):
+                    statement = select(LaunchplaneProviderTargetRow).where(
+                        LaunchplaneProviderTargetRow.context == evidence.context,
+                        LaunchplaneProviderTargetRow.instance == evidence.instance,
+                    )
+                elif isinstance(evidence, PromotionRecord):
+                    statement = select(LaunchplanePromotionRow).where(
+                        LaunchplanePromotionRow.record_id == evidence.record_id
+                    )
+                elif isinstance(evidence, DeploymentRecord):
+                    statement = select(LaunchplaneDeploymentRow).where(
+                        LaunchplaneDeploymentRow.record_id == evidence.record_id
+                    )
+                elif isinstance(evidence, BackupGateRecord):
+                    statement = select(LaunchplaneBackupGateRow).where(
+                        LaunchplaneBackupGateRow.record_id == evidence.record_id
+                    )
+                elif isinstance(evidence, VeriReelProdBackupGateOperationRecord):
+                    statement = select(LaunchplaneVeriReelProdBackupGateOperationRow).where(
+                        LaunchplaneVeriReelProdBackupGateOperationRow.operation_id
+                        == evidence.operation_id
+                    )
+                elif isinstance(evidence, EnvironmentInventory):
+                    statement = select(LaunchplaneInventoryRow).where(
+                        LaunchplaneInventoryRow.context == evidence.context,
+                        LaunchplaneInventoryRow.instance == evidence.instance,
+                    )
+                else:
+                    raise TypeError("Unsupported promotion recovery evidence.")
+                evidence_row = session.scalar(statement.with_for_update())
+                if evidence_row is None or evidence_row.payload != self._payload_dict(evidence):
+                    return MutationReservationAdoptionResult(
+                        status="reservation_mismatch", record=current_record
+                    )
             adopted_at = self._database_mutation_timestamp(session)
             adopted_record = self._updated_idempotency_record(
                 current_record,
@@ -8430,6 +8491,27 @@ class PostgresRecordStore(HumanSessionStore):
                 response_payload=response_payload,
             )
             self._sync_idempotency_row(row, adopted_record)
+            if promotion_recovery_inventory is not None:
+                if not expected_promotion_evidence:
+                    raise ValueError("Promotion inventory recovery requires reviewed evidence.")
+                session.merge(self._environment_inventory_row(promotion_recovery_inventory))
+            if promotion_recovery_record is not None:
+                evidence_row = session.get(
+                    LaunchplanePromotionRow, promotion_recovery_record.record_id
+                )
+                if evidence_row is None or not expected_promotion_evidence:
+                    raise ValueError("Promotion recovery requires an existing reviewed record.")
+                evidence_row.payload = self._payload_dict(promotion_recovery_record)
+                evidence_row.artifact_id = promotion_recovery_record.artifact_identity.artifact_id
+                evidence_row.deploy_started_at = promotion_recovery_record.deploy.started_at
+                evidence_row.deploy_finished_at = promotion_recovery_record.deploy.finished_at
+            if promotion_recovery_deployment is not None:
+                deployment_row = session.get(
+                    LaunchplaneDeploymentRow, promotion_recovery_deployment.record_id
+                )
+                if deployment_row is None or not expected_promotion_evidence:
+                    raise ValueError("Promotion recovery requires an existing reviewed deployment.")
+                deployment_row.payload = self._payload_dict(promotion_recovery_deployment)
             session.commit()
             return MutationReservationAdoptionResult(
                 status="adopted",

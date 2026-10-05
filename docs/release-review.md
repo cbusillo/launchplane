@@ -187,11 +187,36 @@ so a generic-web deploy or rollback wait does not block queued Odoo operations.
 Shutdown finishes an admitted operation and starts no further product release.
 Failures before any provider effect are recorded as terminal failures for this
 release rather than silently retried. An expired promotion lease is shown as
-`reconciliation_required`; the provider fence stays in place. Recovery of generic-web
-promotion reservations is not yet supported by the deploy-only recovery route,
-so [#3002](https://github.com/cbusillo/launchplane/issues/3002) tracks the
-administrator recovery capability needed before relying on unattended crash
-recovery.
+`reconciliation_required`; the provider fence stays in place. The deploy recovery
+route does not recover promotion reservations. For a Client-started generic-web
+release, an existing scoped admin can select the exact decision through
+`GET /v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}`.
+The response contains an opaque recovery reference, reservation state and
+checkpoint; it exposes neither the original key nor provider coordinates.
+`POST` to that path's `/dry-run` with a written `reason` inspects the original
+accepted checklist, backup, reservation, target and durable promotion outcome.
+Both reads require the existing product-scoped `product_environment.read`
+capability and write no records or provider state.
+
+Separately reviewed `/apply` requires the same reason, `recovery_reference`,
+`expected_recovery_digest`, and current production-scoped
+`generic_web_prod_promotion.execute` authority. Browser writes use the existing
+session/CSRF protection; terminal-agent and workflow identities cannot apply.
+Recovery rechecks exact configured/running immutable images, operation deployment
+IDs and current-lane runtime-identity health. It can finish interrupted health
+checks on an exact, durably recorded successful deployment, or adopt a proven
+final promotion or verified automatic rollback, preserving a failed release as
+failed. It completes the exact reservation, finishes promotion/deployment health
+evidence and repairs a lagging inventory in one compare-and-adopt transaction;
+changed stored evidence refuses the transition. Completed recovery replays without
+effects. No provider deployment, rollback, new reservation or grant is created.
+
+Active leases wait. Missing, ambiguous, changed or unknown evidence, no-effect
+reservations, unfinished deployments, failed health checks, and unproven or failed
+rollback deployments remain held. A deployed image alone never proves the
+promotion or its checks succeeded. This is admin-assisted reconciliation, not
+unattended crash recovery or an automatic retry. Real recovery still requires
+the Director's separate authorization under [DIRECTION.md](../DIRECTION.md).
 
 With `promote_with_rollback_drill` it then runs the rollback drill:
 

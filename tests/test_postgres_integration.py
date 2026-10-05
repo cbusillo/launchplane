@@ -6003,6 +6003,19 @@ def _run_integration_provider_operation(
 
 
 class RealPostgresProviderOperationTests(unittest.TestCase):
+    def test_promotion_recovery_adoption_and_evidence_compare_on_postgres(self) -> None:
+        from tests import test_generic_web_client_release as release_fixtures
+        from tests.test_generic_web_promotion_recovery import PromotionRecoveryTests
+
+        for scenario in (
+            "test_adopts_terminal_promotion_once_without_provider_effect",
+            "test_adopts_verified_rollback_and_preserves_failed_release",
+            "test_atomic_adoption_refuses_late_record_change",
+        ):
+            with self.subTest(scenario=scenario), _store_for_fresh_head_database() as store:
+                with patch.object(release_fixtures, "PostgresRecordStore", return_value=store):
+                    PromotionRecoveryTests(scenario).debug()
+
     def test_two_instances_apply_provider_effect_exactly_once(self) -> None:
         with _store_for_fresh_head_database() as store:
             second_store = PostgresRecordStore(database_url=store.database_url)
