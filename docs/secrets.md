@@ -404,7 +404,7 @@ decryption key state denies the reveal or resolution.
   `testing` or `dev` lane, because the lane cannot tell a production key from a
   test key. A binding whose key names an integration needs a policy rule or a
   declared `secret_class` there, even when it is stored for exactly that lane.
-  Code recognizes store, payment, outgoing-mail, printing and common
+  Code recognizes store, payment, outgoing-mail, printing, map, media, web-push and
   business-system connector names (`DEFAULT_INTEGRATION_KEY_MARKERS` in
   `control_plane/runtime_key_safety.py`), matched on whole underscore-separated
   key parts. The active policy record's `integration_key_markers` add
