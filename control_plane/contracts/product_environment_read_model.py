@@ -63,6 +63,10 @@ from control_plane.drivers.registry import (
     list_driver_descriptors,
     read_driver_descriptor,
 )
+from control_plane.lane_runtime_verification import (
+    monitor_observation_provenance,
+    read_lane_runtime_verification,
+)
 from control_plane.production_backup_authority import (
     require_production_backup_authority_store,
     resolve_production_backup_authority,
@@ -683,6 +687,13 @@ def build_product_environment_detail(
         profile=profile,
         lane=lane,
         lane_summary=lane_summary,
+        runtime_verification=(
+            read_lane_runtime_verification(
+                record_store=record_store, profile=profile, lane=lane, summary=lane_summary
+            )
+            if lane_summary is not None
+            else None
+        ),
     )
     warnings = tuple(
         warning
@@ -1919,6 +1930,13 @@ def _build_environment_summary(
         profile=profile,
         lane=lane,
         lane_summary=lane_summary,
+        runtime_verification=(
+            read_lane_runtime_verification(
+                record_store=record_store, profile=profile, lane=lane, summary=lane_summary
+            )
+            if lane_summary is not None
+            else None
+        ),
     )
     return ProductEnvironmentSummary(
         environment=lane.instance,
@@ -2118,15 +2136,8 @@ def _health_monitoring_summary(
         )
         status: str
         if latest is not None:
-            trust_state = _public_ingress_freshness(latest.status)
-            provenance = DataProvenance(
-                source_kind="record",
-                source_record_id=latest.record_id,
-                recorded_at=latest.observed_at,
-                refreshed_at=latest.observed_at,
-                freshness_status=trust_state,
-                detail="Launchplane health monitoring probe observation.",
-            )
+            provenance = monitor_observation_provenance(latest)
+            trust_state = provenance.freshness_status
             status = latest.status
             summary = latest.summary
         elif not check.enabled:
@@ -2266,14 +2277,7 @@ def _public_ingress_summary(
         record_store=record_store,
         incident_id=open_incident.incident_id if open_incident is not None else "",
     )
-    provenance = DataProvenance(
-        source_kind="record",
-        source_record_id=latest.record_id,
-        recorded_at=latest.observed_at,
-        refreshed_at=latest.observed_at,
-        freshness_status=_public_ingress_freshness(latest.status),
-        detail="Launchplane public ingress synthetic observation.",
-    )
+    provenance = monitor_observation_provenance(latest)
     return ProductPublicIngressSummary(
         monitoring_intent=monitoring_intent,
         incident_eligible=incident_eligible,
@@ -2304,16 +2308,6 @@ def _public_ingress_summary(
         trust_state=provenance.freshness_status,
         provenance=provenance,
     )
-
-
-def _public_ingress_freshness(status: str) -> FreshnessStatus:
-    if status == "pass":
-        return "verified"
-    if status == "fail":
-        return "verified"
-    if status == "skipped":
-        return "unsupported"
-    return "missing"
 
 
 def _incident_reminder_times(
