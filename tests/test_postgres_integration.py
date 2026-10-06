@@ -968,6 +968,21 @@ class RealPostgresTrackedRetirementTests(unittest.IsolatedAsyncioTestCase):
                     late_audit_writer=True,
                 )
 
+    async def test_secret_late_writer_preserves_authority_and_recovery(self) -> None:
+        for write_kind in ("secret", "binding"):
+            for profile_failure in (True, False):
+                with (
+                    self.subTest(write_kind=write_kind, profile_failure=profile_failure),
+                    _head_postgres_database() as url,
+                ):
+                    fixture = retirement_tests.ProductRetirementHttpTests()
+                    await fixture._assert_tracked_checkpoint_insert_race(
+                        url,
+                        profile_failure=profile_failure,
+                        secret_audit_race=True,
+                        late_secret_write=write_kind,
+                    )
+
 
 class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_target_retirement_commits_and_replays_on_postgres(self) -> None:
