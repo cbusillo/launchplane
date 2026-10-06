@@ -50,6 +50,7 @@ from control_plane.contracts.merge_train_structural_provenance import (
 )
 from control_plane.merge_train import (
     apply_merge_train_branch_update_intent,
+    apply_merge_train_block_intent,
     MergeTrainDryRunResult,
     MergeTrainDryRunSnapshot,
     MergeTrainQueueEntry,
@@ -2970,13 +2971,12 @@ def _advance_without_candidate_record(
         # Pending saved checks must not hide the ordinary queue's blocking reason.
         if queue_result.intended_next_action == "block":
             return report_obsolete(
-                {
-                    "repository": request.repository,
-                    "base_branch": request.base_branch,
-                    "mode": "dry-run",
-                    "controller_action": "block",
-                    "dry_run_result": queue_result.model_dump(mode="json"),
-                }
+                _apply_queue_block(
+                    request=request,
+                    dry_run_result=queue_result,
+                    github_client=github_client,
+                    lease=lease,
+                )
             )
         return report_obsolete(pending_wait_result)
 
@@ -3390,6 +3390,36 @@ def _advance_planned_stack_collapse_record(
     return result
 
 
+def _apply_queue_block(
+    *,
+    request: MergeTrainControllerRunOnceEnvelope,
+    dry_run_result: MergeTrainDryRunResult,
+    github_client: GitHubMergeTrainClient,
+    lease: MergeTrainControllerLeaseContext,
+) -> dict[str, object]:
+    result: dict[str, object] = {
+        "repository": request.repository,
+        "base_branch": request.base_branch,
+        "mode": "block" if request.mutate else "dry-run",
+        "controller_action": "block",
+        "dry_run_result": dry_run_result.model_dump(mode="json"),
+    }
+    if request.mutate:
+        assert dry_run_result.selected_pr is not None
+        lease.checkpoint(
+            active_action=MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
+            active_phase="block_pull_request",
+            active_record_id="",
+            active_pull_request_number=dry_run_result.selected_pr.number,
+            step_payload={"blocked_label": dry_run_result.blocked_label},
+        )
+        block_result = apply_merge_train_block_intent(
+            dry_run_result=dry_run_result, label_client=github_client
+        )
+        result["block_result"] = block_result.model_dump(mode="json")
+    return result
+
+
 def _advance_from_live_snapshot(
     *,
     request: MergeTrainControllerRunOnceEnvelope,
@@ -3486,13 +3516,12 @@ def _advance_from_live_snapshot(
                 return restored_result
     if dry_run_result.intended_next_action == "block":
         # Report the queue's failure before rediscovering still-open carried children.
-        return {
-            "repository": request.repository,
-            "base_branch": request.base_branch,
-            "mode": "dry-run",
-            "controller_action": "block",
-            "dry_run_result": dry_run_result.model_dump(mode="json"),
-        }
+        return _apply_queue_block(
+            request=request,
+            dry_run_result=dry_run_result,
+            github_client=github_client,
+            lease=lease,
+        )
     if selected_pr is not None and merge_train_snapshot_has_stack_topology(
         snapshot=snapshot, dry_run_result=dry_run_result
     ):

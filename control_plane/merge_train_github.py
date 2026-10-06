@@ -1694,6 +1694,36 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
     ) -> None:
         repository_path = _repository_path(repository)
         normalized_label = _required_value(label, "GitHub label is required.")
+        label_path = f"/repos/{repository_path}/labels/{quote(normalized_label, safe='')}"
+        try:
+            self.transport.request(
+                method="POST",
+                path=f"/repos/{repository_path}/issues/{pull_request_number}/labels",
+                body={"labels": [normalized_label]},
+            )
+            return
+        except MergeTrainGitHubError as error:
+            if error.status_code != 422:
+                raise
+            # A validation refusal can mean the policy's label has not been created.
+            try:
+                self.transport.request(method="GET", path=label_path)
+            except MergeTrainGitHubError as lookup_error:
+                if lookup_error.status_code != 404:
+                    raise
+            else:
+                raise error
+        try:
+            self.transport.request(
+                method="POST",
+                path=f"/repos/{repository_path}/labels",
+                body={"name": normalized_label, "color": "b60205"},
+            )
+        except MergeTrainGitHubError as error:
+            if error.status_code != 422:
+                raise
+            # Another controller may have created the label on a different base lane.
+            self.transport.request(method="GET", path=label_path)
         self.transport.request(
             method="POST",
             path=f"/repos/{repository_path}/issues/{pull_request_number}/labels",

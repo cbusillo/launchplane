@@ -629,6 +629,8 @@ def _build_queue_entry(
         ineligible_reasons.append("pull request is not open")
     if pull_request.is_draft:
         ineligible_reasons.append("draft pull request")
+    if repository_policy.blocked_label in pull_request.labels:
+        ineligible_reasons.append(f"held by {repository_policy.blocked_label} label")
     is_dependency_update = (
         pull_request.actor_id is not None
         and pull_request.actor_id in repository_policy.enqueue.dependency_update_github_user_ids

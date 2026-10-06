@@ -366,6 +366,16 @@ the blocking pull request with `blocked_label` before stopping.
 higher throughput over strict ordering. A worker must still mark the failed pull
 request with `blocked_label` before considering later entries.
 
+The service controller applies a queue block as one leased transition in mutate
+mode and reports `block_result`, including the selected PR and whether policy
+permits immediate continuation. Dry-run reports the intent without applying it.
+A PR carrying `blocked_label` is excluded from subsequent queue selection,
+including label-free dependency updates, so the next controller pass can select
+other eligible work. Remove the block label after resolving the failure to admit
+that PR again. The GitHub adapter creates a missing policy label when label
+application is refused because it does not exist; other provider errors remain
+fail-closed.
+
 For the reconciled pilot, ordinary missing acceptance or check evidence holds the
 affected change rather than pausing unrelated eligible work. A broader pause is
 valid only for a proven dependency edge, a shared-state/integration fence, or an
