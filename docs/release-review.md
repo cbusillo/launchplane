@@ -22,9 +22,35 @@ the worker remembers delivery in memory and does no GitHub reads for that candid
 a replica restart reads the durable receipt again. Settled versions also need no
 GitHub read. This cache never supplies acceptance or bypasses release checks.
 
+Invitation reads run on their own thread, with at most one active sweep per
+worker replica; shutdown joins that sweep. Cold or incomplete GitHub reads add
+no wait to subsequent accepted-release passes. A responsive worker admits those
+passes every 30 seconds, observed on its normal operation poll (10 seconds by
+default), so notification-induced scheduling delay is bounded by 40 seconds
+with the defaults. Existing release work, database contention and operation
+poll duration can add their own delay. The event-controlled worker test holds a
+cold invitation sweep open while two accepted-release passes complete and proves
+that only one invitation sweep is admitted. Version reads still run before the
+five-minute checklist backoff, so a repaired or changed lane is detected on the
+next invitation pass. Repeated missing-version/refusal diagnostics of the same
+exception type are emitted once per product per five minutes; a different type
+or recovery resets that diagnostic throttle. It changes no refusal or retry gate.
+
 The product repository keeps one issue for these requests. Launchplane finds it
 by a standalone `release_request_issue_marker(product)` line in the issue body;
-without one, it creates a "Release review requests" issue. To use an existing
+the issue must be authored through the configured Delivery App, verified by
+GitHub's `performed_via_github_app.id`, as for Client feedback receipts.
+When issue responses omit that field, the provider's Bot author login is
+resolved through GitHub's public App metadata and its ID must match the same
+configured Delivery App. User-authored text and lookalike human logins cannot
+satisfy that check.
+A marked issue from another author requires an App-authored comment containing
+that same issue marker as its adoption attestation, or a prior App-authored
+invitation with its candidate marker on the first line. Existing automatic
+invitations therefore preserve their destination across this upgrade.
+Markers inside Markdown code fences are quoted data and are ignored. A copied marker from an
+untrusted issue or comment never selects a destination or confirms delivery.
+Without a trusted destination, it creates a "Release review requests" issue. To use an existing
 go-live or release issue, append that marker to its body before deploying this
 publisher. Lookup stops at the first page containing a marked issue, newest
 updated first; keep one marked issue per product. Multiple matches on that page
@@ -40,7 +66,9 @@ The marker functions live in `control_plane/release_invitation.py`; there is no
 checked-in destination catalog.
 
 Each comment includes `release_invitation_marker(product, candidate)`, derived
-from the candidate's artifact, commit and shared-input identity. The worker
+from the candidate's artifact, commit and shared-input identity, and must carry
+the configured Delivery App's provider-attested provenance. Release-decision
+issue recovery uses the same App provenance check. The worker
 serializes publication across replicas using the existing release-publication
 lock and checks for that receipt before posting. A retry after a lost response
 adopts the existing comment; edits to checklist notes do not notify again.
@@ -56,6 +84,25 @@ candidate from the supported release-review endpoint and pass its `ReleaseVersio
 to the marker command below; do not infer it from a shortened commit or from the newest
 testing build after it has changed. This imports delivery evidence without sending
 another request or submitting a decision.
+
+If the original issue or manual comment was authored by a person or another
+App, preserve it and add one comment **through the existing Delivery App**
+containing both markers as standalone lines, with no mention or invitation
+text. Keep the issue marker in the original issue body too. Use the maintained
+[GitHub comment helper](https://github.com/cbusillo/codex-skills/blob/main/skills/github/scripts/gh-comment)
+when its configured automation App is the service's Delivery App (the selector
+is reported by `GET /v1/service/github-delivery`). Save the two marker lines to
+a file and run the installed `github/scripts/gh-comment issue <number> --repo
+<repository> --body-file <receipt-file>`. The helper obtains the existing App
+identity; do not mint or copy a token yourself. Read back the comment and verify
+its `performed_via_github_app.id` against that service selector before enabling
+the publisher. If the helper's App differs, report the missing supported
+service/automation prerequisite; do not switch identity or add a grant.
+This attests manual
+adoption without sending another Client request. App-authored manual requests
+with both existing receipts need no additional comment or edit. Neither route
+adds access; if the configured App cannot write the attestation, report that
+prerequisite rather than changing credentials or grants.
 
 Save the endpoint's exact `checklist.candidate` object as a private JSON file
 and use the supported read-only marker command:

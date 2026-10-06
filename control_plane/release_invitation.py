@@ -4,13 +4,17 @@ from dataclasses import dataclass, field
 import argparse
 import hashlib
 import json
+import logging
 import re
 from pathlib import Path
+from threading import Event
 from time import monotonic
 from urllib.parse import quote
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.release_review import ReleaseReviewStatus, ReleaseVersion
+from control_plane.github_payload import github_app_authored, marker_outside_code_fences
+from control_plane.launchplane_github_delivery import resolve_delivery_github_app_id
 from control_plane.release_review import (
     CLIENT_APPROVAL_REQUIRED,
     ReleaseReviewStore,
@@ -18,14 +22,22 @@ from control_plane.release_review import (
     current_release_review,
     release_version,
 )
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.service_human_auth import launchplane_public_origin_from_env
 from control_plane.workflows.launchplane import github_api_request, resolve_launchplane_github_token
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class ReleaseInvitationLookupTooLarge(ValueError):
+    pass
 
 
 @dataclass(slots=True)
 class ReleaseInvitationBackoff:
     next_reads: dict[str, tuple[str, float]] = field(default_factory=dict)
     delivered: set[tuple[str, str, str]] = field(default_factory=set)
+    diagnostics: dict[str, tuple[type[Exception], float]] = field(default_factory=dict)
 
 
 def release_request_issue_marker(product: str) -> str:
@@ -61,7 +73,13 @@ def _ready(review: ReleaseReviewStatus, profile: LaunchplaneProductProfileRecord
 
 
 def _pages(
-    path: str, token: str, *, marker: str = "", issues_only: bool = False
+    path: str,
+    token: str,
+    *,
+    marker: str,
+    app_id: int,
+    issues_only: bool = False,
+    accept_prior_invitation: bool = False,
 ) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     separator = "&" if "?" in path else "?"
@@ -69,18 +87,56 @@ def _pages(
         result = github_api_request(path=f"{path}{separator}per_page=100&page={page}", token=token)
         if not isinstance(result, list) or any(not isinstance(item, dict) for item in result):
             raise ValueError("Release invitation lookup is incomplete.")
-        matching = [
+        marked = [
             item
             for item in result
             if (not issues_only or "pull_request" not in item)
-            and (not marker or marker in str(item.get("body", "")).splitlines())
+            and (
+                marker_outside_code_fences(item.get("body"), marker)
+                or (
+                    accept_prior_invitation
+                    and re.fullmatch(
+                        r"<!-- launchplane:release-invitation:[0-9a-f]{64} -->",
+                        str(item.get("body", "")).split("\n")[0].rstrip("\r"),
+                    )
+                )
+            )
         ]
+        matching = []
+        for item in marked:
+            if github_app_authored(
+                item,
+                app_id,
+                lookup_app=lambda slug: github_api_request(
+                    path=f"/apps/{quote(slug)}", token=token
+                ),
+            ):
+                matching.append(item)
+            elif issues_only:
+                # Manual issues may have a human author. Adoption requires an
+                # App-authored attestation on that issue, without a new mention.
+                number = item.get("number")
+                if isinstance(number, int) and number > 0:
+                    try:
+                        attested = _pages(
+                            f"{path.split('?')[0]}/{number}/comments",
+                            token,
+                            marker=marker,
+                            app_id=app_id,
+                            accept_prior_invitation=True,
+                        )
+                    except ReleaseInvitationLookupTooLarge:
+                        # An unverified destination cannot veto trusted delivery
+                        # by accumulating comments with copied public markers.
+                        continue
+                    if attested:
+                        matching.append(item)
         records.extend(matching)
         if marker and matching:
             return records
         if len(result) < 100:
             return records
-    raise ValueError("Release invitation lookup exceeds the supported size.")
+    raise ReleaseInvitationLookupTooLarge("Release invitation lookup exceeds the supported size.")
 
 
 def publish_release_invitation(
@@ -155,11 +211,13 @@ def publish_release_invitation(
         )
         if not token:
             raise ValueError("Release invitation source-control access is unavailable.")
+        app_id = resolve_delivery_github_app_id(control_plane_root=control_plane_root)
         path = f"/repos/{quote(profile.repository)}/issues"
         issues = _pages(
             f"{path}?state=all&sort=updated&direction=desc",
             token,
             marker=issue_marker,
+            app_id=app_id,
             issues_only=True,
         )
         if len(issues) > 1:
@@ -178,7 +236,7 @@ def publish_release_invitation(
         if not isinstance(number, int) or number < 1:
             raise ValueError("Release invitation issue number is unavailable.")
         comments_path = f"{path}/{number}/comments"
-        if _pages(comments_path, token, marker=marker):
+        if _pages(comments_path, token, marker=marker, app_id=app_id):
             if backoff is not None:
                 backoff.delivered.add((profile.product, profile.repository, marker))
             return
@@ -192,8 +250,8 @@ def publish_release_invitation(
         if not _ready(latest, profile) or latest.checklist_digest != review.checklist_digest:
             return
         # Reuse the review page's authority calculation, including unsupported
-        # drivers and the one-time rollback drill. Import here to avoid the
-        # client-release module's publisher import creating a module cycle.
+        # drivers and the one-time rollback drill. Resolve it only after the
+        # final review check, immediately before composing the request.
         from control_plane.client_release import release_start_for_acceptance
 
         mode = release_start_for_acceptance(store=store, profile=profile)
@@ -213,6 +271,37 @@ def publish_release_invitation(
             raise ValueError("Release invitation publication was not confirmed.")
         if backoff is not None:
             backoff.delivered.add((profile.product, profile.repository, marker))
+
+
+def advance_release_invitations(
+    *,
+    store: object,
+    control_plane_root: Path,
+    backoff: ReleaseInvitationBackoff,
+    stop_event: Event | None = None,
+) -> None:
+    """Deliver on a separate worker thread; isolate and bound repeated diagnostics."""
+    if not isinstance(store, PostgresRecordStore):
+        return
+    for profile in store.list_product_profile_records():
+        if stop_event is not None and stop_event.is_set():
+            break
+        try:
+            publish_release_invitation(
+                store=store, control_plane_root=control_plane_root, profile=profile, backoff=backoff
+            )
+        except Exception as error:
+            previous_type, next_warning = backoff.diagnostics.get(profile.product, (Exception, 0))
+            now = monotonic()
+            if type(error) is not previous_type or now >= next_warning:
+                _LOGGER.warning(
+                    "release invitation unavailable product=%s error_type=%s",
+                    profile.product,
+                    type(error).__name__,
+                )
+                backoff.diagnostics[profile.product] = (type(error), now + 300)
+        else:
+            backoff.diagnostics.pop(profile.product, None)
 
 
 def main() -> None:

@@ -67,6 +67,10 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         github = FakeReleaseIssues()
         with (
             patch(
+                "control_plane.release_review_record.resolve_delivery_github_app_id",
+                return_value=42,
+            ),
+            patch(
                 "control_plane.http_app.publish_release_decision", wraps=publish_release_decision
             ),
             patch(
