@@ -59,7 +59,38 @@ def release_decision_issue_body(decision: ReleaseReviewDecisionRecord) -> str:
             ]
         )
     if not checklist.items:
-        lines.append("No merged pull request changes between these versions.")
+        lines.append(
+            "No product-repository pull request changes. Shared changes are listed below."
+            if checklist.shared_sources
+            else "No merged pull request changes between these versions."
+        )
+    for source in checklist.shared_sources:
+        lines.extend(
+            [
+                "## Shared website components",
+                _literal(
+                    f"Repository: {source.repository}\n"
+                    f"Production: {source.production_commit}\n"
+                    f"Testing: {source.candidate_commit}"
+                ),
+            ]
+        )
+        for item in source.items:
+            lines.extend(
+                [
+                    f"### Pull request {source.repository}#{item.pull_request_number}",
+                    _literal(item.title),
+                    item.url,
+                    _literal(item.owner_test_notes or "Client test notes are missing."),
+                ]
+            )
+        if source.untracked_commits:
+            lines.extend(
+                [
+                    "### Commits without pull request coverage",
+                    _literal("\n".join(source.untracked_commits)),
+                ]
+            )
     if checklist.untracked_commits:
         lines.extend(
             [
