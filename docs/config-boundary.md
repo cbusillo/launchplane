@@ -373,6 +373,26 @@ reintroduced
 Launchplane-owned authz, route, provider-target, domain, runtime-environment,
 managed-secret, topology, or workflow-default fixtures before merge.
 
+Enforcement also fails when a scanned Python file cannot be parsed: no AST
+means its authority candidates have not been checked, even if the report has
+zero findings. Both gate profiles report these failures separately in
+`gate.rejected_coverage_gaps` and `gate.rejected_coverage_gap_count`, with
+`python_authority_coverage_incomplete` as the rejection reason. An edited
+file's existing parse failure is not a preexisting-finding exemption;
+unchanged files remain outside the changed-file scan. Report-only audits still
+exit successfully and retain the gap details. Other documented gap classes
+(including large files, binary files, unscanned classes, JSON/TOML parse gaps,
+and YAML line-scanner limitations) retain their existing report-only handling.
+
+For supported consumer syntax, run Launchplane under the consumer's supported
+Python interpreter (`uv run --python <version> launchplane ...`), or set the
+reusable workflow's existing `python-version` input. The workflow selects that
+interpreter for both setup and scanner execution. Repair invalid source when
+it also fails under the supported interpreter, then rerun the same committed
+base/head comparison. Do not suppress the gap or remove legitimate consumer
+configuration to obtain a passing gate. Service source-event scans apply the
+same gate and persist the coverage rejection in their evidence.
+
 Repository-owned GHCR publishing uses `password: ${{ github.token }}` in
 `publish-image.yml`, which the gate classifies as an artifact-publishing mechanic.
 In `cleanup-ghcr.yml`, `inputs.package_names.default` may name only the lower-case

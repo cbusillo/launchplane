@@ -148,6 +148,24 @@ class ConfigAuthorityEventTests(unittest.TestCase):
                 self.assertEqual(actual["status"], "fail")
                 self.assertNotIn("target-new", json.dumps(actual))
 
+    def test_unparsed_python_authority_fails_the_service_snapshot_gate(self) -> None:
+        from tests.test_config_authority_python_coverage import INVALID_CONSUMER_SOURCE
+
+        self.base = self.head
+        source = self.root / "consumer.py"
+        source.write_text(INVALID_CONSUMER_SOURCE)
+        _commit_all(self.root)
+        self.head = _git(self.root, "rev-parse", "HEAD")
+        source.write_text("# dirty repair must not change the GitHub snapshot\n")
+        actual = self.scan()
+        self.assertEqual(actual["status"], "fail")
+        gate = actual["gate"]
+        assert isinstance(gate, dict)
+        self.assertEqual(gate["rejected_findings"], [])
+        self.assertEqual(gate["rejected_coverage_gap_count"], 1)
+        self.assertEqual(gate["rejected_coverage_gaps"][0]["path"], "consumer.py")
+        self.assertNotIn("live.example", json.dumps(actual))
+
     def test_only_source_edits_request_a_rescan(self) -> None:
         from control_plane.product_config_authority_events import config_authority_event_supported
 

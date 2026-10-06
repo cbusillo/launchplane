@@ -1674,11 +1674,20 @@ def evaluate_config_authority_gate(
                     "rejection_reason": rejection_reason,
                 }
             )
+    rejected_coverage_gaps = [
+        {**gap, "rejection_reason": "python_authority_coverage_incomplete"}
+        for gap in _list_payload(_mapping_payload(payload.get("coverage")).get("gaps"))
+        if isinstance(gap, dict)
+        and gap.get("reason") == "parse_failure"
+        and _parser_name(Path(str(gap.get("path", "")))) == "python_ast"
+    ]
     return {
         "profile": profile,
-        "status": "fail" if rejected_findings else "pass",
+        "status": "fail" if rejected_findings or rejected_coverage_gaps else "pass",
         "rejected_finding_count": len(rejected_findings),
         "rejected_findings": rejected_findings,
+        "rejected_coverage_gap_count": len(rejected_coverage_gaps),
+        "rejected_coverage_gaps": rejected_coverage_gaps,
     }
 
 
