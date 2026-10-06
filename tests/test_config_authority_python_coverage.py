@@ -140,6 +140,7 @@ class PythonCoverageGateTests(unittest.TestCase):
         (self.root / "unsupported.rs").write_text("fn main() {}\n")
         (self.root / "large.py").write_bytes(b" " * (MAX_SCANNED_FILE_BYTES + 1))
         (self.root / "binary.py").write_bytes(b"invalid\x00content")
+        (self.root / "encoding.env").write_bytes(b"# invalid \xff\n")
         (self.root / "settings.json").write_text('{"unfinished":')
         (self.root / "settings.toml").write_text("unfinished = [")
         (self.root / "build.yml").write_text("name: Build\n")
@@ -153,6 +154,7 @@ class PythonCoverageGateTests(unittest.TestCase):
                 "skipped_large_file",
                 "skipped_binary_file",
                 "parse_failure",
+                "decode_failure",
                 "parser_limitation",
             },
         )
