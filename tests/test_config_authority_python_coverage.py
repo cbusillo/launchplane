@@ -159,3 +159,30 @@ class PythonCoverageGateTests(unittest.TestCase):
         gate = evaluate_config_authority_gate(audit, profile="product-repo")
         self.assertEqual(gate["status"], "pass")
         self.assertEqual(gate["rejected_coverage_gaps"], [])
+
+    def test_python_encoding_declarations_are_scanned_and_invalid_bytes_fail_closed(self) -> None:
+        for content, reason in (
+            (b'# coding: latin-1\nPRODUCT_DOMAIN = "live.example"\n# caf\xe9\n', None),
+            (b'PRODUCT_DOMAIN = "live.example"\n# invalid \xff\n', "decode_failure"),
+            (b'# coding: missing-codec\nPRODUCT_DOMAIN = "live.example"\n', "decode_failure"),
+        ):
+            with self.subTest(content=content):
+                self.source.write_bytes(content)
+                head = self.commit()
+                for mode in ("changed-files-gate", "full-audit"):
+                    with self.subTest(mode=mode):
+                        audit = (
+                            self.audit(head)
+                            if mode == "changed-files-gate"
+                            else (build_config_authority_audit(control_plane_root=self.root))
+                        )
+                        gate = evaluate_config_authority_gate(audit, profile="product-repo")
+                        self.assertEqual(gate["status"], "fail")
+                        gaps = gate["rejected_coverage_gaps"]
+                        assert isinstance(gaps, list)
+                        if reason:
+                            self.assertEqual(gaps[0]["reason"], reason)
+                            self.assertEqual(gate["rejected_findings"], [])
+                        else:
+                            self.assertEqual(gaps, [])
+                            self.assertTrue(gate["rejected_findings"])
