@@ -1809,6 +1809,11 @@ def _annotate_historical_closed_stack_children(
                     branch_ref=root.merge_commit_sha,
                     commit_sha=child.expected_head_sha,
                 )
+                or github_client.branch_contains_commit(
+                    repository=landing.repository,
+                    branch_ref=root.recorded_rolling_base_sha or root.expected_base_sha,
+                    commit_sha=child.expected_head_sha,
+                )
             ):
                 continue
             label = repository_policy.stack_child_disposition_label

@@ -83,6 +83,8 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         landing_contains_child: bool = True,
         label_configured: bool = True,
         child_only_in_base: bool = False,
+        root_refreshed_after_child_landing: bool = False,
+        interrupt_root_checkpoint: bool = False,
     ) -> None:
         graph = _StackTransport()
         if deeper:
@@ -249,6 +251,10 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     not checkpointed
                     and not self.interrupted
                     and any(m.status == "mutated" for m in record.plan.mutations)
+                    and (
+                        not interrupt_root_checkpoint
+                        or all(m.status == "mutated" for m in record.plan.mutations)
+                    )
                 ):
                     self.interrupted = True
                     raise MergeTrainGitHubError("provider succeeded before progress persistence")
@@ -310,11 +316,14 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
                 first = await run()
                 self.assertEqual(first.status_code, 202 if checkpointed else 502, first.text)
-                self.assertEqual(len(graph.merge_requests), 2 if checkpointed and deeper else 1)
+                self.assertEqual(
+                    len(graph.merge_requests),
+                    2 if deeper and (checkpointed or interrupt_root_checkpoint) else 1,
+                )
                 original_records = store.list_merge_train_stack_collapse_plan_records()
                 self.assertEqual(
                     any(m.status == "mutated" for r in original_records for m in r.plan.mutations),
-                    checkpointed,
+                    checkpointed or interrupt_root_checkpoint,
                 )
                 if moved:
                     graph.parents["root-push"] = (graph.heads["feature/root"],)
@@ -325,6 +334,11 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     graph.parents["root-without-child"] = ("head-root",)
                     graph.heads["feature/root"] = "root-without-child"
                     graph.parents["current-base-main"] = ("head-child",)
+                if root_refreshed_after_child_landing:
+                    closed.add(2)
+                    graph.parents["current-base-main"] = ("head-child",)
+                    graph.parents["root-refreshed"] = ("head-root", "current-base-main")
+                    graph.heads["feature/root"] = "root-refreshed"
                 if child_changed:
                     graph.parents["new-child"] = (graph.heads["feature/child"],)
                     graph.heads["feature/child"] = "new-child"
@@ -355,7 +369,10 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(closed, {2, 3} if deeper else {2})
                     expected_annotations = (
                         ([2, 3] if deeper else [2])
-                        if landing_contains_child and not child_changed and not child_only_in_base
+                        if landing_contains_child
+                        and not child_changed
+                        and not child_only_in_base
+                        and not root_refreshed_after_child_landing
                         else []
                     )
                     self.assertEqual(comments, expected_annotations)
@@ -525,4 +542,21 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_child_landed_only_in_base_is_not_credited_to_root(self) -> None:
         await self._recovery(
             checkpointed=False, moved=False, indirectly_merged=True, child_only_in_base=True
+        )
+
+    async def test_independent_child_is_not_credited_to_root_after_base_refresh(self) -> None:
+        await self._recovery(
+            checkpointed=False,
+            moved=False,
+            indirectly_merged=True,
+            root_refreshed_after_child_landing=True,
+        )
+
+    async def test_lost_final_carry_checkpoint_preserves_middle_head_for_annotations(self) -> None:
+        await self._recovery(
+            checkpointed=False,
+            moved=False,
+            deeper=True,
+            indirectly_merged=True,
+            interrupt_root_checkpoint=True,
         )
