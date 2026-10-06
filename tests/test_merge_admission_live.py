@@ -351,6 +351,27 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
         self.assertEqual(result.structural_result.status, "exact")
         self.assertEqual(result.readiness.owner_facets, ())
 
+    def test_service_landing_excludes_a_blocked_older_failing_pull_request(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            evidence = _repository_evidence()
+            held = _queued_pull_request(
+                number=2021, head_sha="d" * 40, created_at="2026-08-11T02:59:00Z"
+            ).model_copy(
+                update={
+                    "labels": ("ready-to-merge", "MERGE-BLOCKED"),
+                    "required_checks_status": "fail",
+                }
+            )
+            result = _evaluate_live(
+                store=store,
+                provider=_EvidenceProvider(evidence),
+                evidence=evidence,
+                extra_pull_requests=(held,),
+            )
+        self.assertEqual(result.readiness.state, "ready")
+        self.assertEqual(result.structural_result.status, "exact")
+
     def test_landing_rediscovers_a_dependabot_update_after_a_recorded_refresh(self) -> None:
         bot_id = 49699333
         old_head = "1" * 40

@@ -370,19 +370,24 @@ These ordering rules apply to the single-transition worker. The service batch
 controller holds a failing queue PR independently, as described below.
 
 The service controller applies a queue block as one leased transition in mutate
-mode and reports `block_result`, including the selected PR and whether policy
-permits immediate continuation. Dry-run reports the intent without applying it.
-For service batches, a PR carrying `blocked_label` is excluded from subsequent queue selection,
+mode and reports `block_result`, including the selected PR and permission to
+continue the service train past that held PR (`train_should_continue=true`)
+under either failure policy. The driver continues for other PRs but still fails
+its own blocked PR. Dry-run reports the intent without applying it.
+For service batches, a PR carrying `blocked_label` is excluded from subsequent
+queue selection,
 including label-free dependency updates, so the next controller pass can select
 other eligible work. Remove the block label after resolving the failure to admit
-that PR again. The GitHub adapter creates a missing policy label when label
+that PR again. Applied-block PR feedback explains the failure and how to rejoin.
+The GitHub adapter creates a missing policy label when label
 application is refused because it does not exist; other provider errors remain
 fail-closed.
 
 For the reconciled pilot, ordinary missing acceptance or check evidence holds the
 affected change rather than pausing unrelated eligible work. A broader pause is
 valid only for a proven dependency edge, a shared-state/integration fence, or an
-unknown effect that makes later mutation unsafe. The single-transition worker retains the selected policy's ordering behavior.
+unknown effect that makes later mutation unsafe. The single-transition worker
+retains the selected policy's ordering behavior.
 The service batch controller applies independent queue holds without changing
 policy records. A policy replacement still requires its reviewed DB-backed
 activation.

@@ -14,6 +14,7 @@ from control_plane.merge_train_controller_run_once import (
     _apply_queue_block,
 )
 from control_plane.ordinary_agent_merge_train_client import _NoAmbientTransport
+from control_plane.merge_train_controller_feedback import build_feedback_payloads
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     MergeTrainGitHubError,
@@ -119,10 +120,11 @@ class QueueBlockingTests(unittest.IsolatedAsyncioTestCase):
             result = blocked.json()["result"]
             self.assertEqual(result["mode"], "block")
             self.assertEqual(result["block_result"]["pull_request_number"], 1)
-            self.assertEqual(
-                result["block_result"]["train_should_continue"],
-                failure_policy == "continue_after_blocking_pr",
-            )
+            self.assertTrue(result["block_result"]["train_should_continue"])
+            feedback = build_feedback_payloads(response=blocked.json())
+            self.assertEqual([entry["pull_request_number"] for entry in feedback], [1])
+            self.assertIn("required checks failed", feedback[0]["message"])
+            self.assertIn("remove", feedback[0]["message"])
             self.assertEqual(labels, [(1, repository_policy.blocked_label)])
             self.assertEqual(store.list_merge_train_batch_candidate_records(), ())
             progressed = await _post_merge_train_controller_run_once(
@@ -136,6 +138,23 @@ class QueueBlockingTests(unittest.IsolatedAsyncioTestCase):
                     for entry in progressed.json()["result"]["candidate"]["entries"]
                 ],
                 [2],
+            )
+            self.assertEqual(labels, [(1, repository_policy.blocked_label)])
+            for action in ("build_candidate", "observe_candidate", "plan_landing", "land_batch"):
+                response = await _post_merge_train_controller_run_once(
+                    app, {**request, "mutate": True}
+                )
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertEqual(response.json()["result"]["controller_action"], action)
+            landing = next(
+                record.landing_plan
+                for record in store.list_merge_train_batch_landing_plan_records()
+                if record.record_id
+                == response.json()["records"]["merge_train_batch_landing_plan_record_id"]
+            )
+            self.assertEqual(
+                [(entry.pull_request_number, entry.status) for entry in landing.entries],
+                [(2, "merged")],
             )
             self.assertEqual(labels, [(1, repository_policy.blocked_label)])
 
