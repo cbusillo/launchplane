@@ -652,7 +652,10 @@ maintenance, and Delivery Governance child routes are added only when their type
 views and supported controls exist. Environment diagnosis uses desired,
 provider-recorded, and observed topology as distinct evidence; a verified read
 is not presented as healthy when the recorded ingress, TLS, or runtime identity
-condition is failing.
+condition is failing. A provider-target record exposes recorded placement even
+without a public route binding, including for private-only services. That record
+does not establish public ingress, TLS ownership, or verified runtime identity;
+missing public route authority still blocks public-lane qualification.
 
 Open product inventories, workspaces, and environment evidence views refresh
 their read resources once a minute after a completed read. Hidden tabs pause
