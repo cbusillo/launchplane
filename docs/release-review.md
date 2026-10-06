@@ -387,6 +387,12 @@ is recorded as failed and is not automatically retried. Admin reconciliation is
 still required for uncertainty; deployed-path qualification is separate from
 these deterministic provider tests.
 
+Queued Odoo administrator promotions and rollbacks also hold uncertain effects
+for reconciliation. Synchronous non-worker callers retain their existing result
+handling. Client promotions queued by an older worker without a recovery pin
+are refused before writing; requalify pending release operations when deploying
+this worker, and record fresh acceptance if such a release was stopped.
+
 The review page says before the Accept button whether accepting puts the
 version on the live site, naming it, or whether releases are held. After
 acceptance it shows each step's status. `GET /v1/release-review` returns

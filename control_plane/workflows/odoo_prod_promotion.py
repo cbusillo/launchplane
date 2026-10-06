@@ -34,6 +34,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.production_promotion_backup import (
     ODOO_PROMOTION_BACKUP_ACTION,
+    ProductionPromotionBackupGuard,
     production_promotion_backup_guard,
     require_production_promotion_backup,
 )
@@ -266,16 +267,13 @@ def execute_odoo_prod_promotion(
 
 
 def _checkpoint_chain(
-    first: Callable[[str], None] | None, second: Callable[[str], None]
+    first: Callable[[str], None] | None, second: ProductionPromotionBackupGuard
 ) -> Callable[[str], None]:
     if first is None:
         return second
 
     def checkpoint(phase: str) -> None:
-        # The backup/source-lock gate must pass before the worker records that
-        # the production write may have happened.
-        second(phase)
-        first(phase)
+        second.before_provider_effect(phase, first)
 
     return checkpoint
 
