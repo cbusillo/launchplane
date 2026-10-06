@@ -9,7 +9,11 @@ from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.merge_train_stack_collapse import MergeTrainStackCollapsePlanRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
-from control_plane.merge_train_github import GitHubMergeTrainClient, MergeTrainGitHubError
+from control_plane.merge_train_github import (
+    GitHubMergeTrainClient,
+    MergeTrainGitHubError,
+    MergeTrainGitHubStaleHeadError,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.http_app_test_support import _post_merge_train_controller_run_once
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
@@ -58,7 +62,7 @@ class _StackTransport:
             parent = self.heads[ref]
             if self.contains(parent, child_head):
                 return None  # GitHub returns 204 with no JSON body.
-            head = f"merge-{len(self.merge_requests)}"
+            head = f"branch-merge-{len(self.merge_requests)}"
             self.parents[head] = (parent, child_head)
             self.messages[head] = message
             self.heads[ref] = head
@@ -75,6 +79,8 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         child_changed: bool = False,
         deeper: bool = False,
         indirectly_merged: bool = False,
+        annotation_interrupted: bool = False,
+        landing_contains_child: bool = True,
     ) -> None:
         graph = _StackTransport()
         if deeper:
@@ -82,6 +88,9 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         child_held = False
         comments: list[int] = []
         closed: set[int] = set()
+        labels: set[int] = set()
+        label_attempts: list[int] = []
+        close_requests: list[int] = []
 
         class Reader(_FakeStackedMergeTrainSnapshotReader):
             def read_merge_train_snapshot(
@@ -91,7 +100,14 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     repository=repository, base_branch=base_branch
                 )
                 root, child = snapshot.pull_requests
+                if (
+                    indirectly_merged
+                    and deeper
+                    and graph.contains(graph.heads[child.head_ref], "head-leaf")
+                ):
+                    closed.add(3)
                 if indirectly_merged and graph.contains(graph.heads[root.head_ref], child.head_sha):
+                    closed.add(2)
                     return snapshot.model_copy(
                         update={
                             "pull_requests": (
@@ -128,7 +144,7 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                                         }
                                     ),
                                 )
-                                if deeper
+                                if deeper and 3 not in closed
                                 else ()
                             ),
                         )
@@ -136,6 +152,24 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         class Client(_FakeMergeTrainGitHubClient):
+            def land_batch_candidate(self, **kwargs: Any) -> Any:
+                landed = super().land_batch_candidate(**kwargs)
+                for entry in landed.entries:
+                    graph.parents[entry.merge_commit_sha] = (
+                        (entry.expected_head_sha,) if landing_contains_child else ()
+                    )
+                return landed
+
+            def pull_request_has_label(self, **kwargs: Any) -> bool:
+                return kwargs["pull_request_number"] in labels
+
+            def add_pull_request_label(self, **kwargs: Any) -> None:
+                number = kwargs["pull_request_number"]
+                label_attempts.append(number)
+                if annotation_interrupted and len(label_attempts) == 1:
+                    raise MergeTrainGitHubError("label response failed after comment")
+                labels.add(number)
+
             def find_stack_child_merge_commit(self, **kwargs: Any) -> str:
                 return GitHubMergeTrainClient(transport=graph).find_stack_child_merge_commit(
                     **kwargs
@@ -182,9 +216,10 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     expected_head_sha
                     != graph.heads["feature/child" if number == 2 else "feature/leaf"]
                 ):
-                    raise AssertionError("landing must reconcile the current child head")
+                    raise MergeTrainGitHubStaleHeadError("child head moved", status_code=409)
 
             def close_pull_request(self, **kwargs: Any) -> None:
+                close_requests.append(kwargs["pull_request_number"])
                 self.require_disposition_head(
                     kwargs["pull_request_number"], kwargs["expected_head_sha"]
                 )
@@ -261,7 +296,7 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
                 first = await run()
                 self.assertEqual(first.status_code, 202 if checkpointed else 502, first.text)
-                self.assertEqual(len(graph.merge_requests), 1)
+                self.assertEqual(len(graph.merge_requests), 2 if checkpointed and deeper else 1)
                 original_records = store.list_merge_train_stack_collapse_plan_records()
                 self.assertEqual(
                     any(m.status == "mutated" for r in original_records for m in r.plan.mutations),
@@ -285,17 +320,32 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 )
                 store.write_merge_train_policy_record(current)
                 if indirectly_merged:
-                    # GitHub's indirect merge has already closed the carried child.
-                    closed.add(2)
                     for _ in range(10):
                         response = await run()
+                        if response.status_code == 502 and annotation_interrupted:
+                            self.assertEqual(comments, [2])
+                            continue
                         self.assertEqual(response.status_code, 202, response.text)
                         result = response.json()["result"]
                         if result["controller_action"] == "land_batch":
                             break
                     self.assertEqual(result["controller_action"], "land_batch")
-                    self.assertEqual(closed, {2})
-                    self.assertEqual(len(graph.merge_requests), 1)
+                    self.assertEqual(closed, {2, 3} if deeper else {2})
+                    expected_annotations = (
+                        ([2, 3] if deeper else [2])
+                        if landing_contains_child and not child_changed
+                        else []
+                    )
+                    self.assertEqual(comments, expected_annotations)
+                    self.assertEqual(labels, set(expected_annotations))
+                    self.assertEqual(close_requests, [])
+                    self.assertEqual(len(graph.merge_requests), 2 if deeper else 1)
+                    # Retry completed cleanup through the same HTTP controller.
+                    replay = await run()
+                    self.assertEqual(replay.status_code, 202, replay.text)
+                    self.assertEqual(comments, expected_annotations)
+                    self.assertEqual(labels, set(expected_annotations))
+                    self.assertEqual(len(graph.merge_requests), 2 if deeper else 1)
                     self.assertTrue(
                         all(
                             r.candidate.policy_sha256 == current.policy_sha256
@@ -412,3 +462,27 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         await self._recovery(checkpointed=False, moved=False, indirectly_merged=True)
+
+    async def test_checkpointed_indirect_child_receives_landing_annotations(self) -> None:
+        await self._recovery(checkpointed=True, moved=True, indirectly_merged=True)
+
+    async def test_missing_middle_checkpoint_recovers_absent_leaf_annotations(self) -> None:
+        await self._recovery(checkpointed=False, moved=False, deeper=True, indirectly_merged=True)
+
+    async def test_recorded_middle_progress_recovers_absent_leaf_annotations(self) -> None:
+        await self._recovery(checkpointed=True, moved=True, deeper=True, indirectly_merged=True)
+
+    async def test_annotation_retry_does_not_repeat_comment_or_merge(self) -> None:
+        await self._recovery(
+            checkpointed=False, moved=False, indirectly_merged=True, annotation_interrupted=True
+        )
+
+    async def test_historical_annotation_skips_moved_closed_child(self) -> None:
+        await self._recovery(
+            checkpointed=False, moved=True, indirectly_merged=True, child_changed=True
+        )
+
+    async def test_historical_annotation_requires_actual_landing_containment(self) -> None:
+        await self._recovery(
+            checkpointed=False, moved=False, indirectly_merged=True, landing_contains_child=False
+        )

@@ -26,7 +26,12 @@ from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerStateRecord,
     build_merge_train_controller_state_record,
 )
-from control_plane.contracts.merge_train_effect import MergeTrainSemanticEffectExecutor
+from control_plane.contracts.merge_train_effect import (
+    MergeTrainEffectLineage,
+    MergeTrainSemanticEffectExecutor,
+    StackChildCommentEffect,
+    StackChildLabelEffect,
+)
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy, MergeTrainRepositoryPolicy
 from control_plane.contracts.merge_train_historical_completion import (
     MergeTrainHistoricalCompletionSelector,
@@ -650,6 +655,7 @@ def _resume_merge_train_controller_state(
         "cleanup_candidate_ref",
         "reconcile_stack_children",
         "stack_children_reconciled",
+        "annotate_historical_stack_child",
     }:
         return None
     landing_record_id = str(lease.record.step_payload.get("landing_plan_record_id") or "")
@@ -1693,6 +1699,14 @@ def _finish_landed_merge_train_batch(
             raise MergeTrainControllerRequestError(
                 "merge train stack collapse resume record is missing or incompatible"
             )
+        if landed_record.ordinary_job_binding is None:
+            _annotate_historical_closed_stack_children(
+                landed_record=landed_record,
+                repository_policy=repository_policy,
+                github_client=github_client,
+                stack_collapse_store=stack_collapse_store,
+                lease=lease,
+            )
         return result
     reconciled_records = []
     for collapse_record in collapse_records:
@@ -1715,7 +1729,125 @@ def _finish_landed_merge_train_batch(
     )
     result["merge_train_stack_collapse_plan_record_id"] = newest_record.record_id
     result["stack_collapse_plan"] = newest_record.plan.model_dump(mode="json")
+    _annotate_historical_closed_stack_children(
+        landed_record=landed_record,
+        repository_policy=repository_policy,
+        github_client=github_client,
+        stack_collapse_store=stack_collapse_store,
+        lease=lease,
+    )
     return result
+
+
+def _annotate_historical_closed_stack_children(
+    *,
+    landed_record: MergeTrainBatchLandingPlanRecord,
+    repository_policy: MergeTrainRepositoryPolicy,
+    github_client: GitHubMergeTrainClient,
+    stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
+    lease: MergeTrainControllerLeaseContext,
+) -> None:
+    """Observe carried history after landing; never requalify or execute its plan."""
+    landing = landed_record.landing_plan
+    roots = {
+        entry.pull_request_number: entry for entry in landing.entries if entry.status == "merged"
+    }
+    records = stack_collapse_store.list_merge_train_stack_collapse_plan_records(
+        repository=landing.repository, base_branch=landing.base_branch
+    )
+    annotated = {
+        (child.pull_request_number, child.expected_head_sha)
+        for record in records
+        if record.plan.policy_sha256 == landing.policy_sha256
+        and record.plan.root_pull_request_number in roots
+        for child in record.plan.child_dispositions
+        if child.status == "closed"
+    }
+    for progress in _group_stack_collapse_records(records).values():
+        record = latest_merge_train_stack_collapse_progress_record(tuple(progress))
+        if record is None:
+            continue
+        plan = record.plan
+        root = roots.get(plan.root_pull_request_number)
+        if (
+            root is None
+            or record.ordinary_job_binding is not None
+            or plan.repository != landing.repository
+            or plan.base_branch != landing.base_branch
+            or plan.policy_key != landing.policy_key
+            or plan.policy_sha256 == landing.policy_sha256
+            or not github_client.branch_contains_commit(
+                repository=landing.repository,
+                branch_ref=root.expected_head_sha,
+                commit_sha=plan.root_initial_head_sha,
+            )
+        ):
+            continue
+        for child in plan.child_dispositions:
+            identity = (child.pull_request_number, child.expected_head_sha)
+            if child.status == "closed" or identity in annotated:
+                continue
+            try:
+                closed = github_client.pull_request_is_closed(
+                    repository=landing.repository,
+                    pull_request_number=child.pull_request_number,
+                    expected_head_sha=child.expected_head_sha,
+                )
+            except MergeTrainGitHubStaleHeadError:
+                continue  # Old expectations cannot dispose of a moved child.
+            if not closed or not github_client.branch_contains_commit(
+                repository=landing.repository,
+                branch_ref=root.merge_commit_sha,
+                commit_sha=child.expected_head_sha,
+            ):
+                continue
+            label = repository_policy.stack_child_disposition_label
+            if not label:
+                raise MergeTrainControllerRequestError(
+                    "merge train historical child annotation requires stack_child_disposition_label"
+                )
+            body = (
+                f"Launchplane verified this already-closed stacked PR's head "
+                f"`{child.expected_head_sha}` in root PR #{root.pull_request_number}, "
+                f"landed by the merge train at `{root.merge_commit_sha}`.\n\n"
+                "This restores landing annotations from carried stack history; "
+                "it does not record a new child merge or historical admission."
+            )
+            lineage = MergeTrainEffectLineage(
+                repository=landing.repository,
+                base_branch=landing.base_branch,
+                collapse_id=plan.collapse_id,
+                batch_id=landing.batch_id,
+                landing_plan_id=landing.plan_id,
+            )
+            lease.checkpoint(
+                active_action="land_batch",
+                active_phase="annotate_historical_stack_child",
+                active_record_id=landed_record.record_id,
+                active_pull_request_number=child.pull_request_number,
+            )
+            if not github_client.find_pull_request_comment_url(
+                repository=landing.repository,
+                pull_request_number=child.pull_request_number,
+                body_contains=body,
+            ):
+                github_client.semantic_effect_executor.comment_stack_child(
+                    StackChildCommentEffect(
+                        lineage=lineage, pull_request_number=child.pull_request_number, body=body
+                    )
+                )
+            lease.checkpoint()
+            if not github_client.pull_request_has_label(
+                repository=landing.repository,
+                pull_request_number=child.pull_request_number,
+                label=label,
+            ):
+                github_client.semantic_effect_executor.label_stack_child(
+                    StackChildLabelEffect(
+                        lineage=lineage, pull_request_number=child.pull_request_number, label=label
+                    )
+                )
+            annotated.add(identity)
 
 
 def _reconcile_landed_stack_children(
