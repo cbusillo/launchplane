@@ -74,6 +74,11 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
                 if not field.is_required()
             )
             self.original.pop(default_field)
+        if self._testMethodName == "test_numeric_request_normalization_refuses_reference_read":
+            numeric_field = next(
+                name for name, value in self.original.items() if type(value) is int
+            )
+            self.original[numeric_field] = float(self.original[numeric_field])
         self.reservation = self.reserve(
             "first",
             state="running"
@@ -511,4 +516,10 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
             code, result = self.read()
             self.assertEqual(code, 409, result)
             self.assertEqual(result["error"]["code"], "recovery_evidence_conflict")
+        self.assertEqual(self.store.list_held_provider_target_reservations(), (self.reservation,))
+
+    def test_numeric_request_normalization_refuses_reference_read(self) -> None:
+        code, result = self.read()
+        self.assertEqual(code, 409, result)
+        self.assertEqual(result["error"]["code"], "recovery_evidence_conflict")
         self.assertEqual(self.store.list_held_provider_target_reservations(), (self.reservation,))
