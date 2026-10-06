@@ -1325,7 +1325,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
-    async def test_work_graph_rank_rejects_owner_agent_bearer_identities(
+    async def test_work_graph_rank_accepts_granted_owner_agent_planning(
         self,
     ) -> None:
         cases = (
@@ -1371,8 +1371,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
                     authorization=f"Bearer {token}",
                 )
 
-                self.assertEqual(response.status_code, 403)
-                self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+                self.assertEqual(response.status_code, 202)
 
     async def test_work_graph_rank_rejects_unclassified_issue(self) -> None:
         app = create_launchplane_fastapi_app(
@@ -3193,7 +3192,10 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
                 status, payload, stored = await self._post_expected_config_for_production_use(
                     production_use="live", mode=mode
                 )
-                self.assertEqual(status, 403, payload)
+                self.assertEqual(status, 202 if mode == "dry-run" else 403, payload)
+                if mode == "dry-run":
+                    self.assertEqual(stored.expected_config.managed_secret_bindings, ())
+                    continue
                 error = cast(dict[str, object], payload["error"])
                 self.assertEqual(error["code"], "live_product_requires_operator")
                 self.assertIn("changed by an admin", str(error["message"]))

@@ -840,7 +840,7 @@ def register_tenant_admission_write_routes(
     ) -> TenantRepositoryClassificationApplyResponse:
         trace_id = dependencies.next_trace_id()
 
-        if isinstance(identity, TerminalAgentIdentity):
+        if envelope.mode == "apply" and isinstance(identity, TerminalAgentIdentity):
             raise dependencies.http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -849,6 +849,13 @@ def register_tenant_admission_write_routes(
             )
 
         if not dependencies.authorization_allows(
+            identity=identity,
+            action="tenant_repository_classification.write"
+            if envelope.mode == "apply"
+            else "tenant_repository_classification.plan",
+            product=_LAUNCHPLANE_SERVICE_CONTEXT,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ) and not dependencies.authorization_allows(
             identity=identity,
             action="tenant_repository_classification.write",
             product=_LAUNCHPLANE_SERVICE_CONTEXT,
@@ -1037,7 +1044,9 @@ def register_tenant_admission_write_routes(
     ) -> TrustedMaintenancePolicyApplyResponse:
         trace_id = dependencies.next_trace_id()
 
-        if not isinstance(identity, GitHubHumanIdentity) or identity.github_id < 1:
+        if envelope.mode == "apply" and (
+            not isinstance(identity, GitHubHumanIdentity) or identity.github_id < 1
+        ):
             raise dependencies.http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -1048,6 +1057,14 @@ def register_tenant_admission_write_routes(
             )
 
         if not dependencies.authorization_allows(
+            identity=identity,
+            action=TRUSTED_MAINTENANCE_POLICY_WRITE_ACTION
+            if envelope.mode == "apply"
+            else "trusted_maintenance_policy.plan",
+            product=envelope.record.product,
+            context=envelope.record.context,
+            target=AuthorizationTarget(scope="context"),
+        ) and not dependencies.authorization_allows(
             identity=identity,
             action=TRUSTED_MAINTENANCE_POLICY_WRITE_ACTION,
             product=envelope.record.product,

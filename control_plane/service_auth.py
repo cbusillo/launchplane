@@ -12,6 +12,7 @@ from typing import Annotated, Any, Literal, Protocol, TypeAlias, cast
 from weakref import WeakKeyDictionary
 
 import jwt
+from control_plane.action_effects import AGENT_READ_ROLE_ACTION, agent_read_role_covers
 from pydantic import (
     AfterValidator,
     BaseModel,
@@ -719,7 +720,11 @@ class TerminalAgentPolicyRule(TokenBoundAuthzPolicyRule):
         return self.allows_token_bound_identity(
             subject=identity.subject,
             token_label=identity.token_label,
-            action=action,
+            action=(
+                AGENT_READ_ROLE_ACTION
+                if AGENT_READ_ROLE_ACTION in self.actions and agent_read_role_covers(action)
+                else action
+            ),
             product=product,
             context=context,
             target=target,
@@ -743,7 +748,11 @@ class LocalOperatorPolicyRule(PatternTokenBoundAuthzPolicyRule):
         return self.allows_token_bound_identity(
             subject=identity.subject,
             token_label=identity.token_label,
-            action=action,
+            action=(
+                AGENT_READ_ROLE_ACTION
+                if AGENT_READ_ROLE_ACTION in self.actions and agent_read_role_covers(action)
+                else action
+            ),
             product=product,
             context=context,
             target=target,
@@ -832,9 +841,11 @@ def action_safety(action: str) -> AgentConsumerActionSafety:
         return "destructive"
     if "prod" in action_parts or "promotion" in action_parts:
         return "prod"
-    if normalized_action in {"authz_diagnostic.evaluate", "work_graph.rank"} or (
-        normalized_action.endswith(".read")
-    ):
+    if normalized_action in {
+        "agent_write_intent.plan",
+        "authz_diagnostic.evaluate",
+        "work_graph.rank",
+    } or (normalized_action.endswith(".read")):
         return "read"
     if (
         normalized_action.endswith(".write")

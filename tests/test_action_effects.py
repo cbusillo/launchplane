@@ -1,0 +1,306 @@
+from __future__ import annotations
+
+import ast
+from dataclasses import replace
+from pathlib import Path
+import re
+import unittest
+from unittest.mock import patch
+
+from tests.support.ingress import _FakeNpmplusIngressClient, _npmplus_ingress_route_payload
+from tests.test_production_backup_authority import _dry_run_envelope
+from control_plane.action_effects import ACTION_EFFECTS, AGENT_READ_ROLE_ACTION
+from control_plane.contracts.agent_write_intent import _INTENT_AUTHZ_ACTIONS
+from control_plane.drivers.registry import list_driver_descriptors
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    LaunchplaneAuthzPolicy,
+    LocalOperatorIdentity,
+    LocalOperatorPolicyRule,
+    TerminalAgentIdentity,
+    TerminalAgentPolicyRule,
+)
+from tests.support.http import lifespan_client
+from control_plane.service_github_delivery_controls import (
+    SERVICE_GITHUB_DELIVERY_ROUTE,
+    SERVICE_TOKEN_RETIREMENT_ROUTE,
+)
+from tests.test_service_github_delivery_controls import (
+    retirement_request,
+    seed_metadata,
+)
+from tests.test_authz_administration_read import _database_app
+
+
+def reader_policy(*, product: str = "*") -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy(
+        schema_version=2,
+        local_operators=tuple(
+            LocalOperatorPolicyRule(
+                subjects=("record-reader",),
+                token_labels=("record-reader-label",),
+                products=(product,),
+                contexts=("*",),
+                actions=(AGENT_READ_ROLE_ACTION,),
+                instances=instances,
+            )
+            for instances in ((), ("*",))
+        ),
+    )
+
+
+class ActionEffectTests(unittest.TestCase):
+    def test_every_source_authorization_action_declares_an_effect(self) -> None:
+        """Enforce one rule over all action callsites, constants and descriptors."""
+        references: dict[str, str] = {}
+        root = Path(__file__).resolve().parents[1] / "control_plane"
+        for path in root.rglob("*.py"):
+            if "migrations" in path.parts or path.name == "action_effects.py":
+                continue
+            for node in ast.walk(ast.parse(path.read_text())):
+                value = None
+                if isinstance(node, ast.keyword) and "action" in (node.arg or ""):
+                    value = node.value
+                elif isinstance(node, ast.Assign | ast.AnnAssign):
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    if any(
+                        isinstance(target, ast.Name)
+                        and (
+                            ("authz" in target.id.lower() and "action" in target.id.lower())
+                            or target.id.lower()
+                            in {
+                                "action",
+                                "required_action",
+                                "authorization_action",
+                                "controller_action",
+                                "binding_action",
+                                "onboarding_action",
+                            }
+                            or target.id.endswith("_ACTION")
+                        )
+                        for target in targets
+                    ):
+                        value = node.value
+                if value is not None:
+                    for literal in ast.walk(value):
+                        if (
+                            isinstance(literal, ast.Constant)
+                            and isinstance(literal.value, str)
+                            and re.fullmatch(
+                                r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+", literal.value
+                            )
+                        ):
+                            references[literal.value] = f"{path.relative_to(root)}:{literal.lineno}"
+        for descriptor in list_driver_descriptors():
+            for action in descriptor.actions:
+                for name in (action.authz_action, *action.alternate_authz_actions):
+                    if name:
+                        references[name] = descriptor.driver_id
+        for name in _INTENT_AUTHZ_ACTIONS.values():
+            references[f"{name}.secret"] = "agent secret-backed intent"
+        missing = {name: site for name, site in references.items() if name not in ACTION_EFFECTS}
+        self.assertFalse(missing, f"Undeclared authorization actions: {missing}")
+
+    def test_role_covers_all_declared_reads_and_plans_but_no_writes(self) -> None:
+        identities = (
+            LocalOperatorIdentity("record-reader", "record-reader-label"),
+            TerminalAgentIdentity("record-reader", "record-reader-label"),
+        )
+        for identity in identities:
+            policy = reader_policy()
+            if isinstance(identity, TerminalAgentIdentity):
+                policy = LaunchplaneAuthzPolicy(
+                    schema_version=2,
+                    terminal_agents=tuple(
+                        TerminalAgentPolicyRule.model_validate(
+                            {**rule.model_dump(), "products": (), "contexts": ()}
+                        )
+                        for rule in policy.local_operators
+                    ),
+                )
+            for name, effect in ACTION_EFFECTS.items():
+                # Exclusive instance contracts keep their scope gate.
+                target = AuthorizationTarget(scope="instance", instances=("testing",))
+                with self.subTest(identity=type(identity).__name__, action=name):
+                    allowed = policy.allows(
+                        identity=identity,
+                        action=name,
+                        product="sample",
+                        context="sample",
+                        target=target,
+                    )
+                    self.assertEqual(allowed, effect in {"read", "plan"})
+            self.assertFalse(
+                policy.allows(
+                    identity=identity,
+                    action="new_undeclared.read",
+                    product="sample",
+                    context="sample",
+                )
+            )
+            self.assertFalse(
+                policy.allows(
+                    identity=replace(identity, token_label="other"),
+                    action="product_config.plan",
+                    product="sample",
+                    context="sample",
+                )
+            )
+
+    def test_existing_grants_scope_and_revocation_remain_authoritative(self) -> None:
+        identity = LocalOperatorIdentity("record-reader", "record-reader-label")
+        scoped = reader_policy(product="sample")
+        self.assertFalse(
+            scoped.allows(
+                identity=identity,
+                action="product_config.plan",
+                product="other",
+                context="sample",
+            )
+        )
+        self.assertFalse(
+            LaunchplaneAuthzPolicy().allows(
+                identity=identity,
+                action="product_config.plan",
+                product="sample",
+                context="sample",
+            )
+        )
+        existing = LaunchplaneAuthzPolicy(
+            local_operators=(
+                LocalOperatorPolicyRule(
+                    subjects=(identity.subject,),
+                    token_labels=(identity.token_label,),
+                    actions=("product_config.apply",),
+                ),
+            )
+        )
+        self.assertTrue(
+            existing.allows(
+                identity=identity,
+                action="product_config.apply",
+                product="sample",
+                context="sample",
+            )
+        )
+
+
+class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_service_selector_and_dry_run_preflight_use_role_without_write_power(
+        self,
+    ) -> None:
+        with _database_app(reader_policy()) as (store, _, app):
+            seed_metadata(store)
+            headers = {"Authorization": "Bearer reader-token"}
+            before = store.list_secret_records()
+            with patch.object(
+                store, "read_secret_version", side_effect=AssertionError("No values")
+            ):
+                async with lifespan_client(app) as client:
+                    result = await client.get(SERVICE_GITHUB_DELIVERY_ROUTE, headers=headers)
+                    self.assertEqual(result.status_code, 200, result.text)
+                    self.assertEqual(result.json()["app_id"], "76")
+                    denied = await client.post(
+                        SERVICE_TOKEN_RETIREMENT_ROUTE,
+                        headers=headers,
+                        json={
+                            **retirement_request().model_dump(mode="json"),
+                            "mode": "apply",
+                            "director_confirmed": True,
+                            "expected_plan_digest": "a" * 64,
+                        },
+                    )
+                    self.assertEqual(denied.status_code, 403, denied.text)
+                    for mode, expected in (("dry_run", "allowed"), ("apply", "denied")):
+                        result = await client.post(
+                            "/v1/agent/write-intents/evaluate",
+                            headers=headers,
+                            json={
+                                "intent": "product_config_apply",
+                                "mode": mode,
+                                "product": "sample",
+                                "context": "sample",
+                                "source_url": "https://github.com/example/sample/issues/1",
+                                "reason": "Inspect configuration intent",
+                            },
+                        )
+                        self.assertEqual(result.status_code, 202, result.text)
+                        self.assertEqual(result.json()["result"]["intent"]["status"], expected)
+                        self.assertFalse(result.json()["result"]["intent"]["safe_to_execute"])
+                        if mode == "dry_run":
+                            self.assertFalse(
+                                result.json()["result"]["intent"]["audit"]["subject"][
+                                    "approval_capable"
+                                ]
+                            )
+            self.assertEqual(store.list_secret_records(), before)
+
+    async def test_read_role_reaches_redacted_diagnostics_and_privileged_records(self) -> None:
+        with _database_app(reader_policy()) as (_, _, app):
+            async with lifespan_client(app) as client:
+                for path in (
+                    "/v1/privileged-operations/plans?descriptor_id=managed-authz-policy-set",
+                    "/v1/authz-policies/active",
+                    "/v1/authz-policies/administration",
+                    "/v1/authz-diagnostics/active-policy/health",
+                ):
+                    result = await client.get(
+                        path, headers={"Authorization": "Bearer reader-token"}
+                    )
+                    self.assertEqual(result.status_code, 200, f"{path}: {result.text}")
+                    self.assertNotIn("record-reader-label", result.text)
+
+    async def test_ingress_and_backup_planners_accept_role_but_refuse_apply(self) -> None:
+        with _database_app(reader_policy()) as (store, _, app):
+            headers = {"Authorization": "Bearer reader-token"}
+            from control_plane.http_app import create_launchplane_fastapi_app
+            from control_plane.service_auth import BearerIdentityConfig
+            from tests.http_app_test_support import _RejectingVerifier
+
+            ingress = _FakeNpmplusIngressClient()
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=reader_policy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    local_operator_token="reader-token",
+                    local_operator_subject="record-reader",
+                    local_operator_token_label="record-reader-label",
+                ),
+                npmplus_ingress_client_factory=lambda: ingress,
+            )
+            async with lifespan_client(app) as client:
+                for mode, expected in (("dry-run", 202), ("apply", 403)):
+                    response = await client.post(
+                        "/v1/drivers/ingress/route-apply",
+                        headers=headers,
+                        json=_npmplus_ingress_route_payload(mode=mode),
+                    )
+                    self.assertEqual(response.status_code, expected, response.text)
+                self.assertEqual(ingress.calls, ["list"])
+                envelope = _dry_run_envelope()
+                response = await client.post(
+                    "/v1/production-backup-authority/apply",
+                    headers=headers,
+                    json=envelope.model_dump(mode="json"),
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                response = await client.post(
+                    "/v1/production-backup-authority/apply",
+                    headers=headers,
+                    json={
+                        **envelope.model_dump(mode="json"),
+                        "mode": "apply",
+                        "reviewed_authority_digest": response.json()["result"]["authority_digest"],
+                    },
+                )
+                self.assertEqual(response.status_code, 403, response.text)
+            self.assertFalse(store.list_production_backup_policy_records())
+
+    async def test_missing_role_cannot_read_service_selector(self) -> None:
+        with _database_app(LaunchplaneAuthzPolicy(schema_version=2)) as (_, _, app):
+            async with lifespan_client(app) as client:
+                result = await client.get(
+                    SERVICE_GITHUB_DELIVERY_ROUTE, headers={"Authorization": "Bearer reader-token"}
+                )
+                self.assertEqual(result.status_code, 403, result.text)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from control_plane.action_effects import AGENT_READ_ROLE_ACTION
+
 
 # Creates one lane's Dokploy compose target; granted per context and instance.
 DOKPLOY_TARGET_LANE_SETUP_ACTION = "dokploy_target.lane_setup"
@@ -22,6 +24,7 @@ _NON_DESCRIPTOR_INSTANCE_SCOPED_AUTHZ_ACTIONS = frozenset(
         "product_retirement.apply",
         "product_retirement.plan",
         "production_backup_authority.read",
+        "production_backup_authority.plan",
         "production_backup_authority.write",
         "production_backup_gate.execute",
         "promotion.write",
@@ -51,6 +54,8 @@ _INSTANCE_PINNED_WORKFLOW_AUTHZ_ACTIONS = frozenset(
 )
 _DUAL_SCOPE_AUTHZ_ACTIONS = frozenset(
     {
+        AGENT_READ_ROLE_ACTION,
+        "generic_web_prod_promotion.dry_run",
         "driver.read",
         "ingress_route.apply",
         "ingress_route.plan",

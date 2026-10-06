@@ -40,7 +40,6 @@ from control_plane.contracts.privileged_operation import (
     ManagedAuthzPolicySetProposalInput,
     ManagedMergeTrainPolicyImportProposalInput,
     PrivilegedOperationRecord,
-    ORDINARY_AGENT_DELIVERY_ACTIVATION_READ_ACTION,
     PRIVILEGED_OPERATION_SUMMARY_READ_ACTION,
     PRIVILEGED_POLICY_OPERATION_SUMMARY_READ_ACTION,
     PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
@@ -536,14 +535,9 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/v1/privileged-operations/plans/{operation_id}/cancel", paths)
         self.assertNotIn("/v1/privileged-operations/plans/{operation_id}/execute", paths)
 
-    async def test_other_machine_identities_are_rejected_before_record_lookup(self) -> None:
+    async def test_ungranted_machine_identities_are_rejected_before_record_lookup(self) -> None:
         payload = _policy().model_dump(mode="json")
-        payload["terminal_agents"][0]["actions"] = [
-            PRIVILEGED_SECRET_OPERATION_READ_ACTION,
-            AUTHZ_POLICY_OPERATION_READ_ACTION,
-            MERGE_TRAIN_POLICY_OPERATION_READ_ACTION,
-            ORDINARY_AGENT_DELIVERY_ACTIVATION_READ_ACTION,
-        ]
+        payload["terminal_agents"][0]["actions"] = ["privileged_secret_operation.plan"]
         payload["local_admins"] = [
             {**payload["terminal_agents"][0], "managed_set_id": "privileged-operations.local-admin"}
         ]
@@ -3199,7 +3193,13 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             async with lifespan_client(app) as client:
-                response = await client.get("/v1/privileged-operations/plans")
+                response = await client.post(
+                    "/v1/privileged-operations/plans",
+                    json={
+                        "source_event_id": "human-required",
+                        "request": {"reason": "Credential preparation retains human gate"},
+                    },
+                )
 
         self.assertEqual(response.status_code, 403)
         policy_reader.assert_not_called()

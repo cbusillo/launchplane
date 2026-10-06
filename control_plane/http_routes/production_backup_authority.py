@@ -273,6 +273,7 @@ def _execute_write(
             context=envelope.policy.context,
             instance=envelope.policy.instance,
             trace_id=current_trace_id,
+            planning=envelope.mode == "dry_run",
         )
     raw_payload = request_payload or cast(
         dict[str, object], envelope.model_dump(mode="json", exclude_none=True)
@@ -482,6 +483,7 @@ def _require_write_authorization(
     context: str,
     instance: str,
     trace_id: str,
+    planning: bool = False,
 ) -> None:
     if dependencies.authorization_allows(
         identity=identity,
@@ -489,6 +491,15 @@ def _require_write_authorization(
         product=product,
         context=context,
         target=AuthorizationTarget(scope="instance", instances=(instance,)),
+    ) or (
+        planning
+        and dependencies.authorization_allows(
+            identity=identity,
+            action="production_backup_authority.plan",
+            product=product,
+            context=context,
+            target=AuthorizationTarget(scope="instance", instances=(instance,)),
+        )
     ):
         return
     raise dependencies.http_error(

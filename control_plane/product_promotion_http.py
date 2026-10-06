@@ -337,6 +337,11 @@ def build_product_promotion_status(
         profile.product,
         destination_lane.context,
         (source_lane.instance, destination_lane.instance),
+    ) and not action_allowed(
+        "generic_web_prod_promotion.dry_run",
+        profile.product,
+        destination_lane.context,
+        (source_lane.instance, destination_lane.instance),
     ):
         direct_blockers.append("Caller is not authorized to dry-run generic-web promotion.")
     if not action_allowed(

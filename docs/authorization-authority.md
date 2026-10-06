@@ -14,8 +14,9 @@ reviewed requests, but they do not grant Launchplane permission by themselves.
 - People sign in with GitHub and hold the `admin` or `read_only` role. Clients
   hold the narrow `owner` role for their own site's decisions.
 - The [admin](#the-admin) may do anything.
-- Machine identities (workflows, agents, tokens, workers) hold only their
-  enumerated grants.
+- Machine identities hold their policy grants. The
+  [standing agent read role](#standing-agent-read-role) derives read and plan
+  coverage from source declarations; writes remain separately granted.
 - Granting access is a stop boundary: an agent asks the Director before creating
   credentials, granting access, or changing who can merge (see
   [DIRECTION.md](../DIRECTION.md#stop-boundaries)). Do not create, edit,
@@ -125,10 +126,10 @@ definition of administrator. It does not widen anything else:
   exact managed rule and never consult this shortcut.
 
 `POST /v1/product-profiles/expected-config/apply` refuses a `local_operators`
-caller, in dry-run and apply, when the target product's profile records
+caller in apply mode when the target product's profile records
 `production_use: live`, with the fixed code `live_product_requires_operator`.
 A live product's expected configuration is changed by the Director, whatever
-rule names that product.
+rule names that product. Planning makes no live change.
 
 ## Denial Handling
 
@@ -929,3 +930,46 @@ mechanical v3 persistence fence remain in place until the separately reviewed
 activation work enables a complete supported path. Once v3 policy or evidence is
 persisted, rollback must use an image that can read it; a source compatibility
 change alone is neither activation nor proof of the deployed policy version.
+
+## Standing Agent Read Role
+
+`control_plane/action_effects.py` declares the effect of each authorization
+action: `read`, `plan`, or `write`. A plan may retain redacted audit or preflight
+evidence; it cannot apply the planned configuration, grant access, mint a
+credential, dispatch a deployment, or change a provider. Credential preparation
+and privileged lifecycle transitions keep their existing gates even when an
+action's name includes `plan` or `propose`.
+
+A `local_operators` or `terminal_agents` policy rule containing `agent.read`
+covers declared reads and plans, including future declared actions. It still
+matches the authenticated subject, token label, product, context and instance
+selectors. Other principal collections do not inherit this role. An undeclared
+action receives no role authority. An enumerated grant continues to work as
+before; the effect catalog adds no write, approval, apply or secret-value power.
+
+Context/global access and instance access remain distinct. To cover every
+record, the Director installs one context/global role rule and one instance
+role rule with `instances = ["*"]`, bound to the same exact configured agent
+identity. This is one managed policy change through the existing proposal,
+Director review, approval and CAS/read-back path. Source delivery installs
+neither rule and never rewrites the active policy. Old enumerated read rules
+can remain until their separately reviewed removal. Before rolling back to an
+image without the declaration-based role, remove
+this managed set through the same Director-reviewed policy path and read the
+active policy back. Older readers cannot validate an instance rule containing
+the new role action. The earlier enumerated read rules provide the supported
+rollback path; keep them until that compatibility window ends.
+
+Metadata reads and nonmutating planners consult policy rather than requiring
+an agent to borrow a signed-in administrator's session. Product-config
+preflight may return `allowed` in `dry_run` mode under planning authority, but
+`safe_to_execute` remains false. An `apply` evaluation still checks the original
+write and secret-backed actions and all runtime key-safety evidence. A saved
+dry-run intent cannot be used as an executable intent.
+
+The action-coverage gate discovers authorization callsites, source constants,
+driver descriptor actions and generated secret-backed intent actions and fails
+on a missing effect declaration. Behavior tests exercise the read role across
+the declared effects and representative HTTP reads/planners, including denied
+writes, revoked grants, exact scope and redaction. Add an explicit declaration
+and a behavior test when introducing an action or a new read/plan route.

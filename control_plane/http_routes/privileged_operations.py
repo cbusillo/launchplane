@@ -91,6 +91,7 @@ from control_plane.privileged_operation_registry import (
     PrivilegedOperationPlanningConflictError,
     PrivilegedOperationPlanningStoreError,
     read_privileged_operation_descriptor,
+    list_privileged_operation_descriptors,
     _policy_key_payloads,
 )
 from control_plane.privileged_operation_service import (
@@ -110,6 +111,7 @@ from control_plane.privileged_operation_service import (
     revoke_privileged_operation,
     require_privileged_operation_store,
 )
+from control_plane.action_effects import agent_read_role_covers
 from control_plane.service_auth import (
     AuthorizationTarget,
     GitHubHumanIdentity,
@@ -510,6 +512,14 @@ def register_privileged_operation_routes(
         trace_id: str,
         descriptor_id: PrivilegedOperationDescriptorId,
     ) -> None:
+        if agent_read_role_covers(action) and dependencies.common.authorization_allows(
+            identity=identity,
+            action=action,
+            product="launchplane",
+            context="launchplane",
+            target=AuthorizationTarget(scope="global"),
+        ):
+            return
         try:
             rule_reader = (
                 require_single_explicit_action_managed_rule_identity
@@ -724,8 +734,17 @@ def register_privileged_operation_routes(
 
     def read_record_identity(
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.common.read_identity)],
-    ) -> GitHubHumanIdentity | LocalOperatorIdentity:
-        if not isinstance(identity, GitHubHumanIdentity | LocalOperatorIdentity):
+    ) -> LaunchplaneIdentity:
+        if not isinstance(identity, GitHubHumanIdentity) and not any(
+            dependencies.common.authorization_allows(
+                identity=identity,
+                action=descriptor.human_read_action,
+                product="launchplane",
+                context="launchplane",
+                target=AuthorizationTarget(scope="global"),
+            )
+            for descriptor in list_privileged_operation_descriptors()
+        ):
             raise dependencies.common.http_error(
                 status_code=403,
                 trace_id=dependencies.common.next_trace_id(),
@@ -748,16 +767,14 @@ def register_privileged_operation_routes(
             return
         active_record = read_active_policy_record(trace_id=trace_id)
         try:
-            if active_record.status != "active":
-                raise ManagedRuleAuthorizationError("Authorization policy is not active.")
-            require_single_explicit_action_managed_rule_identity(
-                policy=active_record.policy,
+            if active_record.status != "active" or not active_record.policy.allows(
                 identity=identity,
                 action=action,
                 product="launchplane",
                 context="launchplane",
                 target=AuthorizationTarget(scope="global"),
-            )
+            ):
+                raise ManagedRuleAuthorizationError("No active record-read authority.")
         except ManagedRuleAuthorizationError as error:
             raise dependencies.common.http_error(
                 status_code=403,

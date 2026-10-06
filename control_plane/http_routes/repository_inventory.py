@@ -174,11 +174,22 @@ def register_repository_inventory_write_routes(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> RepositoryInventoryApplyResponse:
         trace_id = dependencies.next_trace_id()
-        if isinstance(identity, TerminalAgentIdentity) or not dependencies.authorization_allows(
-            identity=identity,
-            action=REPOSITORY_INVENTORY_WRITE_ACTION,
-            product=LAUNCHPLANE_SERVICE_CONTEXT,
-            context=LAUNCHPLANE_SERVICE_CONTEXT,
+        if (
+            (envelope.mode == "apply" and isinstance(identity, TerminalAgentIdentity))
+            or not dependencies.authorization_allows(
+                identity=identity,
+                action=REPOSITORY_INVENTORY_WRITE_ACTION
+                if envelope.mode == "apply"
+                else "repository_inventory.plan",
+                product=LAUNCHPLANE_SERVICE_CONTEXT,
+                context=LAUNCHPLANE_SERVICE_CONTEXT,
+            )
+            and not dependencies.authorization_allows(
+                identity=identity,
+                action=REPOSITORY_INVENTORY_WRITE_ACTION,
+                product=LAUNCHPLANE_SERVICE_CONTEXT,
+                context=LAUNCHPLANE_SERVICE_CONTEXT,
+            )
         ):
             raise dependencies.http_error(
                 status_code=403,
