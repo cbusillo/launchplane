@@ -9054,6 +9054,11 @@
         "additionalProperties": false,
         "description": "What a Client's accepted release has done so far, derived from its operations.",
         "properties": {
+          "blocked_reason": {
+            "default": "",
+            "title": "Blocked Reason",
+            "type": "string"
+          },
           "decision_record_id": {
             "title": "Decision Record Id",
             "type": "string"
@@ -9081,6 +9086,7 @@
           }
         },
         "required": [
+          "blocked_reason",
           "decision_record_id",
           "rollback_drill",
           "state",
@@ -9096,7 +9102,8 @@
             "enum": [
               "backup",
               "promote",
-              "rollback"
+              "rollback",
+              "recovery"
             ],
             "title": "Kind",
             "type": "string"

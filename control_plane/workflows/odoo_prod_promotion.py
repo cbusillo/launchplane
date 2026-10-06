@@ -129,6 +129,7 @@ def execute_odoo_prod_promotion(
     record_store: OdooProdPromotionStore,
     request: OdooProdPromotionRequest,
     provider_effect_checkpoint: Callable[[str], None] | None = None,
+    hold_uncertain_effects: bool = False,
 ) -> OdooProdPromotionResult:
     del state_dir, database_url
     product = _resolve_product_profile_key(product=request.product, context=request.context)
@@ -202,6 +203,7 @@ def execute_odoo_prod_promotion(
                     health_timeout_seconds=request.health_timeout_seconds,
                     no_cache=request.no_cache,
                 ),
+                hold_uncertain_effects=hold_uncertain_effects,
                 provider_effect_checkpoint=_checkpoint_chain(
                     provider_effect_checkpoint, backup_checkpoint
                 ),
@@ -270,8 +272,10 @@ def _checkpoint_chain(
         return second
 
     def checkpoint(phase: str) -> None:
-        first(phase)
+        # The backup/source-lock gate must pass before the worker records that
+        # the production write may have happened.
         second(phase)
+        first(phase)
 
     return checkpoint
 

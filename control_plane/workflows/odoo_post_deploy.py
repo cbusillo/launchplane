@@ -16,6 +16,9 @@ from control_plane.contracts.odoo_instance_override_record import (
 )
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployWorkflowIntent
+from control_plane.contracts.odoo_target_replacement_failures import (
+    OdooProviderEffectUncertainError,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
@@ -165,6 +168,7 @@ def execute_odoo_post_deploy(
     env_file: Path | None = None,
     run_destructive_restore: bool = False,
     provider_effect_checkpoint: Callable[[str], None] | None = None,
+    hold_uncertain_effects: bool = False,
     provider_operation_title: str = "",
     schedule_execution_timeout_seconds: int | None = None,
 ) -> OdooPostDeployResult:
@@ -260,7 +264,7 @@ def execute_odoo_post_deploy(
         dokploy_post_deploy.require_odoo_module_update_readback_evidence(
             post_deploy_readback_markers
         )
-    except click.ClickException as error:
+    except (click.ClickException, OSError) as error:
         determinate_failure = isinstance(
             error,
             (
@@ -271,14 +275,9 @@ def execute_odoo_post_deploy(
             isinstance(error, dokploy_api.DokployScheduleExecutionFailed)
             and error.cause in {"remote_command_exit", "trigger_rejected"}
         )
-        if (
-            provider_effect_checkpoint is not None
-            and provider_effect_started
-            and not determinate_failure
-        ):
-            raise RuntimeError(
-                "Odoo post-deploy provider effect requires reconciliation."
-            ) from error
+        uncertain = hold_uncertain_effects and provider_effect_started and not determinate_failure
+        if isinstance(error, OSError) and not uncertain:
+            raise
         if isinstance(error, dokploy_post_deploy.OdooPostDeployReadbackFailure):
             post_deploy_readback_markers = error.evidence
         if odoo_override_record is not None and override_should_apply:
@@ -288,6 +287,10 @@ def execute_odoo_post_deploy(
                 status="fail",
                 detail=str(error),
             )
+        if uncertain:
+            raise OdooProviderEffectUncertainError(
+                "Odoo post-deploy provider effect requires reconciliation."
+            ) from error
         return OdooPostDeployResult(
             context=request.context,
             instance=request.instance,

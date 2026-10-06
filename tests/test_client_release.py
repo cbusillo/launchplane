@@ -1,5 +1,5 @@
 import unittest
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 
 import click
 from pathlib import Path
@@ -59,6 +59,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
 from control_plane.dokploy import DokployTargetDefinition
 from control_plane.dokploy.api import DokployScheduleExecutionFailed
 from control_plane.workflows.odoo_post_deploy import execute_odoo_post_deploy, OdooPostDeployRequest
+from control_plane.workflows.production_promotion_backup import ProductionPromotionBackupGuard
 from control_plane.workflows.odoo_prod_backup_gate import (
     BACKUP_GATE_SOURCE,
     OdooProdBackupGateResult,
@@ -573,6 +574,7 @@ class ClientReleaseTests(unittest.TestCase):
                             context=CONTEXT, instance="prod", phase="deploy"
                         ),
                         provider_effect_checkpoint=checkpoint,
+                        hold_uncertain_effects=kwargs["hold_uncertain_effects"],
                     )
                 self.assertEqual(post_deploy.post_deploy_status, "fail")
             deployment = _deployment(
@@ -902,6 +904,77 @@ class ClientReleaseTests(unittest.TestCase):
             recoveries[0].target.artifact_id, accepted.checklist.production.artifact_id
         )
         self.assertNotEqual(recoveries[0].operation_id, drill_id)
+        self.assertEqual(self.advance(), ())
+
+    def test_backup_guard_refusal_before_first_write_does_not_queue_recovery(self) -> None:
+        _, source = self.queued_promotion()
+
+        def backup_guard(**kwargs: Any) -> Any:
+            self.store.write_promotion_record(kwargs["pending_promotion"])
+
+            def refused(_phase: str) -> None:
+                raise click.ClickException("Backup evidence became stale before the first write.")
+
+            return nullcontext(ProductionPromotionBackupGuard(refused, {}))
+
+        with (
+            self.promotion_providers(),
+            patch(
+                "control_plane.workflows.odoo_prod_promotion.production_promotion_backup_guard",
+                side_effect=backup_guard,
+            ),
+        ):
+            self.run_release_worker()
+        finished = self.store.read_odoo_prod_promotion_operation_record(source.operation_id)
+        self.assertEqual(finished.status, "fail")
+        self.assertFalse(
+            any(
+                checkpoint.evidence.get("production_write_started")
+                for checkpoint in finished.checkpoints
+            )
+        )
+        self.assertEqual(self.store.list_odoo_prod_rollback_operation_records(), ())
+
+    def test_missing_passing_baseline_blocks_before_backup_and_explains_the_wait(self) -> None:
+        self.store.write_deployment_record(
+            _deployment("deployment-prod-1", "artifact-prod", passed=False)
+        )
+        self.switch("promote")
+        accepted = self.accept()
+        self.assertEqual(self.advance(), ())
+        self.assertEqual(self.store.list_verireel_prod_backup_gate_operation_records(), ())
+        run = read_client_release_run(
+            store=self.store,
+            profile=self.store.read_product_profile_record(PRODUCT),
+            decision=accepted,
+        )
+        assert run is not None
+        self.assertEqual(run.state, "waiting")
+        self.assertTrue(run.blocked_reason)
+
+    def test_connection_reset_inside_real_rollback_holds_the_recovery_lane(self) -> None:
+        _, source = self.queued_promotion()
+        with self.promotion_providers():
+            self.run_release_worker()
+        (recovery,) = self.store.list_odoo_prod_rollback_operation_records()
+
+        def disconnected(**kwargs: Any) -> OdooStableTargetReplacementApplyResult:
+            kwargs["provider_effect_checkpoint"](TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
+            raise ConnectionResetError("Provider accepted the write but disconnected.")
+
+        with patch(
+            "control_plane.workflows.odoo_prod_rollback.execute_odoo_stable_target_replacement_apply",
+            side_effect=disconnected,
+        ):
+            self.run_release_worker()
+        self.assertEqual(
+            self.store.read_odoo_prod_rollback_operation_record(recovery.operation_id).status,
+            "reconciliation_required",
+        )
+        self.assertEqual(
+            self.store.read_promotion_record(recovery.request.promotion_record_id).rollback.status,
+            "pending",
+        )
         self.assertEqual(self.advance(), ())
 
 

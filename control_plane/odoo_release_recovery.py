@@ -194,10 +194,15 @@ def odoo_release_recovery_allows(store: object, operation: OdooProdRollbackOpera
 def read_odoo_release_recovery(
     store: PostgresRecordStore, source: OdooProdPromotionOperationRecord
 ) -> OdooProdRollbackOperationRecord | None:
-    expected = build_odoo_release_recovery(store, source)
-    if expected is None:
-        return None
+    key = f"{source.operation_id}:failure-recovery"
+    operation_id = build_odoo_prod_rollback_operation_id(
+        product=source.product,
+        context=source.context,
+        idempotency_key=key,
+        idempotency_scope=source.idempotency_scope,
+    )
     try:
-        return store.read_odoo_prod_rollback_operation_record(expected.operation_id)
+        recovery = store.read_odoo_prod_rollback_operation_record(operation_id)
     except FileNotFoundError:
-        return expected
+        return None
+    return recovery if odoo_release_recovery_source(recovery) == source.operation_id else None

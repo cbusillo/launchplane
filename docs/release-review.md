@@ -368,8 +368,11 @@ the pinned artifact with existing data; it does not restore a database or reuse
 a backup for another forward promotion. It verifies post-deploy, health,
 canonical URL, logos and runtime identity through the existing replacement path,
 and writes the recovered deployment, inventory, release tuple and rollback
-outcome. The release stays failed, with a separate `failure-recovery` step in
-its readback. Failure on the second promotion has its own recovery operation.
+outcome. The release stays failed, with a separate `recovery` step in its
+readback, labeled automatic recovery rather than a rollback drill. Failure on
+the second promotion has its own recovery operation. A missing passing baseline
+prevents the first backup from being queued and appears as `blocked_reason` in
+the release run.
 
 Recovery uses the original admitted acceptance, even if releases become held,
 the Client changes, a newer decision replaces acceptance or testing moves after

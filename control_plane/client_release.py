@@ -101,7 +101,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 _LOGGER = logging.getLogger(__name__)
 
 CLIENT_RELEASE_IDEMPOTENCY_SCOPE = "client-release"
-ClientReleaseStepKind = Literal["backup", "promote", "rollback"]
+ClientReleaseStepKind = Literal["backup", "promote", "rollback", "recovery"]
 ClientReleaseStepStatus = Literal[
     "not_started", "pending", "running", "reconciliation_required", "pass", "fail", "cancelled"
 ]
@@ -151,6 +151,7 @@ class ClientReleaseRunView(BaseModel):
     decision_record_id: str
     rollback_drill: bool
     state: ClientReleaseRunState
+    blocked_reason: str = ""
     steps: tuple[ClientReleaseStepView, ...]
 
 
@@ -409,7 +410,7 @@ def read_client_release_run(
                 views.append(
                     ClientReleaseStepView(
                         step=f"failure-recovery-{step.attempt}",
-                        kind="rollback",
+                        kind="recovery",
                         status=recovery.status,
                         operation_id=recovery.operation_id,
                     )
@@ -424,7 +425,14 @@ def read_client_release_run(
         state = "running"
     else:
         state = "waiting"
+    blocked_reason = ""
+    if profile.driver_id == "odoo" and state == "waiting":
+        try:
+            pin_odoo_release_recovery_target(store, decision, _prod_context(profile))
+        except ValueError:
+            blocked_reason = "No passing production deployment is available for recovery. An admin must reconcile the production record before this release can start."
     return ClientReleaseRunView(
+        blocked_reason=blocked_reason,
         decision_record_id=decision.record_id,
         rollback_drill=decision.release_start == "promote_with_rollback_drill",
         state=state,
@@ -718,6 +726,11 @@ def _advance(
             return _queue_rollback(store, profile, decision, step, context, authorized_at)
         _require_current_release(store, control_plane_root, profile, decision)
         if step.kind == "backup":
+            if profile.driver_id == "odoo":
+                try:
+                    pin_odoo_release_recovery_target(store, decision, context)
+                except ValueError as error:
+                    raise ClientReleaseNotReady("recovery_target_missing") from error
             return _queue_backup(store, profile, decision, step, context, authorized_at)
         backup_record_id = str(getattr(previous, "backup_record_id", ""))
         return _queue_promotion(

@@ -1626,6 +1626,7 @@ def _execute_prod_promotion_operation(
             request=operation.request,
             phase_checkpoint=checkpoint_phase,
             provider_effect_checkpoint=before_effect,
+            hold_uncertain_effects=True,
         )
 
     def terminal(
@@ -1719,6 +1720,7 @@ def _execute_prod_rollback_operation(
             request=operation.request,
             target=operation.target,
             provider_effect_checkpoint=before_effect,
+            hold_uncertain_effects=True,
         )
 
     def terminal(
