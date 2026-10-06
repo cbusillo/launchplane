@@ -236,6 +236,7 @@ def _write_rollback_state(
     started_at: str,
     finished_at: str,
     detail: str,
+    health_evidence: HealthcheckEvidence | None = None,
 ) -> PromotionRecord:
     updated_record = promotion_record.model_copy(
         update={
@@ -247,7 +248,8 @@ def _write_rollback_state(
                 started_at=started_at,
                 finished_at=finished_at,
             ),
-            "rollback_health": HealthcheckEvidence(
+            "rollback_health": health_evidence
+            or HealthcheckEvidence(
                 verified=False,
                 status=health_status,
             ),
@@ -446,6 +448,7 @@ def execute_odoo_prod_rollback(
         started_at=started_at,
         finished_at=finished_at,
         detail=rollback_source.detail,
+        health_evidence=deployment_record.destination_health,
     )
     return OdooProdRollbackResult(
         context=request.context,

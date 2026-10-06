@@ -344,8 +344,8 @@ decision. Before a step is queued, the worker checks all of the following:
 - the recompiled checklist digest still equals the decision's, and it is
   approved.
 
-The worker repeats the decision, Client and hold checks before every provider
-effect. The promotion still checks release approval for the exact candidate and
+The worker repeats the decision, Client and hold checks before forward provider
+effects. The promotion still checks release approval for the exact candidate and
 the verified backup. Once generic-web production has changed, automatic rollback
 remains allowed to restore the admitted previous deployment even if acceptance
 is withdrawn. A crash or uncertain provider outcome keeps the provider operation
@@ -353,10 +353,36 @@ fenced for reconciliation rather than repeating the release.
 
 A changed candidate, a newer decision, or a hold therefore stops the release
 before its next step and never falls back to a newer testing build. A failed or
-cancelled step stops the release, and nothing more runs until the Client
-accepts again. An admin override never starts a release; it stays a hand
+cancelled step stops forward progress; the successful rollback drill never runs
+for a failed promotion. An admin override never starts a release; it stays a hand
 promotion from the Release panel. No automated identity gains a promote right,
 and an automation token still cannot submit a decision.
+
+For Odoo, promotion admission pins the checklist's production artifact and its
+passing deployment in the operation's initial checkpoint. The worker verifies
+that binding again before the first production write and records that write's
+boundary durably. A determinate deployment or post-deploy/health failure commits
+the failed promotion and queues its recovery rollback in one lane-locked
+transaction. Recovery explicitly names that failed promotion and redeploys only
+the pinned artifact with existing data; it does not restore a database or reuse
+a backup for another forward promotion. It verifies post-deploy, health,
+canonical URL, logos and runtime identity through the existing replacement path,
+and writes the recovered deployment, inventory, release tuple and rollback
+outcome. The release stays failed, with a separate `failure-recovery` step in
+its readback. Failure on the second promotion has its own recovery operation.
+
+Recovery uses the original admitted acceptance, even if releases become held,
+the Client changes, a newer decision replaces acceptance or testing moves after
+the first write. Its worker checks the exact source operation, original
+published decision, failed promotion and pinned passing deployment; it supplies
+no caller promotion or manual rollback permission. Missing recovery provenance
+holds the lane for reconciliation. Pre-write failures queue no recovery. A lost
+response, unobserved deployment, post-deploy timeout, interrupted recovery or
+expired lease after effects remains `reconciliation_required`; the worker does
+not replay an uncertain write or report it passed. A determinate failed recovery
+is recorded as failed and is not automatically retried. Admin reconciliation is
+still required for uncertainty; deployed-path qualification is separate from
+these deterministic provider tests.
 
 The review page says before the Accept button whether accepting puts the
 version on the live site, naming it, or whether releases are held. After

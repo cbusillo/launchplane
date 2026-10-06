@@ -1,8 +1,11 @@
 import unittest
+from contextlib import ExitStack
+
+import click
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from collections.abc import Callable
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from unittest.mock import patch
 
 from control_plane.client_release import (
@@ -25,13 +28,41 @@ from control_plane.contracts.durable_operation_authorization import (
     DurableOperationAuthorization,
     DurableOperationCallerIdentity,
 )
-from control_plane.contracts.odoo_prod_promotion_operation import OdooProdPromotionRunResult
-from control_plane.contracts.odoo_prod_rollback_operation import OdooProdRollbackResult
+from control_plane.contracts.odoo_prod_promotion_operation import (
+    OdooProdPromotionRunResult,
+    OdooProdPromotionOperationRecord,
+)
+from control_plane.contracts.odoo_prod_rollback_operation import (
+    OdooProdRollbackResult,
+    OdooProdRollbackOperationRecord,
+)
 from control_plane.contracts.production_backup_authority import ProductionBackupPolicyRecord
 from control_plane.contracts.production_backup_gate import ProductionBackupGateWorkerRequest
 from control_plane.contracts.verireel_prod_backup_gate import VeriReelProdBackupGateResult
 from control_plane.contracts.product_profile_record import ReleaseOnAcceptance
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord, ReleaseStart
+from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.odoo_stable_target_replacement import (
+    OdooStableTargetReplacementApplyResult,
+)
+from control_plane.odoo_release_recovery import (
+    odoo_release_recovery_allows,
+    odoo_release_recovery_source,
+)
+from control_plane.workflows.odoo_stable_operation_worker import (
+    run_odoo_stable_operation_worker_once,
+    OdooStableOperationWorkerResult,
+)
+from control_plane.workflows.odoo_stable_target_replacement import (
+    TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE,
+)
+from control_plane.dokploy import DokployTargetDefinition
+from control_plane.dokploy.api import DokployScheduleExecutionFailed
+from control_plane.workflows.odoo_post_deploy import execute_odoo_post_deploy, OdooPostDeployRequest
+from control_plane.workflows.odoo_prod_backup_gate import (
+    BACKUP_GATE_SOURCE,
+    OdooProdBackupGateResult,
+)
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationDeniedError,
@@ -420,6 +451,458 @@ class ClientReleaseTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             DurableOperationCallerIdentity(identity_type="github_human", login="x", github_id=1)
+
+    def queued_promotion(
+        self,
+    ) -> tuple[ReleaseReviewDecisionRecord, OdooProdPromotionOperationRecord]:
+        self.switch("promote_with_rollback_drill")
+        accepted = self.accept()
+        (backup_id,) = self.advance()
+        self.finish(backup_id)
+        (operation_id,) = self.advance()
+        return accepted, self.store.read_odoo_prod_promotion_operation_record(operation_id)
+
+    def run_release_worker(self) -> OdooStableOperationWorkerResult:
+        result = run_odoo_stable_operation_worker_once(
+            record_store=self.store, control_plane_root_path=self.root, lease_owner="release-worker"
+        )
+        self.assertTrue(result.terminal_write_committed)
+        return result
+
+    def promotion_providers(
+        self, *, failure: str = "post_deploy", after_write: Callable[[], None] | None = None
+    ) -> ExitStack:
+        # Run the real production workflow and promotion record writes; replace
+        # remote backups/deploys with deterministic provider effects.
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        from tests.support.promotion_backup import stub_verified_promotion_backup
+
+        stub_verified_promotion_backup(self, "control_plane.workflows.odoo_prod_promotion_run")
+        stub_verified_promotion_backup(self, "control_plane.workflows.odoo_prod_promotion")
+        for module in ("odoo_prod_promotion_run", "odoo_prod_promotion"):
+            stack.enter_context(patch(f"control_plane.workflows.{module}.require_release_approval"))
+
+        def inputs(**kwargs: Any) -> OdooProdPromotionInputsResult:
+            return self._admission(**kwargs).inputs_result.model_copy(
+                update={
+                    "backup_record_id": "logical-backup",
+                    "source_git_ref": HEAD,
+                }
+            )
+
+        stack.enter_context(
+            patch(
+                "control_plane.workflows.odoo_prod_promotion_run.resolve_odoo_prod_promotion_inputs",
+                side_effect=inputs,
+            )
+        )
+
+        def backup(**kwargs: Any) -> OdooProdBackupGateResult:
+            self.store.write_backup_gate_record(
+                BackupGateRecord(
+                    record_id="logical-backup",
+                    context=CONTEXT,
+                    instance="prod",
+                    source=BACKUP_GATE_SOURCE,
+                    status="pass",
+                    created_at="2026-09-23T03:00:00Z",
+                    evidence={"snapshot": "verified-logical-backup"},
+                )
+            )
+            return OdooProdBackupGateResult(
+                context=CONTEXT,
+                instance="prod",
+                backup_record_id="logical-backup",
+                backup_status="pass",
+            )
+
+        stack.enter_context(
+            patch(
+                "control_plane.workflows.odoo_prod_promotion_run.execute_odoo_prod_backup_gate",
+                side_effect=backup,
+            )
+        )
+
+        def replacement(**kwargs: Any) -> OdooStableTargetReplacementApplyResult:
+            checkpoint = kwargs["provider_effect_checkpoint"]
+            if failure == "pre_write":
+                raise click.ClickException("Preparation refused before any write.")
+            checkpoint(TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
+            if after_write:
+                after_write()
+            if failure == "unknown":
+                raise TimeoutError("The deployment response was lost.")
+            if failure in {"post_deploy", "post_deploy_timeout"}:
+
+                def remote_command(**provider_kwargs: Any) -> dict[str, str]:
+                    provider_kwargs["before_provider_mutation"]("post_deploy_schedule_trigger")
+                    raise DokployScheduleExecutionFailed(
+                        schedule_id="module-upgrade",
+                        deployment_id="failed-upgrade",
+                        deployment_status="failed" if failure == "post_deploy" else "running",
+                        cause="remote_command_exit"
+                        if failure == "post_deploy"
+                        else "execution_timeout",
+                    )
+
+                with (
+                    patch(
+                        "control_plane.workflows.odoo_post_deploy._resolve_compose_target_definition",
+                        return_value=DokployTargetDefinition(
+                            context=CONTEXT,
+                            instance="prod",
+                            target_type="compose",
+                            target_id="example-prod",
+                            target_name="example-prod",
+                        ),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_post_deploy.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.example", "test-token"),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_post_deploy.dokploy_post_deploy.run_compose_post_deploy_update",
+                        side_effect=remote_command,
+                    ),
+                ):
+                    post_deploy = execute_odoo_post_deploy(
+                        control_plane_root=self.root,
+                        record_store=self.store,
+                        request=OdooPostDeployRequest(
+                            context=CONTEXT, instance="prod", phase="deploy"
+                        ),
+                        provider_effect_checkpoint=checkpoint,
+                    )
+                self.assertEqual(post_deploy.post_deploy_status, "fail")
+            deployment = _deployment(
+                "failed-candidate-deployment", "artifact-testing", passed=False
+            )
+            if failure == "health":
+                deployment = deployment.model_copy(
+                    update={
+                        "post_deploy_update": PostDeployUpdateEvidence(
+                            attempted=True, status="pass"
+                        ),
+                        "destination_health": HealthcheckEvidence(status="fail"),
+                    }
+                )
+            self.store.write_deployment_record(deployment)
+            return OdooStableTargetReplacementApplyResult(
+                product=PRODUCT,
+                context=CONTEXT,
+                instance="prod",
+                strategy="recreate-in-place",
+                artifact_id="artifact-testing",
+                deployment_record_id=deployment.record_id,
+                deploy_status="fail",
+                post_deploy_status=cast(
+                    Literal["pass", "fail", "skipped"], deployment.post_deploy_update.status
+                ),
+                health_status=cast(
+                    Literal["pass", "fail", "skipped"], deployment.destination_health.status
+                ),
+                error_message="Candidate verification failed.",
+            )
+
+        stack.enter_context(
+            patch(
+                "control_plane.workflows.odoo_prod_promotion.execute_odoo_stable_target_replacement_apply",
+                side_effect=replacement,
+            )
+        )
+        return stack
+
+    def test_failed_release_recovers_pinned_baseline_and_never_enters_the_drill(self) -> None:
+        for failure in ("post_deploy", "health"):
+            with self.subTest(failure=failure):
+                self.setUp()
+                accepted, source = self.queued_promotion()
+                with self.promotion_providers(failure=failure):
+                    self.run_release_worker()
+                failed = self.store.read_odoo_prod_promotion_operation_record(source.operation_id)
+                self.assertEqual(failed.status, "fail")
+                assert failed.result is not None
+                (recovery,) = self.store.list_odoo_prod_rollback_operation_records()
+                self.assertEqual(
+                    recovery.target.artifact_id, accepted.checklist.production.artifact_id
+                )
+                self.assertEqual(recovery.target.deployment_record_id, "deployment-prod-1")
+                self.assertEqual(
+                    recovery.request.promotion_record_id, failed.result.promotion_record_id
+                )
+                self.assertEqual(odoo_release_recovery_source(recovery), source.operation_id)
+                self.assertTrue(odoo_release_recovery_allows(self.store, recovery))
+                self.assertEqual(self.advance(), ())
+                self.store.write_deployment_record(
+                    _deployment("newer-passing-deployment", "artifact-other")
+                )
+
+                def recovered(**kwargs: Any) -> OdooStableTargetReplacementApplyResult:
+                    self.assertEqual(kwargs["request"].artifact_id, recovery.target.artifact_id)
+                    self.assertEqual(kwargs["request"].data_source_mode, "existing")
+                    kwargs["provider_effect_checkpoint"](TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
+                    deployment = _deployment(
+                        "recovered-deployment", recovery.target.artifact_id
+                    ).model_copy(
+                        update={
+                            "post_deploy_update": PostDeployUpdateEvidence(
+                                attempted=True, status="pass"
+                            ),
+                            "destination_health": HealthcheckEvidence(
+                                status="pass",
+                                verified=True,
+                                urls=("https://example.prod/health",),
+                                timeout_seconds=30,
+                            ),
+                        }
+                    )
+                    self.store.write_deployment_record(deployment)
+                    self.set_prod(recovery.target.artifact_id)
+                    return OdooStableTargetReplacementApplyResult(
+                        product=PRODUCT,
+                        context=CONTEXT,
+                        instance="prod",
+                        strategy="recreate-in-place",
+                        artifact_id=recovery.target.artifact_id,
+                        deployment_record_id=deployment.record_id,
+                        deploy_status="pass",
+                        post_deploy_status="pass",
+                        health_status="pass",
+                        canonical_status="pass",
+                        logo_status="pass",
+                    )
+
+                with patch(
+                    "control_plane.workflows.odoo_prod_rollback.execute_odoo_stable_target_replacement_apply",
+                    side_effect=recovered,
+                ):
+                    self.run_release_worker()
+                done = self.store.read_odoo_prod_rollback_operation_record(recovery.operation_id)
+                self.assertEqual(done.status, "pass")
+                assert done.result is not None
+                self.assertEqual(done.result.artifact_id, recovery.target.artifact_id)
+                self.assertEqual(done.result.rollback_health_status, "pass")
+                promotion = self.store.read_promotion_record(recovery.request.promotion_record_id)
+                self.assertEqual(promotion.deploy.status, "fail")
+                self.assertEqual(promotion.rollback.status, "pass")
+                self.assertTrue(promotion.rollback_health.verified)
+                self.assertEqual(self.advance(), ())
+                run = read_client_release_run(
+                    store=self.store,
+                    profile=self.store.read_product_profile_record(PRODUCT),
+                    decision=accepted,
+                )
+                assert run is not None
+                self.assertEqual(run.state, "stopped")
+                self.assertEqual(
+                    next(step.status for step in run.steps if step.step == "failure-recovery-1"),
+                    "pass",
+                )
+                self.assertEqual(
+                    self.store.read_release_tuple_record(
+                        context_name=CONTEXT, channel_name="prod"
+                    ).artifact_id,
+                    recovery.target.artifact_id,
+                )
+
+    def test_pre_write_failure_does_not_queue_recovery_and_unknown_effect_holds_the_lane(
+        self,
+    ) -> None:
+        for failure, status in (
+            ("pre_write", "fail"),
+            ("unknown", "reconciliation_required"),
+            ("post_deploy_timeout", "reconciliation_required"),
+        ):
+            with self.subTest(failure=failure):
+                self.setUp()
+                _, source = self.queued_promotion()
+                with self.promotion_providers(failure=failure):
+                    self.run_release_worker()
+                finished = self.store.read_odoo_prod_promotion_operation_record(source.operation_id)
+                self.assertEqual(finished.status, status)
+                self.assertEqual(self.store.list_odoo_prod_rollback_operation_records(), ())
+                self.assertEqual(self.advance(), ())
+                if status == "reconciliation_required":
+                    self.assertEqual(finished.lease_owner, "")
+                    self.assertIsNone(finished.result)
+                    persisted, created = (
+                        self.store.create_odoo_prod_promotion_operation_record_if_no_active_lane(
+                            source.model_copy(
+                                update={
+                                    "operation_id": "other-operation",
+                                    "idempotency_key": "other",
+                                }
+                            )
+                        )
+                    )
+                    self.assertFalse(created)
+                    self.assertEqual(persisted.operation_id, source.operation_id)
+
+    def test_recovery_retains_admitted_authority_after_forward_authority_changes(self) -> None:
+        _, source = self.queued_promotion()
+
+        def change_authority() -> None:
+            self.switch("held")
+            self.store.write_release_review_decision_record(
+                decision(self.store, outcome="changes_requested", date="2026-09-23T05:00:00Z")
+            )
+            testing = self.store.read_release_tuple_record(
+                context_name=CONTEXT, channel_name="testing"
+            )
+            self.store.write_release_tuple_record(
+                testing.model_copy(update={"artifact_id": "new-testing"})
+            )
+
+        with self.promotion_providers(after_write=change_authority):
+            self.run_release_worker()
+        (recovery,) = self.store.list_odoo_prod_rollback_operation_records()
+        self.assertFalse(client_release_grant_allows(self.store, recovery.authorization))
+        self.assertTrue(odoo_release_recovery_allows(self.store, recovery))
+        for update in (
+            {"target": recovery.target.model_copy(update={"artifact_id": "new-testing"})},
+            {
+                "authorization": recovery.authorization.model_copy(
+                    update={"release_decision_record_id": "another-decision"}
+                )
+            },
+        ):
+            self.assertFalse(
+                odoo_release_recovery_allows(self.store, recovery.model_copy(update=update))
+            )
+
+        def rollback(**kwargs: Any) -> OdooProdRollbackResult:
+            kwargs["provider_effect_checkpoint"](TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
+            return OdooProdRollbackResult(
+                context=CONTEXT,
+                instance="prod",
+                source_channel="previous-deployment",
+                artifact_id=recovery.target.artifact_id,
+                promotion_record_id=recovery.request.promotion_record_id,
+                rollback_status="fail",
+                error_message="Recovery verification failed.",
+            )
+
+        with patch(
+            "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_prod_rollback",
+            side_effect=rollback,
+        ):
+            self.run_release_worker()
+        self.assertEqual(
+            self.store.read_odoo_prod_rollback_operation_record(recovery.operation_id).status,
+            "fail",
+        )
+        self.assertEqual(
+            self.store.read_odoo_prod_promotion_operation_record(source.operation_id).status, "fail"
+        )
+
+    def test_recovery_timeout_stays_uncertain_and_is_not_replayed(self) -> None:
+        _, source = self.queued_promotion()
+        with self.promotion_providers():
+            self.run_release_worker()
+        (recovery,) = self.store.list_odoo_prod_rollback_operation_records()
+
+        def rollback(**kwargs: Any) -> OdooProdRollbackResult:
+            kwargs["provider_effect_checkpoint"](TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
+            raise TimeoutError("Recovery may still be deploying.")
+
+        with patch(
+            "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_prod_rollback",
+            side_effect=rollback,
+        ):
+            self.run_release_worker()
+            self.assertEqual(
+                run_odoo_stable_operation_worker_once(
+                    record_store=self.store,
+                    control_plane_root_path=self.root,
+                    lease_owner="another-worker",
+                ).operation_kind,
+                "",
+            )
+        self.assertEqual(
+            self.store.read_odoo_prod_rollback_operation_record(recovery.operation_id).status,
+            "reconciliation_required",
+        )
+        self.assertEqual(
+            self.store.read_odoo_prod_promotion_operation_record(source.operation_id).status, "fail"
+        )
+
+    def test_claim_and_pre_write_retry_preserve_the_pinned_recovery_binding(self) -> None:
+        _, source = self.queued_promotion()
+        claimed = self.store.claim_next_odoo_prod_promotion_operation_record(
+            lease_owner="worker",
+            claimed_at="2026-09-23T05:00:00Z",
+            lease_expires_at="2026-09-23T05:01:00Z",
+        )
+        assert claimed is not None
+        self.assertEqual(claimed.checkpoints[0].evidence, source.checkpoints[0].evidence)
+        self.store.recover_expired_odoo_prod_promotion_operation_records(
+            now="2026-09-23T05:02:00Z",
+            safe_phases=("created", "running", "validated"),
+            max_attempts=3,
+        )
+        claimed_again = self.store.claim_next_odoo_prod_promotion_operation_record(
+            lease_owner="worker-2",
+            claimed_at="2026-09-23T05:03:00Z",
+            lease_expires_at="2026-09-23T05:04:00Z",
+        )
+        assert claimed_again is not None
+        self.assertEqual(claimed_again.checkpoints[0].evidence, source.checkpoints[0].evidence)
+
+    def test_failed_promotion_and_recovery_enqueue_commit_atomically(self) -> None:
+        _, source = self.queued_promotion()
+        original = self.store._release_operation_row
+
+        def reject_recovery(row_type: Any, record: Any) -> Any:
+            if isinstance(record, OdooProdRollbackOperationRecord):
+                raise RuntimeError("Simulated recovery insert failure.")
+            return original(row_type, record)
+
+        with (
+            self.promotion_providers(),
+            patch.object(self.store, "_release_operation_row", side_effect=reject_recovery),
+            self.assertRaisesRegex(RuntimeError, "insert failure"),
+        ):
+            self.run_release_worker()
+        self.assertEqual(
+            self.store.read_odoo_prod_promotion_operation_record(source.operation_id).status,
+            "running",
+        )
+        self.assertEqual(self.store.list_odoo_prod_rollback_operation_records(), ())
+        persisted, created = (
+            self.store.create_odoo_prod_promotion_operation_record_if_no_active_lane(
+                source.model_copy(
+                    update={"operation_id": "other-operation", "idempotency_key": "other"}
+                )
+            )
+        )
+        self.assertFalse(created)
+        self.assertEqual(persisted.operation_id, source.operation_id)
+
+    def test_failure_on_repromotion_recovers_the_same_pinned_baseline(self) -> None:
+        accepted, first = self.queued_promotion()
+        self.finish(first.operation_id)
+        self.set_prod(accepted.checklist.candidate.artifact_id)
+        (drill_id,) = self.advance()
+        self.finish(drill_id)
+        self.set_prod(accepted.checklist.production.artifact_id)
+        (backup_id,) = self.advance()
+        self.finish(backup_id)
+        (second_id,) = self.advance()
+        with self.promotion_providers():
+            self.run_release_worker()
+        recoveries = [
+            record
+            for record in self.store.list_odoo_prod_rollback_operation_records()
+            if odoo_release_recovery_source(record)
+        ]
+        self.assertEqual(len(recoveries), 1)
+        self.assertEqual(odoo_release_recovery_source(recoveries[0]), second_id)
+        self.assertEqual(
+            recoveries[0].target.artifact_id, accepted.checklist.production.artifact_id
+        )
+        self.assertNotEqual(recoveries[0].operation_id, drill_id)
+        self.assertEqual(self.advance(), ())
 
 
 class AcceptedArtifactAdmissionTests(unittest.TestCase):

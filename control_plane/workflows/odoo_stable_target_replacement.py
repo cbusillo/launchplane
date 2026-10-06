@@ -1773,6 +1773,7 @@ def execute_odoo_stable_target_replacement_apply(
     else:
         runtime_source["runtime_override_payload_rendered"] = "false"
 
+    production_write_started = False
     try:
         with _failure_stage(deploy_blocked_code("provider_target_unreadable")):
             host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
@@ -1981,6 +1982,7 @@ def execute_odoo_stable_target_replacement_apply(
         )
         if provider_effect_checkpoint is not None:
             provider_effect_checkpoint(TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
+        production_write_started = True
         raw_compose_evidence = dokploy_compose.sync_dokploy_compose_raw_source(
             host=host,
             token=token,
@@ -2216,6 +2218,16 @@ def execute_odoo_stable_target_replacement_apply(
             }
         )
     except click.ClickException as error:
+        # A missing response or deployment timeout does not prove the provider
+        # stopped. The durable worker must hold the lane rather than overwrite
+        # a still-running deploy with a recovery. A terminal failed deployment
+        # is determinate and can be recovered.
+        if (
+            production_write_started
+            and provider_effect_checkpoint is not None
+            and not isinstance(error, dokploy_api.DokployDeploymentFailed)
+        ):
+            raise RuntimeError("Odoo provider effect requires reconciliation.") from error
         failure = _deploy_step_failure(error)
         _write_failed_deployment(
             record_store=record_store,
