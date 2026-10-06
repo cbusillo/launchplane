@@ -141,6 +141,7 @@ class CodeOwnerLandingTests(unittest.TestCase):
             ("/docs/**/guide.md", {"filename": "docs/guide.md"}),
             ("/custom.txt", {"filename": "custom.txt"}),
             ("/", {"filename": "app.py"}),
+            ("/docs/C#/", {"filename": "docs/C#/guide.md"}),
         ):
             with self.subTest(pattern=pattern):
                 transport = RecordingMergeTrainGitHubTransport(
@@ -221,6 +222,21 @@ class CodeOwnerLandingTests(unittest.TestCase):
         )
         self.assertEqual(result.queue_order, (1,))
         self.assertEqual(result.intended_next_action, "merge")
+
+    def test_directory_wildcard_does_not_route_unrelated_code_individually(self) -> None:
+        (pr,) = individual_landing_snapshots(
+            transport=RecordingMergeTrainGitHubTransport(
+                responses=(
+                    _owners("/docs/** @team"),
+                    [{"filename": "app.py"}],
+                    {"head": {"sha": "head-1"}},
+                )
+            ),
+            repository_path="example/repo",
+            base_sha="base",
+            pull_requests=(_pr(1),),
+        )
+        self.assertFalse(pr.requires_individual_landing)
 
     def test_provider_failure_does_not_change_candidate_routing(self) -> None:
         for status in (None, 502, 403):

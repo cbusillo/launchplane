@@ -139,7 +139,7 @@ def _read_patterns(
         return tuple(
             line.split()[0]
             for raw_line in content.splitlines()
-            if (line := raw_line.split("#", 1)[0].strip()) and len(line.split()) > 1
+            if (line := raw_line.strip()) and not line.startswith("#") and len(line.split()) > 1
         )
     return ()
 
@@ -147,8 +147,15 @@ def _read_patterns(
 def _may_match(path: str, pattern: str) -> bool:
     # Unusual syntax is routed individually instead of guessed. Routing can
     # overmatch, but must never erase the approval attached to an owned PR.
-    if "**" in pattern or any(character in pattern for character in "\\[]!"):
+    if any(character in pattern for character in "\\[]!"):
         return True
+    if "**" in pattern:
+        # A literal prefix narrows conservative routing without implementing a
+        # second gitignore engine. Leading wildcards may still overmatch.
+        prefix = pattern.lstrip("/").split("*", 1)[0].split("?", 1)[0]
+        if pattern.startswith("/") or "/" in pattern:
+            return path.startswith(prefix)
+        return any(component.startswith(prefix) for component in path.split("/"))
     anchored = pattern.startswith("/")
     pattern = pattern.lstrip("/").rstrip("/")
     if not pattern:
