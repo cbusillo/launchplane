@@ -123,8 +123,8 @@ class QueueBlockingTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result["block_result"]["train_should_continue"])
             feedback = build_feedback_payloads(response=blocked.json())
             self.assertEqual([entry["pull_request_number"] for entry in feedback], [1])
-            self.assertIn("required checks failed", feedback[0]["message"])
-            self.assertIn("remove", feedback[0]["message"])
+            self.assertIn("required checks failed", cast(str, feedback[0]["message"]))
+            self.assertIn("remove", cast(str, feedback[0]["message"]))
             self.assertEqual(labels, [(1, repository_policy.blocked_label)])
             self.assertEqual(store.list_merge_train_batch_candidate_records(), ())
             progressed = await _post_merge_train_controller_run_once(
