@@ -943,10 +943,15 @@ controller work, preview lifecycle and rollback plans, inventory scans, and
 retained-volume backup import operations remain writes: they publish operative
 records or dispatch runner work. Reading their saved evidence remains separate.
 
-A `local_operators` or `terminal_agents` policy rule containing `agent.read`
-covers declared reads and plans, including future declared actions. It still
-matches the authenticated subject, token label, product, context and instance
-selectors. Other principal collections do not inherit this role. An undeclared
+The Director's agent uses its existing `local_operators` credential for the
+complete read and pure-plan route surface. Its policy rule containing
+`agent.read` covers declared reads and plans, including future declared actions,
+while matching the authenticated subject, token label, product, context and
+instance selectors. `terminal_agents` rules can inherit the same policy effects
+on terminal-compatible routes; their existing credential transport restrictions
+remain, including the refusal at mixed write-route authentication. The role does
+not turn a terminal credential into a `local_operators` credential. Other principal
+collections do not inherit this role. An undeclared
 action receives no role authority. An enumerated grant continues to work as
 before; the effect catalog adds no write, approval, apply or secret-value power.
 
@@ -975,7 +980,8 @@ dispatch explicitly checks the execute grant as well as dispatch authority;
 a pure-plan dry-run marker supplies evidence only.
 
 The action-coverage gate discovers authorization callsites, source constants,
-driver descriptor actions and generated secret-backed intent actions and fails
+helper action parameter positions, driver descriptor actions and generated
+secret-backed intent actions and fails
 on a missing effect declaration. Behavior tests exercise the read role across
 the declared effects and representative HTTP reads/planners, including denied
 writes, revoked grants, exact scope and redaction. Add an explicit declaration

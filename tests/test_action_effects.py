@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 import re
 import unittest
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from tests.support.ingress import _FakeNpmplusIngressClient, _npmplus_ingress_route_payload
@@ -55,9 +56,25 @@ class ActionEffectTests(unittest.TestCase):
         """Enforce one rule over all action callsites, constants and descriptors."""
         references: dict[str, str] = {}
         root = Path(__file__).resolve().parents[1] / "control_plane"
-        for path in root.rglob("*.py"):
-            if "migrations" in path.parts or path.name == "action_effects.py":
-                continue
+        paths = tuple(
+            path
+            for path in root.rglob("*.py")
+            if "migrations" not in path.parts and path.name != "action_effects.py"
+        )
+        positions = {name: {0} for name in ("action_allowed", "allows", "evaluate")}
+        for path in paths:
+            for definition in ast.walk(ast.parse(path.read_text())):
+                if not isinstance(definition, ast.FunctionDef | ast.AsyncFunctionDef):
+                    continue
+                arguments = [*definition.args.posonlyargs, *definition.args.args]
+                bound = bool(arguments and arguments[0].arg in {"self", "cls"})
+                for index, argument in enumerate(arguments):
+                    if "action" in argument.arg:
+                        slots = positions.setdefault(definition.name, set())
+                        slots.add(index)
+                        if bound and index:
+                            slots.add(index - 1)
+        for path in paths:
             for node in ast.walk(ast.parse(path.read_text())):
                 value = None
                 if isinstance(node, ast.keyword) and "action" in (node.arg or ""):
@@ -70,8 +87,13 @@ class ActionEffectTests(unittest.TestCase):
                         if isinstance(node.func, ast.Attribute)
                         else ""
                     )
-                    if name in {"action_allowed", "allows", "evaluate"}:
-                        value = node.args[0]
+                    slots = positions.get(name, set())
+                    value = ast.Tuple(
+                        elts=[
+                            argument for index, argument in enumerate(node.args) if index in slots
+                        ],
+                        ctx=ast.Load(),
+                    )
                 elif isinstance(node, ast.Assign | ast.AnnAssign):
                     targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                     if any(
@@ -111,6 +133,28 @@ class ActionEffectTests(unittest.TestCase):
             references[f"{name}.secret"] = "agent secret-backed intent"
         missing = {name: site for name, site in references.items() if name not in ACTION_EFFECTS}
         self.assertFalse(missing, f"Undeclared authorization actions: {missing}")
+
+    def test_gate_rejects_undeclared_actions_in_later_helper_arguments(self) -> None:
+        unknown_actions = ("missing_authorize.read", "missing_selection.plan")
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "control_plane"
+            source.mkdir()
+            (source / "runtime_reader.py").write_text(
+                "def authorize(identity, action, context): pass\n"
+                "def select_runtime(store, identity, context, action): pass\n"
+                f"authorize(None, {unknown_actions[0]!r}, 'sample')\n"
+                f"select_runtime(None, None, 'sample', {unknown_actions[1]!r})\n"
+            )
+            with (
+                patch("tests.test_action_effects.__file__", str(root / "tests" / "gate.py")),
+                self.assertRaisesRegex(
+                    AssertionError, "Undeclared authorization actions"
+                ) as result,
+            ):
+                self.test_every_source_authorization_action_declares_an_effect()
+            for action in unknown_actions:
+                self.assertIn(action, str(result.exception))
 
     def test_driver_read_effects_agree_with_driver_execution_contract(self) -> None:
         for descriptor in list_driver_descriptors():
