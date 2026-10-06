@@ -29,6 +29,7 @@ class ConfigAuthorityTrainWorkflowTests(unittest.TestCase):
         batch: bool = False,
         rejected: bool = False,
         target_movement: str = "",
+        repository: str = "example/product",
         overrides: dict[str, str] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], Path, str, str]:
         product = root / "product-repo"
@@ -110,9 +111,9 @@ class ConfigAuthorityTrainWorkflowTests(unittest.TestCase):
             "AUDIT_PYTHON": sys.executable,
             "EVENT_NAME": "push",
             "EVENT_REF": build_merge_train_batch_candidate_ref(
-                repository="example/product", base_branch="trunk", batch_id="fixture-batch"
+                repository=repository, base_branch="trunk", batch_id="fixture-batch"
             ),
-            "GITHUB_REPOSITORY": "example/product",
+            "GITHUB_REPOSITORY": repository,
             "DEFAULT_BRANCH": "trunk",
             "BASE_SHA": "0" * 40,
             "HEAD_SHA": head,
@@ -135,9 +136,18 @@ class ConfigAuthorityTrainWorkflowTests(unittest.TestCase):
         self.assertIn("--fail-on-findings", arguments)
 
     def test_new_train_ref_executes_the_audit_against_its_original_base(self) -> None:
-        for batch in (False, True):
-            with self.subTest(batch=batch), TemporaryDirectory() as directory:
-                result, capture, base, head = self._exercise(Path(directory), batch=batch)
+        for batch, repository in (
+            (False, "example/product"),
+            (True, "example/product"),
+            (True, "Example/Mixed_Case"),
+        ):
+            with (
+                self.subTest(batch=batch, repository=repository),
+                TemporaryDirectory() as directory,
+            ):
+                result, capture, base, head = self._exercise(
+                    Path(directory), batch=batch, repository=repository
+                )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self._assert_pair(capture, base, head)
                 self.assertFalse(json.loads(result.stdout)["gate"]["rejected_findings"])

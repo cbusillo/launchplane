@@ -94,8 +94,9 @@ jobs:
           if [[ "$EVENT_NAME" = push && "$BASE_SHA" = 0000000000000000000000000000000000000000 ]]; then
             default_branch="${DEFAULT_BRANCH:-}"
             event_ref="${EVENT_REF:-}"
-            train_prefix="refs/heads/launchplane/train/${GITHUB_REPOSITORY:-}/${default_branch//\//-}/"
-            if [[ -z "$default_branch" || -z "${GITHUB_REPOSITORY:-}" || "$event_ref" != "$train_prefix"* || "$event_ref" = "$train_prefix" || ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ || "$HEAD_SHA" =~ ^0+$ ]]; then
+            repository="$(printf '%s' "${GITHUB_REPOSITORY:-}" | tr '[:upper:]' '[:lower:]')"
+            train_prefix="refs/heads/launchplane/train/${repository}/${default_branch//\//-}/"
+            if [[ -z "$default_branch" || -z "$repository" || "$event_ref" != "$train_prefix"* || "$event_ref" = "$train_prefix" || ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ || "$HEAD_SHA" =~ ^0+$ ]]; then
               echo "New-ref comparison requires a default-branch train candidate and a nonzero head SHA." >&2
               exit 1
             fi
