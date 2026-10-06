@@ -3,6 +3,7 @@ import { AlertTriangle, KeyRound, LoaderCircle, ShieldCheck } from "lucide-react
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { AppShell } from "./AppShell";
+import { useEvidenceRefresh } from "./use-evidence-refresh";
 import { ProductActivityRoute } from "./ActivityRoute";
 import {
   loadDevFixtures,
@@ -73,11 +74,16 @@ export function App() {
   });
   const [authRefreshToken, setAuthRefreshToken] = useState(0);
   const [productRefreshToken, setProductRefreshToken] = useState(0);
+  const [inventoryRefreshToken, setInventoryRefreshToken] = useState(0);
   const [productsResource, setProductsResource] = useState<
     ResourceState<ProductSiteOverview[]>
   >(emptyResource());
   const [signingOut, setSigningOut] = useState(false);
   const [sessionNotice, setSessionNotice] = useState("");
+  useEvidenceRefresh(route.kind,
+    !fixtureMode && authState.status === "signed_in" && authState.identity.role !== "owner" &&
+      (route.kind === "product-index" || route.kind === "product-workspace" || route.kind === "product-environment"),
+    productsResource, () => setInventoryRefreshToken(value => value + 1));
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -217,7 +223,7 @@ export function App() {
       active = false;
       controller.abort();
     };
-  }, [authState.status, fixtureMode, productRefreshToken, route.kind]);
+  }, [authState.status, fixtureMode, productRefreshToken, inventoryRefreshToken, route.kind]);
 
   const refreshProducts = useCallback(() => {
     setProductRefreshToken((current) => current + 1);

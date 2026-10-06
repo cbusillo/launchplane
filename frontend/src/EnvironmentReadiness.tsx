@@ -37,10 +37,12 @@ export function EnvironmentReadinessPanel({
   actions,
   detail,
   fixtureMode,
+  refreshToken,
 }: {
   actions: ProductActionAvailability[];
   detail: ProductEnvironmentDetail;
   fixtureMode: DevFixtureMode;
+  refreshToken: number;
 }) {
   const inspectableActions = useMemo(
     () => inspectableReadinessActions(actions),
@@ -66,6 +68,16 @@ export function EnvironmentReadinessPanel({
   const readinessLoading =
     readinessResource.status === "loading" ||
     (readinessResource.status === "ready" && !readinessMatchesSelection);
+  const requestedAction = selectedAction?.authz_action ?? "";
+  const artifactId = detail.target.artifact_manifest?.artifact_id ?? "";
+  const currentArtifactId = detail.target.expected_runtime_identity?.artifact_id ?? "";
+  const readinessRequest = useMemo(() => selectedAction
+    ? buildOperationalReadinessRequest(detail, selectedAction) : null,
+  // Only changes to the actual request invalidate a service read. Evidence
+  // refresh renders must not reset the operator's selected readiness panel.
+  [detail.product, detail.context, detail.environment, artifactId, currentArtifactId, requestedAction]);
+  const fixtureDetail = fixtureMode ? detail : null;
+  const fixtureAction = fixtureMode ? selectedAction : null;
 
   useEffect(() => {
     if (!inspectableActions.length) {
@@ -83,7 +95,7 @@ export function EnvironmentReadinessPanel({
   }, [inspectableActions, selectedAuthzAction, selectionSignature]);
 
   useEffect(() => {
-    if (!selectedAction) {
+    if (!readinessRequest) {
       return;
     }
     let active = true;
@@ -93,17 +105,17 @@ export function EnvironmentReadinessPanel({
     async function loadReadiness() {
       try {
         let readiness: ProductOperationalReadiness;
-        if (fixtureMode) {
+        if (fixtureMode && fixtureDetail && fixtureAction) {
           const fixtures = await loadDevFixtures();
           await fixtures.waitForReadinessFixture(controller.signal);
           readiness = fixtures.operationalReadinessForFixture(
             fixtureMode,
-            detail,
-            selectedAction,
+            fixtureDetail,
+            fixtureAction,
           );
         } else {
           const response = await readProductOperationalReadiness(
-            buildOperationalReadinessRequest(detail, selectedAction),
+            readinessRequest!,
             controller.signal,
           );
           readiness = response.readiness;
@@ -146,7 +158,7 @@ export function EnvironmentReadinessPanel({
       active = false;
       controller.abort();
     };
-  }, [detail, fixtureMode, retryToken, selectedAction]);
+  }, [readinessRequest, fixtureDetail, fixtureAction, fixtureMode, refreshToken, retryToken]);
 
   if (!inspectableActions.length) {
     return (

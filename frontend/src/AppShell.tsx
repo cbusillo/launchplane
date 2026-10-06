@@ -249,7 +249,6 @@ export function AppShell({
               <button
                 aria-label="Refresh current evidence"
                 className="icon-button"
-                disabled={productsResource.status === "loading"}
                 onClick={onRefresh}
                 type="button"
               >

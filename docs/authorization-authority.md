@@ -665,6 +665,33 @@ administration set retains its own stop-before-removal requirements. Neither
 intent reads denied product data through an alternate route; normal product
 reads use their existing authorization after any approved installation.
 
+### Preparing Agent Proposal Access
+
+The Access policy workbench's **Prepare agent proposal access** card compiles
+one rule in the isolated `operator.agent-policy-proposer` managed set for the
+service-configured `local_operator` identity. The browser supplies only the candidate
+`agent-policy-proposer`, add/remove intent and stable source event. It cannot
+choose a principal, descriptor, action or policy fragment.
+
+The single rule names only `authz_policy_operation.propose` and
+`merge_train_policy_operation.propose`, on product/context `launchplane`, with
+no instance selector. It grants proposals for the two existing policy descriptors
+only. Plans are inert until the signed-in Director approves them; neither the
+rule nor the proposal route grants approval, policy writes, import apply,
+credentials, provider operations or ordinary-agent delivery. Existing standing
+read grants remain separate. See [agent proposals](privileged-operations.md#agent-policy-proposals).
+
+Preparation rejects a missing or globbed configured identity, an occupied set
+with another identity/shape, and overlapping proposal authority. Exact installed
+add/remove intents are already satisfied. Replays bind the configured principal
+and exact candidate; a configuration change cannot rebind a saved plan. Removal
+proposes an empty fragment for every rule in only this set, including unexpected
+rules. The exact diff remains subject to Director approval. Unrelated access
+and existing pending plans remain unchanged.
+The standard managed-policy review, human confirmation, current-policy checks,
+CAS and service worker govern installation. Installing or removing the rule is
+an access change, so the Director approves it separately; code adds no grant.
+
 ### Preparing Agent Product Setup
 
 The Access policy workbench can prepare the closed `agent-product-setup`

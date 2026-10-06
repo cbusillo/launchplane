@@ -3734,7 +3734,8 @@ managed-secret disable audit evidence through an insert-only path on PostgreSQL
 and SQLite. A stale absent read cannot overwrite a committed event, including
 its original timestamp. The filesystem store exposes the same insert-only create
 operation for local storage use; its concurrency proof covers that operation,
-not HTTP retirement or crash durability.
+not HTTP retirement. See [filesystem storage guarantees](records.md) for
+interruption recovery and durability limits.
 If overlapping attempts collide while inserting the deterministic disable event,
 the loser reads it back and accepts only matching secret, actor, event type,
 detail and reviewed-plan metadata; only the request timestamp may differ.

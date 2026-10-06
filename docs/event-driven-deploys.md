@@ -14,7 +14,9 @@ events for the product's repository, verifies the build, and deploys it.
 Launchplane receives the webhook of the GitHub App its merge train already
 uses (the App is installed on every product repository). One receiver,
 `POST /v1/github/app-webhook`, takes `workflow_run` and `pull_request`
-deliveries. Everything else is acknowledged and ignored.
+deliveries for deploy reconciliation. Opted-in source checks also consume
+`push` and `merge_group` deliveries as described below. Other events are
+acknowledged and ignored.
 
 Events carry no instructions. An event only says which target to look at
 again:
@@ -366,3 +368,84 @@ For SellYourOutboard and VeriReel (#2740): each repository's
 own `.github/workflows/build.yml`, then its `preview` label. Product-run preview
 verification went with `launchplane-preview.yml`; Launchplane's own health check
 of the expected build is what marks the preview ready, as for Odoo.
+
+## Product configuration authority from source events
+
+Source implementation: #3021. Runtime activation and required-check policy are
+separate Director decisions; consumer workflows remain until coverage is verified.
+An enrolled base branch's DB-backed merge-train policy can opt in with
+`config_authority_events_enabled`. Its default is false, and omitting it
+preserves historical policy digests. No checked-in product catalog or service
+environment variable activates it.
+
+For an opted-in, tracked inventory repository, the signed App receiver records
+an independent scan request for PR opened/reopened/synchronize/edited, push, or
+merge-group checks-requested events for that enrolled base branch, even without
+a deploy profile or build.
+It acknowledges after the transaction, without waiting for GitHub file reads.
+Redelivery preserves the original request and deploy-target deduplication.
+Pushes are scanned only for enrolled base branches with an explicit nonzero
+before/head pair. Creation, deletion, tag and unrelated feature/train-candidate
+pushes request no scan; PR and merge-group events provide their comparisons.
+
+The existing operation worker leases each delivery and rereads repository
+identity. PRs use the API's current explicit base/head pair; push and merge-group
+use the signed event's explicit pair, confirmed as commits through the API.
+Two complete immutable Git trees supply the changed paths, rather than GitHub
+compare's merge-base diff. Verified blob bytes feed the same scanner and
+`product-repo` gate as the CLI. Inherited findings, file classifications,
+symlink handling, and reported coverage gaps retain that scanner's behavior.
+Dirty checkouts, workflow instructions, and product executables are never inputs.
+A source read, identity mismatch, corrupt blob, truncated tree, or exceeded scan
+budget refuses verification. Scans have a four-minute read budget under a
+ten-minute lease; an expired lease is recovered and its older attempt cannot
+publish a check or stored result. Publication holds the database delivery fence
+through the provider write and completion; different deliveries for one
+repository are serialized. A separate scan thread is admitted after deploy and
+reconcile polling; a slow source read does not hold up newly queued operations.
+With no branch opted in, idle polling skips the scan table. The source migration
+adds a PostgreSQL index on scan state and receipt time for enabled queue reads.
+
+Completed results are projected through the existing checks-only App as
+`launchplane/config-authority/<event>/<encoded-base-branch>`, with event
+`pull-request`, `push`, or `merge-group` and a URL-encoded branch name.
+Separate event and branch names prevent a narrower comparison from overwriting a PR's
+result on the same head. A failed gate produces failure. An unavailable scan
+projects in-progress while a retry is pending, then failure on exhaustion;
+these checks are not excluded from normal check readiness as advisory governance
+projections are. A missing projection credential/permission or failed projection
+is stored as unavailable, with the scan outcome preserved separately. No token
+fallback or access grant is created. Source reads use the repository's existing
+train App with a contents/pull-requests read token (a subset of the train's
+existing permissions); projection uses the existing
+checks-only identity. Both installations and managed-key bindings need to be
+verified before activation. Requiring these check names is an Director decision.
+
+An authorized inventory reader can retrieve a delivery's request, queue/lease
+state, commit pair, redacted gate findings, coverage gaps, hashes and projection
+receipt through `GET /v1/repository-inventory?repository_id=<id>&delivery_id=<id>`.
+The delivery must belong to that repository. Literal configuration values and
+file contents are absent. A rejected gate stays failed. Unavailable source or
+projection evidence makes up to three attempts with backoff (30 then 60 seconds); native
+signed redelivery can retry an exhausted unavailable scan without repeating its
+deploy targets. Summaries stay within the check API's size limit, with full
+evidence in the reader and its delivery ID in the summary. Interrupted workers recover through their expired lease.
+
+Before removing the RepairShopr, VeriReel or SellYourOutboard workflow, verify
+runtime activation, event subscriptions, source reads and check projection for
+that product, and account for any required-check change. Source fixture parity
+and read-only scans of their commits demonstrate scanner coverage; they do not
+prove deployed activation or authorize any live change.
+
+The queue itself does not create a GitHub check: a delivery awaiting a worker
+has no source result yet. Existing checks alone therefore cannot prove that this
+scan finished before merge. Before consumer removal, the Director's required-check
+handling must account for a missing/queued source check and for irrelevant old
+branch contexts after a PR retarget. Source implementation does not change that
+live policy. Runtime proof must include a delayed scan, not only a completed pass.
+
+Source reads share the train App installation's rate budget. The four-minute
+budget limits source reads, and the blob cache avoids repeats within an attempt.
+Repeated large change sets or retries can still consume that shared allowance. Rate admission,
+large-change coverage and interrupted-process resource behavior need operational
+qualification before broad activation; this source proof does not establish them.

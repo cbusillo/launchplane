@@ -107,10 +107,11 @@ from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewDokployDryRunPlan,
     execute_odoo_preview_dokploy_apply,
 )
-from control_plane.workflows import odoo_stable_operation_worker
 from control_plane.workflows.odoo_stable_operation_worker import (
     OdooStableOperationWorkerResult,
     OdooStableOperationWorkerStore,
+    OdooProdPromotionOperationWorkerStore,
+    OdooProdRollbackOperationWorkerStore,
     run_odoo_stable_operation_worker_loop,
     run_odoo_stable_operation_worker_once,
 )
@@ -3449,8 +3450,12 @@ class ProductReconcileWorkerTests(ProductReconcileTestCase):
         self.assertEqual(result.status, "idle")
         operation_claims = {
             name
-            for member in vars(odoo_stable_operation_worker).values()
-            if isinstance(member, type)
+            for protocol in (
+                OdooStableOperationWorkerStore,
+                OdooProdPromotionOperationWorkerStore,
+                OdooProdRollbackOperationWorkerStore,
+            )
+            for member in protocol.__mro__
             for name in vars(member)
             if name.startswith("claim_next_") and name != "claim_next_product_reconcile_request"
         }
