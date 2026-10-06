@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.operation_descriptor import OperationDescriptor
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretAuditEvent, SecretBinding, SecretRecord
 from control_plane.github_app_configuration import ADVISORY_GITHUB_APP_ID_ENV_KEY
@@ -25,6 +26,13 @@ from control_plane.storage.product_authority_bundle import (
 )
 
 SERVICE_GITHUB_DELIVERY_ROUTE = "/v1/service/github-delivery"
+SERVICE_GITHUB_DELIVERY_OPERATION = OperationDescriptor(
+    method="GET",
+    route_path=SERVICE_GITHUB_DELIVERY_ROUTE,
+    authz_action="product_config.plan",
+    scope="context",
+    mode_effects={"read": "observation"},
+)
 SERVICE_TOKEN_RETIREMENT_ROUTE = SERVICE_GITHUB_DELIVERY_ROUTE + "/token-retirement"
 _SERVICE_INTEGRATION = "launchplane_service"
 

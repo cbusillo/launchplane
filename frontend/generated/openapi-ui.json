@@ -10006,6 +10006,22 @@
             "title": "Method",
             "type": "string"
           },
+          "mode_effects": {
+            "additionalProperties": {
+              "enum": [
+                "observation",
+                "inert_evidence",
+                "operation",
+                "access",
+                "credential",
+                "destructive",
+                "live_site"
+              ],
+              "type": "string"
+            },
+            "title": "Mode Effects",
+            "type": "object"
+          },
           "operator_visible": {
             "default": true,
             "title": "Operator Visible",
@@ -10079,6 +10095,7 @@
           "input_schema",
           "label",
           "method",
+          "mode_effects",
           "operator_visible",
           "output_schema",
           "readiness_requirements",

@@ -17,6 +17,10 @@ from pathlib import Path as FilePath
 from typing import Annotated, Any, Literal, NoReturn, NotRequired, Protocol, Self, TypedDict, cast
 from uuid import uuid4
 import click
+from control_plane.operation_authorization import (
+    observation_authorization_allows,
+    register_operation_route,
+)
 import fastapi.exceptions as fastapi_exceptions
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.datastructures import DefaultPlaceholder
@@ -423,7 +427,7 @@ from control_plane.github_delivery_configuration import (
     apply_delivery_github_configuration,
 )
 from control_plane.service_github_delivery_controls import (
-    SERVICE_GITHUB_DELIVERY_ROUTE,
+    SERVICE_GITHUB_DELIVERY_OPERATION,
     SERVICE_TOKEN_RETIREMENT_ROUTE,
     ServiceGitHubDeliveryStatus,
     ServiceTokenRetirementRequest,
@@ -24609,7 +24613,20 @@ def create_launchplane_fastapi_app(
         record_store: Annotated[object, Depends(get_record_store)],
     ) -> ServiceGitHubDeliveryStatus:
         trace_id = next_trace_id()
-        require_service_delivery_admin(identity, action="product_config.plan", trace_id=trace_id)
+        if not observation_authorization_allows(
+            endpoint=read_github_delivery_controls,
+            mode="read",
+            authorization_allows=resolved_authz_policy_runtime.allows,
+            identity=identity,
+            product=_LAUNCHPLANE_SERVICE_CONTEXT,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot observe Launchplane service delivery metadata.",
+            )
         return await run_in_threadpool(
             read_service_github_delivery,
             store=service_delivery_store(record_store, trace_id),
@@ -24645,10 +24662,10 @@ def create_launchplane_fastapi_app(
                 message="Service-token retirement is unavailable, stale, or conflicts with its reviewed request.",
             ) from error
 
-    app.add_api_route(
-        SERVICE_GITHUB_DELIVERY_ROUTE,
-        read_github_delivery_controls,
-        methods=["GET"],
+    register_operation_route(
+        app,
+        descriptor=SERVICE_GITHUB_DELIVERY_OPERATION,
+        endpoint=read_github_delivery_controls,
         response_model=ServiceGitHubDeliveryStatus,
         operation_id="read_service_github_delivery_controls",
         summary="Read service GitHub delivery selectors and managed binding metadata",

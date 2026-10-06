@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from control_plane.contracts.driver_descriptor import DriverActionScope
+from control_plane.contracts.operation_descriptor import OperationDescriptor, OperationEffect
+from control_plane.operation_authorization import bind_operation_handler
 from control_plane.drivers.generic_web_dispatch import (
     _GENERIC_WEB_DEPLOY_ROUTE,
     _GENERIC_WEB_PROD_PROMOTION_ROUTE,
@@ -138,11 +140,12 @@ class _DriverRouteMetadata:
     driver_id: str
     action_id: str
     route_path: str
-    method: str
+    method: Literal["GET", "POST"]
     authz_action: str
     alternate_authz_actions: tuple[str, ...]
     scope: DriverActionScope
     operator_visible: bool
+    mode_effects: tuple[tuple[str, OperationEffect], ...] = ()
 
 
 class _AuthorizationAllows(Protocol):
@@ -226,11 +229,12 @@ def _driver_route_metadata_from_descriptors() -> dict[str, _DriverRouteMetadata]
                 driver_id=descriptor.driver_id,
                 action_id=action.action_id,
                 route_path=route_path,
-                method=method,
+                method=action.method,
                 authz_action=authz_action,
                 alternate_authz_actions=alternate_authz_actions,
                 scope=action.scope,
                 operator_visible=action.operator_visible,
+                mode_effects=tuple(action.mode_effects.items()),
             )
     return route_metadata
 
@@ -274,6 +278,17 @@ def bind_native_fastapi_driver_handler(
             f"metadata: {route_path}"
         )
     setattr(endpoint, _NATIVE_DRIVER_ROUTE_METADATA_ATTRIBUTE, route_metadata)
+    bind_operation_handler(
+        descriptor=OperationDescriptor(
+            method=route_metadata.method,
+            route_path=route_metadata.route_path,
+            authz_action=route_metadata.authz_action,
+            scope=route_metadata.scope,
+            mode_effects=dict(route_metadata.mode_effects),
+        ),
+        endpoint=endpoint,
+        declared_methods=declared_methods,
+    )
     return route_metadata
 
 
