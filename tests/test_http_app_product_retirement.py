@@ -1431,15 +1431,15 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 if not released.wait(30):
                     raise TimeoutError("retirement mutable write synchronization timed out")
 
-        def secret_write(record: SecretRecord) -> object:
+        def secret_write(record: SecretRecord) -> None:
             if record.status == "disabled":
                 pause_mutable_write("secret")
-            return original_secret_write(record)
+            original_secret_write(record)
 
-        def binding_write(binding: SecretBinding) -> object:
+        def binding_write(binding: SecretBinding) -> None:
             if binding.status == "disabled":
                 pause_mutable_write("binding")
-            return original_binding_write(binding)
+            original_binding_write(binding)
 
         original_profile_write = store.compare_and_write_product_profile_record
         original_clock = store._database_mutation_timestamp
