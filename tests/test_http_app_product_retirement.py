@@ -14,7 +14,7 @@ from sqlalchemy.engine import Connection, ExceptionContext
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import OperationalError
 
-from control_plane.contracts.secret_record import SecretRecord, SecretAuditEvent
+from control_plane.contracts.secret_record import SecretRecord, SecretAuditEvent, SecretBinding
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -1271,6 +1271,20 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     late_audit_writer=True,
                 )
 
+    async def test_tracked_secret_late_writer_preserves_authority_and_recovery(self) -> None:
+        for write_kind in ("secret", "binding"):
+            for profile_failure in (True, False):
+                with (
+                    self.subTest(write_kind=write_kind, profile_failure=profile_failure),
+                    TemporaryDirectory() as directory,
+                ):
+                    await self._assert_tracked_checkpoint_insert_race(
+                        f"sqlite+pysqlite:///{Path(directory) / 'launchplane.sqlite3'}",
+                        profile_failure=profile_failure,
+                        secret_audit_race=True,
+                        late_secret_write=write_kind,
+                    )
+
     async def _assert_tracked_checkpoint_insert_race(
         self,
         database_url: str,
@@ -1280,6 +1294,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
         secret_audit_race: bool = False,
         audit_drift: bool = False,
         late_audit_writer: bool = False,
+        late_secret_write: str = "",
     ) -> None:
         store = self._store(Path("."), database_url=database_url)
         try:
@@ -1290,6 +1305,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 secret_audit_race=secret_audit_race,
                 audit_drift=audit_drift,
                 late_audit_writer=late_audit_writer,
+                late_secret_write=late_secret_write,
             )
         finally:
             store.close()
@@ -1303,6 +1319,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
         secret_audit_race: bool,
         audit_drift: bool,
         late_audit_writer: bool,
+        late_secret_write: str,
     ) -> None:
         store.write_secret_record(
             SecretRecord(
@@ -1317,6 +1334,19 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 updated_at=NOW,
             )
         )
+        if late_secret_write:
+            store.write_secret_binding(
+                SecretBinding(
+                    binding_id="race-binding",
+                    secret_id="race-secret",
+                    integration="fixture",
+                    binding_key="FIXTURE_TOKEN",
+                    context="example-site",
+                    instance="prod",
+                    created_at=NOW,
+                    updated_at=NOW,
+                )
+            )
         app = self._app(store, actions=("product_retirement.plan", "product_retirement.apply"))
         with patch(
             "control_plane.product_retirement.observe_tracked_dokploy_application",
@@ -1358,7 +1388,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             with lock:
                 insert_count += 1
                 number = insert_count
-            if number == 1 and not late_audit_writer:
+            if number == 1 and not late_audit_writer and not late_secret_write:
                 entered.set()
                 if not released.wait(30):
                     raise TimeoutError("retirement INSERT synchronization timed out")
@@ -1386,6 +1416,31 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     raise TimeoutError("retirement audit read synchronization timed out")
             return events
 
+        original_secret_write = store.write_secret_record
+        original_binding_write = store.write_secret_binding
+        mutable_write_paused = False
+
+        def pause_mutable_write(kind: str) -> None:
+            nonlocal mutable_write_paused
+            with lock:
+                pause = late_secret_write == kind and not mutable_write_paused
+                if pause:
+                    mutable_write_paused = True
+            if pause:
+                entered.set()
+                if not released.wait(30):
+                    raise TimeoutError("retirement mutable write synchronization timed out")
+
+        def secret_write(record: SecretRecord) -> object:
+            if record.status == "disabled":
+                pause_mutable_write("secret")
+            return original_secret_write(record)
+
+        def binding_write(binding: SecretBinding) -> object:
+            if binding.status == "disabled":
+                pause_mutable_write("binding")
+            return original_binding_write(binding)
+
         original_profile_write = store.compare_and_write_product_profile_record
         original_clock = store._database_mutation_timestamp
         clock_value: list[str | None] = [None]
@@ -1411,6 +1466,8 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch.object(store, "compare_and_write_product_profile_record", profile_write),
                 patch.object(store, "list_secret_audit_events", audit_read),
+                patch.object(store, "write_secret_record", secret_write),
+                patch.object(store, "write_secret_binding", binding_write),
                 patch.object(
                     store,
                     "_database_mutation_timestamp",
@@ -1477,6 +1534,9 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     winner_secret = store.list_secret_records(
                         context_name="example-site", instance_name="prod"
                     )[0]
+                    winner_bindings = store.list_secret_bindings(
+                        integration="fixture", context_name="example-site", instance_name="prod"
+                    )
                     if secret_drift:
                         winner_secret = winner_secret.model_copy(
                             update={
@@ -1496,17 +1556,34 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 store.list_secret_audit_events(secret_id="race-secret"), committed_audit
             )
-        self.assertEqual(insert_count, 2)
-        self.assertEqual(len(insert_errors), 1)
+        self.assertEqual(insert_count, 1 if late_secret_write else 2)
+        self.assertEqual(len(insert_errors), 0 if late_secret_write else 1)
         records = store.list_product_retirement_records(product="example-site")
         checkpoints = tuple(
             record for record in records if record.mutation_evidence.finalization_at
         )
         self.assertEqual(len(checkpoints), 1)
-        self.assertEqual(
-            store.list_secret_records(context_name="example-site", instance_name="prod")[0],
-            winner_secret,
-        )
+        current_secret = store.list_secret_records(
+            context_name="example-site", instance_name="prod"
+        )[0]
+        if late_secret_write:
+            # Mutable timestamps may drift; version, disabled authority and immutable
+            # audit evidence must survive this earlier pause and same-key recovery.
+            self.assertEqual(
+                current_secret.model_dump(exclude={"updated_at"}),
+                winner_secret.model_dump(exclude={"updated_at"}),
+            )
+            self.assertEqual(current_secret.status, "disabled")
+            current_bindings = store.list_secret_bindings(
+                integration="fixture", context_name="example-site", instance_name="prod"
+            )
+            self.assertEqual(
+                tuple(binding.model_dump(exclude={"updated_at"}) for binding in current_bindings),
+                tuple(binding.model_dump(exclude={"updated_at"}) for binding in winner_bindings),
+            )
+            self.assertEqual(current_bindings[0].status, "disabled")
+        else:
+            self.assertEqual(current_secret, winner_secret)
         winner_audit = store.list_secret_audit_events(secret_id="race-secret")
         self.assertEqual(len(winner_audit), 1)
         held = store.read_idempotency_record(
