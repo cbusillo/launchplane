@@ -1332,20 +1332,25 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         self, *, repository: str, pull_request_number: int, body_contains: str
     ) -> str:
         repository_path = _repository_path(repository)
-        payload = self.transport.request(
-            method="GET",
-            path=f"/repos/{repository_path}/issues/{pull_request_number}/comments",
-        )
-        if not isinstance(payload, list):
-            raise MergeTrainGitHubError("GitHub issue comments response must be a JSON list.")
         needle = _required_value(body_contains, "GitHub comment match text is required.")
-        for item in payload:
-            if not isinstance(item, dict):
-                continue
-            body = str(item.get("body") or "")
-            if needle in body:
-                return str(item.get("html_url") or "").strip()
-        return ""
+        page = 1
+        while True:
+            path = f"/repos/{repository_path}/issues/{pull_request_number}/comments"
+            # Keep the first page's default size; subsequent pages use that same size.
+            if page > 1:
+                path += f"?per_page=30&page={page}"
+            payload = self.transport.request(method="GET", path=path)
+            if not isinstance(payload, list):
+                raise MergeTrainGitHubError("GitHub issue comments response must be a JSON list.")
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                body = str(item.get("body") or "")
+                if needle in body:
+                    return str(item.get("html_url") or "").strip()
+            if len(payload) < 30:
+                return ""
+            page += 1
 
     def pull_request_is_merged(
         self, *, repository: str, pull_request_number: int, expected_head_sha: str
