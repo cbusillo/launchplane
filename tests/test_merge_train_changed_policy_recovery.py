@@ -81,6 +81,7 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         indirectly_merged: bool = False,
         annotation_interrupted: bool = False,
         landing_contains_child: bool = True,
+        label_configured: bool = True,
     ) -> None:
         graph = _StackTransport()
         if deeper:
@@ -310,6 +311,8 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     graph.heads["feature/child"] = "new-child"
                 changed_policy = original_policy.policy.model_dump(mode="json")
                 changed_policy["policies"][0]["blocked_label"] = "current-policy-blocked"
+                if not label_configured:
+                    changed_policy["policies"][0]["stack_child_disposition_label"] = ""
                 current = original_policy.model_validate(
                     {
                         **original_policy.model_dump(mode="json"),
@@ -337,14 +340,22 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                         else []
                     )
                     self.assertEqual(comments, expected_annotations)
-                    self.assertEqual(labels, set(expected_annotations))
+                    self.assertEqual(
+                        labels, set(expected_annotations) if label_configured else set()
+                    )
+                    if not label_configured:
+                        self.assertEqual(
+                            result["historical_stack_child_label_status"], "not_configured"
+                        )
                     self.assertEqual(close_requests, [])
                     self.assertEqual(len(graph.merge_requests), 2 if deeper else 1)
                     # Retry completed cleanup through the same HTTP controller.
                     replay = await run()
                     self.assertEqual(replay.status_code, 202, replay.text)
                     self.assertEqual(comments, expected_annotations)
-                    self.assertEqual(labels, set(expected_annotations))
+                    self.assertEqual(
+                        labels, set(expected_annotations) if label_configured else set()
+                    )
                     self.assertEqual(len(graph.merge_requests), 2 if deeper else 1)
                     self.assertTrue(
                         all(
@@ -485,4 +496,9 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_historical_annotation_requires_actual_landing_containment(self) -> None:
         await self._recovery(
             checkpointed=False, moved=False, indirectly_merged=True, landing_contains_child=False
+        )
+
+    async def test_removed_label_does_not_stall_landed_root_cleanup(self) -> None:
+        await self._recovery(
+            checkpointed=False, moved=False, indirectly_merged=True, label_configured=False
         )

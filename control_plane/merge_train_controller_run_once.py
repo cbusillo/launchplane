@@ -1694,6 +1694,8 @@ def _finish_landed_merge_train_batch(
         return result
     if landed_record.ordinary_job_binding is not None:
         result["landing_progress"] = "complete"
+    elif not repository_policy.stack_child_disposition_label:
+        result["historical_stack_child_label_status"] = "not_configured"
     if not collapse_records:
         if lease.record.step_payload.get("stack_collapse_plan_record_id"):
             raise MergeTrainControllerRequestError(
@@ -1802,10 +1804,6 @@ def _annotate_historical_closed_stack_children(
             ):
                 continue
             label = repository_policy.stack_child_disposition_label
-            if not label:
-                raise MergeTrainControllerRequestError(
-                    "merge train historical child annotation requires stack_child_disposition_label"
-                )
             body = (
                 f"Launchplane verified this already-closed stacked PR's head "
                 f"`{child.expected_head_sha}` in root PR #{root.pull_request_number}, "
@@ -1837,7 +1835,7 @@ def _annotate_historical_closed_stack_children(
                     )
                 )
             lease.checkpoint()
-            if not github_client.pull_request_has_label(
+            if label and not github_client.pull_request_has_label(
                 repository=landing.repository,
                 pull_request_number=child.pull_request_number,
                 label=label,

@@ -362,6 +362,35 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
         self.assertEqual(comment_url, "https://github.com/example/repo/pull/11#issuecomment-2")
 
+    def test_find_pull_request_comment_url_reads_later_pages(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                [{"body": "old discussion", "html_url": "https://example.test/old"}] * 30,
+                [{"body": "restored annotation", "html_url": "https://example.test/restored"}],
+            )
+        )
+        client = GitHubMergeTrainClient(transport=transport)
+        self.assertEqual(
+            client.find_pull_request_comment_url(
+                repository="example/repo",
+                pull_request_number=11,
+                body_contains="restored annotation",
+            ),
+            "https://example.test/restored",
+        )
+        self.assertIn("page=2", transport.requests[-1].path)
+
+    def test_find_pull_request_comment_url_fails_on_unreadable_later_page(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=([{"body": "old discussion"}] * 30, {"message": "unavailable"})
+        )
+        with self.assertRaises(MergeTrainGitHubError):
+            GitHubMergeTrainClient(transport=transport).find_pull_request_comment_url(
+                repository="example/repo",
+                pull_request_number=11,
+                body_contains="restored annotation",
+            )
+
     def test_pull_request_has_label_reads_pr_labels(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=({"labels": [{"name": "stack-landed"}]},)
