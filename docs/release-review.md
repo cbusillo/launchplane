@@ -8,6 +8,64 @@ testing site and the **`Client test notes`** from every merged pull request in t
 commit range at `/ui/owner-review?product=<product>`. No GitHub interaction is
 required to read the checklist, accept it, or request changes.
 
+When the checklist is complete and only the Client's approval remains, the
+stable worker posts a release-review request mentioning the recorded Client,
+through the existing Launchplane Delivery App's release-record access. It links
+the Client review page and explains whether Accept starts the gated production
+release or records approval while releases are held. Incomplete or unavailable
+checklists, prelaunch/retired products, standing Director acceptance and candidates
+with a recorded decision receive no request. Missing access is reported; no grant
+or credential is created. The worker uses Launchplane's own bootstrap
+`LAUNCHPLANE_PUBLIC_URL` for the review link and checks at most every five minutes
+per unchanged profile and lane versions until delivery. After a confirmed receipt,
+the worker remembers delivery in memory and does no GitHub reads for that candidate;
+a replica restart reads the durable receipt again. Settled versions also need no
+GitHub read. This cache never supplies acceptance or bypasses release checks.
+
+The product repository keeps one issue for these requests. Launchplane finds it
+by a standalone `release_request_issue_marker(product)` line in the issue body;
+without one, it creates a "Release review requests" issue. To use an existing
+go-live or release issue, append that marker to its body before deploying this
+publisher. Lookup stops at the first page containing a marked issue, newest
+updated first; keep one marked issue per product. Multiple matches on that page
+or incomplete reads refuse publication. Discovery is bounded to 1,000 entries
+(including PRs); for a larger repository, mark its destination before enabling
+the publisher so it appears at the front of the updated-issue list. A closed
+marked issue is intentionally reused; its mentions still notify the Client.
+Comment lookup is also bounded to 1,000 entries; keep the requests issue unlocked
+and preserve its receipts. The Client must already be able to read the product
+repository for the mention to notify them; missing access is a reported prerequisite,
+not a reason to grant access automatically.
+The marker functions live in `control_plane/release_invitation.py`; there is no
+checked-in destination catalog.
+
+Each comment includes `release_invitation_marker(product, candidate)`, derived
+from the candidate's artifact, commit and shared-input identity. The worker
+serializes publication across replicas using the existing release-publication
+lock and checks for that receipt before posting. A retry after a lost response
+adopts the existing comment; edits to checklist notes do not notify again.
+A different candidate gets a new request on the same issue. Markers are delivery
+receipts only and never supply release acceptance. Preserve them during edits;
+deleting a receipt permits another notification.
+
+For a candidate already requested manually, append its candidate marker on its
+own line, without indentation or trailing spaces, to the existing request comment
+and the issue marker to that issue's body before the
+new publisher starts. Preserve the existing wording and mention. Read the exact
+candidate from the supported release-review endpoint and pass its `ReleaseVersion`
+to the marker command below; do not infer it from a shortened commit or from the newest
+testing build after it has changed. This imports delivery evidence without sending
+another request or submitting a decision.
+
+Save the endpoint's exact `checklist.candidate` object as a private JSON file
+and use the supported read-only marker command:
+
+```sh
+uv run python -m control_plane.release_invitation --product example-site --candidate-file /path/to/candidate.json
+```
+
+It prints the issue and comment markers and makes no service or GitHub request.
+
 The review leads with the product, the viewer's Client or admin role, the
 testing-site link, and **What to test**. Pull requests with identical
 `Client test notes` appear as one check listing each change it covers, and a change missing

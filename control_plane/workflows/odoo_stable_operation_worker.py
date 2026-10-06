@@ -61,6 +61,7 @@ from control_plane.client_release import (
     advance_client_releases,
     client_release_grant_allows,
 )
+from control_plane.release_invitation import ReleaseInvitationBackoff
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationDeniedError,
     DurableOperationAuthorizationGuard,
@@ -877,6 +878,7 @@ def run_odoo_stable_operation_worker_loop(
     client_release_thread: Thread | None = None
     config_scan_thread: Thread | None = None
     standing_review_backoff = StandingReleaseReviewBackoff()
+    invitation_backoff = ReleaseInvitationBackoff()
 
     def advance_releases() -> None:
         try:
@@ -885,6 +887,7 @@ def run_odoo_stable_operation_worker_loop(
                 control_plane_root=control_plane_root_path,
                 stop_event=worker_stop_event,
                 standing_review_backoff=standing_review_backoff,
+                invitation_backoff=invitation_backoff,
             )
         except Exception:
             logging.exception("Client release advance failed.")
