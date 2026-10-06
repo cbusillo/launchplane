@@ -438,6 +438,10 @@ def discover_merge_train_stack(
         seen_numbers.add(child.number)
         current_head_ref = child.head_ref
 
+    if any(pr.requires_individual_landing for pr in chain):
+        # Land the original root first. Its children remain open on their own
+        # PRs; after their base dependency lands they can target the train base.
+        chain = [root_pull_request]
     if len(chain) == 1:
         return MergeTrainStackDiscoveryResult(
             status="not_stacked",

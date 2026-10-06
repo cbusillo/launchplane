@@ -6,6 +6,7 @@ from control_plane.merge_train import (
     MergeTrainDryRunSnapshot,
     MergeTrainPullRequestSnapshot,
     build_merge_train_dry_run_result,
+    discover_merge_train_stack,
 )
 from control_plane.merge_train_codeowners import individual_landing_snapshots
 from control_plane.merge_train_github import (
@@ -14,6 +15,7 @@ from control_plane.merge_train_github import (
     RecordingMergeTrainGitHubTransport,
 )
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate
+from control_plane.merge_train_controller_run_once import _conflict_probe_queue
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.support.merge_train import labeled_by
 
@@ -29,6 +31,9 @@ def _pr(
         label_actors=labeled_by(("ready-to-merge",)),
         actor_role="repo_admin",
         base_ref="main",
+        head_ref=f"work-{number}",
+        head_repository="example/repo",
+        base_repository="example/repo",
         mergeable="mergeable",
         required_checks_status="pass",
         branch_update_required=behind,
@@ -56,9 +61,13 @@ class CodeOwnerLandingTests(unittest.TestCase):
                 ],
                 _owners("/DIRECTION.md @director\n/.github/CODEOWNERS @director\n"),
                 [{"filename": "app.py"}],
+                {"head": {"sha": "head-1"}},
                 [{"filename": "DIRECTION.md"}],
+                {"head": {"sha": "head-2"}},
                 [{"filename": ".github/CODEOWNERS"}],
+                {"head": {"sha": "head-3"}},
                 [{"filename": "other.py"}],
+                {"head": {"sha": "head-4"}},
             )
         )
         with (
@@ -113,6 +122,10 @@ class CodeOwnerLandingTests(unittest.TestCase):
                 )
                 self.assertEqual(result.queue_order, expected)
                 self.assertEqual(result.intended_next_action, action)
+                self.assertEqual(
+                    tuple(pr.number for pr in _conflict_probe_queue(result)),
+                    expected if len(expected) > 1 else (),
+                )
 
     def test_owned_rename_origin_and_generic_patterns_route_individually(self) -> None:
         for pattern, file in (
@@ -130,7 +143,7 @@ class CodeOwnerLandingTests(unittest.TestCase):
         ):
             with self.subTest(pattern=pattern):
                 transport = RecordingMergeTrainGitHubTransport(
-                    responses=(_owners(f"{pattern} @team\n"), [file])
+                    responses=(_owners(f"{pattern} @team\n"), [file], {"head": {"sha": "head-1"}})
                 )
                 (pr,) = individual_landing_snapshots(
                     transport=transport,
@@ -140,12 +153,52 @@ class CodeOwnerLandingTests(unittest.TestCase):
                 )
                 self.assertTrue(pr.requires_individual_landing)
 
+    def test_stacks_with_owned_roots_or_children_leave_original_prs_open(self) -> None:
+        for owned_number in (1, 2):
+            with self.subTest(owned_number=owned_number):
+                prs = (
+                    _pr(1, individual=owned_number == 1),
+                    _pr(2, individual=owned_number == 2).model_copy(update={"base_ref": "work-1"}),
+                )
+                result = discover_merge_train_stack(
+                    policy=build_test_merge_train_policy(repository="example/repo"),
+                    snapshot=MergeTrainDryRunSnapshot(
+                        repository="example/repo", base_branch="main", pull_requests=prs
+                    ),
+                    root_pull_request_number=1,
+                )
+                self.assertEqual(result.status, "not_stacked")
+                self.assertEqual(result.stack_order, (1,))
+
+    def test_incomplete_or_moving_file_evidence_is_individual_without_stopping_other_prs(
+        self,
+    ) -> None:
+        for files, confirmation in (
+            ({}, {}),
+            ([{"filename": "app.py"}], {"head": {"sha": "new-head"}}),
+            ([{"filename": "app.py", "status": "renamed"}], {}),
+        ):
+            with self.subTest(files=files):
+                responses = [_owners("/DIRECTION.md @owner"), files]
+                if isinstance(files, list) and files[0].get("status") != "renamed":
+                    responses.append(confirmation)
+                responses.extend(([{"filename": "app.py"}], {"head": {"sha": "head-2"}}))
+                prs = individual_landing_snapshots(
+                    transport=RecordingMergeTrainGitHubTransport(responses=tuple(responses)),
+                    repository_path="example/repo",
+                    base_sha="base",
+                    pull_requests=(_pr(1), _pr(2)),
+                )
+                self.assertTrue(prs[0].requires_individual_landing)
+                self.assertFalse(prs[1].requires_individual_landing)
+
     def test_missing_ownership_uses_next_location_but_denied_read_stops(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 MergeTrainGitHubError("absent", status_code=404),
                 _owners("/custom.txt @owner"),
                 [{"filename": "custom.txt"}],
+                {"head": {"sha": "head-1"}},
             )
         )
         (pr,) = individual_landing_snapshots(
@@ -159,7 +212,6 @@ class CodeOwnerLandingTests(unittest.TestCase):
         for response in (
             MergeTrainGitHubError("denied", status_code=403),
             {"encoding": "none"},
-            _owners("/custom.txt @owner"),
         ):
             with self.subTest(response=response), self.assertRaises(MergeTrainGitHubError):
                 individual_landing_snapshots(

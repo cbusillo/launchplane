@@ -14,10 +14,14 @@ change; when that change is first, it selects only that PR. GitHub checks its
 existing code-owner approval and protected requirements on the original PR.
 Ownership-file changes also land individually. The GitHub adapter reads the
 base revision's ownership file in GitHub's directory precedence, including
-rename origins in the changed-file evidence; unreadable or incomplete evidence
-stops planning. Matching is conservative: unusual patterns and overridden
+rename origins in the changed-file evidence and confirming the original head
+again after reading its files. Unreadable ownership stops planning; incomplete
+file evidence routes only that PR individually. Matching is conservative: unusual patterns and overridden
 ownership may cause extra individual landings, never approval transfer to a
 generated batch. No owner identities or owned paths are copied into train policy.
+Stacks containing an owned change are not collapsed: the root lands first,
+leaving its children open. After a child's base dependency lands, its original
+PR must target the train's base branch before it can enter that queue.
 
 The merge train is provider-neutral and batch-validating. Source-control-specific
 reads and effects belong behind an adapter; the steps below describe the current
