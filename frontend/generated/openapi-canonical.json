@@ -8843,6 +8843,126 @@
         "title": "GenericWebDeployRecoveryProviderEvidenceResponse",
         "type": "object"
       },
+      "GenericWebDeployRecoveryReferenceApplyRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_recovery_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Expected Recovery Digest",
+            "type": "string"
+          },
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
+            "type": "string"
+          },
+          "product": {
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "pattern": "\\S",
+            "title": "Reason",
+            "type": "string"
+          },
+          "recovery_reference": {
+            "pattern": "^event-deploy-[0-9a-f]{64}$",
+            "title": "Recovery Reference",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "recovery_reference",
+          "reason",
+          "expected_recovery_digest"
+        ],
+        "title": "GenericWebDeployRecoveryReferenceApplyRequest",
+        "type": "object"
+      },
+      "GenericWebDeployRecoveryReferenceRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
+            "type": "string"
+          },
+          "product": {
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "pattern": "\\S",
+            "title": "Reason",
+            "type": "string"
+          },
+          "recovery_reference": {
+            "pattern": "^event-deploy-[0-9a-f]{64}$",
+            "title": "Recovery Reference",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "recovery_reference",
+          "reason"
+        ],
+        "title": "GenericWebDeployRecoveryReferenceRequest",
+        "type": "object"
+      },
+      "GenericWebDeployRecoveryReferenceResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "recovery_reference": {
+            "title": "Recovery Reference",
+            "type": "string"
+          },
+          "reservation_attempt": {
+            "title": "Reservation Attempt",
+            "type": "integer"
+          },
+          "reservation_state": {
+            "enum": [
+              "running",
+              "reconcile_required"
+            ],
+            "title": "Reservation State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "recovery_reference",
+          "reservation_state",
+          "reservation_attempt"
+        ],
+        "title": "GenericWebDeployRecoveryReferenceResponse",
+        "type": "object"
+      },
       "GenericWebDeployRequest": {
         "additionalProperties": false,
         "properties": {
@@ -45698,8 +45818,9 @@
           {
             "in": "header",
             "name": "Idempotency-Key",
-            "required": true,
+            "required": false,
             "schema": {
+              "default": "",
               "title": "Idempotency-Key",
               "type": "string"
             }
@@ -45719,7 +45840,15 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWebDeployRecoveryApplyRequest"
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/GenericWebDeployRecoveryApplyRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/GenericWebDeployRecoveryReferenceApplyRequest"
+                  }
+                ],
+                "title": "Recovery Request"
               }
             }
           },
@@ -45807,8 +45936,9 @@
           {
             "in": "header",
             "name": "Idempotency-Key",
-            "required": true,
+            "required": false,
             "schema": {
+              "default": "",
               "title": "Idempotency-Key",
               "type": "string"
             }
@@ -45828,7 +45958,15 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWebDeployRecoveryDryRunRequest"
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/GenericWebDeployRecoveryDryRunRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/GenericWebDeployRecoveryReferenceRequest"
+                  }
+                ],
+                "title": "Recovery Request"
               }
             }
           },
@@ -45916,8 +46054,9 @@
           {
             "in": "header",
             "name": "Idempotency-Key",
-            "required": true,
+            "required": false,
             "schema": {
+              "default": "",
               "title": "Idempotency-Key",
               "type": "string"
             }
@@ -45937,7 +46076,15 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWebDeployRecoveryDryRunRequest"
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/GenericWebDeployRecoveryDryRunRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/GenericWebDeployRecoveryReferenceRequest"
+                  }
+                ],
+                "title": "Recovery Request"
               }
             }
           },
@@ -46016,6 +46163,105 @@
           }
         },
         "summary": "Inspect exact provider evidence for a generic web deploy reservation"
+      }
+    },
+    "/v1/admin/generic-web/deploy-recovery/{product}/testing": {
+      "get": {
+        "operationId": "read_event_deploy_recovery_reference",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericWebDeployRecoveryReferenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read Event Deploy Recovery Reference"
       }
     },
     "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}": {

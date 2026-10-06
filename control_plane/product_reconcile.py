@@ -10,6 +10,8 @@ the plan on its request.
 
 from __future__ import annotations
 
+from control_plane.event_testing_deploy import event_testing_deploy_request
+
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -78,7 +80,6 @@ from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.generic_web_deploy_http import (
     GENERIC_WEB_DEPLOY_ROUTE,
-    GenericWebDeployEnvelope,
     GenericWebDeployProductMismatchError,
     GenericWebDeployRouteDependencyError,
     resolve_generic_web_deploy_lane,
@@ -173,7 +174,6 @@ from control_plane.testing_lane_hold import (
     is_staff_testing_hold_cancellation,
     read_staff_testing_hold,
 )
-from control_plane.workflows.generic_web_deploy import GenericWebDeployRequest
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebDeployProvider,
     default_generic_web_deploy_provider,
@@ -646,14 +646,10 @@ def _deploy_generic_web_testing(
             hold_recorded_at=hold.recorded_at,
         )
         return ReconcileOutcome(plan)
-    envelope = GenericWebDeployEnvelope(
+    envelope = event_testing_deploy_request(
         product=profile.product,
-        deploy=GenericWebDeployRequest(
-            product=profile.product,
-            instance=TESTING_INSTANCE,
-            artifact_id=desired.image_reference,
-            source_git_ref=desired.manifest.source_commit,
-        ),
+        image_reference=desired.image_reference,
+        source_commit=desired.manifest.source_commit,
     )
     # The deployment testing ran when this deploy was decided is part of its key:
     # every deploy and rollback records a new one, so a lane changed since gets the
@@ -677,6 +673,7 @@ def _deploy_generic_web_testing(
             lane=lane,
             trace_id=trace_id,
             deploy_provider=testing_hooks.generic_web_deploy_provider(),
+            retain_event_request=True,
         )
         # The reconcile request's lane lease serializes these decisions. A new
         # authority key must not bypass an unresolved old attempt, even after a
