@@ -2754,8 +2754,24 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
 
         feedback = cast(dict[str, object], closed["pr_feedback"])
         self.assertEqual(feedback["status"], "cleared")
+        self.assertEqual(feedback["delivery_status"], "delivered")
         self.assertEqual(feedback["delivery_action"], "no_existing_comment")
         self.assertEqual(self.comments.writes, [])
+        records = self.store.list_preview_pr_feedback_records(context_name="cm")
+        self.reconcile_preview()
+        self.assertEqual(self.store.list_preview_pr_feedback_records(context_name="cm"), records)
+
+    def test_pending_feedback_audit_failure_keeps_cleanup_history(self) -> None:
+        with patch.object(self.store, "write_preview_pr_feedback_record", side_effect=RuntimeError):
+            pending = cast(dict[str, object], self.reconcile_preview()["pr_feedback"])
+        self.assertEqual((pending["status"], pending["delivery_status"]), ("pending", "failed"))
+        self.assertIn("Waiting for:", self.comment_body())
+        self.github.pull_request["state"] = "closed"
+
+        cleared = cast(dict[str, object], self.reconcile_preview()["pr_feedback"])
+
+        self.assertEqual((cleared["status"], cleared["delivery_status"]), ("cleared", "delivered"))
+        self.assertEqual(self.comments.on(5), [])
 
     def test_failed_pending_feedback_cleanup_retries_on_the_next_reconcile(self) -> None:
         self.reconcile_preview()

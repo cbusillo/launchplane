@@ -93,6 +93,7 @@ def post_reconcile_feedback(
     """
     previous = request.last_plan.get(PR_FEEDBACK_PLAN_KEY)
     previous_entry = cast(dict[str, object], previous) if isinstance(previous, dict) else None
+    feedback: _Feedback | None = None
     try:
         profile = cast(ReconcileFeedbackStore, record_store).read_product_profile_record(
             request.product
@@ -132,10 +133,14 @@ def post_reconcile_feedback(
         _LOGGER.warning(
             "Reconcile PR feedback for %s failed: %s", request.target_key, feedback_error
         )
-        return {
-            "delivery_status": "failed",
-            "error": f"Unexpected {type(feedback_error).__name__} while posting PR feedback.",
-        }
+        failed_entry = dict(previous_entry or {})
+        if feedback is not None:
+            failed_entry["status"] = feedback.status
+        failed_entry.update(
+            delivery_status="failed",
+            error=f"Unexpected {type(feedback_error).__name__} while posting PR feedback.",
+        )
+        return failed_entry
 
 
 def _decide_feedback(
@@ -417,7 +422,9 @@ def _post(
             )
             if existing is None:
                 return _Delivery(
-                    pull_request_number=pull_request_number, action="no_existing_comment"
+                    pull_request_number=pull_request_number,
+                    status="delivered",
+                    action="no_existing_comment",
                 )
             comment_id = existing.get("id")
             if not isinstance(comment_id, int):
