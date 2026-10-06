@@ -78,6 +78,7 @@ def resolve_event_deploy_recovery_coordinates(
         if (
             envelope.product != product
             or envelope.deploy.instance != "testing"
+            or envelope.model_dump(mode="json") != snapshot.original_event_deploy
             or fingerprint(
                 route_path=GENERIC_WEB_DEPLOY_ROUTE, payload=snapshot.original_event_deploy
             )

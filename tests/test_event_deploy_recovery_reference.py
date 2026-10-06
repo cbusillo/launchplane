@@ -15,6 +15,7 @@ from control_plane.contracts.artifact_identity import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
+from control_plane.drivers.generic_web_dispatch import GenericWebDeployEnvelope
 from control_plane.event_testing_deploy import event_testing_deploy_request
 from control_plane.product_reconcile import RECONCILE_SOURCE, reconcile_reservation_scope
 from control_plane.storage.postgres import (
@@ -66,6 +67,13 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
             image_reference=f"{self.manifest.image.repository}@{self.manifest.image.digest}",
             source_commit=self.manifest.source_commit,
         ).model_dump(mode="json")
+        if self._testMethodName == "test_request_model_normalization_drift_refuses_reference_read":
+            default_field = next(
+                name
+                for name, field in GenericWebDeployEnvelope.model_fields.items()
+                if not field.is_required()
+            )
+            self.original.pop(default_field)
         self.reservation = self.reserve(
             "first",
             state="running"
@@ -494,3 +502,13 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
                 )
                 self.assertEqual(code, 409, refused)
                 self.assertEqual(refused["error"]["code"], "reservation_target_conflict")
+
+    def test_request_model_normalization_drift_refuses_reference_read(self) -> None:
+        with patch(
+            "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
+            side_effect=AssertionError("provider read"),
+        ):
+            code, result = self.read()
+            self.assertEqual(code, 409, result)
+            self.assertEqual(result["error"]["code"], "recovery_evidence_conflict")
+        self.assertEqual(self.store.list_held_provider_target_reservations(), (self.reservation,))
