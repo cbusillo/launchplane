@@ -37,7 +37,12 @@ from control_plane.preview_pr_feedback_notifications import (
 )
 from control_plane.product_review_status import OwnerReviewStatus, owner_review_reference_url
 from control_plane.testing_lane_hold import STAFF_TESTING_HOLD_REASON
-from control_plane.workflows.launchplane import github_api_request, upsert_github_issue_comment
+from control_plane.workflows.launchplane import (
+    delete_github_issue_comment,
+    find_github_issue_comment_by_marker,
+    github_api_request,
+    upsert_github_issue_comment,
+)
 from control_plane.workflows.preview_pr_feedback import render_preview_pr_feedback_markdown
 
 PREVIEW_FEEDBACK_MARKER = "<!-- launchplane-reconcile-preview -->"
@@ -198,7 +203,7 @@ def _preview_feedback(
         and plan.get("reason") == "pull_request_not_open"
         and not error
         and isinstance(previous := request.last_plan.get(PR_FEEDBACK_PLAN_KEY), dict)
-        and previous.get("status") == "pending"
+        and previous.get("status") in {"pending", "cleared"}
     ):
         status, revision = "cleared", ""
     else:
@@ -402,6 +407,28 @@ def _post(
             )
             if not pull_request_number:
                 return _Delivery(pull_request_number=0, action="no_merged_pull_request")
+        if feedback.status == "cleared":
+            existing = find_github_issue_comment_by_marker(
+                owner=owner,
+                repo=repo,
+                issue_number=pull_request_number,
+                token=token,
+                marker=feedback.marker,
+            )
+            if existing is None:
+                return _Delivery(
+                    pull_request_number=pull_request_number, action="no_existing_comment"
+                )
+            comment_id = existing.get("id")
+            if not isinstance(comment_id, int):
+                raise click.ClickException("Existing preview feedback comment has no numeric id.")
+            delete_github_issue_comment(owner=owner, repo=repo, comment_id=comment_id, token=token)
+            return _Delivery(
+                pull_request_number=pull_request_number,
+                status="delivered",
+                action="deleted_comment",
+                comment_id=comment_id,
+            )
         comment = upsert_github_issue_comment(
             owner=owner,
             repo=repo,

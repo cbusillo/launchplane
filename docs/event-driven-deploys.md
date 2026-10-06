@@ -232,7 +232,7 @@ needs no workflow to report previews or testing deploys.
   and edited in place: waiting for a verified build of the head commit, ready
   (with the preview URL), retired, or failed with a short, redacted reason
   (`cleanup_failed` when a destroy failed). Closing a PR before its preview
-  build arrives replaces its pending feedback with a terminal cleared note;
+  build arrives removes its pending comment and records terminal cleared feedback;
   a closed PR without feedback history posts nothing. Other plans that change
   nothing, are deferred, or are held for another driver say nothing.
 - **Testing:** one comment on the PR GitHub merged as the desired commit
