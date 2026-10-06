@@ -29,6 +29,7 @@ from tests.test_generic_web_deploy_recovery import (
     _create_recovery_app,
     _generic_web_recovery_reservation,
     _generic_web_recovery_target,
+    _generic_web_deploy_result,
     _write_generic_web_recovery_reservation,
     _RecoveryObservationProvider,
 )
@@ -378,3 +379,40 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
             return_value=SimpleNamespace(last_plan=plan),
         ):
             self.assertEqual(self.review(read["recovery_reference"])[0], 409)
+
+    def test_retry_preserves_retained_request_and_completes_existing_reservation(self) -> None:
+        provider = _RecoveryObservationProvider(
+            GenericWebProviderDeploymentObservation(outcome="absent")
+        )
+        _, read = self.read()
+        result = _generic_web_deploy_result().model_dump(mode="json")
+        result["provider_effect_attempted"] = False
+        with (
+            patch(
+                "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
+                return_value=provider,
+            ),
+            patch(
+                "control_plane.generic_web_deploy_provider_adapter.execute_generic_web_deploy_result",
+                return_value=({"deployment_record_id": result["deployment_record_id"]}, result),
+            ) as execute,
+            patch.object(
+                self.store, "reserve_mutation", side_effect=AssertionError("new reservation")
+            ),
+        ):
+            code, plan = self.review(read["recovery_reference"])
+            self.assertEqual(code, 200, plan)
+            self.assertEqual(plan["proposed_action"], "retry_original_operation")
+            code, applied = self.review(read["recovery_reference"], digest=plan["recovery_digest"])
+            self.assertEqual(code, 202, applied)
+            self.assertEqual(applied["recovery_action"], "retry_original_operation")
+            execute.assert_called_once()
+        stored = self.store.read_idempotency_record(
+            scope=self.reservation.scope,
+            route_path=self.reservation.route_path,
+            idempotency_key=self.reservation.idempotency_key,
+        )
+        assert stored is not None
+        self.assertEqual(stored.state, "completed")
+        self.assertEqual(stored.attempt, self.reservation.attempt + 1)
+        self.assertEqual(stored.reconciliation_key, self.reservation.reconciliation_key)

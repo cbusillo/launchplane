@@ -653,6 +653,16 @@ async def _inspect_generic_web_deploy_recovery(
                 code="reservation_target_conflict",
                 message="Stored generic web deploy recovery target identity is invalid.",
             ) from error
+        if (
+            stored_target.original_event_deploy is not None
+            and stored_target.original_event_deploy != original_payload
+        ):
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="reservation_target_conflict",
+                message="Stored event deploy request conflicts with the original payload.",
+            )
         operation_context = stored_target.context.strip()
         stored_instance = stored_target.instance.strip()
         stored_product = stored_target.product.strip()
@@ -784,6 +794,7 @@ async def _inspect_generic_web_deploy_recovery(
                 lane=authoritative_lane,
                 trace_id=trace_id,
                 recorded_artifact=True,
+                retain_event_request=stored_target.original_event_deploy is not None,
             )
             provider_inspection = adapter.inspect(
                 provider_operation_key=provider_operation_key,
@@ -1113,6 +1124,17 @@ def build_generic_web_deploy_recovery_apply_handler(
                 trace_id=trace_id,
                 inspection=inspection,
                 reservation=adoption.record,
+            )
+
+        if (
+            inspection.adapter.reconciliation_key().strip()
+            != action_inspection.reservation.reconciliation_key
+        ):
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="reservation_target_conflict",
+                message="Recovery retry cannot preserve the original reconciliation identity.",
             )
 
         retry = record_store.retry_reconciled_mutation(

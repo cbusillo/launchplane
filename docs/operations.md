@@ -497,7 +497,9 @@ For a held event-driven testing deploy, a scoped admin can first call
 held reservation in the event reconciler's scope and an original deploy request
 whose retained request or saved reconcile inputs match the reservation fingerprint.
 New event reservations retain their exact request in the service-owned target snapshot;
-older reservations require fingerprint-matched saved reconcile inputs. Missing,
+older reservations require fingerprint-matched saved reconcile inputs. If a newer
+build has overwritten those inputs, the reference read refuses: use the legacy
+explicit path only with separately proven original coordinates. Missing,
 ambiguous, cross-lane or changed evidence refuses; the original request, key and
 provider coordinates remain inside Launchplane.
 
