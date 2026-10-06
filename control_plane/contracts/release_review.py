@@ -113,6 +113,11 @@ class ReleaseReviewStatus(BaseModel):
 
     required: bool = True
     approved: bool = False
+    checklist_complete: bool | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     checklist: ReleaseChecklist | None = None
     checklist_digest: str = ""
     blockers: tuple[str, ...] = ()

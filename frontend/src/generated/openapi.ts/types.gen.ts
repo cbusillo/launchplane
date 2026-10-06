@@ -3942,6 +3942,7 @@ export type ReleaseReviewStatus = {
     approved: boolean;
     blockers: Array<string>;
     checklist: ReleaseChecklist | null;
+    checklist_complete?: boolean | null;
     checklist_digest: string;
     latest_decision: ReleaseReviewDecisionRecord | null;
     required: boolean;

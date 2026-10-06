@@ -62,11 +62,17 @@ sections, with each repository's exact production-to-testing SHA range, merged
 pull requests and Client test notes. The same commit coverage and missing-note
 checks apply to product and shared repositories. Added or removed sources,
 unexplained selection changes, and ambiguous or inconsistent source evidence
-remain blockers. A failed shared-repository read makes the checklist unavailable;
+remain blockers. A failed shared-repository read or a non-forward SHA range stays an explicit
+coverage blocker, preserving the existing release-scoped admin review path.
 Launchplane uses that repository's existing scoped Delivery App access and never
 adds a grant. The complete shared evidence is saved in the release decision and
 published in its release record. Ordinary Client acceptance cannot waive missing
 coverage.
+
+The server reports checklist completeness for the Client button, including
+missing notes inside merge-train batches. Historical shared-input overrides
+remain readable, but replacing the blanket blocker with detailed shared coverage
+changes the checklist digest and requires a new decision.
 
 The decision stores the complete checklist and its digest. The digest includes
 the production and candidate artifact and commit, repository, Client identity,

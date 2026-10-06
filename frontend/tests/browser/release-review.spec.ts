@@ -51,7 +51,8 @@ test("Owner reviews the complete release and can request changes after accepting
   await page.getByRole("button", { name: "Request changes" }).click();
   await expect(page.getByRole("region", { name: "Latest release decision" }).getByRole("blockquote")).toHaveText(feedback);
   await versions.getByText("Technical details", { exact: true }).click();
-  await expect(versions.locator("code")).toHaveText(["a".repeat(40), "b".repeat(40)]);
+  await expect(versions).toContainText("Shared components from example/shared-addons");
+  await expect(versions).toContainText("Shared components from example/disable-online");
   await page.screenshot({ path: testInfo.outputPath("owner-changes-requested.png"), fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   expect(mutations).toEqual([]);
@@ -60,7 +61,7 @@ test("Owner reviews the complete release and can request changes after accepting
 
 test("Missing shared PR instructions disable Client acceptance", async ({ page }) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=denied");
-  await expect(page.getByRole("region", { name: "Shared website components from example/shared-addons", exact: true })).toContainText("Test notes are missing for this change.");
+  await expect(page.getByRole("region", { name: "Shared website components from example/shared-addons", exact: true })).toContainText("#52 has no Client test notes.");
   await expect(page.getByRole("button", { name: "Accept release", exact: true })).toBeDisabled();
 });
 

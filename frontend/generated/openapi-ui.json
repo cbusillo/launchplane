@@ -30919,6 +30919,18 @@
               }
             ]
           },
+          "checklist_complete": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checklist Complete",
+            "x-launchplane-optional-response": true
+          },
           "checklist_digest": {
             "default": "",
             "title": "Checklist Digest",

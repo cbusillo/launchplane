@@ -3,6 +3,8 @@
 import re
 from urllib.parse import urlsplit
 
+import click
+
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.release_review import SharedSourceReview
 from control_plane.release_review_github import GitHubRead, read_release_changes
@@ -77,12 +79,21 @@ def read_shared_source_changes(
             )
         if before[key] == after[key]:
             continue
-        items, untracked = read_release_changes(
-            repository=key,
-            production_commit=before[key],
-            candidate_commit=after[key],
-            read=read,
-        )
+        try:
+            items, untracked = read_release_changes(
+                repository=key,
+                production_commit=before[key],
+                candidate_commit=after[key],
+                read=read,
+            )
+        except (ValueError, click.ClickException):
+            # Preserve the existing release-scoped admin review path. Client
+            # acceptance still cannot waive unavailable shared coverage.
+            unexplained.append(
+                f"Shared website component {key} could not be fully reviewed "
+                f"({before[key]} to {after[key]}). Admin review is required."
+            )
+            continue
         reviews.append(
             SharedSourceReview(
                 repository=key,

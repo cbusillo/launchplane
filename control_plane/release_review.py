@@ -249,6 +249,7 @@ def build_release_review(
         matching, key=lambda decision: (decision.decided_at, decision.record_id), default=None
     )
     blockers = checklist_blockers(checklist)
+    complete = not blockers
     approved = bool(latest_decision and latest_decision.release_issue_url) and (
         bool(latest_decision and latest_decision.decision == "overridden")
         or bool(not blockers and latest_decision and latest_decision.decision == "accepted")
@@ -264,6 +265,7 @@ def build_release_review(
     return ReleaseReviewStatus(
         required=profile.production_use != "prelaunch",
         approved=approved,
+        checklist_complete=complete,
         checklist=checklist,
         checklist_digest=digest,
         blockers=() if approved else blockers,

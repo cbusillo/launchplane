@@ -25,6 +25,7 @@ class SharedGitHub:
         self.notes = "Check staff sign-in and follow a readable record link."
         self.uncovered = False
         self.fail = False
+        self.status = "ahead"
 
     def read(self, path: str) -> object:
         repository = "/".join(path.split("/")[2:4])
@@ -34,7 +35,7 @@ class SharedGitHub:
             raise click.ClickException("private provider error")
         if "/compare/" in path:
             return {
-                "status": "ahead",
+                "status": "ahead" if website else self.status,
                 "total_commits": len(commits),
                 "commits": [{"sha": sha} for sha in commits],
             }
@@ -247,7 +248,8 @@ class SharedReleaseReviewTests(unittest.TestCase):
                 control_plane_root=self.root, record_store=self.store, profile=profile()
             )
             self.assertFalse(failed.approved)
-            self.assertEqual(failed.unavailable_reason, "github_read_failed")
+            self.assertFalse(failed.checklist_complete)
+            self.assertIsNotNone(failed.checklist)
             self.assertNotIn("private provider error", str(failed))
         with (
             patch(
@@ -265,7 +267,58 @@ class SharedReleaseReviewTests(unittest.TestCase):
             failed = current_release_review(
                 control_plane_root=self.root, record_store=self.store, profile=profile()
             )
-            self.assertEqual(failed.unavailable_reason, "source_control_access_unavailable")
+            self.assertFalse(failed.checklist_complete)
+            self.assertIsNotNone(failed.checklist)
+
+    def test_unreadable_or_non_forward_shared_sources_keep_manual_review_path(self) -> None:
+        for fail, status in ((True, "ahead"), (False, "behind"), (False, "diverged")):
+            with self.subTest(fail=fail, status=status):
+                self.github.fail, self.github.status = fail, status
+                review = self.review()
+                assert review.checklist is not None
+                self.assertFalse(review.checklist_complete)
+                self.assertTrue(review.checklist.additional_changes)
+                override = ReleaseReviewDecisionRecord(
+                    record_id=f"manual-{fail}-{status}",
+                    product=profile().product,
+                    checklist_digest=review.checklist_digest,
+                    checklist=review.checklist,
+                    decision="overridden",
+                    reason="Admin reviewed the exact shared changes.",
+                    actor_github_id="9003",
+                    actor_github_login="operator",
+                    decided_at="2026-10-05T00:00:00Z",
+                    release_issue_url="https://github.com/example/site/issues/91",
+                )
+                self.store.write_release_review_decision_record(override)
+                self.assertTrue(self.review().approved)
+                self.assertEqual(self.store.list_deployment_records(), ())
+
+    def test_historical_shared_override_does_not_approve_new_coverage(self) -> None:
+        review = self.review()
+        assert review.checklist is not None
+        legacy = review.checklist.model_copy(
+            update={
+                "shared_sources": (),
+                "additional_changes": ("Shared components changed; admin review required.",),
+            }
+        )
+        self.store.write_release_review_decision_record(
+            ReleaseReviewDecisionRecord(
+                record_id="historical-shared-override",
+                product=profile().product,
+                checklist_digest=checklist_digest(legacy),
+                checklist=legacy,
+                decision="overridden",
+                reason="Reviewed the historical shared-input checklist.",
+                actor_github_id="9003",
+                actor_github_login="operator",
+                decided_at="2026-10-05T00:00:00Z",
+                release_issue_url="https://github.com/example/site/issues/91",
+            )
+        )
+        self.assertFalse(self.review().approved)
+        self.assertTrue(self.review().checklist_complete)
 
     def test_historical_website_only_shape_and_annotations_preserve_digest(self) -> None:
         self.set_sources("testing", BASE)
