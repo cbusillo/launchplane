@@ -3107,7 +3107,7 @@ def _allow_reason(
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS
     if (
         normalized == "pyproject.toml"
-        and re.fullmatch(r"tool\.black\.target-version\[[0-9]+\]", key)
+        and re.fullmatch(r"tool\.black\.target-version\[[0-9]+]", key)
         and isinstance(value, str)
         # Black's supported target identifiers, not arbitrary TARGET values.
         and re.fullmatch(r"py3(?:[3-9]|1[0-5])", value)

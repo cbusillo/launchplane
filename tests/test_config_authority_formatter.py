@@ -11,7 +11,8 @@ from tests.test_config_authority_audit import _commit_all, _git, _init_repo
 
 
 class FormatterTargetGateTests(unittest.TestCase):
-    def gate(self, text: str, path: str = "pyproject.toml") -> dict[str, object]:
+    @staticmethod
+    def gate(text: str, path: str = "pyproject.toml") -> dict[str, object]:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             _init_repo(root)
