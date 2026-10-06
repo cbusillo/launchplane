@@ -92,6 +92,13 @@ class GitHubAppWebhookDeliveryRecord(BaseModel):
     repository_id: str = Field(pattern=r"^[1-9][0-9]*$")
     received_at: str = Field(min_length=1)
     target_keys: tuple[str, ...] = ()
+    config_authority: dict[str, JsonValue] = Field(default_factory=dict)
+    config_authority_request: dict[str, JsonValue] = Field(default_factory=dict)
+    config_authority_state: Literal["", "pending", "running", "done", "failed"] = ""
+    config_authority_lease_owner: str = ""
+    config_authority_lease_expires_at: str = ""
+    config_authority_attempt: int = Field(default=0, ge=0)
+    config_authority_next_attempt_at: str = ""
 
 
 def _validate_target_shape(

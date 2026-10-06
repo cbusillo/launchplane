@@ -25,7 +25,7 @@ from typing import (
     overload,
 )
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, JsonValue, TypeAdapter
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -51,7 +51,7 @@ from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, aliased, mapped_column, sessionmaker
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
@@ -3483,6 +3483,13 @@ class LaunchplaneGitHubAppWebhookDeliveryRow(Base):
     repository_id: Mapped[str] = mapped_column(String, nullable=False)
     received_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+CONFIG_AUTHORITY_QUEUE_INDEX = Index(
+    "launchplane_github_app_webhook_deliveries_config_scan_idx",
+    LaunchplaneGitHubAppWebhookDeliveryRow.payload["config_authority_state"].as_string(),
+    LaunchplaneGitHubAppWebhookDeliveryRow.received_at,
+).ddl_if(dialect="postgresql")
 
 
 class LaunchplanePreviewPrFeedbackRemediationRow(Base):
@@ -19897,8 +19904,30 @@ class PostgresRecordStore(HumanSessionStore):
                 f"launchplane:github-app-webhook-delivery:{delivery.delivery_id}",
                 *(f"launchplane:product-reconcile:{target.target_key}" for target in targets),
             )
-            if session.get(LaunchplaneGitHubAppWebhookDeliveryRow, delivery.delivery_id):
-                session.rollback()
+            existing_row = session.get(LaunchplaneGitHubAppWebhookDeliveryRow, delivery.delivery_id)
+            if existing_row is not None:
+                existing = self._read_payload(
+                    model_type=GitHubAppWebhookDeliveryRecord, payload=existing_row.payload
+                )
+                if (
+                    existing.config_authority_state == "failed"
+                    and existing.config_authority.get("status") == "unavailable"
+                    and existing.repository_id == delivery.repository_id
+                    and existing.event == delivery.event
+                    and existing.config_authority_request == delivery.config_authority_request
+                ):
+                    # Verified redelivery retries the original request, never its deploy targets.
+                    retried = existing.model_copy(
+                        update={
+                            "config_authority_state": "pending",
+                            "config_authority_next_attempt_at": "",
+                            "config_authority_attempt": 0,
+                        }
+                    )
+                    existing_row.payload = self._payload_dict(retried)
+                    session.commit()
+                else:
+                    session.rollback()
                 return "duplicate"
             session.add(
                 LaunchplaneGitHubAppWebhookDeliveryRow(
@@ -19918,6 +19947,157 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             session.commit()
             return "recorded"
+
+    def claim_next_config_authority_delivery(
+        self,
+        lease_owner: str,
+        lease_seconds: int,
+    ) -> GitHubAppWebhookDeliveryRecord | None:
+        if not lease_owner.strip():
+            raise ValueError("Config-authority claim requires a lease owner.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            now = self._database_mutation_timestamp(session)
+            row_model = LaunchplaneGitHubAppWebhookDeliveryRow
+            active_row = aliased(row_model)
+            statement = (
+                select(row_model)
+                .where(
+                    ~select(active_row.delivery_id)
+                    .where(
+                        active_row.repository_id == row_model.repository_id,
+                        active_row.payload["config_authority_state"].as_string() == "running",
+                        active_row.payload["config_authority_lease_expires_at"].as_string() >= now,
+                    )
+                    .exists(),
+                    or_(
+                        and_(
+                            row_model.payload["config_authority_state"].as_string() == "pending",
+                            or_(
+                                row_model.payload["config_authority_next_attempt_at"]
+                                .as_string()
+                                .is_(None),
+                                row_model.payload["config_authority_next_attempt_at"].as_string()
+                                <= now,
+                            ),
+                        ),
+                        and_(
+                            row_model.payload["config_authority_state"].as_string() == "running",
+                            row_model.payload["config_authority_lease_expires_at"].as_string()
+                            < now,
+                        ),
+                    ),
+                )
+                .order_by(row_model.received_at, row_model.delivery_id)
+                .limit(20)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update(skip_locked=True)
+            for row in session.scalars(statement).all():
+                if not self._try_lock_landing_authority(
+                    session, f"launchplane:config-authority-repository:{row.repository_id}"
+                ):
+                    continue
+                active = session.scalar(
+                    select(row_model.delivery_id)
+                    .where(
+                        row_model.repository_id == row.repository_id,
+                        row_model.payload["config_authority_state"].as_string() == "running",
+                        row_model.payload["config_authority_lease_expires_at"].as_string() >= now,
+                    )
+                    .limit(1)
+                )
+                if active is not None:
+                    continue
+                if not self._try_lock_landing_authority(
+                    session, f"launchplane:github-app-webhook-delivery:{row.delivery_id}"
+                ):
+                    continue
+                record = self._read_payload(
+                    model_type=GitHubAppWebhookDeliveryRecord, payload=row.payload
+                )
+                claimed = record.model_copy(
+                    update={
+                        "config_authority_state": "running",
+                        "config_authority_lease_owner": lease_owner.strip(),
+                        "config_authority_lease_expires_at": self._mutation_lease_expiry(
+                            observed_at=now,
+                            lease_seconds=lease_seconds,
+                        ),
+                        "config_authority_attempt": record.config_authority_attempt + 1,
+                    }
+                )
+                row.payload = self._payload_dict(claimed)
+                session.commit()
+                return claimed
+            session.rollback()
+            return None
+
+    def complete_config_authority_delivery(
+        self,
+        claimed: GitHubAppWebhookDeliveryRecord,
+        evidence: dict[str, JsonValue],
+        publish: Callable[[], None] | None = None,
+    ) -> GitHubAppWebhookDeliveryRecord:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_landing_authority(
+                session,
+                f"launchplane:config-authority-repository:{claimed.repository_id}",
+                f"launchplane:github-app-webhook-delivery:{claimed.delivery_id}",
+            )
+            statement = select(LaunchplaneGitHubAppWebhookDeliveryRow).where(
+                LaunchplaneGitHubAppWebhookDeliveryRow.delivery_id == claimed.delivery_id
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(claimed.delivery_id)
+            current = self._read_payload(
+                model_type=GitHubAppWebhookDeliveryRecord, payload=row.payload
+            )
+            if (
+                current.config_authority_state != "running"
+                or current.config_authority_lease_owner != claimed.config_authority_lease_owner
+                or current.config_authority_attempt != claimed.config_authority_attempt
+                or current.config_authority_lease_expires_at
+                <= self._database_mutation_timestamp(session)
+            ):
+                raise ProductReconcileLeaseLostError("Config-authority delivery lease was lost.")
+            if publish is not None:
+                publish()
+            retry = evidence.get("status") == "unavailable" and current.config_authority_attempt < 3
+            completed = current.model_copy(
+                update={
+                    "config_authority_state": "pending"
+                    if retry
+                    else "failed"
+                    if evidence.get("status") in {"unavailable", "fail"}
+                    else "done",
+                    "config_authority": evidence,
+                    "config_authority_next_attempt_at": self._mutation_lease_expiry(
+                        observed_at=self._database_mutation_timestamp(session),
+                        lease_seconds=30 * 2 ** (current.config_authority_attempt - 1),
+                    )
+                    if retry
+                    else "",
+                    "config_authority_lease_owner": "",
+                    "config_authority_lease_expires_at": "",
+                }
+            )
+            row.payload = self._payload_dict(completed)
+            session.commit()
+            return completed
+
+    def read_github_app_webhook_delivery(self, delivery_id: str) -> GitHubAppWebhookDeliveryRecord:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneGitHubAppWebhookDeliveryRow, delivery_id)
+            if row is None:
+                raise FileNotFoundError(delivery_id)
+            return self._read_payload(
+                model_type=GitHubAppWebhookDeliveryRecord, payload=row.payload
+            )
 
     def request_product_reconcile(
         self, target: ProductReconcileTarget, requested_at: str

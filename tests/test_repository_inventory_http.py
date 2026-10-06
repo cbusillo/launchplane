@@ -117,12 +117,82 @@ class RepositoryInventoryHttpTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             set(paths["/v1/repository-inventory"]["get"]["responses"]),
-            {"200", "400", "401", "403", "409", "503"},
+            {"200", "400", "401", "403", "404", "409", "503"},
         )
         self.assertEqual(
             set(paths["/v1/repository-inventory/apply"]["post"]["responses"]),
             {"200", "400", "401", "403", "409", "503"},
         )
+
+    async def test_source_delivery_evidence_requires_inventory_read_and_matching_repository(
+        self,
+    ) -> None:
+        from control_plane.contracts.product_reconcile import GitHubAppWebhookDeliveryRecord
+        from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
+
+        with TemporaryDirectory() as directory:
+            store = _postgres_store(Path(directory))
+            self.addCleanup(store.close)
+            store.write_repository_inventory_record(
+                RepositoryInventoryRecord.model_validate(_payload()["record"])
+            )
+            delivery = GitHubAppWebhookDeliveryRecord(
+                delivery_id="source-check",
+                event="push",
+                repository_id=REPOSITORY_ID,
+                received_at="2026-10-05T00:00:00Z",
+                config_authority={"status": "fail", "head_sha": "b" * 40},
+                config_authority_state="failed",
+            )
+            from control_plane.storage.postgres import LaunchplaneGitHubAppWebhookDeliveryRow
+
+            with store._session_factory() as session:
+                session.add(
+                    LaunchplaneGitHubAppWebhookDeliveryRow(
+                        delivery_id=delivery.delivery_id,
+                        event=delivery.event,
+                        repository_id=delivery.repository_id,
+                        received_at=delivery.received_at,
+                        payload=delivery.model_dump(mode="json"),
+                    )
+                )
+                session.commit()
+            app = create_launchplane_fastapi_app(
+                verifier=StubVerifier(identity()),
+                authz_policy=_authz_policy(actions=(REPOSITORY_INVENTORY_READ_ACTION,)),
+                record_store_factory=lambda: store,
+            )
+            response = await _asgi_get(
+                app,
+                "/v1/repository-inventory?repository_id="
+                + REPOSITORY_ID
+                + "&delivery_id=source-check",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                response.json()["config_authority_delivery"]["config_authority"],
+                delivery.config_authority,
+            )
+            other = await _asgi_get(
+                app,
+                "/v1/repository-inventory?repository_id=999&delivery_id=source-check",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+            self.assertEqual(other.status_code, 404)
+            unauthorized_app = create_launchplane_fastapi_app(
+                verifier=StubVerifier(identity(repository="other/forbidden")),
+                authz_policy=_authz_policy(actions=()),
+                record_store_factory=lambda: store,
+            )
+            denied = await _asgi_get(
+                unauthorized_app,
+                "/v1/repository-inventory?repository_id="
+                + REPOSITORY_ID
+                + "&delivery_id=source-check",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+            self.assertEqual(denied.status_code, 403)
 
     async def test_dry_run_works_with_filesystem_rehearsal_store(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -1448,6 +1448,7 @@ export type MergeTrainReconciliationDiagnostic = {
 export type MergeTrainRepositoryPolicyOutput = {
     base_branch: string;
     blocked_label: string;
+    config_authority_events_enabled?: boolean;
     engineering_review_mode: 'advisory' | 'required';
     enqueue: MergeTrainEnqueuePolicyOutput;
     enqueue_label: string;
