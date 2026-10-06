@@ -1,11 +1,17 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
 
-from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.contracts.merge_train_policy import (
+    MergeTrainPolicyRecord,
+    merge_train_policy_sha256,
+)
+from control_plane.contracts.merge_train_controller_state import (
+    build_merge_train_controller_state_record,
+)
+from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.merge_train import MergeTrainDryRunSnapshot, build_merge_train_dry_run_result
 from control_plane.merge_train_controller_run_once import (
@@ -174,10 +180,22 @@ class QueueBlockingTests(unittest.IsolatedAsyncioTestCase):
         )
         intent = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
         self.assertEqual(intent.intended_next_action, "block")
-        lease = cast(
-            MergeTrainControllerLeaseContext,
-            SimpleNamespace(record=SimpleNamespace(ordinary_job_binding=object())),
+        record = build_merge_train_controller_state_record(
+            repository=snapshot.repository,
+            base_branch=snapshot.base_branch,
+            policy_key=policy.policies[0].policy_key,
+            policy_sha256=merge_train_policy_sha256(policy),
+            updated_at="2026-10-06T12:00:00Z",
+        ).model_copy(
+            update={
+                "ordinary_job_binding": OrdinaryAgentJobBinding(
+                    request_id="fixture-bound-job",
+                    scope_sha256="0" * 64,
+                    binding_revision=1,
+                ),
+            }
         )
+        lease = MergeTrainControllerLeaseContext(record=record)
         result = _apply_queue_block(
             request=MergeTrainControllerRunOnceEnvelope(
                 repository=snapshot.repository, mutate=True
