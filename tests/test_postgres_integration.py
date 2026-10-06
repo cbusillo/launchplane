@@ -301,8 +301,22 @@ def _postgres_root_database_url() -> str:
 
 def _alembic_config(database_url: str) -> AlembicConfig:
     config = AlembicConfig("alembic.ini")
-    config.set_main_option("sqlalchemy.url", database_url)
+    # Alembic uses ConfigParser interpolation; keep URL escapes literal on read-back.
+    config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
     return config
+
+
+class AlembicFixtureConfigTests(unittest.TestCase):
+    def test_database_url_round_trip(self) -> None:
+        for database_url in (
+            "postgresql+psycopg://fixture@localhost/fixture",
+            "postgresql+psycopg://fixture@localhost/fixture?options=-cstatement_timeout%3D10000",
+            "postgresql+psycopg://fixture:p%25ss%40word@localhost/fixture"
+            "?application_name=fixture%20migration&options=-cstatement_timeout%3D10000",
+        ):
+            with self.subTest(database_url=database_url):
+                restored_url = _alembic_config(database_url).get_main_option("sqlalchemy.url")
+                self.assertEqual(restored_url, database_url)
 
 
 def _create_postgres_database(root_database_url: str, *, template: str = "") -> str:

@@ -69,7 +69,9 @@ LAUNCHPLANE_TEST_POSTGRES_URL=postgresql+psycopg://... uv run --extra dev launch
 ```
 
 The URL is a temporary/root test service URL, not a Launchplane runtime
-credential. The harness creates and drops isolated databases. It upgrades one
+credential. Percent-encoded URL components, including PostgreSQL connection
+options, are preserved through the harness's Alembic configuration.
+The harness creates and drops isolated databases. It upgrades one
 empty database through Alembic `head` per process and clones it as a template
 for each test that only needs a head schema (`_head_postgres_database`); tests
 that prove a migration upgrade their own database from the revision they need.
