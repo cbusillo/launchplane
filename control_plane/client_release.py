@@ -624,22 +624,10 @@ def advance_client_releases(
     if not isinstance(store, PostgresRecordStore):
         return ()
     queued: list[str] = []
-    for profile in store.list_product_profile_records():
+    profiles = store.list_product_profile_records()
+    for profile in profiles:
         if stop_event is not None and stop_event.is_set():
             break
-        try:
-            publish_release_invitation(
-                store=store,
-                control_plane_root=control_plane_root,
-                profile=profile,
-                backoff=invitation_backoff,
-            )
-        except Exception as error:
-            _LOGGER.warning(
-                "release invitation unavailable product=%s error_type=%s",
-                profile.product,
-                type(error).__name__,
-            )
         if profile.driver_id not in {"odoo", "generic-web"}:
             continue
         try:
@@ -668,6 +656,23 @@ def advance_client_releases(
             continue
         if operation_id:
             queued.append(operation_id)
+    # Queue accepted releases before potentially slow invitation lookups.
+    for profile in profiles:
+        if stop_event is not None and stop_event.is_set():
+            break
+        try:
+            publish_release_invitation(
+                store=store,
+                control_plane_root=control_plane_root,
+                profile=profile,
+                backoff=invitation_backoff,
+            )
+        except Exception as error:
+            _LOGGER.warning(
+                "release invitation unavailable product=%s error_type=%s",
+                profile.product,
+                type(error).__name__,
+            )
     return tuple(queued)
 
 

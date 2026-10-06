@@ -23,7 +23,12 @@ The product repository keeps one issue for these requests. Launchplane finds it
 by a standalone `release_request_issue_marker(product)` line in the issue body;
 without one, it creates a "Release review requests" issue. To use an existing
 go-live or release issue, append that marker to its body before deploying this
-publisher. Multiple marked issues or incomplete paged reads refuse publication.
+publisher. Lookup stops at the first page containing a marked issue, newest
+updated first; keep one marked issue per product. Multiple matches on that page
+or incomplete reads refuse publication. Discovery is bounded to 1,000 entries
+(including PRs); for a larger repository, mark its destination before enabling
+the publisher so it appears at the front of the updated-issue list. A closed
+marked issue is intentionally reused; its mentions still notify the Client.
 The marker functions live in `control_plane/release_invitation.py`; there is no
 checked-in destination catalog.
 
@@ -36,13 +41,23 @@ A different candidate gets a new request on the same issue. Markers are delivery
 receipts only and never supply release acceptance. Preserve them during edits;
 deleting a receipt permits another notification.
 
-For a candidate already requested manually, append its candidate marker to the
-existing request comment and the issue marker to that issue's body before the
+For a candidate already requested manually, append its candidate marker on its
+own line, without indentation or trailing spaces, to the existing request comment
+and the issue marker to that issue's body before the
 new publisher starts. Preserve the existing wording and mention. Read the exact
 candidate from the supported release-review endpoint and pass its `ReleaseVersion`
-to the marker function; do not infer it from a shortened commit or from the newest
+to the marker command below; do not infer it from a shortened commit or from the newest
 testing build after it has changed. This imports delivery evidence without sending
 another request or submitting a decision.
+
+Save the endpoint's exact `checklist.candidate` object as a private JSON file
+and use the supported read-only marker command:
+
+```sh
+uv run python -m control_plane.release_invitation --product example-site --candidate-file /path/to/candidate.json
+```
+
+It prints the issue and comment markers and makes no service or GitHub request.
 
 The review leads with the product, the viewer's Client or admin role, the
 testing-site link, and **What to test**. Pull requests with identical

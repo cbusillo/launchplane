@@ -1,7 +1,9 @@
 """Ask the Client to accept a complete release, once per testing candidate."""
 
 from dataclasses import dataclass, field
+import argparse
 import hashlib
+import json
 import re
 from pathlib import Path
 from time import monotonic
@@ -29,7 +31,13 @@ def release_request_issue_marker(product: str) -> str:
 
 
 def release_invitation_marker(product: str, candidate: ReleaseVersion) -> str:
-    key = hashlib.sha256((product + candidate.model_dump_json()).encode()).hexdigest()
+    identity = (
+        product,
+        candidate.artifact_id,
+        candidate.source_commit,
+        candidate.shared_addons_digest,
+    )
+    key = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
     return f"<!-- launchplane:release-invitation:{key} -->"
 
 
@@ -50,14 +58,24 @@ def _ready(review: ReleaseReviewStatus, profile: LaunchplaneProductProfileRecord
     )
 
 
-def _pages(path: str, token: str) -> list[dict[str, object]]:
+def _pages(
+    path: str, token: str, *, marker: str = "", issues_only: bool = False
+) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     separator = "&" if "?" in path else "?"
     for page in range(1, 11):
         result = github_api_request(path=f"{path}{separator}per_page=100&page={page}", token=token)
         if not isinstance(result, list) or any(not isinstance(item, dict) for item in result):
             raise ValueError("Release invitation lookup is incomplete.")
-        records.extend(result)
+        matching = [
+            item
+            for item in result
+            if (not issues_only or "pull_request" not in item)
+            and (not marker or marker in str(item.get("body", "")).splitlines())
+        ]
+        records.extend(matching)
+        if marker and matching:
+            return records
         if len(result) < 100:
             return records
     raise ValueError("Release invitation lookup exceeds the supported size.")
@@ -115,12 +133,12 @@ def publish_release_invitation(
         if not token:
             raise ValueError("Release invitation source-control access is unavailable.")
         path = f"/repos/{quote(profile.repository)}/issues"
-        issues = [
-            issue
-            for issue in _pages(f"{path}?state=all&sort=created&direction=desc", token)
-            if "pull_request" not in issue
-            and issue_marker in str(issue.get("body", "")).splitlines()
-        ]
+        issues = _pages(
+            f"{path}?state=all&sort=updated&direction=desc",
+            token,
+            marker=issue_marker,
+            issues_only=True,
+        )
         if len(issues) > 1:
             raise ValueError("Release invitation destination is ambiguous.")
         if not issues:
@@ -137,10 +155,7 @@ def publish_release_invitation(
         if not isinstance(number, int) or number < 1:
             raise ValueError("Release invitation issue number is unavailable.")
         comments_path = f"{path}/{number}/comments"
-        if any(
-            marker in str(comment.get("body", "")).splitlines()
-            for comment in _pages(comments_path, token)
-        ):
+        if _pages(comments_path, token, marker=marker):
             return
         # Recompile after destination lookup: a concurrent acceptance or testing
         # deploy must not receive an invitation for the obsolete snapshot.
@@ -165,3 +180,24 @@ def publish_release_invitation(
         )
         if not isinstance(result, dict) or not isinstance(result.get("id"), int):
             raise ValueError("Release invitation publication was not confirmed.")
+
+
+def main() -> None:
+    """Print adoption markers from an exact candidate read; never publish."""
+    parser = argparse.ArgumentParser(description=main.__doc__)
+    parser.add_argument("--product", required=True)
+    parser.add_argument("--candidate-file", required=True, type=Path)
+    args = parser.parse_args()
+    candidate = ReleaseVersion.model_validate_json(args.candidate_file.read_text())
+    print(
+        json.dumps(
+            {
+                "issue_marker": release_request_issue_marker(args.product),
+                "comment_marker": release_invitation_marker(args.product, candidate),
+            }
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

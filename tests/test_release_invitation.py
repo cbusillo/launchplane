@@ -1,4 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import redirect_stdout
+import io
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -8,6 +11,7 @@ from unittest.mock import patch
 from control_plane.contracts.release_review import ReleaseReviewStatus
 from control_plane.release_invitation import (
     ReleaseInvitationBackoff,
+    main,
     publish_release_invitation,
     release_invitation_marker,
     release_request_issue_marker,
@@ -237,3 +241,56 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.publish(ReleaseInvitationBackoff())
         self.assertGreater(self.read_count, count)
         self.assertEqual(len(self.comments), 1)
+
+    def test_large_repository_stops_after_finding_marked_issue(self) -> None:
+        marker = release_request_issue_marker(self.profile.product)
+        original = self.github
+        pages: list[str] = []
+
+        def paged(**kwargs: Any) -> object:
+            path = kwargs["path"]
+            if kwargs.get("method") == "POST" or "/comments?" in path:
+                return original(**kwargs)
+            pages.append(path)
+            if path.endswith("page=1"):
+                return [
+                    {"number": number, "pull_request": {}, "body": marker} for number in range(100)
+                ]
+            if path.endswith("page=2"):
+                return [{"number": 91, "body": marker}] + [
+                    {"number": number, "body": "Old issue"} for number in range(99)
+                ]
+            self.fail("Lookup continued after the destination was found")
+
+        with patch("control_plane.release_invitation.github_api_request", paged):
+            self.publish()
+        self.assertEqual(len(pages), 2)
+        self.assertEqual(len(self.comments), 1)
+        self.assertEqual(len(self.posts), 1)
+
+    def test_marker_command_reads_exact_candidate_without_publishing(self) -> None:
+        assert self.review.checklist is not None
+        candidate = self.review.checklist.candidate
+        candidate_file = self.root / "candidate.json"
+        candidate_file.write_text(candidate.model_dump_json())
+        output = io.StringIO()
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "markers",
+                    "--product",
+                    self.profile.product,
+                    "--candidate-file",
+                    str(candidate_file),
+                ],
+            ),
+            redirect_stdout(output),
+        ):
+            main()
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["issue_marker"], release_request_issue_marker(self.profile.product))
+        self.assertEqual(
+            result["comment_marker"], release_invitation_marker(self.profile.product, candidate)
+        )
+        self.assertEqual(self.posts, [])
