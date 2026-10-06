@@ -351,6 +351,13 @@ def build_product_promotion_status(
         (source_lane.instance, destination_lane.instance),
     ):
         workflow_blockers.append("Caller is not authorized to dispatch the promotion workflow.")
+    if not action_allowed(
+        "generic_web_prod_promotion.execute",
+        profile.product,
+        destination_lane.context,
+        (source_lane.instance, destination_lane.instance),
+    ):
+        workflow_blockers.append("Caller is not authorized to execute the promotion workflow.")
     workflow_live_blockers = list(workflow_blockers)
     if release_review.required and not release_review.approved:
         workflow_live_blockers.extend(release_review.blockers)
@@ -387,7 +394,7 @@ def build_product_promotion_status(
             default_bump=cast(BumpLevel, profile.promotion_workflow.default_bump.strip()),
             direct_dry_run=_operation_availability(
                 operation="direct_dry_run",
-                authz_action="generic_web_prod_promotion.execute",
+                authz_action="generic_web_prod_promotion.dry_run",
                 blockers=direct_blockers,
                 trust_state=trust_state,
                 consequences=(

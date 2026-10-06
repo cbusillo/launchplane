@@ -970,7 +970,9 @@ preflight may return `allowed` in `dry_run` mode under planning authority, but
 write and secret-backed actions and all runtime key-safety evidence. A saved
 dry-run intent cannot be used as an executable intent. Secret-copy source checks
 retain the existing explicit source grants; declaration-based metadata reads
-cannot authorize copying a secret value to another lane.
+cannot authorize copying a secret value to another lane. A promotion workflow's
+dispatch explicitly checks the execute grant as well as dispatch authority;
+a pure-plan dry-run marker supplies evidence only.
 
 The action-coverage gate discovers authorization callsites, source constants,
 driver descriptor actions and generated secret-backed intent actions and fails

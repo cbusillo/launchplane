@@ -5729,7 +5729,7 @@ def create_launchplane_fastapi_app(
     def rank_work_graph_snapshot(
         payload: WorkGraphRankEnvelope,
         identity: Annotated[
-            GitHubActionsIdentity | GitHubHumanIdentity,
+            LaunchplaneIdentity,
             Depends(read_browser_work_graph_rank_identity),
         ],
     ) -> WorkGraphRankResponse:
@@ -16356,6 +16356,16 @@ def create_launchplane_fastapi_app(
             action="generic_web_prod_promotion.dispatch",
             trace_id=trace_id,
         )
+        # A pure-plan marker cannot replace the execution grant that the
+        # former direct dry-run prerequisite required.
+        resolve_authorized_product_promotion_target(
+            record_store=record_store,
+            identity=identity,
+            product=product,
+            environment=environment,
+            action="generic_web_prod_promotion.execute",
+            trace_id=trace_id,
+        )
         normalized_key = idempotency_key.strip()
         if not normalized_key:
             raise _launchplane_http_error(
@@ -16595,7 +16605,7 @@ def create_launchplane_fastapi_app(
             ) from error
         onboarding_action = (
             "generic_web_onboarding.plan"
-            if onboarding_request.mode == "dry_run"
+            if onboarding_request.generic_web is not None and onboarding_request.mode == "dry_run"
             else "product_onboarding.apply"
         )
         if not resolved_authz_policy_runtime.policy.allows(

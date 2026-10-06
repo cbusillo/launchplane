@@ -10,6 +10,7 @@ from unittest.mock import patch
 from tests.support.ingress import _FakeNpmplusIngressClient, _npmplus_ingress_route_payload
 from tests.test_production_backup_authority import _dry_run_envelope
 from control_plane.action_effects import ACTION_EFFECTS, AGENT_READ_ROLE_ACTION
+from control_plane.authz_scope import exclusively_instance_scoped_authz_actions
 from control_plane.contracts.agent_write_intent import _INTENT_AUTHZ_ACTIONS
 from control_plane.drivers.registry import list_driver_descriptors
 from control_plane.service_auth import (
@@ -61,6 +62,16 @@ class ActionEffectTests(unittest.TestCase):
                 value = None
                 if isinstance(node, ast.keyword) and "action" in (node.arg or ""):
                     value = node.value
+                elif isinstance(node, ast.Call) and node.args:
+                    name = (
+                        node.func.id
+                        if isinstance(node.func, ast.Name)
+                        else node.func.attr
+                        if isinstance(node.func, ast.Attribute)
+                        else ""
+                    )
+                    if name in {"action_allowed", "allows", "evaluate"}:
+                        value = node.args[0]
                 elif isinstance(node, ast.Assign | ast.AnnAssign):
                     targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                     if any(
@@ -127,17 +138,26 @@ class ActionEffectTests(unittest.TestCase):
                     ),
                 )
             for name, effect in ACTION_EFFECTS.items():
-                # Exclusive instance contracts keep their scope gate.
-                target = AuthorizationTarget(scope="instance", instances=("testing",))
-                with self.subTest(identity=type(identity).__name__, action=name):
-                    allowed = policy.allows(
-                        identity=identity,
-                        action=name,
-                        product="sample",
-                        context="sample",
-                        target=target,
-                    )
-                    self.assertEqual(allowed, effect in {"read", "plan"})
+                for target in (
+                    AuthorizationTarget(scope="context"),
+                    AuthorizationTarget(scope="global"),
+                    AuthorizationTarget(scope="instance", instances=("testing",)),
+                ):
+                    with self.subTest(
+                        identity=type(identity).__name__, action=name, scope=target.scope
+                    ):
+                        allowed = policy.allows(
+                            identity=identity,
+                            action=name,
+                            product="sample",
+                            context="sample",
+                            target=target,
+                        )
+                        expected = effect in {"read", "plan"} and (
+                            target.scope == "instance"
+                            or name not in exclusively_instance_scoped_authz_actions()
+                        )
+                        self.assertEqual(allowed, expected)
             self.assertFalse(
                 policy.allows(
                     identity=identity,

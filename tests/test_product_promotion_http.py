@@ -40,8 +40,10 @@ from control_plane.contracts.promotion_record import (
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.service_auth import (
+    BearerIdentityConfig,
     GitHubActionsIdentity,
     LaunchplaneAuthzPolicy,
+    LocalOperatorPolicyRule,
 )
 from control_plane.product_promotion_http import (
     ProductPromotionDryRunEnvelope,
@@ -858,6 +860,85 @@ class ProductPromotionReleaseApprovalTests(unittest.TestCase):
 
 
 class FastApiProductPromotionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_planning_marker_cannot_substitute_for_workflow_execute_grant(self) -> None:
+        from tests.test_action_effects import reader_policy
+
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "state.db")
+            )
+            store.ensure_schema()
+            self.addCleanup(store.close)
+            self._seed_store(store)
+            role = reader_policy()
+            policy = role.model_copy(
+                update={
+                    "local_operators": (
+                        *role.local_operators,
+                        LocalOperatorPolicyRule(
+                            subjects=("record-reader",),
+                            token_labels=("record-reader-label",),
+                            actions=("generic_web_prod_promotion.dispatch",),
+                            instances=("*",),
+                        ),
+                    )
+                }
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    local_operator_token="reader-token",
+                    local_operator_subject="record-reader",
+                    local_operator_token_label="record-reader-label",
+                ),
+            )
+            headers = {"Authorization": "Bearer reader-token"}
+            base = "/v1/products/atlas-commerce/environments/prod/promotion"
+            with patch(
+                "control_plane.http_app.delivery_github_credentials_ready", return_value=True
+            ):
+                response = await _asgi_get(app, f"{base}-status", headers=headers)
+                self.assertEqual(response.status_code, 200, response.text)
+                status = response.json()["promotion_status"]
+                fingerprint = status["evidence_fingerprint"]
+                self.assertTrue(status["direct_dry_run"]["enabled"])
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    f"{base}/dry-run",
+                    headers={**headers, "Idempotency-Key": "plan-only-marker"},
+                    payload={
+                        "reason": "Review evidence",
+                        "evidence_fingerprint": fingerprint,
+                        "bump": "patch",
+                    },
+                )
+                self.assertEqual(response.status_code, 202, response.text)
+                with patch(
+                    "control_plane.http_app.dispatch_generic_web_promotion_workflow_result",
+                    side_effect=AssertionError("No live dispatch without execute authority"),
+                ):
+                    for dry_run in (True, False):
+                        response = await _asgi_request(
+                            app,
+                            "POST",
+                            f"{base}/workflow-dispatch",
+                            headers={**headers, "Idempotency-Key": f"plan-only-attempt-{dry_run}"},
+                            payload={
+                                "reason": "Attempt a live dispatch",
+                                "evidence_fingerprint": fingerprint,
+                                "dry_run": dry_run,
+                                "bump": "patch",
+                                "confirmation": status["live_confirmations"]["patch"],
+                            },
+                        )
+                        self.assertEqual(response.status_code, 404, response.text)
+                self.assertFalse(status["workflow_live"]["enabled"])
+                self.assertFalse(status["workflow_dry_run"]["enabled"])
+                self.assertFalse(store.list_outbox_delivery_records())
+
     async def test_raw_live_execution_denies_missing_release_approval_before_provider(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
