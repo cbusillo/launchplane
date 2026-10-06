@@ -70,6 +70,7 @@ class ReleaseReviewStore(Protocol):
 RELEASE_RECORD_PENDING = (
     "The decision is saved, but the release record could not be published. Try recording it again."
 )
+CLIENT_APPROVAL_REQUIRED = "Client approval of this release is required."
 
 RELEASE_EVIDENCE_MESSAGES: dict[ReleaseEvidenceReason, str] = {
     "testing_lane_missing": "This product has no testing lane to release from.",
@@ -258,9 +259,7 @@ def build_release_review(
         blockers += (RELEASE_RECORD_PENDING,)
     if not approved and not blockers:
         blockers = (
-            "The Client requested changes."
-            if latest_decision
-            else "Client approval of this release is required.",
+            "The Client requested changes." if latest_decision else CLIENT_APPROVAL_REQUIRED,
         )
     return ReleaseReviewStatus(
         required=profile.production_use != "prelaunch",
