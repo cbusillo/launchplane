@@ -190,7 +190,13 @@ def _publish_release_decision_issue(
                 "pull_request" in issue
                 or not isinstance(issue_body, str)
                 or issue_body.splitlines()[:1] != [marker]
-                or not github_app_authored(issue, app_id)
+                or not github_app_authored(
+                    issue,
+                    app_id,
+                    lookup_app=lambda slug: github_api_request(
+                        path=f"/apps/{quote(slug)}", token=token
+                    ),
+                )
             ):
                 continue
             number = issue.get("number")

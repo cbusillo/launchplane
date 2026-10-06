@@ -104,7 +104,13 @@ def _pages(
         ]
         matching = []
         for item in marked:
-            if github_app_authored(item, app_id):
+            if github_app_authored(
+                item,
+                app_id,
+                lookup_app=lambda slug: github_api_request(
+                    path=f"/apps/{quote(slug)}", token=token
+                ),
+            ):
                 matching.append(item)
             elif issues_only:
                 # Manual issues may have a human author. Adoption requires an

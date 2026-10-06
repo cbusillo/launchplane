@@ -40,6 +40,10 @@ The product repository keeps one issue for these requests. Launchplane finds it
 by a standalone `release_request_issue_marker(product)` line in the issue body;
 the issue must be authored through the configured Delivery App, verified by
 GitHub's `performed_via_github_app.id`, as for Client feedback receipts.
+When issue responses omit that field, the provider's Bot author login is
+resolved through GitHub's public App metadata and its ID must match the same
+configured Delivery App. User-authored text and lookalike human logins cannot
+satisfy that check.
 A marked issue from another author requires an App-authored comment containing
 that same issue marker as its adoption attestation, or a prior App-authored
 invitation with its candidate marker on the first line. Existing automatic

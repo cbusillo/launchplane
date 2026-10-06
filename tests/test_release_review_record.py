@@ -322,6 +322,30 @@ class ReleaseReviewRecordTests(unittest.TestCase):
         self.assertEqual(url, "https://github.com/example/site/issues/99")
         self.assertEqual(api.call_count, 1)
 
+    def test_issue_bot_author_is_verified_when_app_field_is_absent(self) -> None:
+        with patch(
+            "control_plane.release_review_record.github_api_request",
+            side_effect=[
+                [
+                    {
+                        "number": 99,
+                        "body": release_decision_issue_body(self.decision),
+                        "user": {"type": "Bot", "login": "delivery-test[bot]"},
+                    }
+                ],
+                {"id": 42, "slug": "delivery-test"},
+            ],
+        ) as api:
+            result = publish_release_decision(
+                store=self.store,
+                control_plane_root=self.root,
+                profile=profile(),
+                decision=self.decision,
+            )
+        self.assertEqual(result, "https://github.com/example/site/issues/99")
+        self.assertEqual(api.call_args.kwargs["path"], "/apps/delivery-test")
+        self.assertNotIn("method", api.call_args.kwargs)
+
     def test_copied_marker_from_another_author_does_not_acknowledge_decision(self) -> None:
         for provenance in ({}, {"performed_via_github_app": {"id": 7}}):
             with self.subTest(provenance=provenance):

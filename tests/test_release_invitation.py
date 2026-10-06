@@ -61,6 +61,8 @@ class ReleaseInvitationTests(unittest.TestCase):
 
     def github(self, *, path: str, token: str, **kwargs: Any) -> object:
         self.assertEqual(token, "delivery-token")
+        if path == "/apps/delivery-test":
+            return {"id": 42, "slug": "delivery-test"}
         self.assertTrue(path.startswith("/repos/example/site/issues"))
         if kwargs.get("method") == "POST":
             body = kwargs["body"]
@@ -177,6 +179,47 @@ class ReleaseInvitationTests(unittest.TestCase):
         ]
         self.publish()
         self.assertEqual(self.posts, [])
+
+    def test_bot_authored_manual_issue_without_app_field_preserves_receipt(self) -> None:
+        assert self.review.checklist is not None
+        self.issues = [
+            {
+                "number": 91,
+                "body": "Go live\n" + release_request_issue_marker(self.profile.product),
+                "user": {"type": "Bot", "login": "delivery-test[bot]"},
+            }
+        ]
+        self.comments = [
+            {
+                "id": 1,
+                "body": "Existing manual request\n"
+                + release_invitation_marker(self.profile.product, self.review.checklist.candidate),
+                **self.app,
+            }
+        ]
+        self.publish()
+        self.assertEqual(self.posts, [])
+
+    def test_bot_lookup_must_match_configured_app_and_human_lookalike_is_ignored(self) -> None:
+        marker = release_request_issue_marker(self.profile.product)
+        for author in (
+            {"type": "Bot", "login": "other-app[bot]"},
+            {"type": "User", "login": "delivery-test[bot]"},
+        ):
+            with self.subTest(author=author):
+                self.issues = [{"number": 13, "body": marker, "user": author}]
+                self.comments.clear()
+                self.posts.clear()
+                original = self.github
+
+                def api(**kwargs: Any) -> object:
+                    if kwargs["path"] == "/apps/other-app":
+                        return {"id": 7}
+                    return original(**kwargs)
+
+                with patch("control_plane.release_invitation.github_api_request", api):
+                    self.publish()
+                self.assertEqual(len(self.posts), 2)
 
     def test_copied_markers_cannot_redirect_or_suppress_delivery(self) -> None:
         assert self.review.checklist is not None
