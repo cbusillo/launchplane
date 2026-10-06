@@ -40,7 +40,7 @@ def github_app_authored(
     if not isinstance(author, dict) or author.get("type") != "Bot" or lookup_app is None:
         return False
     login = author.get("login")
-    if not isinstance(login, str) or not re.fullmatch(r"[a-zA-Z0-9-]+\[bot\]", login):
+    if not isinstance(login, str) or not re.fullmatch(r"[a-zA-Z0-9-]+\[bot]", login):
         return False
     resolved = lookup_app(login.removesuffix("[bot]"))
     return isinstance(resolved, dict) and resolved.get("id") == app_id

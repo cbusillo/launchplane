@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 import io
 import json
+import logging
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -350,7 +351,9 @@ class ReleaseInvitationTests(unittest.TestCase):
 
         with (
             patch("control_plane.release_invitation.monotonic", return_value=100) as clock,
-            patch("control_plane.release_invitation._LOGGER.warning") as warning,
+            patch.object(
+                logging.getLogger("control_plane.release_invitation"), "warning"
+            ) as warning,
             patch(
                 "control_plane.release_invitation.release_version",
                 side_effect=FileNotFoundError("testing lane missing"),
