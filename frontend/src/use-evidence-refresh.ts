@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 
 import type { ResourceState } from "./resource";
 
-const READ_REFRESH_INTERVAL_MS = 60_000;
+export const READ_REFRESH_INTERVAL_MS = 60_000;
 
 // Refresh reads independently of the shell's manual refresh, which also resets
 // action resources. The existing loaders own cancellation and retained data.
@@ -23,7 +23,13 @@ export function useEvidenceRefresh<T>(
     let requested = false;
     const dueAt = performance.now() + READ_REFRESH_INTERVAL_MS;
     const update = () => {
-      if (requested || document.visibilityState !== "visible" || performance.now() < dueAt) return;
+      if (requested || document.visibilityState !== "visible") return;
+      const remaining = dueAt - performance.now();
+      if (remaining > 0) {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(update, Math.max(1, remaining));
+        return;
+      }
       requested = true;
       window.clearTimeout(timer);
       refreshRef.current();

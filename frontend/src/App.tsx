@@ -80,7 +80,7 @@ export function App() {
   >(emptyResource());
   const [signingOut, setSigningOut] = useState(false);
   const [sessionNotice, setSessionNotice] = useState("");
-  useEvidenceRefresh(`${route.kind}:${routeProductKey(route) ?? ""}`,
+  useEvidenceRefresh(route.kind,
     !fixtureMode && authState.status === "signed_in" && authState.identity.role !== "owner" &&
       (route.kind === "product-index" || route.kind === "product-workspace" || route.kind === "product-environment"),
     productsResource, () => setInventoryRefreshToken(value => value + 1));

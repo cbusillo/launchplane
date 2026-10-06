@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { READ_REFRESH_INTERVAL_MS } from "../../src/use-evidence-refresh";
 
 for (const environmentView of [false, true]) {
   test(`open ${environmentView ? "environment" : "workspace"} reads recover without reusing expired proof`, async ({ page }, testInfo) => {
@@ -26,13 +27,13 @@ for (const environmentView of [false, true]) {
     });
     const currentProof = <T,>(data: T): T => {
       const copy = structuredClone(data);
-      const now = new Date(start + 600_000).toISOString();
+      const now = new Date(start + 20 * READ_REFRESH_INTERVAL_MS).toISOString();
       const refresh = (value: unknown) => {
         if (!value || typeof value !== "object") return;
         const record = value as Record<string, unknown>;
         if ("stale_after" in record) {
           record.stale_after = now;
-          record.refreshed_at = new Date(start + 180_000).toISOString();
+          record.refreshed_at = new Date(start + 3 * READ_REFRESH_INTERVAL_MS).toISOString();
         }
         for (const child of Object.values(record)) refresh(child);
       };
@@ -85,10 +86,10 @@ for (const environmentView of [false, true]) {
     await expect(signal).toHaveAttribute("data-tone", "warning");
     const initialReads = reads;
     responseMode = "delay";
-    await page.clock.runFor(60_000);
+    await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
     await expect.poll(() => Boolean(releaseRead)).toBe(true);
     expect(reads).toBe(initialReads + 1);
-    await page.clock.runFor(120_000);
+    await page.clock.runFor(2 * READ_REFRESH_INTERVAL_MS);
     expect(reads).toBe(initialReads + 1);
     await expect(signal).toHaveAttribute("data-tone", "warning");
     responseMode = "fail";
@@ -98,17 +99,17 @@ for (const environmentView of [false, true]) {
     await page.screenshot({ path: `../tmp/browser-smoke/open-${environmentView ? "environment" : "workspace"}-failed-${testInfo.project.name}.png`, fullPage: true });
     // Immediate failures with the same status must keep retrying even if React
     // batches loading and error into one render.
-    await page.clock.runFor(60_000);
+    await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
     await expect.poll(() => reads).toBe(initialReads + 2);
     await expect(signal).toContainText("Stale");
     responseMode = "unverified";
-    await page.clock.runFor(60_000);
+    await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
     await expect.poll(() => reads).toBe(initialReads + 3);
     await expect(signal).toHaveAttribute("data-tone", "warning");
     await expect(signal).toContainText("Recorded");
     responseMode = "fresh";
     await page.evaluate(() => Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" }));
-    await page.clock.runFor(60_000);
+    await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
     expect(reads).toBe(initialReads + 3);
     await page.evaluate(() => {
       Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
@@ -120,11 +121,11 @@ for (const environmentView of [false, true]) {
     await expect(signal).toHaveAttribute("data-tone", environmentView ? "pass" : "verified");
     await expect(signal).not.toContainText("Stale");
     // Inventory has its own read lifecycle, including the rail's lane evidence.
-    await page.clock.runFor(60_000);
+    await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
     await expect(page.locator('.rail-product-link[data-active="true"] [data-lane="testing"]')).toHaveAttribute("data-trust", "verified");
     await page.screenshot({ path: `../tmp/browser-smoke/open-${environmentView ? "environment" : "workspace"}-recovered-${testInfo.project.name}.png`, fullPage: true });
     delayInventory = true;
-    await page.clock.runFor(60_000);
+    await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
     await expect.poll(() => Boolean(releaseInventory)).toBe(true);
     const manualRefresh = page.getByRole("button", { name: "Refresh current evidence" });
     await expect(manualRefresh).toBeEnabled();
@@ -137,7 +138,7 @@ for (const environmentView of [false, true]) {
     await expect(page.locator(".rail-products")).not.toContainText("Obsolete delayed inventory");
     responseMode = "delay";
     releaseRead = undefined;
-    await page.clock.runFor(60_000);
+    await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
     await expect.poll(() => Boolean(releaseRead)).toBe(true);
     const observedReads = reads;
     await page.getByRole("link", { name: "Engineering Ops" }).click();
@@ -145,7 +146,7 @@ for (const environmentView of [false, true]) {
     const observedInventoryReads = inventoryReads;
     responseMode = "fresh";
     releaseRead!();
-    await page.clock.runFor(120_000);
+    await page.clock.runFor(2 * READ_REFRESH_INTERVAL_MS);
     await page.evaluate(() => window.dispatchEvent(new Event("focus")));
     expect(reads).toBe(observedReads);
     expect(inventoryReads).toBe(observedInventoryReads);
@@ -212,7 +213,7 @@ for (const view of ["actions", "runtime-settings", "managed-secrets"]) {
     const selectedAction = view === "actions" ? await page.getByLabel("Inspect exact action").inputValue() : "";
     // Wall-clock corrections must not stop the monotonic refresh timer.
     await page.clock.setSystemTime(new Date(Date.parse(fixtures.detail.provenance.refreshed_at) - 3600_000));
-    await page.clock.runFor(60_000);
+    await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
     await expect.poll(() => detailReads).toBe(observedDetailReads + 1);
     await expect(page.getByText("Refreshing evidence", { exact: true })).not.toBeVisible();
     expect(configReads).toBe(observedConfigReads);
@@ -224,7 +225,7 @@ for (const view of ["actions", "runtime-settings", "managed-secrets"]) {
       await expect(page.getByLabel("Inspect exact action")).toHaveValue(selectedAction);
       const afterManualReadinessReads = readinessReads;
       fixtures.detail.target.expected_runtime_identity.artifact_id = "fixture-next-expected-artifact";
-      await page.clock.runFor(60_000);
+      await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
       await expect.poll(() => readinessReads).toBe(afterManualReadinessReads + 1);
       expect(expectedArtifact).toBe("fixture-next-expected-artifact");
     } else {
