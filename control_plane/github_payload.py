@@ -1,6 +1,25 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import re
+
+
+def marker_outside_code_fences(body: object, marker: str) -> bool:
+    """A delivery marker in quoted PR notes is data, not a publisher receipt."""
+    if not isinstance(body, str):
+        return False
+    fence = ""
+    for line in body.splitlines():
+        boundary = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if boundary:
+            run, suffix = boundary.groups()
+            if not fence:
+                fence = run
+            elif run[0] == fence[0] and len(run) >= len(fence) and not suffix.strip():
+                fence = ""
+        elif not fence and line == marker:
+            return True
+    return False
 
 
 def github_app_authored(record: dict[str, object], app_id: int) -> bool:

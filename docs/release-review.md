@@ -41,7 +41,10 @@ by a standalone `release_request_issue_marker(product)` line in the issue body;
 the issue must be authored through the configured Delivery App, verified by
 GitHub's `performed_via_github_app.id`, as for Client feedback receipts.
 A marked issue from another author requires an App-authored comment containing
-that same issue marker as its adoption attestation. A copied marker from an
+that same issue marker as its adoption attestation, or a prior App-authored
+invitation with its candidate marker on the first line. Existing automatic
+invitations therefore preserve their destination across this upgrade.
+Markers inside Markdown code fences are quoted data and are ignored. A copied marker from an
 untrusted issue or comment never selects a destination or confirms delivery.
 Without a trusted destination, it creates a "Release review requests" issue. To use an existing
 go-live or release issue, append that marker to its body before deploying this
@@ -81,7 +84,17 @@ another request or submitting a decision.
 If the original issue or manual comment was authored by a person or another
 App, preserve it and add one comment **through the existing Delivery App**
 containing both markers as standalone lines, with no mention or invitation
-text. Keep the issue marker in the original issue body too. This attests manual
+text. Keep the issue marker in the original issue body too. Use the maintained
+[GitHub comment helper](https://github.com/cbusillo/codex-skills/blob/main/skills/github/scripts/gh-comment)
+when its configured automation App is the service's Delivery App (the selector
+is reported by `GET /v1/service/github-delivery`). Save the two marker lines to
+a file and run the installed `github/scripts/gh-comment issue <number> --repo
+<repository> --body-file <receipt-file>`. The helper obtains the existing App
+identity; do not mint or copy a token yourself. Read back the comment and verify
+its `performed_via_github_app.id` against that service selector before enabling
+the publisher. If the helper's App differs, report the missing supported
+service/automation prerequisite; do not switch identity or add a grant.
+This attests manual
 adoption without sending another Client request. App-authored manual requests
 with both existing receipts need no additional comment or edit. Neither route
 adds access; if the configured App cannot write the attestation, report that

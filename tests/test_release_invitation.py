@@ -224,6 +224,77 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.publish()
         self.assertEqual(self.posts, [])
 
+    def test_existing_app_invitation_keeps_human_destination_after_upgrade(self) -> None:
+        assert self.review.checklist is not None
+        marker = release_invitation_marker(self.profile.product, self.review.checklist.candidate)
+        self.issues = [
+            {
+                "number": 91,
+                "body": "Human issue\n" + release_request_issue_marker(self.profile.product),
+            }
+        ]
+        self.comments = [{"id": 1, "body": marker + "\nExisting App request", **self.app}]
+        self.publish()
+        self.assertEqual(self.posts, [])
+        checklist = self.review.checklist
+        self.review = self.review.model_copy(
+            update={
+                "checklist": checklist.model_copy(
+                    update={
+                        "candidate": checklist.candidate.model_copy(
+                            update={"artifact_id": "next-candidate"}
+                        ),
+                    }
+                )
+            }
+        )
+        self.publish()
+        self.assertEqual(len(self.issues), 1)
+        self.assertEqual(len(self.posts), 1)
+
+    def test_app_written_quoted_markers_do_not_redirect_or_suppress(self) -> None:
+        assert self.review.checklist is not None
+        issue_marker = release_request_issue_marker(self.profile.product)
+        marker = release_invitation_marker(self.profile.product, self.review.checklist.candidate)
+        for fence in ("```", "~~~~", "``````"):
+            with self.subTest(fence=fence):
+                self.issues = [
+                    {
+                        "number": 13,
+                        "body": f"Release decision\n{fence}\n{issue_marker}\n{fence}",
+                        **self.app,
+                    }
+                ]
+                self.comments = [
+                    {
+                        "id": 1,
+                        "body": f"Quoted notes\n{fence}\n{marker}\n{fence}",
+                        **self.app,
+                    }
+                ]
+                self.posts.clear()
+                self.publish()
+                self.assertEqual(len(self.posts), 2)
+                self.assertEqual(len(self.comments), 2)
+
+    def test_oversized_unverified_destination_cannot_veto_trusted_issue(self) -> None:
+        issue_marker = release_request_issue_marker(self.profile.product)
+        self.issues = [
+            {"number": 13, "body": issue_marker},
+            {"number": 91, "body": issue_marker, **self.app},
+        ]
+        original = self.github
+
+        def paged(**kwargs: Any) -> object:
+            if "/issues/13/comments?" in kwargs["path"]:
+                return [{"id": number, "body": "Untrusted comment"} for number in range(100)]
+            return original(**kwargs)
+
+        with patch("control_plane.release_invitation.github_api_request", paged):
+            self.publish()
+        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(len(self.comments), 1)
+
     def test_missing_versions_warn_at_bounded_intervals_and_recover(self) -> None:
         backoff = ReleaseInvitationBackoff()
 

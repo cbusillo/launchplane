@@ -13,7 +13,7 @@ from urllib.parse import quote
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.release_review import ReleaseReviewStatus, ReleaseVersion
-from control_plane.github_payload import github_app_authored
+from control_plane.github_payload import github_app_authored, marker_outside_code_fences
 from control_plane.launchplane_github_delivery import resolve_delivery_github_app_id
 from control_plane.release_review import (
     CLIENT_APPROVAL_REQUIRED,
@@ -27,6 +27,10 @@ from control_plane.service_human_auth import launchplane_public_origin_from_env
 from control_plane.workflows.launchplane import github_api_request, resolve_launchplane_github_token
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class ReleaseInvitationLookupTooLarge(ValueError):
+    pass
 
 
 @dataclass(slots=True)
@@ -69,7 +73,13 @@ def _ready(review: ReleaseReviewStatus, profile: LaunchplaneProductProfileRecord
 
 
 def _pages(
-    path: str, token: str, *, marker: str, app_id: int, issues_only: bool = False
+    path: str,
+    token: str,
+    *,
+    marker: str,
+    app_id: int,
+    issues_only: bool = False,
+    accept_prior_invitation: bool = False,
 ) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     separator = "&" if "?" in path else "?"
@@ -81,7 +91,16 @@ def _pages(
             item
             for item in result
             if (not issues_only or "pull_request" not in item)
-            and (not marker or marker in str(item.get("body", "")).splitlines())
+            and (
+                marker_outside_code_fences(item.get("body"), marker)
+                or (
+                    accept_prior_invitation
+                    and re.fullmatch(
+                        r"<!-- launchplane:release-invitation:[0-9a-f]{64} -->",
+                        str(item.get("body", "")).split("\n")[0].rstrip("\r"),
+                    )
+                )
+            )
         ]
         matching = []
         for item in marked:
@@ -91,23 +110,27 @@ def _pages(
                 # Manual issues may have a human author. Adoption requires an
                 # App-authored attestation on that issue, without a new mention.
                 number = item.get("number")
-                if (
-                    isinstance(number, int)
-                    and number > 0
-                    and _pages(
-                        f"{path.split('?')[0]}/{number}/comments",
-                        token,
-                        marker=marker,
-                        app_id=app_id,
-                    )
-                ):
-                    matching.append(item)
+                if isinstance(number, int) and number > 0:
+                    try:
+                        attested = _pages(
+                            f"{path.split('?')[0]}/{number}/comments",
+                            token,
+                            marker=marker,
+                            app_id=app_id,
+                            accept_prior_invitation=True,
+                        )
+                    except ReleaseInvitationLookupTooLarge:
+                        # An unverified destination cannot veto trusted delivery
+                        # by accumulating comments with copied public markers.
+                        continue
+                    if attested:
+                        matching.append(item)
         records.extend(matching)
         if marker and matching:
             return records
         if len(result) < 100:
             return records
-    raise ValueError("Release invitation lookup exceeds the supported size.")
+    raise ReleaseInvitationLookupTooLarge("Release invitation lookup exceeds the supported size.")
 
 
 def publish_release_invitation(
