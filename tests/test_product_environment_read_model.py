@@ -1719,6 +1719,69 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertIn("odoo-devkit", detail.model_dump_json())
         self.assertIn("simple-zpl2", detail.model_dump_json())
 
+    def test_private_service_target_does_not_require_public_route_authority(self) -> None:
+        for target_present in (True, False):
+            with self.subTest(target_present=target_present), TemporaryDirectory() as directory:
+                store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{directory}/state.db")
+                store.ensure_schema()
+                payload = _site_profile_payload(preview_enabled=False, preview_context="")
+                lanes = cast(tuple[dict[str, object], ...], payload["lanes"])
+                lanes[1]["base_url"] = ""
+                lanes[1]["health_url"] = ""
+                lanes[1]["health_monitoring"] = {
+                    "monitoring_intent": "private",
+                    "checks": [
+                        {
+                            "name": "private-runtime",
+                            "kind": "private_http",
+                            "private_endpoint_key": "example-service-prod-runtime",
+                        }
+                    ],
+                }
+                profile = LaunchplaneProductProfileRecord.model_validate(payload)
+                store.write_product_profile_record(profile)
+                target = ProviderTargetRecord(
+                    context="example-site-prod",
+                    instance="prod",
+                    provider_id="dokploy",
+                    target_category="application",
+                    target_id="private-target-id",
+                    display_name="example-service-prod",
+                    provider_target_type="application",
+                    provider_evidence={"host_id": "private-host-id"},
+                    updated_at="2026-05-02T22:32:00Z",
+                    source_label="test",
+                )
+                if target_present:
+                    store.write_provider_target_record(target)
+                detail = build_product_environment_detail(
+                    record_store=store,
+                    product=profile.product,
+                    environment="prod",
+                    action_allowed=lambda *_: False,
+                )
+                store.close()
+
+                self.assertEqual(
+                    detail.target.provider, target.provider_id if target_present else ""
+                )
+                self.assertEqual(
+                    detail.target.target_name, target.display_name if target_present else ""
+                )
+                self.assertEqual(detail.target.target_id_recorded, target_present)
+                self.assertEqual(
+                    detail.target.trust_state, "recorded" if target_present else "missing"
+                )
+                self.assertEqual(detail.target.runtime_identity_status, "unchecked")
+                self.assertIsNone(detail.target.observed_runtime_identity)
+                self.assertEqual(detail.public_ingress.status, "not_expected")
+                self.assertEqual(detail.topology.provider_recorded.authority_status, "missing")
+                self.assertEqual(detail.topology.provider_recorded.domains, ())
+                self.assertEqual(detail.topology.provider_recorded.ingress.trust_state, "missing")
+                self.assertEqual(detail.topology.provider_recorded.tls.trust_state, "missing")
+                self.assertNotIn(target.target_id, detail.model_dump_json())
+                self.assertNotIn("private-host-id", detail.model_dump_json())
+
     def test_product_environment_detail_exposes_physical_provider_target(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"

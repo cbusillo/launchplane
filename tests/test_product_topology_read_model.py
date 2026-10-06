@@ -1035,7 +1035,7 @@ class ProductTopologyReadModelTests(unittest.TestCase):
         self.assertNotIn("edge-host-private-456", serialized)
         self.assertNotIn("certificate-private-789", serialized)
 
-    def test_missing_route_authority_does_not_synthesize_provider_topology(self) -> None:
+    def test_target_placement_does_not_synthesize_public_route_authority(self) -> None:
         profile = _profile()
         topology = build_product_environment_topology(
             record_store=_TopologyStore(route_binding=None),
@@ -1050,8 +1050,16 @@ class ProductTopologyReadModelTests(unittest.TestCase):
         )
 
         self.assertEqual(topology.provider_recorded.authority_status, "missing")
-        self.assertEqual(topology.provider_recorded.placement.provider, "")
-        self.assertEqual(topology.provider_recorded.placement.target_name, "")
+        self.assertEqual(
+            topology.provider_recorded.placement.provider, _provider_target().provider_id
+        )
+        self.assertEqual(
+            topology.provider_recorded.placement.target_name, _provider_target().display_name
+        )
+        self.assertEqual(topology.provider_recorded.placement.trust_state, "recorded")
+        self.assertEqual(topology.provider_recorded.domains, ())
+        self.assertEqual(topology.provider_recorded.ingress.trust_state, "missing")
+        self.assertEqual(topology.provider_recorded.tls.trust_state, "missing")
         self.assertEqual(topology.provider_recorded.trust_state, "missing")
         warning_codes = {warning.code for warning in topology.warnings}
         self.assertIn("missing_route_authority", warning_codes)

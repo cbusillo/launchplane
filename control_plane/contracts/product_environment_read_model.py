@@ -2713,7 +2713,10 @@ def _target_summary(
         expected_identity = lane_summary.latest_deployment.runtime_identity
         destination_health = lane_summary.latest_deployment.destination_health
     recorded_placement = topology.provider_recorded.placement
-    if topology.provider_recorded.authority_status != "missing":
+    if (
+        topology.provider_recorded.authority_status != "missing"
+        or recorded_placement.provider_target_record_present
+    ):
         return ProductTargetSummary(
             provider=recorded_placement.provider,
             target_type=recorded_placement.target_type,
