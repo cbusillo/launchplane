@@ -3105,6 +3105,14 @@ def _allow_reason(
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS
     if normalized == ".github/github.json" and _is_launchplane_metadata_routing(key, value):
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS
+    if (
+        normalized == "pyproject.toml"
+        and re.fullmatch(r"tool\.black\.target-version\[[0-9]+\]", key)
+        and isinstance(value, str)
+        # Black's supported target identifiers, not arbitrary TARGET values.
+        and re.fullmatch(r"py3(?:[3-9]|1[0-5])", value)
+    ):
+        return ALLOW_REASON_REPO_METADATA_ERGONOMICS
     if normalized.endswith(".py") and (
         key_text.startswith("ALLOW_REASON_")
         or key_text.startswith("PRODUCT_DRIVER_REUSABLE_")
