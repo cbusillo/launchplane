@@ -59,7 +59,11 @@ def release_decision_issue_body(decision: ReleaseReviewDecisionRecord) -> str:
             ]
         )
     if not checklist.items:
-        lines.append("No merged pull request changes between these versions.")
+        lines.append(
+            "No product-repository pull request changes. Shared changes are listed below."
+            if checklist.shared_sources
+            else "No merged pull request changes between these versions."
+        )
     for source in checklist.shared_sources:
         lines.extend(
             [

@@ -53,6 +53,15 @@ test("Owner reviews the complete release and can request changes after accepting
   await versions.getByText("Technical details", { exact: true }).click();
   await expect(versions).toContainText("Shared components from example/shared-addons");
   await expect(versions).toContainText("Shared components from example/disable-online");
+  const sharedSources = await page.evaluate(async () => {
+    const modulePath = "/ui/src/dev-fixtures.ts";
+    const fixtures = await import(modulePath);
+    return fixtures.releaseReviewForFixture("products").review.checklist?.shared_sources ?? [];
+  });
+  for (const source of sharedSources) {
+    const range = versions.locator("dl > div").filter({ has: page.getByText(`Shared components from ${source.repository}`, { exact: true }) });
+    await expect(range.locator("code")).toHaveText([source.production_commit, source.candidate_commit]);
+  }
   await page.screenshot({ path: testInfo.outputPath("owner-changes-requested.png"), fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   expect(mutations).toEqual([]);

@@ -42,7 +42,7 @@ function ReleaseItems({ items, viewerIsOwner, emptyMessage = "No merged pull req
             {item.title}
             {item.already_reviewed ? <span>{`${viewerIsOwner ? "You" : "The Client"} accepted this change in its preview. Check it again as part of this release.`}</span> : null}
           </li>)}</ul>
-        </li>)}</ol> : <p>{items.length ? "Nothing in this release needs you to test it." : emptyMessage}</p>}
+        </li>)}</ol> : <p>{items.length ? "No changes from this repository need you to test them." : emptyMessage}</p>}
         {grouped.nothingToTest.length ? <details className="release-review-untested">
           <summary>{grouped.nothingToTest.length === 1 ? "1 change needs nothing from you" : `${grouped.nothingToTest.length} changes need nothing from you`}</summary>
           <ul>{grouped.nothingToTest.map(item => <li key={item.url}>
@@ -134,7 +134,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
         {(checklist.shared_sources ?? []).map(source => <section key={source.repository} aria-label={`Shared website components from ${source.repository}`}>
           <h4>Shared website components</h4>
           <p className="owner-review-state">{source.repository}</p>
-          <ReleaseItems items={source.items} viewerIsOwner={response.viewer_is_owner} />
+          <ReleaseItems items={source.items} viewerIsOwner={response.viewer_is_owner} emptyMessage={source.untracked_commits.length ? "Shared changes have no merged pull request coverage. See the blockers below." : undefined} />
         </section>)}
       </> : null}
       {response.review.blockers.length ? <ul>{response.review.blockers.map(blocker => <li key={blocker}>{blocker}</li>)}</ul> : null}
