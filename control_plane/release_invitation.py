@@ -16,6 +16,7 @@ from control_plane.release_review import (
     ReleaseReviewStore,
     checklist_blockers,
     current_release_review,
+    release_version,
 )
 from control_plane.service_human_auth import launchplane_public_origin_from_env
 from control_plane.workflows.launchplane import github_api_request, resolve_launchplane_github_token
@@ -24,6 +25,7 @@ from control_plane.workflows.launchplane import github_api_request, resolve_laun
 @dataclass(slots=True)
 class ReleaseInvitationBackoff:
     next_reads: dict[str, tuple[str, float]] = field(default_factory=dict)
+    delivered: set[tuple[str, str, str]] = field(default_factory=set)
 
 
 def release_request_issue_marker(product: str) -> str:
@@ -97,18 +99,39 @@ def publish_release_invitation(
         or not profile.owner.is_set
     ):
         return
-    if not re.fullmatch(
-        r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", profile.owner.github_login
+    production = release_version(store=store, profile=profile, instance="prod")
+    candidate = release_version(store=store, profile=profile, instance="testing")
+    if production == candidate:
+        return
+    receipt = (
+        profile.product,
+        profile.repository,
+        release_invitation_marker(profile.product, candidate),
+    )
+    if backoff is not None and receipt in backoff.delivered:
+        return
+    # A person already decided about these versions. This avoids polling GitHub
+    # for settled products without letting a cached result supply acceptance.
+    if any(
+        decision.checklist.production == production
+        and decision.checklist.candidate == candidate
+        and decision.checklist.repository == profile.repository
+        and decision.checklist.owner_github_id == profile.owner.github_id
+        for decision in store.list_release_review_decision_records(product=profile.product, limit=1)
     ):
-        raise ValueError("Release invitation requires a GitHub login.")
+        return
     # Do not compile a large checklist on every worker poll. This is a read
     # throttle only; GitHub's candidate marker remains the durable receipt.
-    fingerprint = profile.model_dump_json()
+    fingerprint = (
+        profile.model_dump_json() + production.model_dump_json() + candidate.model_dump_json()
+    )
     if backoff is not None:
-        previous = backoff.next_reads.get(profile.product)
-        if previous is not None and previous[0] == fingerprint and monotonic() < previous[1]:
+        previous_fingerprint, next_read = backoff.next_reads.get(profile.product, ("", 0))
+        if previous_fingerprint == fingerprint and monotonic() < next_read:
             return
         backoff.next_reads[profile.product] = (fingerprint, monotonic() + 300)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,38}", profile.owner.github_login):
+        raise ValueError("Release invitation requires a GitHub login.")
     # Product-wide serialization also prevents competing candidates creating
     # separate destination issues. The existing lock spans all worker replicas.
     with store.release_review_publication_lock(record_id=f"invitation:{profile.product}"):
@@ -156,6 +179,8 @@ def publish_release_invitation(
             raise ValueError("Release invitation issue number is unavailable.")
         comments_path = f"{path}/{number}/comments"
         if _pages(comments_path, token, marker=marker):
+            if backoff is not None:
+                backoff.delivered.add((profile.product, profile.repository, marker))
             return
         # Recompile after destination lookup: a concurrent acceptance or testing
         # deploy must not receive an invitation for the obsolete snapshot.
@@ -166,11 +191,17 @@ def publish_release_invitation(
         )
         if not _ready(latest, profile) or latest.checklist_digest != review.checklist_digest:
             return
-        effect = (
-            "Accepting records your approval; releases are held until an admin releases the hold."
-            if profile.release_on_acceptance == "held"
-            else "Accepting starts the release to the production site, with a verified backup, checks and automatic rollback."
-        )
+        # Reuse the review page's authority calculation, including unsupported
+        # drivers and the one-time rollback drill. Import here to avoid the
+        # client-release module's publisher import creating a module cycle.
+        from control_plane.client_release import release_start_for_acceptance
+
+        mode = release_start_for_acceptance(store=store, profile=profile)
+        effect = "Accepting records your approval; an admin starts the release."
+        if mode:
+            effect = "Accepting starts the release to the production site, with a verified backup, checks and automatic rollback."
+            if mode == "promote_with_rollback_drill":
+                effect = "Accepting starts the release to the production site and its rollback-and-re-release drill, with verified backups, checks and automatic rollback."
         body = (
             f"{marker}\n\n@{profile.owner.github_login} this release is ready for you to review:\n\n"
             f"{origin}/ui/owner-review?product={quote(profile.product, safe='')}\n\n{effect}"
@@ -180,6 +211,8 @@ def publish_release_invitation(
         )
         if not isinstance(result, dict) or not isinstance(result.get("id"), int):
             raise ValueError("Release invitation publication was not confirmed.")
+        if backoff is not None:
+            backoff.delivered.add((profile.product, profile.repository, marker))
 
 
 def main() -> None:

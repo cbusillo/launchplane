@@ -59,7 +59,12 @@ from control_plane.contracts.production_backup_gate import (
 )
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord, ReleaseStart
 from control_plane.odoo_stable_lane import OdooStableLaneOperationConflictError
-from control_plane.release_review import current_release_review, release_version, checklist_blockers
+from control_plane.release_review import (
+    ReleaseReviewStore,
+    current_release_review,
+    release_version,
+    checklist_blockers,
+)
 from control_plane.release_review_record import publish_release_decision
 from control_plane.release_invitation import ReleaseInvitationBackoff, publish_release_invitation
 from control_plane.generic_web_promotion_http import (
@@ -662,7 +667,7 @@ def advance_client_releases(
             break
         try:
             publish_release_invitation(
-                store=store,
+                store=cast(ReleaseReviewStore, store),
                 control_plane_root=control_plane_root,
                 profile=profile,
                 backoff=invitation_backoff,

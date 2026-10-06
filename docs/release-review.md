@@ -17,7 +17,10 @@ checklists, prelaunch/retired products, standing Director acceptance and candida
 with a recorded decision receive no request. Missing access is reported; no grant
 or credential is created. The worker uses Launchplane's own bootstrap
 `LAUNCHPLANE_PUBLIC_URL` for the review link and checks at most every five minutes
-per unchanged product profile.
+per unchanged profile and lane versions until delivery. After a confirmed receipt,
+the worker remembers delivery in memory and does no GitHub reads for that candidate;
+a replica restart reads the durable receipt again. Settled versions also need no
+GitHub read. This cache never supplies acceptance or bypasses release checks.
 
 The product repository keeps one issue for these requests. Launchplane finds it
 by a standalone `release_request_issue_marker(product)` line in the issue body;
@@ -29,6 +32,10 @@ or incomplete reads refuse publication. Discovery is bounded to 1,000 entries
 (including PRs); for a larger repository, mark its destination before enabling
 the publisher so it appears at the front of the updated-issue list. A closed
 marked issue is intentionally reused; its mentions still notify the Client.
+Comment lookup is also bounded to 1,000 entries; keep the requests issue unlocked
+and preserve its receipts. The Client must already be able to read the product
+repository for the mention to notify them; missing access is a reported prerequisite,
+not a reason to grant access automatically.
 The marker functions live in `control_plane/release_invitation.py`; there is no
 checked-in destination catalog.
 

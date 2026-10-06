@@ -4,7 +4,7 @@ import io
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, cast
 import unittest
 from unittest.mock import patch
 
@@ -16,7 +16,7 @@ from control_plane.release_invitation import (
     release_invitation_marker,
     release_request_issue_marker,
 )
-from control_plane.release_review import build_release_review
+from control_plane.release_review import ReleaseReviewStore, build_release_review
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.test_release_review import decision, github_read, profile, seed
 
@@ -34,7 +34,9 @@ class ReleaseInvitationTests(unittest.TestCase):
         seed(self.store)
         self.profile = profile().model_copy(update={"release_on_acceptance": "promote"})
         self.store.write_product_profile_record(self.profile)
-        self.review = build_release_review(store=self.store, profile=self.profile, read=github_read)
+        self.review = build_release_review(
+            store=cast(ReleaseReviewStore, self.store), profile=self.profile, read=github_read
+        )
         self.issues: list[dict[str, Any]] = []
         self.comments: list[dict[str, Any]] = []
         self.posts: list[dict[str, Any]] = []
@@ -50,7 +52,7 @@ class ReleaseInvitationTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def read_review(self, **kwargs: Any) -> ReleaseReviewStatus:
+    def read_review(self, **_kwargs: Any) -> ReleaseReviewStatus:
         self.read_count += 1
         return self.review
 
@@ -74,7 +76,7 @@ class ReleaseInvitationTests(unittest.TestCase):
 
     def publish(self, backoff: ReleaseInvitationBackoff | None = None) -> None:
         publish_release_invitation(
-            store=self.store,
+            store=cast(ReleaseReviewStore, self.store),
             control_plane_root=self.root,
             profile=self.profile,
             backoff=backoff,
@@ -196,7 +198,25 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.profile = profile()
         self.store.write_product_profile_record(self.profile)
         self.publish()
-        self.assertIn("releases are held", self.comments[0]["body"])
+        self.assertIn("an admin starts the release", self.comments[0]["body"])
+
+    def test_effect_matches_review_for_unsupported_driver_and_drill(self) -> None:
+        self.profile = self.profile.model_copy(update={"driver_id": "verireel"})
+        self.store.write_product_profile_record(self.profile)
+        assert self.review.checklist is not None
+        with patch(
+            "control_plane.release_invitation.release_version",
+            side_effect=[self.review.checklist.production, self.review.checklist.candidate],
+        ):
+            self.publish()
+        self.assertIn("an admin starts the release", self.comments[0]["body"])
+        self.comments.clear()
+        self.profile = profile().model_copy(
+            update={"release_on_acceptance": "promote_with_rollback_drill"}
+        )
+        self.store.write_product_profile_record(self.profile)
+        self.publish()
+        self.assertIn("rollback-and-re-release drill", self.comments[0]["body"])
 
     def test_no_client_prelaunch_retired_and_standing_acceptance_do_not_message(self) -> None:
         for update in (
@@ -242,6 +262,50 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertGreater(self.read_count, count)
         self.assertEqual(len(self.comments), 1)
 
+    def test_confirmed_receipt_skips_github_until_candidate_changes(self) -> None:
+        backoff = ReleaseInvitationBackoff()
+        self.publish(backoff)
+        reads = self.read_count
+        with patch("control_plane.release_invitation.monotonic", return_value=10**12):
+            self.publish(backoff)
+        self.assertEqual(self.read_count, reads)
+        original = self.store.read_artifact_manifest("artifact-testing")
+        changed = original.model_copy(
+            update={"artifact_id": "new-candidate", "source_commit": "e" * 40}
+        )
+        self.store.write_artifact_manifest(changed)
+        release = self.store.read_release_tuple_record(
+            context_name="example-site", channel_name="testing"
+        )
+        self.store.write_release_tuple_record(
+            release.model_copy(update={"artifact_id": changed.artifact_id})
+        )
+        assert self.review.checklist is not None
+        checklist = self.review.checklist
+        self.review = self.review.model_copy(
+            update={
+                "checklist": checklist.model_copy(
+                    update={
+                        "candidate": checklist.candidate.model_copy(
+                            update={
+                                "artifact_id": changed.artifact_id,
+                                "source_commit": changed.source_commit,
+                            }
+                        )
+                    }
+                )
+            }
+        )
+        self.publish(backoff)
+        self.assertGreater(self.read_count, reads)
+        self.assertEqual(len(self.comments), 2)
+
+    def test_settled_candidate_needs_no_github_read(self) -> None:
+        self.store.create_release_review_decision_record_if_absent(decision(self.store))
+        self.publish(ReleaseInvitationBackoff())
+        self.assertEqual(self.read_count, 0)
+        self.assertEqual(self.posts, [])
+
     def test_large_repository_stops_after_finding_marked_issue(self) -> None:
         marker = release_request_issue_marker(self.profile.product)
         original = self.github
@@ -260,7 +324,7 @@ class ReleaseInvitationTests(unittest.TestCase):
                 return [{"number": 91, "body": marker}] + [
                     {"number": number, "body": "Old issue"} for number in range(99)
                 ]
-            self.fail("Lookup continued after the destination was found")
+            raise AssertionError("Lookup continued after the destination was found")
 
         with patch("control_plane.release_invitation.github_api_request", paged):
             self.publish()
