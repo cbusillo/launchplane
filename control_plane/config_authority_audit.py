@@ -5,12 +5,14 @@ from collections import Counter, deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import tomllib
+import tokenize
 from typing import Protocol, cast
 
 
@@ -1674,11 +1676,24 @@ def evaluate_config_authority_gate(
                     "rejection_reason": rejection_reason,
                 }
             )
+    rejected_coverage_gaps = [
+        {
+            "path": gap.get("path", ""),
+            "reason": gap.get("reason", ""),
+            "rejection_reason": "python_authority_coverage_incomplete",
+        }
+        for gap in _list_payload(_mapping_payload(payload.get("coverage")).get("gaps"))
+        if isinstance(gap, dict)
+        and gap.get("reason") in {"parse_failure", "decode_failure"}
+        and _parser_name(Path(str(gap.get("path", "")))) == "python_ast"
+    ]
     return {
         "profile": profile,
-        "status": "fail" if rejected_findings else "pass",
+        "status": "fail" if rejected_findings or rejected_coverage_gaps else "pass",
         "rejected_finding_count": len(rejected_findings),
         "rejected_findings": rejected_findings,
+        "rejected_coverage_gap_count": len(rejected_coverage_gaps),
+        "rejected_coverage_gaps": rejected_coverage_gaps,
     }
 
 
@@ -1920,8 +1935,8 @@ def _committed_source_files(
             )
             continue
         try:
-            text = content.decode("utf-8")
-        except UnicodeDecodeError as error:
+            text = _decode_source_text(content, path)
+        except (UnicodeError, SyntaxError, LookupError) as error:
             gaps.append(CoverageGap(relative_path, "decode_failure", str(error)))
             continue
         digest = hashlib.sha256(content).hexdigest()
@@ -2081,14 +2096,23 @@ def _explicit_scan_paths(*, root: Path, path: Path) -> Iterable[Path]:
             yield candidate
 
 
+def _decode_source_text(content: bytes, path: Path) -> str:
+    encoding = (
+        tokenize.detect_encoding(io.BytesIO(content).readline)[0]
+        if _parser_name(path) == "python_ast"
+        else "utf-8"
+    )
+    return content.decode(encoding)
+
+
 def _scan_source_file(
     source_file: AuditSourceFile, *, repository_package: str = ""
 ) -> tuple[list[ConfigAuthorityFinding], list[CoverageGap]]:
     try:
         text = source_file.committed_text
         if text is None:
-            text = source_file.path.read_text(encoding="utf-8")
-    except UnicodeDecodeError as error:
+            text = _decode_source_text(source_file.path.read_bytes(), source_file.path)
+    except (UnicodeError, SyntaxError, LookupError) as error:
         return [], [
             CoverageGap(
                 path=source_file.relative_path,

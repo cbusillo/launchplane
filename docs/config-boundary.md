@@ -296,12 +296,18 @@ gate. Both commit SHAs must be supplied; missing commits or failed git reads
 fail closed. The scan ignores dirty and untracked files. It compares the two
 supplied snapshots exactly, rather than calculating a merge base: a PR behind
 its base can report authority absent from the newer base but present in its head.
-The reusable gate maps PR, merge-group and push events to their explicit commit
-pairs and fetches a missing named commit from the checked-out repository; zero-SHA comparisons and events without a mapping fail closed. Use the
-CLI with an explicit pair, or full-audit, for other events. Reusable callers
-should select pull_request and merge_group, or push updates with two existing
-commits. Branch/tag creation has no valid before commit and must use the PR path
-for changed-file verification; no default-branch fallback is invented. Changed symlink paths
+The reusable gate maps PR, merge-group and ordinary push events to their explicit
+commit pairs and fetches a missing named commit from the checked-out repository.
+A newly created default-branch train ref has a zero before SHA. For that event,
+the gate fetches the repository's event-supplied default branch and selects the
+first shared commit in the candidate and target branch's first-parent histories.
+This recovers the train's original base across all batch entries, including when
+the target advances or merges the candidate while the job is queued. The
+comparison covers every batch entry and stays bound to committed snapshots.
+Missing history, no shared base, a same-head base, other zero-SHA comparisons,
+and unmapped events fail closed. Branch/tag creation outside that default-branch
+train path uses pull_request or merge_group verification, or the CLI with an
+explicit pair/full-audit. Changed symlink paths
 resolve only within the committed tree and are classified under the link path;
 links outside that tree or through submodules fail closed. Link hops are bounded,
 and a broken base-side link supplies no preexisting finding exemption, so a PR
@@ -343,8 +349,7 @@ interpreter for both the audit tool and Python AST parsing. Consumers using
 syntax newer than the default must supply their supported interpreter version
 (for example, `python-version: "3.14"`). The workflow passes that choice directly
 to `uv run --python`, including when a checkout already has a virtual environment.
-Syntax the selected interpreter cannot parse remains a reported coverage gap;
-`--fail-on-findings` enforces classified findings, not parser completeness.
+Coverage-failure handling is described below.
 Adopt the landed immutable workflow/scanner revision and the input in
 the consumer's own maintenance issue; changing formatter settings to evade a
 finding or suppressing parser gaps is not the repair.
@@ -372,6 +377,30 @@ topology material. Product repos should use this changed-file gate to reject
 reintroduced
 Launchplane-owned authz, route, provider-target, domain, runtime-environment,
 managed-secret, topology, or workflow-default fixtures before merge.
+
+Enforcement also fails when a scanned Python file cannot be decoded or parsed,
+even if the report has zero findings. Python encoding declarations are honored;
+invalid encodings remain coverage failures. Both gate profiles report these failures separately in
+`gate.rejected_coverage_gaps` and `gate.rejected_coverage_gap_count`, with
+`python_authority_coverage_incomplete` as the rejection reason. An edited
+file's existing parse failure is not a preexisting-finding exemption;
+unchanged files remain outside the changed-file scan. Enforced full audits
+apply the same rule to all selected Python files. Report-only audits still
+exit successfully and retain the gap details. Other documented gap classes
+(including large files, binary files, unscanned classes, JSON/TOML parse gaps,
+and YAML line-scanner limitations) retain their existing report-only handling.
+
+For supported consumer syntax, run Launchplane under the consumer's supported
+Python interpreter (`uv run --python <version> launchplane ...`), or set the
+reusable workflow's existing `python-version` input. The workflow selects that
+interpreter for both setup and scanner execution. Repair invalid source when
+it also fails under the supported interpreter, then rerun the same committed
+base/head comparison. Do not suppress the gap or remove legitimate consumer
+configuration to obtain a passing gate. Service source-event scans apply the
+same gate using the service's own interpreter; they do not consume the workflow
+input. A consumer requiring newer syntax needs a service runtime that supports
+it before that service scan can pass. Service evidence and check summaries
+report coverage rejections separately from authority findings.
 
 Repository-owned GHCR publishing uses `password: ${{ github.token }}` in
 `publish-image.yml`, which the gate classifies as an artifact-publishing mechanic.

@@ -173,7 +173,9 @@ uv run launchplane service audit-config-authority \
 
 The gate prints the same redacted audit report as the full scanner, adds a JSON
 `gate` summary when enforcement is enabled, then exits non-zero for new findings
-that still need classification. In changed-file mode, findings that already
+that still need classification or
+[incomplete Python coverage](config-boundary.md#inspection). The same section
+owns supported-interpreter selection and coverage-failure handling. In changed-file mode, findings that already
 existed at the explicit base commit stay visible in the report with
 `preexisting_changed_file_finding`, but they do not block unrelated edits to the
 same file. Supply the pull request base and head SHAs and fetch both commits.
