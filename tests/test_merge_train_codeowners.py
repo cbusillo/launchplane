@@ -179,7 +179,7 @@ class CodeOwnerLandingTests(unittest.TestCase):
             ([{"filename": "app.py", "status": "renamed"}], {}),
         ):
             with self.subTest(files=files):
-                responses = [_owners("/DIRECTION.md @owner"), files]
+                responses: list[object] = [_owners("/DIRECTION.md @owner"), files]
                 if isinstance(files, list) and files[0].get("status") != "renamed":
                     responses.append(confirmation)
                 responses.extend(([{"filename": "app.py"}], {"head": {"sha": "head-2"}}))
