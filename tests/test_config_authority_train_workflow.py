@@ -22,8 +22,8 @@ def _git(root: Path, *args: str) -> str:
 
 
 class ConfigAuthorityTrainWorkflowTests(unittest.TestCase):
+    @staticmethod
     def _exercise(
-        self,
         root: Path,
         *,
         batch: bool = False,
