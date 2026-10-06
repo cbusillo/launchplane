@@ -2,10 +2,14 @@ import unittest
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from contextvars import ContextVar
 import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+from typing import ClassVar
+
+from fastapi import FastAPI
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.http_app import create_launchplane_fastapi_app
@@ -24,6 +28,51 @@ from tests.test_testing_lane_hold import _payload as hold_payload
 
 
 class LaneProductConfigCommitOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    _apps: ClassVar[dict[str, FastAPI]]
+    _record_store: ClassVar[ContextVar[FilesystemRecordStore | PostgresRecordStore]]
+    _app_root: ClassVar[TemporaryDirectory[str]]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls._apps = {}
+        cls._record_store = ContextVar("lane_commit_test_store")
+        cls._app_root = TemporaryDirectory()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._apps.clear()
+        cls._app_root.cleanup()
+        super().tearDownClass()
+
+    @classmethod
+    @contextmanager
+    def _app_for_store(
+        cls,
+        store: FilesystemRecordStore | PostgresRecordStore,
+        *,
+        caller: str,
+        policy: LaunchplaneAuthzPolicy,
+        config: BearerIdentityConfig,
+    ) -> Iterator[FastAPI]:
+        # Cache routes and caller policy, never records. Context propagates into
+        # the app's worker threads and resets before the next isolated scenario.
+        token = cls._record_store.set(store)
+        try:
+            if caller not in cls._apps:
+                cls._apps[caller] = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    record_store_factory=lambda: cls._record_store.get(),
+                    control_plane_root_path=Path(cls._app_root.name),
+                    bearer_identity_config=config,
+                )
+            yield cls._apps[caller]
+        finally:
+            cls._record_store.reset(token)
+            if isinstance(store, PostgresRecordStore):
+                store.close()
+
     async def test_padded_stored_lanes_apply_and_fence_foreign_normalized_claims(self) -> None:
         for route, payload, writer in (
             ("odoo-addon-settings", addon_payload(), "write_odoo_instance_override_record"),
@@ -177,106 +226,101 @@ class LaneProductConfigCommitOwnershipTests(unittest.IsolatedAsyncioTestCase):
                             }
                         )
                     )
-                    app = create_launchplane_fastapi_app(
-                        verifier=_StubVerifier(identity),
-                        authz_policy=policy,
-                        record_store_factory=lambda: store,
-                        control_plane_root_path=root,
-                        bearer_identity_config=config,
-                    )
-                    headers = {"Authorization": f"Bearer {token}"}
-                    path = f"/v1/product-config/{route}/apply"
-                    dry_run = await http_request(
-                        app, "POST", path, headers=headers, payload=payload
-                    )
-                    self.assertEqual(dry_run.status_code, 202, dry_run.text)
-                    apply_payload = {
-                        **payload,
-                        "mode": "apply",
-                        "reviewed_plan_sha256": dry_run.json()["result"]["plan_sha256"],
-                    }
-                    before = store.read_dokploy_target_record(
-                        context_name="cm", instance_name="testing"
-                    )
-                    original_writer = getattr(store, writer_name)
+                    with self._app_for_store(
+                        store, caller=caller, policy=policy, config=config
+                    ) as app:
+                        headers = {"Authorization": f"Bearer {token}"}
+                        path = f"/v1/product-config/{route}/apply"
+                        dry_run = await http_request(
+                            app, "POST", path, headers=headers, payload=payload
+                        )
+                        self.assertEqual(dry_run.status_code, 202, dry_run.text)
+                        apply_payload = {
+                            **payload,
+                            "mode": "apply",
+                            "reviewed_plan_sha256": dry_run.json()["result"]["plan_sha256"],
+                        }
+                        before = store.read_dokploy_target_record(
+                            context_name="cm", instance_name="testing"
+                        )
+                        original_writer = getattr(store, writer_name)
 
-                    def write_after_reassignment(*args: object, **kwargs: object) -> object:
-                        if scenario in ("reassigned", "lost_instance"):
-                            store.write_product_profile_record(
-                                profile.model_copy(
-                                    update={
-                                        "lanes": ()
-                                        if scenario == "reassigned"
-                                        else tuple(
-                                            lane
-                                            for lane in profile.lanes
-                                            if lane.instance != "testing"
-                                        )
-                                    }
+                        def write_after_reassignment(*args: object, **kwargs: object) -> object:
+                            if scenario in ("reassigned", "lost_instance"):
+                                store.write_product_profile_record(
+                                    profile.model_copy(
+                                        update={
+                                            "lanes": ()
+                                            if scenario == "reassigned"
+                                            else tuple(
+                                                lane
+                                                for lane in profile.lanes
+                                                if lane.instance != "testing"
+                                            )
+                                        }
+                                    )
                                 )
-                            )
-                        if scenario in ("reassigned", "shared_context", "duplicate_lane"):
-                            store.write_product_profile_record(
-                                profile.model_copy(
-                                    update={
-                                        "product": "other-product",
-                                        "lanes": tuple(
-                                            lane.model_copy(update=padding)
-                                            if scenario == "duplicate_lane"
-                                            and padding
-                                            and lane.instance == "testing"
-                                            else lane
-                                            for lane in profile.lanes
-                                            if scenario in ("reassigned", "duplicate_lane")
-                                            or lane.instance == "prod"
-                                        ),
-                                    }
+                            if scenario in ("reassigned", "shared_context", "duplicate_lane"):
+                                store.write_product_profile_record(
+                                    profile.model_copy(
+                                        update={
+                                            "product": "other-product",
+                                            "lanes": tuple(
+                                                lane.model_copy(update=padding)
+                                                if scenario == "duplicate_lane"
+                                                and padding
+                                                and lane.instance == "testing"
+                                                else lane
+                                                for lane in profile.lanes
+                                                if scenario in ("reassigned", "duplicate_lane")
+                                                or lane.instance == "prod"
+                                            ),
+                                        }
+                                    )
                                 )
-                            )
-                        return original_writer(*args, **kwargs)
+                            return original_writer(*args, **kwargs)
 
-                    with patch.object(
-                        store, writer_name, side_effect=write_after_reassignment
-                    ) as writer:
-                        response = await http_request(
-                            app,
-                            "POST",
-                            path,
-                            headers={**headers, "Idempotency-Key": f"ownership-{route}"},
-                            payload=apply_payload,
+                        with patch.object(
+                            store, writer_name, side_effect=write_after_reassignment
+                        ) as writer:
+                            response = await http_request(
+                                app,
+                                "POST",
+                                path,
+                                headers={**headers, "Idempotency-Key": f"ownership-{route}"},
+                                payload=apply_payload,
+                            )
+                        writer.assert_called_once()
+                        refused = scenario in ("reassigned", "lost_instance", "duplicate_lane") or (
+                            caller == "local_operator" and scenario == "shared_context"
                         )
-                    writer.assert_called_once()
-                    refused = scenario in ("reassigned", "lost_instance", "duplicate_lane") or (
-                        caller == "local_operator" and scenario == "shared_context"
-                    )
-                    context_refused = caller == "local_operator" and scenario != "lost_instance"
-                    self.assertEqual(
-                        response.status_code,
-                        (403 if context_refused else 409) if refused else 202,
-                        response.text,
-                    )
-                    if refused:
+                        context_refused = caller == "local_operator" and scenario != "lost_instance"
                         self.assertEqual(
-                            response.json()["error"]["code"],
-                            "local_operator_lane_scope_required"
-                            if context_refused
-                            else "product_profile_conflict",
+                            response.status_code,
+                            (403 if context_refused else 409) if refused else 202,
+                            response.text,
                         )
-                        self.assertEqual(
-                            store.read_dokploy_target_record(
-                                context_name="cm", instance_name="testing"
-                            ),
-                            before,
-                        )
-                        self.assertEqual(store.list_odoo_instance_override_records(), ())
-                    else:
-                        self.assertTrue(response.json()["result"]["applied"])
-                        self.assertEqual(
-                            store.read_product_profile_record(profile.product), profile
-                        )
-                    if isinstance(store, PostgresRecordStore):
-                        self.assertEqual(store.list_product_reconcile_requests(), ())
-                        store.close()
+                        if refused:
+                            self.assertEqual(
+                                response.json()["error"]["code"],
+                                "local_operator_lane_scope_required"
+                                if context_refused
+                                else "product_profile_conflict",
+                            )
+                            self.assertEqual(
+                                store.read_dokploy_target_record(
+                                    context_name="cm", instance_name="testing"
+                                ),
+                                before,
+                            )
+                            self.assertEqual(store.list_odoo_instance_override_records(), ())
+                        else:
+                            self.assertTrue(response.json()["result"]["applied"])
+                            self.assertEqual(
+                                store.read_product_profile_record(profile.product), profile
+                            )
+                        if isinstance(store, PostgresRecordStore):
+                            self.assertEqual(store.list_product_reconcile_requests(), ())
 
 
 class FilesystemLaneWriteLockTests(unittest.TestCase):
