@@ -938,7 +938,10 @@ action: `read`, `plan`, or `write`. A plan may retain redacted audit or prefligh
 evidence; it cannot apply the planned configuration, grant access, mint a
 credential, dispatch a deployment, or change a provider. Credential preparation
 and privileged lifecycle transitions keep their existing gates even when an
-action's name includes `plan` or `propose`.
+action's name includes `plan` or `propose`. Merge-train plans that enqueue
+controller work, preview lifecycle and rollback plans, inventory scans, and
+retained-volume backup import operations remain writes: they publish operative
+records or dispatch runner work. Reading their saved evidence remains separate.
 
 A `local_operators` or `terminal_agents` policy rule containing `agent.read`
 covers declared reads and plans, including future declared actions. It still
@@ -965,7 +968,9 @@ an agent to borrow a signed-in administrator's session. Product-config
 preflight may return `allowed` in `dry_run` mode under planning authority, but
 `safe_to_execute` remains false. An `apply` evaluation still checks the original
 write and secret-backed actions and all runtime key-safety evidence. A saved
-dry-run intent cannot be used as an executable intent.
+dry-run intent cannot be used as an executable intent. Secret-copy source checks
+retain the existing explicit source grants; declaration-based metadata reads
+cannot authorize copying a secret value to another lane.
 
 The action-coverage gate discovers authorization callsites, source constants,
 driver descriptor actions and generated secret-backed intent actions and fails

@@ -5919,14 +5919,6 @@ def create_launchplane_fastapi_app(
             action=repository_policy.service_authz.action,
             product=repository_policy.service_authz.product,
             context=repository_policy.service_authz.context,
-        ) and not (
-            batch_request.mode == "plan"
-            and resolved_authz_policy_runtime.policy.allows(
-                identity=identity,
-                action="merge_train.plan",
-                product=repository_policy.service_authz.product,
-                context=repository_policy.service_authz.context,
-            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -6146,14 +6138,6 @@ def create_launchplane_fastapi_app(
             action=repository_policy.service_authz.action,
             product=repository_policy.service_authz.product,
             context=repository_policy.service_authz.context,
-        ) and not (
-            not controller_request.mutate
-            and resolved_authz_policy_runtime.policy.allows(
-                identity=identity,
-                action="merge_train.plan",
-                product=repository_policy.service_authz.product,
-                context=repository_policy.service_authz.context,
-            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -10767,14 +10751,6 @@ def create_launchplane_fastapi_app(
             action=repository_policy.service_authz.action,
             product=repository_policy.service_authz.product,
             context=repository_policy.service_authz.context,
-        ) and not (
-            landing_request.mode == "plan"
-            and resolved_authz_policy_runtime.policy.allows(
-                identity=identity,
-                action="merge_train.plan",
-                product=repository_policy.service_authz.product,
-                context=repository_policy.service_authz.context,
-            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -10996,14 +10972,6 @@ def create_launchplane_fastapi_app(
             action=repository_policy.service_authz.action,
             product=repository_policy.service_authz.product,
             context=repository_policy.service_authz.context,
-        ) and not (
-            not merge_train_request.mutate
-            and resolved_authz_policy_runtime.policy.allows(
-                identity=identity,
-                action="merge_train.plan",
-                product=repository_policy.service_authz.product,
-                context=repository_policy.service_authz.context,
-            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -15578,10 +15546,8 @@ def create_launchplane_fastapi_app(
             )
 
         def secret_copy_source_readable(*, context: str, instance: str) -> bool:
-            # A copy source is a record read: ``secret.read`` or the standing
-            # ``product_environment.read`` on the source's own product and lane
-            # (or context, for a context-scoped secret). The copy itself remains a
-            # write under the destination's ``product_config.apply``.
+            # Secret-value copies retain their existing explicit source grants.
+            # Standing metadata-read authority cannot authorize moving values.
             target = AuthorizationTarget(
                 scope="instance" if instance else "context",
                 instances=(instance,) if instance else (),
@@ -15592,12 +15558,14 @@ def create_launchplane_fastapi_app(
                 product="launchplane",
                 context=context,
                 target=target,
+                inherit_agent_read_role=False,
             ) or resolved_authz_policy_runtime.policy.allows(
                 identity=identity,
                 action="product_environment.read",
                 product=product_config_request.product,
                 context=context,
                 target=target,
+                inherit_agent_read_role=False,
             )
 
         for reference in copy_references:

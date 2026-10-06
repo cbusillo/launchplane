@@ -716,13 +716,16 @@ class TerminalAgentPolicyRule(TokenBoundAuthzPolicyRule):
         context: str,
         target: AuthorizationTarget | None = None,
         schema_version: AuthzPolicySchemaVersion = 1,
+        inherit_agent_read_role: bool = True,
     ) -> bool:
         return self.allows_token_bound_identity(
             subject=identity.subject,
             token_label=identity.token_label,
             action=(
                 AGENT_READ_ROLE_ACTION
-                if AGENT_READ_ROLE_ACTION in self.actions and agent_read_role_covers(action)
+                if inherit_agent_read_role
+                and AGENT_READ_ROLE_ACTION in self.actions
+                and agent_read_role_covers(action)
                 else action
             ),
             product=product,
@@ -744,13 +747,16 @@ class LocalOperatorPolicyRule(PatternTokenBoundAuthzPolicyRule):
         context: str,
         target: AuthorizationTarget | None = None,
         schema_version: AuthzPolicySchemaVersion = 1,
+        inherit_agent_read_role: bool = True,
     ) -> bool:
         return self.allows_token_bound_identity(
             subject=identity.subject,
             token_label=identity.token_label,
             action=(
                 AGENT_READ_ROLE_ACTION
-                if AGENT_READ_ROLE_ACTION in self.actions and agent_read_role_covers(action)
+                if inherit_agent_read_role
+                and AGENT_READ_ROLE_ACTION in self.actions
+                and agent_read_role_covers(action)
                 else action
             ),
             product=product,
@@ -1091,6 +1097,7 @@ class LaunchplaneAuthzPolicy(BaseModel):
         context: str,
         target: AuthorizationTarget | None = None,
         record_context: bool = True,
+        inherit_agent_read_role: bool = True,
     ) -> AuthzEvaluation:
         resolved_target = target or AuthorizationTarget(scope="context")
         if self.schema_version == 1 and action in exact_instance_workflow_authz_actions():
@@ -1155,6 +1162,7 @@ class LaunchplaneAuthzPolicy(BaseModel):
                     context=context,
                     target=resolved_target,
                     schema_version=self.schema_version,
+                    inherit_agent_read_role=inherit_agent_read_role,
                 )
                 for rule in self.terminal_agents
             )
@@ -1178,6 +1186,7 @@ class LaunchplaneAuthzPolicy(BaseModel):
                     context=context,
                     target=resolved_target,
                     schema_version=self.schema_version,
+                    inherit_agent_read_role=inherit_agent_read_role,
                 )
                 for rule in self.local_operators
             )
@@ -1235,6 +1244,7 @@ class LaunchplaneAuthzPolicy(BaseModel):
         product: str,
         context: str,
         target: AuthorizationTarget | None = None,
+        inherit_agent_read_role: bool = True,
     ) -> bool:
         return (
             self.evaluate(
@@ -1243,6 +1253,7 @@ class LaunchplaneAuthzPolicy(BaseModel):
                 product=product,
                 context=context,
                 target=target,
+                inherit_agent_read_role=inherit_agent_read_role,
             ).decision
             == "allowed"
         )

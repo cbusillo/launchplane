@@ -101,6 +101,14 @@ class ActionEffectTests(unittest.TestCase):
         missing = {name: site for name, site in references.items() if name not in ACTION_EFFECTS}
         self.assertFalse(missing, f"Undeclared authorization actions: {missing}")
 
+    def test_driver_read_effects_agree_with_driver_execution_contract(self) -> None:
+        for descriptor in list_driver_descriptors():
+            for action in descriptor.actions:
+                if ACTION_EFFECTS[action.authz_action] in {"read", "plan"}:
+                    with self.subTest(action=action.authz_action):
+                        self.assertEqual(action.safety, "read")
+                        self.assertFalse(action.writes_records)
+
     def test_role_covers_all_declared_reads_and_plans_but_no_writes(self) -> None:
         identities = (
             LocalOperatorIdentity("record-reader", "record-reader-label"),
@@ -296,6 +304,40 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(response.status_code, 403, response.text)
             self.assertFalse(store.list_production_backup_policy_records())
+
+    async def test_train_plans_cannot_resolve_credentials_or_queue_execution(self) -> None:
+        from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
+
+        with _database_app(reader_policy()) as (store, _, app):
+            store.write_merge_train_policy_record(
+                build_test_merge_train_policy_record(repository="example/sample")
+            )
+            with patch(
+                "control_plane.http_app.resolve_merge_train_github_token",
+                side_effect=AssertionError("Read role must not resolve train credentials"),
+            ):
+                async with lifespan_client(app) as client:
+                    requests = (
+                        ("batch-candidate", {"mode": "plan"}),
+                        ("batch-landing", {"mode": "plan", "candidate_record_id": "candidate"}),
+                        ("controller", {"mutate": False}),
+                        ("", {"mutate": False}),
+                    )
+                    for operation, fields in requests:
+                        path = "/v1/work-graph/merge-train/"
+                        path += f"{operation}/run-once" if operation else "run-once"
+                        response = await client.post(
+                            path,
+                            headers={"Authorization": "Bearer reader-token"},
+                            json={
+                                "repository": "example/sample",
+                                "github_api_base_url": "https://untrusted.example",
+                                **fields,
+                            },
+                        )
+                        self.assertEqual(response.status_code, 403, response.text)
+            self.assertFalse(store.list_merge_train_batch_candidate_records())
+            self.assertFalse(store.list_merge_train_batch_landing_plan_records())
 
     async def test_missing_role_cannot_read_service_selector(self) -> None:
         with _database_app(LaunchplaneAuthzPolicy(schema_version=2)) as (_, _, app):
