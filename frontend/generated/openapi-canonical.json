@@ -36504,6 +36504,15 @@
             "title": "Repository",
             "type": "string"
           },
+          "shared_sources": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/SharedSourceReview"
+            },
+            "title": "Shared Sources",
+            "type": "array",
+            "x-launchplane-optional-response": true
+          },
           "testing_url": {
             "title": "Testing Url",
             "type": "string"
@@ -36797,6 +36806,18 @@
                 "type": "null"
               }
             ]
+          },
+          "checklist_complete": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checklist Complete",
+            "x-launchplane-optional-response": true
           },
           "checklist_digest": {
             "default": "",
@@ -41383,6 +41404,48 @@
           "reason"
         ],
         "title": "ServiceTokenRetirementResponse",
+        "type": "object"
+      },
+      "SharedSourceReview": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_commit": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Candidate Commit",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ReleaseReviewItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "production_commit": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Production Commit",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "untracked_commits": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Untracked Commits",
+            "type": "array"
+          }
+        },
+        "required": [
+          "repository",
+          "production_commit",
+          "candidate_commit",
+          "items"
+        ],
+        "title": "SharedSourceReview",
         "type": "object"
       },
       "SoloAdministrationConfirmationResponse": {

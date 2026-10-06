@@ -24,10 +24,15 @@ test("Owner reviews the complete release and can request changes after accepting
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
   await expect(page.getByRole("heading", { name: "Review this release" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Open the testing site" })).toHaveAttribute("href", "https://testing.example.invalid/");
-  const checks = page.locator(".release-review-checklist > li");
+  const checks = page.locator(".release-review-checklist").first().locator(":scope > li");
   await expect(checks).toHaveCount(1);
   await expect(checks.getByText("On a phone, confirm the booking button is visible.", { exact: false })).toBeVisible();
   await expect(checks.locator(".release-review-changes > li")).toHaveCount(2);
+  for (const repository of ["example/shared-addons", "example/disable-online"]) {
+    const shared = page.getByRole("region", { name: `Shared website components from ${repository}`, exact: true });
+    await expect(shared).toContainText("Sign in as a staff user and confirm your usual pages open.");
+    await expect(shared).toContainText("Preserve staff sign-in");
+  }
   const untested = page.locator(".release-review-untested");
   await expect(untested.getByText("2 changes need nothing from you")).toBeVisible();
   await expect(untested.getByText("Speed up CI")).toBeHidden();
@@ -46,11 +51,27 @@ test("Owner reviews the complete release and can request changes after accepting
   await page.getByRole("button", { name: "Request changes" }).click();
   await expect(page.getByRole("region", { name: "Latest release decision" }).getByRole("blockquote")).toHaveText(feedback);
   await versions.getByText("Technical details", { exact: true }).click();
-  await expect(versions.locator("code")).toHaveText(["a".repeat(40), "b".repeat(40)]);
+  await expect(versions).toContainText("Shared components from example/shared-addons");
+  await expect(versions).toContainText("Shared components from example/disable-online");
+  const sharedSources = await page.evaluate(async () => {
+    const modulePath = "/ui/src/dev-fixtures.ts";
+    const fixtures = await import(modulePath);
+    return fixtures.releaseReviewForFixture("products").review.checklist?.shared_sources ?? [];
+  });
+  for (const source of sharedSources) {
+    const range = versions.locator("dl > div").filter({ has: page.getByText(`Shared components from ${source.repository}`, { exact: true }) });
+    await expect(range.locator("code")).toHaveText([source.production_commit, source.candidate_commit]);
+  }
   await page.screenshot({ path: testInfo.outputPath("owner-changes-requested.png"), fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   expect(mutations).toEqual([]);
   expect(errors).toEqual([]);
+});
+
+test("Missing shared PR instructions disable Client acceptance", async ({ page }) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=denied");
+  await expect(page.getByRole("region", { name: "Shared website components from example/shared-addons", exact: true })).toContainText("#52 has no Client test notes.");
+  await expect(page.getByRole("button", { name: "Accept release", exact: true })).toBeDisabled();
 });
 
 test("Operator records a separate reasoned override without Owner controls", async ({ page }, testInfo) => {

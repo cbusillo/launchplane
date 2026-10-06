@@ -3888,6 +3888,7 @@ export type ReleaseChecklist = {
     product: string;
     production: ReleaseVersion;
     repository: string;
+    shared_sources?: Array<SharedSourceReview>;
     testing_url: string;
     untracked_commits: Array<string>;
 };
@@ -3941,6 +3942,7 @@ export type ReleaseReviewStatus = {
     approved: boolean;
     blockers: Array<string>;
     checklist: ReleaseChecklist | null;
+    checklist_complete?: boolean | null;
     checklist_digest: string;
     latest_decision: ReleaseReviewDecisionRecord | null;
     required: boolean;
@@ -4128,6 +4130,14 @@ export type ServiceTokenRetirementResponse = {
     status: 'ok';
     tokens: Array<ObsoleteServiceToken>;
     trace_id: string;
+};
+
+export type SharedSourceReview = {
+    candidate_commit: string;
+    items: Array<ReleaseReviewItem>;
+    production_commit: string;
+    repository: string;
+    untracked_commits: Array<string>;
 };
 
 export type StructuredHealthEvidence = {
