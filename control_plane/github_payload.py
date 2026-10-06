@@ -3,6 +3,12 @@ from __future__ import annotations
 from collections.abc import Callable
 
 
+def github_app_authored(record: dict[str, object], app_id: int) -> bool:
+    """Match provider-attested App provenance, never a copied login or marker."""
+    app = record.get("performed_via_github_app")
+    return bool(app_id > 0 and isinstance(app, dict) and app.get("id") == app_id)
+
+
 def json_object(
     value: object,
     label: str,

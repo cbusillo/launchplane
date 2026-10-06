@@ -11,6 +11,7 @@ from unittest.mock import patch
 from control_plane.contracts.release_review import ReleaseReviewStatus
 from control_plane.release_invitation import (
     ReleaseInvitationBackoff,
+    advance_release_invitations,
     main,
     publish_release_invitation,
     release_invitation_marker,
@@ -37,6 +38,7 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.review = build_release_review(
             store=cast(ReleaseReviewStore, self.store), profile=self.profile, read=github_read
         )
+        self.app = {"performed_via_github_app": {"id": 42}}
         self.issues: list[dict[str, Any]] = []
         self.comments: list[dict[str, Any]] = []
         self.posts: list[dict[str, Any]] = []
@@ -45,6 +47,7 @@ class ReleaseInvitationTests(unittest.TestCase):
         for target, replacement in (
             ("launchplane_public_origin_from_env", lambda: "https://launchplane.example.invalid"),
             ("current_release_review", self.read_review),
+            ("resolve_delivery_github_app_id", lambda **kwargs: 42),
             ("resolve_launchplane_github_token", lambda **kwargs: "delivery-token"),
             ("github_api_request", self.github),
         ):
@@ -63,13 +66,13 @@ class ReleaseInvitationTests(unittest.TestCase):
             body = kwargs["body"]
             self.posts.append(body)
             if path.endswith("/comments"):
-                result = {"id": len(self.comments) + 1, **body}
+                result = {"id": len(self.comments) + 1, **body, **self.app}
                 self.comments.append(result)
                 if self.lose_response:
                     self.lose_response = False
                     raise TimeoutError("response lost after publication")
                 return result
-            issue = {"number": 91, **body}
+            issue = {"number": 91, **body, **self.app}
             self.issues.append(issue)
             return issue
         return self.comments.copy() if "/comments?" in path else self.issues.copy()
@@ -158,17 +161,104 @@ class ReleaseInvitationTests(unittest.TestCase):
     def test_manual_request_is_adopted_without_another_mention(self) -> None:
         assert self.review.checklist is not None
         self.issues = [
-            {"number": 91, "body": "Go live\n" + release_request_issue_marker(self.profile.product)}
+            {
+                "number": 91,
+                "body": "Go live\n" + release_request_issue_marker(self.profile.product),
+                **self.app,
+            }
         ]
         self.comments = [
             {
                 "id": 1,
+                **self.app,
                 "body": "Existing manual request\n"
                 + release_invitation_marker(self.profile.product, self.review.checklist.candidate),
             }
         ]
         self.publish()
         self.assertEqual(self.posts, [])
+
+    def test_copied_markers_cannot_redirect_or_suppress_delivery(self) -> None:
+        assert self.review.checklist is not None
+        issue_marker = release_request_issue_marker(self.profile.product)
+        marker = release_invitation_marker(self.profile.product, self.review.checklist.candidate)
+        for provenance in ({}, {"performed_via_github_app": {"id": 7}}):
+            with self.subTest(provenance=provenance):
+                self.issues = [{"number": 13, "body": issue_marker, **provenance}]
+                self.comments = [{"id": 1, "body": marker, **provenance}]
+                self.posts.clear()
+                self.publish()
+                self.assertEqual(len(self.posts), 2)
+                self.assertEqual(len(self.comments), 2)
+
+    def test_copied_comment_on_trusted_destination_does_not_suppress_delivery(self) -> None:
+        assert self.review.checklist is not None
+        self.issues = [
+            {
+                "number": 91,
+                "body": release_request_issue_marker(self.profile.product),
+                **self.app,
+            }
+        ]
+        self.comments = [
+            {
+                "id": 1,
+                "body": release_invitation_marker(
+                    self.profile.product, self.review.checklist.candidate
+                ),
+            }
+        ]
+        self.publish()
+        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(len(self.comments), 2)
+
+    def test_human_manual_request_adopted_by_app_attestation_without_new_mention(self) -> None:
+        assert self.review.checklist is not None
+        issue_marker = release_request_issue_marker(self.profile.product)
+        marker = release_invitation_marker(self.profile.product, self.review.checklist.candidate)
+        self.issues = [{"number": 91, "body": "Manual go-live issue\n" + issue_marker}]
+        self.comments = [
+            {"id": 1, "body": "The original manual request"},
+            {"id": 2, "body": issue_marker + "\n" + marker, **self.app},
+        ]
+        self.publish()
+        self.assertEqual(self.posts, [])
+
+    def test_missing_versions_warn_at_bounded_intervals_and_recover(self) -> None:
+        backoff = ReleaseInvitationBackoff()
+
+        def advance() -> None:
+            advance_release_invitations(
+                store=self.store,
+                control_plane_root=self.root,
+                backoff=backoff,
+            )
+
+        with (
+            patch("control_plane.release_invitation.monotonic", return_value=100) as clock,
+            patch("control_plane.release_invitation._LOGGER.warning") as warning,
+            patch(
+                "control_plane.release_invitation.release_version",
+                side_effect=FileNotFoundError("testing lane missing"),
+            ) as versions,
+        ):
+            advance()
+            for _ in range(20):
+                advance()
+            self.assertEqual(warning.call_count, 1)
+            clock.return_value = 401
+            advance()
+            self.assertEqual(warning.call_count, 2)
+            self.assertEqual(self.posts, [])
+            versions.side_effect = None
+            assert self.review.checklist is not None
+            versions.side_effect = [
+                self.review.checklist.production,
+                self.review.checklist.candidate,
+            ]
+            advance()
+            self.assertEqual(len(self.comments), 1)
+            self.assertEqual(backoff.diagnostics, {})
 
     def test_lost_post_response_is_recovered_without_duplicate(self) -> None:
         self.lose_response = True
@@ -232,7 +322,7 @@ class ReleaseInvitationTests(unittest.TestCase):
 
     def test_ambiguous_or_unreadable_destination_refuses_post(self) -> None:
         marker = release_request_issue_marker(self.profile.product)
-        self.issues = [{"number": number, "body": marker} for number in (1, 2)]
+        self.issues = [{"number": number, "body": marker, **self.app} for number in (1, 2)]
         with self.assertRaises(ValueError):
             self.publish()
         with patch("control_plane.release_invitation.github_api_request", return_value={}):
@@ -321,7 +411,7 @@ class ReleaseInvitationTests(unittest.TestCase):
                     {"number": number, "pull_request": {}, "body": marker} for number in range(100)
                 ]
             if path.endswith("page=2"):
-                return [{"number": 91, "body": marker}] + [
+                return [{"number": 91, "body": marker, **self.app}] + [
                     {"number": number, "body": "Old issue"} for number in range(99)
                 ]
             raise AssertionError("Lookup continued after the destination was found")

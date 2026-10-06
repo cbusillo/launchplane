@@ -61,7 +61,10 @@ from control_plane.client_release import (
     advance_client_releases,
     client_release_grant_allows,
 )
-from control_plane.release_invitation import ReleaseInvitationBackoff
+from control_plane.release_invitation import (
+    ReleaseInvitationBackoff,
+    advance_release_invitations,
+)
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationDeniedError,
     DurableOperationAuthorizationGuard,
@@ -876,6 +879,8 @@ def run_odoo_stable_operation_worker_loop(
     last_sweep_at: float | None = None
     last_client_release_advance_at: float | None = None
     client_release_thread: Thread | None = None
+    invitation_thread: Thread | None = None
+    last_invitation_advance_at: float | None = None
     config_scan_thread: Thread | None = None
     standing_review_backoff = StandingReleaseReviewBackoff()
     invitation_backoff = ReleaseInvitationBackoff()
@@ -887,10 +892,20 @@ def run_odoo_stable_operation_worker_loop(
                 control_plane_root=control_plane_root_path,
                 stop_event=worker_stop_event,
                 standing_review_backoff=standing_review_backoff,
-                invitation_backoff=invitation_backoff,
             )
         except Exception:
             logging.exception("Client release advance failed.")
+
+    def invite_clients() -> None:
+        try:
+            advance_release_invitations(
+                store=record_store,
+                control_plane_root=control_plane_root_path,
+                stop_event=worker_stop_event,
+                backoff=invitation_backoff,
+            )
+        except Exception:
+            logging.exception("Client release invitation scan failed.")
 
     def scan_source() -> None:
         try:
@@ -932,6 +947,15 @@ def run_odoo_stable_operation_worker_loop(
                     daemon=False,
                 )
                 client_release_thread.start()
+            if (
+                last_invitation_advance_at is None
+                or monotonic() - last_invitation_advance_at >= CLIENT_RELEASE_ADVANCE_SECONDS
+            ) and (invitation_thread is None or not invitation_thread.is_alive()):
+                last_invitation_advance_at = monotonic()
+                invitation_thread = Thread(
+                    target=invite_clients, name="client-release-invitations", daemon=False
+                )
+                invitation_thread.start()
             try:
                 result = run_odoo_stable_operation_worker_once(
                     record_store=record_store,
@@ -977,6 +1001,8 @@ def run_odoo_stable_operation_worker_loop(
         # Shutdown must not abandon an admitted promotion/rollback.
         if client_release_thread is not None:
             client_release_thread.join()
+        if invitation_thread is not None:
+            invitation_thread.join()
         if config_scan_thread is not None:
             config_scan_thread.join()
     return OdooStableOperationWorkerLoopResult(

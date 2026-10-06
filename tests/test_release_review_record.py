@@ -77,7 +77,11 @@ class FakeReleaseIssues:
             return snapshot
         assert body is not None
         with self._lock:
-            issue = {"number": 99 + len(self.issues), "body": body["body"]}
+            issue = {
+                "number": 99 + len(self.issues),
+                "body": body["body"],
+                "performed_via_github_app": {"id": 42},
+            }
             self.issues.append(issue)
         if self.lose_response:
             self.lose_response = False
@@ -154,6 +158,11 @@ class ReleaseReviewRecordTests(unittest.TestCase):
         seed(store)
         self.decision = decision(store).model_copy(update={"release_issue_url": ""})
         store.create_release_review_decision_record_if_absent(self.decision)
+        identity = patch(
+            "control_plane.release_review_record.resolve_delivery_github_app_id", return_value=42
+        )
+        identity.start()
+        self.addCleanup(identity.stop)
         token = patch(
             "control_plane.release_review_record.resolve_launchplane_github_token",
             return_value="test-token",
@@ -274,7 +283,13 @@ class ReleaseReviewRecordTests(unittest.TestCase):
     def test_recovers_successful_issue_write_without_a_duplicate(self) -> None:
         with patch(
             "control_plane.release_review_record.github_api_request",
-            return_value=[{"number": 99, "body": release_decision_issue_body(self.decision)}],
+            return_value=[
+                {
+                    "number": 99,
+                    "body": release_decision_issue_body(self.decision),
+                    "performed_via_github_app": {"id": 42},
+                }
+            ],
         ) as api:
             url = publish_release_decision(
                 store=self.store,
@@ -294,7 +309,9 @@ class ReleaseReviewRecordTests(unittest.TestCase):
         )
         with patch(
             "control_plane.release_review_record.github_api_request",
-            return_value=[{"number": 99, "body": older_body}],
+            return_value=[
+                {"number": 99, "body": older_body, "performed_via_github_app": {"id": 42}}
+            ],
         ) as api:
             url = publish_release_decision(
                 store=self.store,
@@ -304,6 +321,27 @@ class ReleaseReviewRecordTests(unittest.TestCase):
             )
         self.assertEqual(url, "https://github.com/example/site/issues/99")
         self.assertEqual(api.call_count, 1)
+
+    def test_copied_marker_from_another_author_does_not_acknowledge_decision(self) -> None:
+        for provenance in ({}, {"performed_via_github_app": {"id": 7}}):
+            with self.subTest(provenance=provenance):
+                saved = self.decision.model_copy(update={"record_id": f"copied-{len(provenance)}"})
+                self.store.create_release_review_decision_record_if_absent(saved)
+                with patch(
+                    "control_plane.release_review_record.github_api_request",
+                    side_effect=[
+                        [{"number": 13, "body": release_decision_issue_body(saved), **provenance}],
+                        {"number": 99},
+                    ],
+                ) as api:
+                    result = publish_release_decision(
+                        store=self.store,
+                        control_plane_root=self.root,
+                        profile=profile(),
+                        decision=saved,
+                    )
+                self.assertEqual(result, "https://github.com/example/site/issues/99")
+                self.assertEqual(api.call_args.kwargs["method"], "POST")
 
     def test_only_the_same_record_marker_on_the_first_line_recovers(self) -> None:
         body = release_decision_issue_body(self.decision)
@@ -333,7 +371,15 @@ class ReleaseReviewRecordTests(unittest.TestCase):
         cases: tuple[list[object], ...] = (
             [{}],
             [[], {}],
-            [[{"number": "bad", "body": release_decision_issue_body(self.decision)}]],
+            [
+                [
+                    {
+                        "number": "bad",
+                        "body": release_decision_issue_body(self.decision),
+                        "performed_via_github_app": {"id": 42},
+                    }
+                ]
+            ],
         )
         for responses in cases:
             with (
