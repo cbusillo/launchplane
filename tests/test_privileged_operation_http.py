@@ -467,7 +467,10 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         policy: LaunchplaneAuthzPolicy,
         human_reader: Mock | None = None,
         mutation_human_reader: Mock | None = None,
-        agent_identity: TerminalAgentIdentity | None = None,
+        agent_identity: TerminalAgentIdentity
+        | LocalOperatorIdentity
+        | LocalAdminIdentity
+        | None = None,
         configured_terminal_identity: TerminalAgentIdentity | None = None,
         configured_local_operator_identity: LocalOperatorIdentity | None = None,
         policy_record_reader: Callable[[], object] | None = None,
@@ -1847,6 +1850,271 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["detail"]["code"], "authorization_denied")
         self.assertEqual(operation_records, ())
         self.assertEqual(policy_records, (policy_record,))
+
+    async def test_local_operator_proposals_are_inert_replayable_and_human_reviewable(self) -> None:
+        from control_plane.authz_candidate_preparation import (
+            compile_agent_policy_proposer_candidate,
+        )
+
+        identity = _SETUP_IDENTITY
+        policy = _policy()
+        _, grant = compile_agent_policy_proposer_candidate(
+            current_policy=policy, identity=identity, intent="add"
+        )
+        assert grant is not None
+        policy = policy.model_copy(update={"local_operators": grant.desired_policy.local_operators})
+        for descriptor, payload_builder in (
+            ("managed-authz-policy-set", _managed_authz_plan_payload),
+            ("managed-merge-train-policy-import", _merge_train_policy_plan_payload),
+        ):
+            with self.subTest(descriptor=descriptor), TemporaryDirectory() as directory:
+                store = PostgresRecordStore(
+                    database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+                )
+                store.ensure_schema()
+                active = store.seed_authz_policy_if_absent(_policy_record(policy))
+                train = build_test_merge_train_policy_record(
+                    repository="example/source",
+                    record_id="merge-train-policy-active",
+                    updated_at="2026-08-22T19:00:00+00:00",
+                )
+                store.write_merge_train_policy_record(train)
+                app = self._app(
+                    store=store,
+                    policy=policy,
+                    agent_identity=identity,
+                    configured_local_operator_identity=identity,
+                    policy_record_reader=lambda: active,
+                )
+                try:
+                    async with lifespan_client(app) as client:
+                        payload = payload_builder("local-proposal")
+                        proposed = await client.post(
+                            "/v1/agent/privileged-operations/plans", json=payload
+                        )
+                        self.assertEqual(proposed.status_code, 200, proposed.text)
+                        operation_id = proposed.json()["summary"]["operation_id"]
+                        replay = await client.post(
+                            "/v1/agent/privileged-operations/plans", json=payload
+                        )
+                        self.assertEqual(replay.json()["summary"]["operation_id"], operation_id)
+                        altered = {
+                            **payload,
+                            "request": {
+                                **cast(dict[str, object], payload["request"]),
+                                "reason": "Changed proposal.",
+                            },
+                        }
+                        conflict = await client.post(
+                            "/v1/agent/privileged-operations/plans", json=altered
+                        )
+                        self.assertEqual(conflict.status_code, 409, conflict.text)
+                        review = await client.get(
+                            f"/v1/privileged-operations/plans/{operation_id}/review"
+                        )
+                        self.assertEqual(review.status_code, 200, review.text)
+                        self.assertEqual(
+                            review.json()["review"]["requested_by_kind"], "local_operator"
+                        )
+                    record = store.read_privileged_operation_record(operation_id)
+                    self.assertEqual(record.status, "planned")
+                    self.assertIsNone(record.approval)
+                    self.assertIsNone(record.execution)
+                    self.assertEqual(record.requested_by.identity_type, "local_operator")
+                    self.assertNotIn(identity.subject, proposed.text)
+                    self.assertNotIn(identity.token_label, proposed.text)
+                    self.assertEqual(
+                        store.list_authz_policy_records(status="active", limit=None), (active,)
+                    )
+                    self.assertEqual(store.read_merge_train_policy_record(train.record_id), train)
+                    self.assertEqual(
+                        len(
+                            store.list_privileged_operation_event_records(
+                                operation_id=operation_id, limit=None
+                            )
+                        ),
+                        1,
+                    )
+                    # Even a supplied local identity with approval actions cannot be an immutable human approver.
+                    approval_rule = policy.local_operators[0].model_copy(
+                        update={
+                            "actions": (
+                                *policy.local_operators[0].actions,
+                                AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
+                                MERGE_TRAIN_POLICY_OPERATION_APPROVE_ACTION,
+                            )
+                        }
+                    )
+                    denied_app = self._app(
+                        store=store,
+                        policy=policy.model_copy(update={"local_operators": (approval_rule,)}),
+                        mutation_human_reader=Mock(return_value=identity),
+                    )
+                    async with lifespan_client(denied_app) as client:
+                        approval = await client.post(
+                            f"/v1/privileged-operations/plans/{operation_id}/approve",
+                            json={
+                                "source_event_id": "self-approval",
+                                "reason": "Try approving own plan.",
+                            },
+                        )
+                        self.assertEqual(approval.status_code, 403, approval.text)
+                    self.assertEqual(store.read_privileged_operation_record(operation_id), record)
+                finally:
+                    store.close()
+
+    async def test_local_operator_proposals_require_exact_current_explicit_managed_grant(
+        self,
+    ) -> None:
+        from control_plane.authz_candidate_preparation import (
+            compile_agent_policy_proposer_candidate,
+        )
+
+        identity = _SETUP_IDENTITY
+        baseline = _policy()
+        _, grant = compile_agent_policy_proposer_candidate(
+            current_policy=baseline, identity=identity, intent="add"
+        )
+        assert grant is not None
+        allowed = baseline.model_copy(
+            update={"local_operators": grant.desired_policy.local_operators}
+        )
+        rule = grant.desired_policy.local_operators[0]
+        cases = (
+            (baseline, baseline, identity, identity),
+            (allowed, baseline, identity, identity),
+            (
+                allowed.model_copy(
+                    update={"local_operators": (rule.model_copy(update={"actions": ()}),)}
+                ),
+                allowed,
+                identity,
+                identity,
+            ),
+            (
+                allowed.model_copy(
+                    update={
+                        "local_operators": (
+                            rule.model_copy(
+                                update={"managed_set_id": None, "managed_rule_id": None}
+                            ),
+                        )
+                    }
+                ),
+                allowed,
+                identity,
+                identity,
+            ),
+            (
+                allowed.model_copy(update={"local_operators": (rule, rule)}),
+                allowed,
+                identity,
+                identity,
+            ),
+            (allowed, allowed, identity, None),
+            (
+                allowed,
+                allowed,
+                LocalOperatorIdentity(subject="other", token_label=identity.token_label),
+                identity,
+            ),
+            (
+                allowed,
+                allowed,
+                LocalAdminIdentity(subject=identity.subject, token_label=identity.token_label),
+                identity,
+            ),
+        )
+        for runtime, active, caller, configured in cases:
+            with self.subTest(caller=caller, runtime=runtime), TemporaryDirectory() as directory:
+                store = FilesystemRecordStore(Path(directory))
+                app = self._app(
+                    store=store,
+                    policy=runtime,
+                    agent_identity=caller,
+                    configured_local_operator_identity=configured,
+                    policy_record_reader=lambda: _policy_record(active),
+                )
+                async with lifespan_client(app) as client:
+                    response = await client.post(
+                        "/v1/agent/privileged-operations/plans",
+                        json=_managed_authz_plan_payload("refused-local-proposal"),
+                    )
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertEqual(store.list_privileged_operation_records(limit=None), ())
+
+    async def test_agent_proposer_candidate_is_server_derived_pending_and_replay_bound(
+        self,
+    ) -> None:
+        results, records, _ = await self._prepare_agent_product_setup(
+            payloads=(
+                {
+                    "candidate_id": "agent-policy-proposer",
+                    "intent": "add",
+                    "source_event_id": "ui:proposer-access",
+                },
+                {
+                    "candidate_id": "agent-policy-proposer",
+                    "intent": "add",
+                    "source_event_id": "ui:proposer-access",
+                },
+                {
+                    "candidate_id": "agent-policy-proposer",
+                    "intent": "add",
+                    "source_event_id": "ui:injection",
+                    "subjects": ["attacker"],
+                },
+            )
+        )
+        self.assertEqual(results[0]["status"], 200, results)
+        self.assertEqual(results[1]["operation_id"], results[0]["operation_id"])
+        self.assertEqual(results[2]["status"], 422)
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        assert isinstance(record, PrivilegedOperationRecord)
+        assert isinstance(record.request, ManagedAuthzPolicySetProposalInput)
+        self.assertEqual(record.status, "planned")
+        self.assertEqual(
+            record.request.desired_policy.local_operators[0].subjects, (_SETUP_IDENTITY.subject,)
+        )
+        self.assertEqual(
+            set(record.request.desired_policy.local_operators[0].actions),
+            {AUTHZ_POLICY_OPERATION_PROPOSE_ACTION, MERGE_TRAIN_POLICY_OPERATION_PROPOSE_ACTION},
+        )
+
+    async def test_agent_proposer_removal_prepares_realistic_drift_without_applying(self) -> None:
+        from control_plane.authz_candidate_preparation import (
+            compile_agent_policy_proposer_candidate,
+        )
+
+        _, grant = compile_agent_policy_proposer_candidate(
+            current_policy=_policy(), identity=_SETUP_IDENTITY, intent="add"
+        )
+        assert grant is not None
+        payload = _policy().model_dump(mode="json")
+        drifted_rule = grant.desired_policy.local_operators[0].model_dump(mode="json")
+        drifted_rule["actions"].append(AUTHZ_POLICY_OPERATION_READ_ACTION)
+        payload["local_operators"] = [drifted_rule]
+        drifted_policy = LaunchplaneAuthzPolicy.model_validate(payload)
+        results, records, reviews = await self._prepare_agent_product_setup(
+            policy=drifted_policy,
+            payloads=(
+                {
+                    "candidate_id": "agent-policy-proposer",
+                    "intent": "remove",
+                    "source_event_id": "ui:remove-drifted-proposer",
+                },
+            ),
+        )
+        self.assertEqual(results[0]["status"], 200, results)
+        record = records[0]
+        assert isinstance(record, PrivilegedOperationRecord)
+        assert isinstance(record.request, ManagedAuthzPolicySetProposalInput)
+        assert isinstance(record.evidence, ManagedAuthzPolicySetHumanEvidence)
+        self.assertEqual(record.status, "planned")
+        self.assertEqual(record.request.desired_policy.local_operators, ())
+        self.assertGreater(record.evidence.diff.removed_rule_count, 0)
+        self.assertIn("unexpected rules", reviews[0])
 
     async def test_terminal_agent_proposes_and_reads_only_its_redacted_policy_summary(
         self,

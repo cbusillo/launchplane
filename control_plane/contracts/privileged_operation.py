@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import re
 from typing import Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import field_validator, BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.merge_train_policy import (
@@ -172,7 +172,22 @@ class PrivilegedOperationAgentActor(BaseModel):
         return self
 
 
-PrivilegedOperationRequester: TypeAlias = PrivilegedOperationActor | PrivilegedOperationAgentActor
+class PrivilegedOperationLocalOperatorActor(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    identity_type: Literal["local_operator"] = "local_operator"
+    login: Literal["local-operator"] = "local-operator"
+    principal_sha256: str
+
+    @field_validator("principal_sha256")
+    @classmethod
+    def _validate_principal(cls, value: str) -> str:
+        return _sha256(value, "principal_sha256")
+
+
+PrivilegedOperationRequester: TypeAlias = (
+    PrivilegedOperationActor | PrivilegedOperationAgentActor | PrivilegedOperationLocalOperatorActor
+)
 
 
 class ManagedSecretReencryptionPlanInput(BaseModel):
@@ -877,7 +892,11 @@ class PrivilegedOperationRecord(BaseModel):
         elif self.descriptor_id == "managed-authz-policy-set":
             if self.safety_class != "policy_admin":
                 raise ValueError("Managed-policy operations require policy-admin safety")
-            if self.requested_by.identity_type not in {"github_human", "terminal_agent"}:
+            if self.requested_by.identity_type not in {
+                "github_human",
+                "terminal_agent",
+                "local_operator",
+            }:
                 raise ValueError("Managed-policy operations require a human or agent requester")
             if not isinstance(self.request, ManagedAuthzPolicySetProposalInput) or not isinstance(
                 self.evidence, ManagedAuthzPolicySetHumanEvidence
@@ -892,7 +911,11 @@ class PrivilegedOperationRecord(BaseModel):
         elif self.descriptor_id == "managed-merge-train-policy-import":
             if self.safety_class != "policy_admin":
                 raise ValueError("Merge-train policy operations require policy-admin safety")
-            if self.requested_by.identity_type not in {"github_human", "terminal_agent"}:
+            if self.requested_by.identity_type not in {
+                "github_human",
+                "terminal_agent",
+                "local_operator",
+            }:
                 raise ValueError("Merge-train policy operations require a human or agent requester")
             if not isinstance(
                 self.request, ManagedMergeTrainPolicyImportProposalInput
@@ -1079,11 +1102,16 @@ class PrivilegedOperationEventRecord(BaseModel):
         )
         if self.action == "planned":
             expected_source_kind = (
-                "agent_api" if self.actor.identity_type == "terminal_agent" else "browser_api"
+                "agent_api"
+                if self.actor.identity_type in {"terminal_agent", "local_operator"}
+                else "browser_api"
             )
             if self.sequence != 1 or self.source_kind != expected_source_kind:
                 raise ValueError("Planned events must use the requester's API surface")
-            if self.actor.identity_type not in {"github_human", "terminal_agent"} or reason:
+            if (
+                self.actor.identity_type not in {"github_human", "terminal_agent", "local_operator"}
+                or reason
+            ):
                 raise ValueError("Planned events require a human or agent and no event reason")
         elif self.action in {"approved", "revoked", "cancelled"}:
             if self.sequence not in {2, 3} or self.source_kind != "browser_api":
@@ -1442,7 +1470,7 @@ class PrivilegedOperationSemanticReviewActivityEntry(BaseModel):
     action: PrivilegedOperationEventAction
     occurred_at: str
     source_kind: PrivilegedOperationSourceKind
-    actor_type: Literal["github_human", "terminal_agent", "system"]
+    actor_type: Literal["github_human", "terminal_agent", "local_operator", "system"]
     reason_available: bool = False
     event_id: str
     resulting_record_digest: str
@@ -1475,7 +1503,7 @@ class PrivilegedOperationSemanticReview(BaseModel):
     operation_class: PrivilegedOperationSemanticReviewClass
     safety_class: PrivilegedOperationSafetyClass
     title: PrivilegedOperationSemanticReviewTitle
-    requested_by_kind: Literal["github_human", "terminal_agent"]
+    requested_by_kind: Literal["github_human", "terminal_agent", "local_operator"]
     lifecycle: PrivilegedOperationSemanticReviewLifecycle
     blockers: PrivilegedOperationSemanticReviewBlocker
     change: PrivilegedOperationSemanticReviewChange
@@ -1732,12 +1760,24 @@ def build_privileged_operation_id_for_actor(
     normalized_source_event_id = normalize_privileged_operation_source_event_id(source_event_id)
     if isinstance(actor, PrivilegedOperationAgentActor):
         principal = f"agent:{actor.principal_sha256}"
+    elif isinstance(actor, PrivilegedOperationLocalOperatorActor):
+        principal = f"local-operator:{actor.principal_sha256}"
     elif actor.identity_type == "github_human":
         principal = f"github:{actor.github_id}"
     else:
         raise ValueError("Managed-policy operation IDs require a human or agent actor")
     digest = _digest_payload([descriptor_id, principal, normalized_source_event_id])[:32]
     return f"privileged-operation-{digest}"
+
+
+def local_operator_principal_sha256(*, subject: str, token_label: str) -> str:
+    return _digest_payload(
+        [
+            "launchplane-local-operator-privileged-operation-v1",
+            _required_token(subject, "subject"),
+            _required_token(token_label, "token_label"),
+        ]
+    )
 
 
 def terminal_agent_principal_sha256(*, subject: str, token_label: str) -> str:

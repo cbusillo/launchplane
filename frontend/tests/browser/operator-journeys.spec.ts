@@ -1553,6 +1553,28 @@ test.describe("operator journeys", () => {
     expect(sourceEventIds[2]).toBe(sourceEventIds[0]);
   });
 
+  test("agent proposer access prepares a pending grant without approval", async ({ page }) => {
+    const requests: Array<Record<string, unknown>> = [];
+    await page.route("**/v1/auth/session", async (route) => {
+      await route.fulfill({ json: { csrf_token: "fixture-proposer-csrf" } });
+    });
+    await page.route("**/v1/privileged-operations/authorization-candidates/prepare", async (route) => {
+      requests.push(route.request().postDataJSON() as Record<string, unknown>);
+      await route.fulfill({ json: { trace_id: "trace-proposer-plan", state: "planned" } });
+    });
+    await page.goto("/ui/engineering/privileged-operations?fixture=products");
+    await page.getByRole("button", { name: "Access policy" }).click();
+    const card = page.locator("section").filter({ has: page.getByRole("heading", { name: "Prepare agent proposal access", exact: true }) });
+    await expect(card.getByText(/Every plan remains pending until you approve it while signed in/)).toBeVisible();
+    await card.getByRole("button", { name: "Prepare proposal access", exact: true }).click();
+    await expect(card.getByText("The plan was prepared, but its review is not available yet.")).toBeVisible();
+    expect(requests).toHaveLength(1);
+    expect(Object.keys(requests[0]).sort()).toEqual(["candidate_id", "intent", "source_event_id"]);
+    expect(requests[0].candidate_id).toBe("agent-policy-proposer");
+    expect(requests[0].intent).toBe("add");
+    await expect(card.getByRole("button", { name: "Approve", exact: true })).toHaveCount(0);
+  });
+
   test("agent product setup preparation lists every product and sends their ids", async ({ page }) => {
     const requests: Array<Record<string, unknown>> = [];
     await page.route("**/v1/auth/session", async (route) => {
