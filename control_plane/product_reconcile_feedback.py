@@ -133,13 +133,14 @@ def post_reconcile_feedback(
         _LOGGER.warning(
             "Reconcile PR feedback for %s failed: %s", request.target_key, feedback_error
         )
-        failed_entry = dict(previous_entry or {})
+        failed_entry: dict[str, object] = {
+            "delivery_status": "failed",
+            "error": f"Unexpected {type(feedback_error).__name__} while posting PR feedback.",
+        }
         if feedback is not None:
             failed_entry["status"] = feedback.status
-        failed_entry.update(
-            delivery_status="failed",
-            error=f"Unexpected {type(feedback_error).__name__} while posting PR feedback.",
-        )
+        elif previous_entry is not None and "status" in previous_entry:
+            failed_entry["status"] = previous_entry["status"]
         return failed_entry
 
 

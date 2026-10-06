@@ -2773,6 +2773,26 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.assertEqual((cleared["status"], cleared["delivery_status"]), ("cleared", "delivered"))
         self.assertEqual(self.comments.on(5), [])
 
+    def test_cleanup_audit_failure_keeps_status_without_a_stale_delivery_receipt(self) -> None:
+        self.reconcile_preview()
+        self.github.pull_request["state"] = "closed"
+        with patch.object(self.store, "write_preview_pr_feedback_record", side_effect=RuntimeError):
+            failed = cast(dict[str, object], self.reconcile_preview()["pr_feedback"])
+        self.assertEqual((failed["status"], failed["delivery_status"]), ("cleared", "failed"))
+        self.assertNotIn("feedback_id", failed)
+        self.assertNotIn("delivery_action", failed)
+        self.assertEqual(self.comments.on(5), [])
+
+        recovered = cast(dict[str, object], self.reconcile_preview()["pr_feedback"])
+
+        self.assertEqual(recovered["delivery_status"], "delivered")
+        record = next(
+            item
+            for item in self.store.list_preview_pr_feedback_records(context_name="cm")
+            if item.feedback_id == recovered["feedback_id"]
+        )
+        self.assertEqual(record.status, "cleared")
+
     def test_failed_pending_feedback_cleanup_retries_on_the_next_reconcile(self) -> None:
         self.reconcile_preview()
         self.github.pull_request["state"] = "closed"
