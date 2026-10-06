@@ -299,6 +299,14 @@ class FakeGitHubComments:
             ]
         if method != "GET" and self.fail_writes:
             raise click.ClickException(f"GitHub API request failed for {path}: HTTP Error 502")
+        if path.startswith(f"{prefix}/issues/comments/") and method == "DELETE":
+            comment_id = int(path.rsplit("/", 1)[1])
+            for number, comments in self.comments.items():
+                for comment in comments:
+                    if comment["id"] == comment_id:
+                        comments.remove(comment)
+                        self.writes.append(("DELETE", number))
+                        return None
         if path.startswith(f"{prefix}/issues/comments/") and method == "PATCH":
             comment_id = int(path.rsplit("/", 1)[1])
             for number, comments in self.comments.items():
@@ -2711,6 +2719,103 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
     def comment_body(self) -> str:
         (comment,) = self.comments.on(5)
         return cast(str, comment["body"])
+
+    def test_closing_before_a_preview_build_clears_pending_feedback(self) -> None:
+        self.assertEqual(self.reconcile_preview()["action"], "wait")
+        self.assertIn("Waiting for: a verified build", self.comment_body())
+        self.comments.comments[5].append({"id": 1000, "body": "Unrelated review comment"})
+        self.github.pull_request["state"] = "closed"
+
+        closed = self.reconcile_preview()
+
+        self.assertEqual((closed["action"], closed["reason"]), ("none", "pull_request_not_open"))
+        self.assertEqual(self.comments.on(5), [{"id": 1000, "body": "Unrelated review comment"}])
+        feedback = cast(dict[str, object], closed["pr_feedback"])
+        self.assertEqual(
+            (feedback["status"], feedback["delivery_status"]), ("cleared", "delivered")
+        )
+        self.assertEqual(self.store.list_preview_records(), ())
+        self.assertEqual(self.provider.applied, [])
+        self.reconcile_preview()
+        self.assertEqual(self.comments.writes, [("POST", 5), ("DELETE", 5)])
+        record = max(
+            self.store.list_preview_pr_feedback_records(context_name="cm"),
+            key=lambda item: item.requested_at,
+        )
+        self.assertEqual((record.status, record.delivery_status), ("cleared", "delivered"))
+
+    def test_failed_pending_feedback_is_not_created_when_the_pr_closes(self) -> None:
+        self.comments.fail_writes = True
+        self.reconcile_preview()
+        self.comments.fail_writes = False
+        self.github.pull_request["state"] = "closed"
+
+        closed = self.reconcile_preview()
+
+        feedback = cast(dict[str, object], closed["pr_feedback"])
+        self.assertEqual(feedback["status"], "cleared")
+        self.assertEqual(feedback["delivery_status"], "delivered")
+        self.assertEqual(feedback["delivery_action"], "no_existing_comment")
+        self.assertEqual(self.comments.writes, [])
+        records = self.store.list_preview_pr_feedback_records(context_name="cm")
+        self.reconcile_preview()
+        self.assertEqual(self.store.list_preview_pr_feedback_records(context_name="cm"), records)
+
+    def test_pending_feedback_audit_failure_keeps_cleanup_history(self) -> None:
+        with patch.object(self.store, "write_preview_pr_feedback_record", side_effect=RuntimeError):
+            pending = cast(dict[str, object], self.reconcile_preview()["pr_feedback"])
+        self.assertEqual((pending["status"], pending["delivery_status"]), ("pending", "failed"))
+        self.assertIn("Waiting for:", self.comment_body())
+        self.github.pull_request["state"] = "closed"
+
+        cleared = cast(dict[str, object], self.reconcile_preview()["pr_feedback"])
+
+        self.assertEqual((cleared["status"], cleared["delivery_status"]), ("cleared", "delivered"))
+        self.assertEqual(self.comments.on(5), [])
+
+    def test_cleanup_audit_failure_keeps_status_without_a_stale_delivery_receipt(self) -> None:
+        self.reconcile_preview()
+        self.github.pull_request["state"] = "closed"
+        with patch.object(self.store, "write_preview_pr_feedback_record", side_effect=RuntimeError):
+            failed = cast(dict[str, object], self.reconcile_preview()["pr_feedback"])
+        self.assertEqual((failed["status"], failed["delivery_status"]), ("cleared", "failed"))
+        self.assertNotIn("feedback_id", failed)
+        self.assertNotIn("delivery_action", failed)
+        self.assertEqual(self.comments.on(5), [])
+
+        recovered = cast(dict[str, object], self.reconcile_preview()["pr_feedback"])
+
+        self.assertEqual(recovered["delivery_status"], "delivered")
+        record = next(
+            item
+            for item in self.store.list_preview_pr_feedback_records(context_name="cm")
+            if item.feedback_id == recovered["feedback_id"]
+        )
+        self.assertEqual(record.status, "cleared")
+
+    def test_failed_pending_feedback_cleanup_retries_on_the_next_reconcile(self) -> None:
+        self.reconcile_preview()
+        self.github.pull_request["state"] = "closed"
+        self.comments.fail_writes = True
+
+        failed = cast(dict[str, object], self.reconcile_preview()["pr_feedback"])
+
+        self.assertEqual((failed["status"], failed["delivery_status"]), ("cleared", "failed"))
+        self.assertIn("Waiting for:", self.comment_body())
+        self.comments.fail_writes = False
+        delivered = cast(dict[str, object], self.reconcile_preview()["pr_feedback"])
+        self.assertEqual(delivered["delivery_status"], "delivered")
+        self.assertEqual(self.comments.on(5), [])
+        self.reconcile_preview()
+        self.assertEqual(self.comments.writes, [("POST", 5), ("DELETE", 5)])
+
+    def test_closed_pr_without_feedback_history_posts_nothing(self) -> None:
+        self.github.pull_request["state"] = "closed"
+
+        self.assertEqual(self.reconcile_preview()["action"], "none")
+
+        self.assertEqual(self.comments.writes, [])
+        self.assertEqual(self.store.list_preview_pr_feedback_records(context_name="cm"), ())
 
     def test_preview_result_is_one_comment_edited_in_place(self) -> None:
         self.assertEqual(self.reconcile_preview()["action"], "wait")
