@@ -296,12 +296,18 @@ gate. Both commit SHAs must be supplied; missing commits or failed git reads
 fail closed. The scan ignores dirty and untracked files. It compares the two
 supplied snapshots exactly, rather than calculating a merge base: a PR behind
 its base can report authority absent from the newer base but present in its head.
-The reusable gate maps PR, merge-group and push events to their explicit commit
-pairs and fetches a missing named commit from the checked-out repository; zero-SHA comparisons and events without a mapping fail closed. Use the
-CLI with an explicit pair, or full-audit, for other events. Reusable callers
-should select pull_request and merge_group, or push updates with two existing
-commits. Branch/tag creation has no valid before commit and must use the PR path
-for changed-file verification; no default-branch fallback is invented. Changed symlink paths
+The reusable gate maps PR, merge-group and ordinary push events to their explicit
+commit pairs and fetches a missing named commit from the checked-out repository.
+A newly created default-branch train ref has a zero before SHA. For that event,
+the gate fetches the repository's event-supplied default branch and selects the
+first shared commit in the candidate and target branch's first-parent histories.
+This recovers the train's original base across all batch entries, including when
+the target advances or merges the candidate while the job is queued. The
+comparison covers every batch entry and stays bound to committed snapshots.
+Missing history, no shared base, a same-head base, other zero-SHA comparisons,
+and unmapped events fail closed. Branch/tag creation outside that default-branch
+train path uses pull_request or merge_group verification, or the CLI with an
+explicit pair/full-audit. Changed symlink paths
 resolve only within the committed tree and are classified under the link path;
 links outside that tree or through submodules fail closed. Link hops are bounded,
 and a broken base-side link supplies no preexisting finding exemption, so a PR
