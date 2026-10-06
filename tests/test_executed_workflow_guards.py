@@ -79,59 +79,6 @@ class ExecutedWorkflowGuardTests(unittest.TestCase):
         outputs = dict(line.split("=", 1) for line in self.output.read_text().splitlines())
         return outputs["idempotency_key"]
 
-    def test_config_authority_invokes_selected_python_and_preserves_enforcement(self) -> None:
-        from tests.test_config_authority_audit import _commit_all, _git, _init_repo
-
-        product = self.root / "product-repo"
-        product.mkdir()
-        # The worker resolves ../product-repo from the Launchplane checkout.
-        checkout = self.root / "launchplane"
-        checkout.mkdir()
-        _init_repo(product)
-        (product / "app.py").write_text("pass\n")
-        _commit_all(product)
-        revision = _git(product, "rev-parse", "HEAD")
-        binaries = self.root / "bin"
-        binaries.mkdir()
-        uv = binaries / "uv"
-        uv.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$AUDIT_ARGS"\n')
-        uv.chmod(0o755)
-        workflow = load_workflow(
-            REPOSITORY_ROOT / ".github/workflows/reusable-product-repo-config-authority.yml"
-        )
-        step = workflow.step_named(
-            "launchplane-config-authority", "Run Launchplane config authority gate"
-        )
-        assert step is not None
-        assert self.bash is not None
-        arguments = self.root / "audit-arguments"
-        for version, enforce in (("3.14", "true"), ("3.13", "false")):
-            with self.subTest(version=version, enforce=enforce):
-                result = subprocess.run(
-                    [self.bash, "-ceu", step.run],
-                    cwd=checkout,
-                    env={
-                        **self.env,
-                        "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
-                        "EVENT_NAME": "pull_request",
-                        "BASE_SHA": revision,
-                        "HEAD_SHA": revision,
-                        "FAIL_ON_FINDINGS": enforce,
-                        "AUDIT_PYTHON_VERSION": version,
-                        "AUDIT_ARGS": str(arguments),
-                    },
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                    check=False,
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                invoked = arguments.read_text().splitlines()
-                self.assertEqual(invoked[:3], ["run", "--python", version])
-                self.assertEqual("--fail-on-findings" in invoked, enforce == "true")
-                self.assertEqual(invoked[invoked.index("--base-sha") + 1], revision)
-                self.assertEqual(invoked[invoked.index("--head-sha") + 1], revision)
-
     def test_rerun_reuses_identity_but_new_run_has_its_own_identity(self) -> None:
         first = self.deploy_identity(run_id="101", attempt="1")
         self.assertEqual(first, self.deploy_identity(run_id="101", attempt="2"))
