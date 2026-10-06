@@ -15,6 +15,10 @@ if TYPE_CHECKING:
     from control_plane.merge_train_github import MergeTrainGitHubTransport
 
 
+class _IncompleteCodeOwnerEvidence(ValueError):
+    """Changed-file evidence cannot justify batching this pull request."""
+
+
 _CODEOWNERS_PATHS = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
 
 
@@ -49,14 +53,14 @@ def individual_landing_snapshots(
                 or not isinstance(confirmation.get("head"), dict)
                 or confirmation["head"].get("sha") != pr.head_sha
             ):
-                raise MergeTrainGitHubError("Code-owner routing head changed during file reads.")
+                raise _IncompleteCodeOwnerEvidence(
+                    "Code-owner routing head changed during file reads."
+                )
             individual = any(
                 path in _CODEOWNERS_PATHS or any(_may_match(path, pattern) for pattern in patterns)
                 for path in paths
             )
-        except MergeTrainGitHubError as error:
-            if error.rate_limited:
-                raise
+        except _IncompleteCodeOwnerEvidence:
             # Incomplete evidence can never justify transferring this PR's
             # approval to a batch. Other PRs may still proceed.
             individual = True
@@ -67,8 +71,6 @@ def individual_landing_snapshots(
 def _changed_paths(
     transport: "MergeTrainGitHubTransport", repository_path: str, number: int
 ) -> tuple[str, ...]:
-    from control_plane.merge_train_github import MergeTrainGitHubError
-
     paths: list[str] = []
     for page in range(1, 31):
         files = transport.request(
@@ -76,25 +78,31 @@ def _changed_paths(
             path=f"/repos/{repository_path}/pulls/{number}/files?per_page=100&page={page}",
         )
         if not isinstance(files, list):
-            raise MergeTrainGitHubError("Code-owner routing requires complete changed files.")
+            raise _IncompleteCodeOwnerEvidence(
+                "Code-owner routing requires complete changed files."
+            )
         for file in files:
             if (
                 not isinstance(file, dict)
                 or not isinstance(file.get("filename"), str)
                 or not file["filename"]
             ):
-                raise MergeTrainGitHubError("Code-owner routing received a malformed file.")
+                raise _IncompleteCodeOwnerEvidence("Code-owner routing received a malformed file.")
             paths.append(file["filename"])
             if file.get("status") == "renamed":
                 previous = file.get("previous_filename")
                 if not isinstance(previous, str) or not previous:
-                    raise MergeTrainGitHubError("Code-owner routing requires rename origins.")
+                    raise _IncompleteCodeOwnerEvidence(
+                        "Code-owner routing requires rename origins."
+                    )
                 paths.append(previous)
         if len(files) < 100:
             if not paths:
-                raise MergeTrainGitHubError("Code-owner routing requires nonempty changed files.")
+                raise _IncompleteCodeOwnerEvidence(
+                    "Code-owner routing requires nonempty changed files."
+                )
             return tuple(paths)
-    raise MergeTrainGitHubError("Code-owner routing exceeded the changed-file page bound.")
+    raise _IncompleteCodeOwnerEvidence("Code-owner routing exceeded the changed-file page bound.")
 
 
 def _read_patterns(
@@ -143,6 +151,8 @@ def _may_match(path: str, pattern: str) -> bool:
         return True
     anchored = pattern.startswith("/")
     pattern = pattern.lstrip("/").rstrip("/")
+    if not pattern:
+        return True
     prefixes = tuple(
         "/".join(path.split("/")[:index]) for index in range(1, len(path.split("/")) + 1)
     )

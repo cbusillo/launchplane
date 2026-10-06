@@ -140,6 +140,7 @@ class CodeOwnerLandingTests(unittest.TestCase):
             ("*.md", {"filename": "nested/change.md"}),
             ("/docs/**/guide.md", {"filename": "docs/guide.md"}),
             ("/custom.txt", {"filename": "custom.txt"}),
+            ("/", {"filename": "app.py"}),
         ):
             with self.subTest(pattern=pattern):
                 transport = RecordingMergeTrainGitHubTransport(
@@ -191,6 +192,21 @@ class CodeOwnerLandingTests(unittest.TestCase):
                 )
                 self.assertTrue(prs[0].requires_individual_landing)
                 self.assertFalse(prs[1].requires_individual_landing)
+
+    def test_provider_failure_does_not_change_candidate_routing(self) -> None:
+        for status in (None, 502, 403):
+            with self.subTest(status=status), self.assertRaises(MergeTrainGitHubError):
+                individual_landing_snapshots(
+                    transport=RecordingMergeTrainGitHubTransport(
+                        responses=(
+                            _owners("/DIRECTION.md @owner"),
+                            MergeTrainGitHubError("provider read failed", status_code=status),
+                        )
+                    ),
+                    repository_path="example/repo",
+                    base_sha="base",
+                    pull_requests=(_pr(1),),
+                )
 
     def test_missing_ownership_uses_next_location_but_denied_read_stops(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(

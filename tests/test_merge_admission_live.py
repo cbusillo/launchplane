@@ -610,6 +610,67 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
                 self.assertEqual(result.readiness.engineering_review_authority, "advisory")
                 self.assertEqual(result.readiness.engineering_review.state, "unknown")
 
+    def test_an_existing_multi_pr_plan_cannot_land_an_owned_change_in_a_batch(self) -> None:
+        candidate_record, landing_record, controller_state, _ = _guard_records()
+        first = landing_record.landing_plan.entries[0]
+        second = first.model_copy(
+            update={
+                "pull_request_number": first.pull_request_number + 1,
+                "position": 2,
+                "expected_head_sha": "d" * 40,
+            }
+        )
+        landing_record = landing_record.model_copy(
+            update={
+                "landing_plan": landing_record.landing_plan.model_copy(
+                    update={"entries": (first, second)}
+                ),
+            }
+        )
+        snapshot = MergeTrainDryRunSnapshot(
+            repository=REPOSITORY,
+            base_branch="main",
+            base_sha=BASE_SHA,
+            pull_requests=(
+                _queued_pull_request(
+                    number=first.pull_request_number,
+                    head_sha=HEAD_SHA,
+                    created_at="2026-08-11T03:00:00Z",
+                ).model_copy(update={"requires_individual_landing": True}),
+                _queued_pull_request(
+                    number=second.pull_request_number,
+                    head_sha=second.expected_head_sha,
+                    created_at="2026-08-11T03:00:01Z",
+                ),
+            ),
+        )
+        evaluator = LiveMergeAdmissionEvaluator(
+            store=object(),
+            repository_evidence_provider=_UnusedRepositoryEvidenceProvider(),
+            technical_check_client=TenantAdmissionControllerGitHubClient(
+                transport=RecordingMergeTrainGitHubTransport()
+            ),
+            policy_record_provider=lambda: build_test_merge_train_policy_record(
+                repository=REPOSITORY
+            ),
+            snapshot_reader=_StaticSnapshotReader(snapshot),
+        )
+        with self.assertRaises(MergeAdmissionDeniedError) as denied:
+            evaluator.evaluate(
+                candidate_record=candidate_record,
+                landing_plan_record=landing_record,
+                entry=first,
+                observed_base_sha=BASE_SHA,
+                observed_base_tree_sha="4" * 40,
+                observed_head_sha=HEAD_SHA,
+                observed_head_tree_sha=TREE_SHA,
+                controller_state=controller_state,
+                expected_lease_owner=controller_state.lease_owner,
+                stack_collapse_record=None,
+                evaluated_at="2026-08-11T03:01:00Z",
+            )
+        self.assertEqual(denied.exception.reason_code, "landing_lineage_changed")
+
     def test_live_queue_is_rediscovered_and_inserted_pr_refuses_admission(self) -> None:
         candidate_record, landing_record, controller_state, _ = _guard_records()
         snapshot_reader = _StaticSnapshotReader(
