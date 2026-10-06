@@ -506,14 +506,25 @@ provider coordinates remain inside Launchplane.
 Submit `product`, `instance: "testing"`, `recovery_reference` and `reason` to the
 existing dry-run or provider-evidence POST route, without an `Idempotency-Key`
 header. Apply also requires `expected_recovery_digest` from the reviewed dry run.
-These reference requests require scoped admin identity and the existing recovery
-authority; apply requires `generic_web_deploy.execute`. The service resolves the
+These reference requests require scoped admin identity. Dry-run requires both
+`product_environment.read` and `generic_web_deploy.execute`; provider-evidence
+requires `product_environment.read` plus its existing evidence-read or execute
+authority. Apply requires `generic_web_deploy.execute`. The service resolves the
 original coordinates and runs the same recovery inspector and atomic transition
 as the legacy path. The reference binds the reservation snapshot; changes during
 resolution or inspection refuse. Changed provider observations or reasons invalidate
 the reviewed digest. Reads never create a reservation or inspect a provider;
 dry-run never writes. Unknown outcomes remain held under the existing recovery
 rules. A settled reservation is no longer selectable by a held-event reference.
+After a lost apply response, read the testing lane's deployment and reconcile
+evidence through `GET /v1/products/{product}/environments/testing` and
+`GET /v1/product-profiles/{product}/reconcile-requests`. A missing held reference
+alone does not prove success or failure and never authorizes another provider effect.
+If those reads do not establish the outcome, keep it unconfirmed.
+
+Rollout compatibility: a service build predating the retained-request field
+cannot decode new event target snapshots. Rolling back to such a build leaves
+recovery unavailable and that build's monitor may omit those held fences.
 
 Legacy generic-web deploy recovery starts read-only. Admins call
 `POST /v1/admin/generic-web/deploy-recovery/dry-run` with the exact original

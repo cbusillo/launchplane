@@ -82,6 +82,7 @@ __all__ = [
     "GENERIC_WEB_DEPLOY_RECOVERY_PROVIDER_EVIDENCE_READ_ACTION",
     "GENERIC_WEB_DEPLOY_RECOVERY_APPLY_ROUTE",
     "GenericWebDeployRecoveryDependencies",
+    "authorized_event_deploy_coordinates",
     "build_generic_web_deploy_recovery_apply_handler",
     "build_generic_web_deploy_recovery_dry_run_handler",
     "build_generic_web_deploy_recovery_provider_evidence_handler",
@@ -451,16 +452,33 @@ def _transition_expired_running_recovery(
 async def _inspect_generic_web_deploy_recovery(
     *,
     request: Request,
-    recovery_request: GenericWebDeployRecoveryDryRunRequest,
+    recovery_request: GenericWebDeployRecoveryDryRunRequest
+    | GenericWebDeployRecoveryReferenceRequest,
     identity: LaunchplaneIdentity,
     record_store: object,
     idempotency_key: str,
     trace_id: str,
     dependencies: GenericWebDeployRecoveryDependencies,
-    original_payload: dict[str, object] | None = None,
-    expected_reservation: LaunchplaneIdempotencyRecord | None = None,
     authorization_actions: tuple[str, ...] = ("generic_web_deploy.execute",),
 ) -> _GenericWebDeployRecoveryInspection:
+    original_payload: dict[str, object] | None = None
+    expected_reservation: LaunchplaneIdempotencyRecord | None = None
+    if isinstance(recovery_request, GenericWebDeployRecoveryReferenceRequest):
+        is_apply = isinstance(recovery_request, GenericWebDeployRecoveryReferenceApplyRequest)
+        resolved, idempotency_key, expected_reservation = _resolve_reference_request(
+            recovery_request=recovery_request,
+            identity=identity,
+            record_store=record_store,
+            dependencies=dependencies,
+            trace_id=trace_id,
+            apply=is_apply,
+        )
+        recovery_request = (
+            GenericWebDeployRecoveryApplyRequest.model_validate(resolved)
+            if is_apply
+            else GenericWebDeployRecoveryDryRunRequest.model_validate(resolved)
+        )
+        original_payload = resolved["original_deploy"]
     try:
         profile, lane = resolve_generic_web_deploy_lane(
             record_store=record_store,
@@ -602,6 +620,7 @@ async def _inspect_generic_web_deploy_recovery(
     authoritative_lane = lane
     legacy_provider_effect_started_at = ""
     legacy_snapshot_without_product = False
+    retain_event_request = False
     runtime_close_out_evidence: GenericWebRuntimeCloseOutEvidence | None = None
 
     if reservation.state == "completed":
@@ -663,6 +682,7 @@ async def _inspect_generic_web_deploy_recovery(
                 code="reservation_target_conflict",
                 message="Stored event deploy request conflicts with the original payload.",
             )
+        retain_event_request = stored_target.original_event_deploy is not None
         operation_context = stored_target.context.strip()
         stored_instance = stored_target.instance.strip()
         stored_product = stored_target.product.strip()
@@ -794,7 +814,7 @@ async def _inspect_generic_web_deploy_recovery(
                 lane=authoritative_lane,
                 trace_id=trace_id,
                 recorded_artifact=True,
-                retain_event_request=stored_target.original_event_deploy is not None,
+                retain_event_request=retain_event_request,
             )
             provider_inspection = adapter.inspect(
                 provider_operation_key=provider_operation_key,
@@ -885,23 +905,8 @@ def build_generic_web_deploy_recovery_dry_run_handler(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> GenericWebDeployRecoveryDryRunResponse:
         trace_id = dependencies.next_trace_id()
-        original_payload = None
-        expected_reservation = None
-        if isinstance(recovery_request, GenericWebDeployRecoveryReferenceRequest):
-            resolved, idempotency_key, expected_reservation = _resolve_reference_request(
-                recovery_request=recovery_request,
-                identity=identity,
-                record_store=record_store,
-                dependencies=dependencies,
-                trace_id=trace_id,
-                apply=False,
-            )
-            recovery_request = GenericWebDeployRecoveryDryRunRequest.model_validate(resolved)
-            original_payload = resolved["original_deploy"]
         inspection = await _inspect_generic_web_deploy_recovery(
             request=request,
-            original_payload=original_payload,
-            expected_reservation=expected_reservation,
             recovery_request=recovery_request,
             identity=identity,
             record_store=record_store,
@@ -926,23 +931,8 @@ def build_generic_web_deploy_recovery_provider_evidence_handler(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> GenericWebDeployRecoveryProviderEvidenceResponse:
         trace_id = dependencies.next_trace_id()
-        original_payload = None
-        expected_reservation = None
-        if isinstance(recovery_request, GenericWebDeployRecoveryReferenceRequest):
-            resolved, idempotency_key, expected_reservation = _resolve_reference_request(
-                recovery_request=recovery_request,
-                identity=identity,
-                record_store=record_store,
-                dependencies=dependencies,
-                trace_id=trace_id,
-                apply=False,
-            )
-            recovery_request = GenericWebDeployRecoveryDryRunRequest.model_validate(resolved)
-            original_payload = resolved["original_deploy"]
         inspection = await _inspect_generic_web_deploy_recovery(
             request=request,
-            original_payload=original_payload,
-            expected_reservation=expected_reservation,
             recovery_request=recovery_request,
             identity=identity,
             record_store=record_store,
@@ -996,23 +986,8 @@ def build_generic_web_deploy_recovery_apply_handler(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> GenericWebDeployRecoveryApplyResponse:
         trace_id = dependencies.next_trace_id()
-        original_payload = None
-        expected_reservation = None
-        if isinstance(recovery_request, GenericWebDeployRecoveryReferenceRequest):
-            resolved, idempotency_key, expected_reservation = _resolve_reference_request(
-                recovery_request=recovery_request,
-                identity=identity,
-                record_store=record_store,
-                dependencies=dependencies,
-                trace_id=trace_id,
-                apply=True,
-            )
-            recovery_request = GenericWebDeployRecoveryApplyRequest.model_validate(resolved)
-            original_payload = resolved["original_deploy"]
         inspection = await _inspect_generic_web_deploy_recovery(
             request=request,
-            original_payload=original_payload,
-            expected_reservation=expected_reservation,
             recovery_request=recovery_request,
             identity=identity,
             record_store=record_store,
@@ -1020,6 +995,8 @@ def build_generic_web_deploy_recovery_apply_handler(
             trace_id=trace_id,
             dependencies=dependencies,
         )
+        assert isinstance(inspection.request, GenericWebDeployRecoveryApplyRequest)
+        recovery_request = inspection.request
         if not isinstance(record_store, PostgresRecordStore):
             raise dependencies.http_error(
                 status_code=503,
@@ -1069,6 +1046,18 @@ def build_generic_web_deploy_recovery_apply_handler(
         if inspection.adapter is None:
             raise RuntimeError("Generic web deploy recovery apply requires an adapter.")
         recovery_metadata = _recovery_metadata(inspection)
+        if (
+            inspection.proposed_action == "retry_original_operation"
+            and inspection.adapter.reconciliation_key().strip()
+            != inspection.reservation.reconciliation_key
+        ):
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="reservation_target_conflict",
+                message="Recovery retry cannot preserve the original reconciliation identity.",
+            )
+
         action_inspection = _transition_expired_running_recovery(
             inspection=inspection,
             store=record_store,
@@ -1124,17 +1113,6 @@ def build_generic_web_deploy_recovery_apply_handler(
                 trace_id=trace_id,
                 inspection=inspection,
                 reservation=adoption.record,
-            )
-
-        if (
-            inspection.adapter.reconciliation_key().strip()
-            != action_inspection.reservation.reconciliation_key
-        ):
-            raise dependencies.http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="reservation_target_conflict",
-                message="Recovery retry cannot preserve the original reconciliation identity.",
             )
 
         retry = record_store.retry_reconciled_mutation(

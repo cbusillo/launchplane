@@ -2,6 +2,7 @@
 
 import json
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -13,6 +14,7 @@ from control_plane.contracts.artifact_identity import (
     ArtifactImageReference,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
 from control_plane.event_testing_deploy import event_testing_deploy_request
 from control_plane.product_reconcile import RECONCILE_SOURCE, reconcile_reservation_scope
 from control_plane.storage.postgres import (
@@ -67,7 +69,11 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
         self.reservation = self.reserve(
             "first",
             state="running"
-            if self._testMethodName == "test_active_lease_waits_without_provider_read"
+            if self._testMethodName
+            in (
+                "test_active_lease_waits_without_provider_read",
+                "test_retry_identity_conflict_does_not_transition_an_expired_lease",
+            )
             else "reconcile_required",
         )
         self.app = _create_recovery_app(
@@ -352,9 +358,7 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
             "list_held_provider_target_reservations",
             side_effect=AssertionError("disclosure"),
         ):
-            code, result = _invoke_app(
-                self.app, method="GET", path=self.path, authorization="Bearer valid-token"
-            )
+            code, result = _invoke_app(self.app, method="GET", path=self.path)
             self.assertEqual(code, 403, result)
 
     def test_legacy_saved_plan_requires_exact_fingerprint(self) -> None:
@@ -416,3 +420,77 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
         self.assertEqual(stored.state, "completed")
         self.assertEqual(stored.attempt, self.reservation.attempt + 1)
         self.assertEqual(stored.reconciliation_key, self.reservation.reconciliation_key)
+
+    def test_two_held_records_in_the_event_scope_refuse(self) -> None:
+        second = self.reservation.model_copy(
+            update={
+                "idempotency_key": self.reservation.idempotency_key + "-second",
+                "provider_target_key": "other-target",
+            }
+        )
+        _write_generic_web_recovery_reservation(self.store, second)
+        with patch.object(
+            self.store,
+            "lookup_existing_mutation_reservation",
+            side_effect=AssertionError("ambiguous selection"),
+        ):
+            self.assertEqual(self.read()[0], 409)
+
+    def test_legacy_request_still_requires_original_key(self) -> None:
+        code, result = _invoke_app(
+            self.app,
+            method="POST",
+            path="/v1/admin/generic-web/deploy-recovery/dry-run",
+            authorization="Bearer local-operator-token",
+            payload={
+                "product": self.product,
+                "instance": "testing",
+                "original_deploy": self.original,
+                "reason": "Inspect the original deploy.",
+            },
+        )
+        self.assertEqual(code, 400, result)
+        self.assertEqual(result["error"]["code"], "idempotency_key_required")
+
+    def test_retry_identity_conflict_does_not_transition_an_expired_lease(self) -> None:
+        expired_observation = parse_launchplane_mutation_timestamp(
+            self.reservation.lease_expires_at, field_name="lease_expires_at"
+        ) + timedelta(seconds=1)
+        lookup = ExistingMutationReservationLookupResult(
+            status="found", record=self.reservation, observed_at=expired_observation.isoformat()
+        )
+        provider = _RecoveryObservationProvider(
+            GenericWebProviderDeploymentObservation(outcome="absent")
+        )
+        with (
+            patch.object(self.store, "lookup_existing_mutation_reservation", return_value=lookup),
+            patch(
+                "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
+                return_value=provider,
+            ),
+        ):
+            _, read = self.read()
+            code, plan = self.review(read["recovery_reference"])
+            self.assertEqual(code, 200, plan)
+            self.assertEqual(plan["proposed_action"], "retry_original_operation")
+            with (
+                patch(
+                    "control_plane.generic_web_deploy_provider_adapter.GenericWebDeployProviderMutationAdapter.reconciliation_key",
+                    return_value="changed",
+                ),
+                patch.object(
+                    self.store,
+                    "mark_mutation_reconcile_required",
+                    side_effect=AssertionError("state write"),
+                ),
+                patch.object(
+                    self.store,
+                    "retry_reconciled_mutation",
+                    side_effect=AssertionError("retry write"),
+                ),
+            ):
+                code, refused = self.review(
+                    read["recovery_reference"], digest=plan["recovery_digest"]
+                )
+                self.assertEqual(code, 409, refused)
+                self.assertEqual(refused["error"]["code"], "reservation_target_conflict")
