@@ -128,7 +128,7 @@ def _read_patterns(
             raise MergeTrainGitHubError("Code-owner routing requires readable CODEOWNERS content.")
         try:
             content = base64.b64decode("".join(payload["content"].split()), validate=True).decode(
-                "utf-8"
+                "utf-8-sig"
             )
         except (ValueError, binascii.Error, UnicodeDecodeError) as error:
             raise MergeTrainGitHubError(
@@ -149,17 +149,17 @@ def _may_match(path: str, pattern: str) -> bool:
     # overmatch, but must never erase the approval attached to an owned PR.
     if any(character in pattern for character in "\\[]!"):
         return True
-    if "**" in pattern:
-        # A literal prefix narrows conservative routing without implementing a
-        # second gitignore engine. Leading wildcards may still overmatch.
-        prefix = pattern.lstrip("/").split("*", 1)[0].split("?", 1)[0]
-        if pattern.startswith("/") or "/" in pattern:
-            return path.startswith(prefix)
-        return any(component.startswith(prefix) for component in path.split("/"))
     anchored = pattern.startswith("/")
     pattern = pattern.lstrip("/").rstrip("/")
     if not pattern:
         return True
+    if "**" in pattern:
+        # A literal prefix narrows conservative routing without implementing a
+        # second gitignore engine. Leading wildcards may still overmatch.
+        prefix = pattern.split("*", 1)[0].split("?", 1)[0]
+        if anchored or "/" in pattern:
+            return path.startswith(prefix)
+        return any(component.startswith(prefix) for component in path.split("/"))
     prefixes = tuple(
         "/".join(path.split("/")[:index]) for index in range(1, len(path.split("/")) + 1)
     )

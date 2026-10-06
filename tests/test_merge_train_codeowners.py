@@ -142,6 +142,8 @@ class CodeOwnerLandingTests(unittest.TestCase):
             ("/custom.txt", {"filename": "custom.txt"}),
             ("/", {"filename": "app.py"}),
             ("/docs/C#/", {"filename": "docs/C#/guide.md"}),
+            ("fixtures**/", {"filename": "tests/fixtures-v2/a.json"}),
+            ("\ufeff/DIRECTION.md", {"filename": "DIRECTION.md"}),
         ):
             with self.subTest(pattern=pattern):
                 transport = RecordingMergeTrainGitHubTransport(
