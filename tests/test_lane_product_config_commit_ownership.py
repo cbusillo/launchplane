@@ -1,4 +1,6 @@
 import unittest
+import json
+from dataclasses import asdict
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -13,7 +15,11 @@ from fastapi import FastAPI
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
+from control_plane.service_auth import (
+    BearerIdentityConfig,
+    GitHubActionsIdentity,
+    LaunchplaneAuthzPolicy,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import ProductProfileConflictError
@@ -27,16 +33,19 @@ from tests.test_integration_allowances import _request_payload as allowances_pay
 from tests.test_testing_lane_hold import _payload as hold_payload
 
 
+_record_store: ContextVar[FilesystemRecordStore | PostgresRecordStore] = ContextVar(
+    "lane_commit_test_store"
+)
+
+
 class LaneProductConfigCommitOwnershipTests(unittest.IsolatedAsyncioTestCase):
-    _apps: ClassVar[dict[str, FastAPI]]
-    _record_store: ClassVar[ContextVar[FilesystemRecordStore | PostgresRecordStore]]
+    _apps: ClassVar[dict[tuple[str, str, str, str], FastAPI]]
     _app_root: ClassVar[TemporaryDirectory[str]]
 
     @classmethod
     def setUpClass(cls) -> None:
         super().setUpClass()
         cls._apps = {}
-        cls._record_store = ContextVar("lane_commit_test_store")
         cls._app_root = TemporaryDirectory()
 
     @classmethod
@@ -52,24 +61,31 @@ class LaneProductConfigCommitOwnershipTests(unittest.IsolatedAsyncioTestCase):
         store: FilesystemRecordStore | PostgresRecordStore,
         *,
         caller: str,
+        identity: GitHubActionsIdentity,
         policy: LaunchplaneAuthzPolicy,
         config: BearerIdentityConfig,
     ) -> Iterator[FastAPI]:
         # Cache routes and caller policy, never records. Context propagates into
         # the app's worker threads and resets before the next isolated scenario.
-        token = cls._record_store.set(store)
+        token = _record_store.set(store)
         try:
-            if caller not in cls._apps:
-                cls._apps[caller] = create_launchplane_fastapi_app(
-                    verifier=_StubVerifier(_identity()),
+            key = (
+                caller,
+                policy.model_dump_json(),
+                config.model_dump_json(),
+                json.dumps(asdict(identity), sort_keys=True),
+            )
+            if key not in cls._apps:
+                cls._apps[key] = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(identity),
                     authz_policy=policy,
-                    record_store_factory=lambda: cls._record_store.get(),
+                    record_store_factory=lambda: _record_store.get(),
                     control_plane_root_path=Path(cls._app_root.name),
                     bearer_identity_config=config,
                 )
-            yield cls._apps[caller]
+            yield cls._apps[key]
         finally:
-            cls._record_store.reset(token)
+            _record_store.reset(token)
             if isinstance(store, PostgresRecordStore):
                 store.close()
 
@@ -227,7 +243,7 @@ class LaneProductConfigCommitOwnershipTests(unittest.IsolatedAsyncioTestCase):
                         )
                     )
                     with self._app_for_store(
-                        store, caller=caller, policy=policy, config=config
+                        store, caller=caller, identity=identity, policy=policy, config=config
                     ) as app:
                         headers = {"Authorization": f"Bearer {token}"}
                         path = f"/v1/product-config/{route}/apply"
