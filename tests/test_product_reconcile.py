@@ -2712,6 +2712,38 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         (comment,) = self.comments.on(5)
         return cast(str, comment["body"])
 
+    def test_closing_before_a_preview_build_clears_pending_feedback(self) -> None:
+        self.assertEqual(self.reconcile_preview()["action"], "wait")
+        self.assertIn("Waiting for: a verified build", self.comment_body())
+        self.github.pull_request["state"] = "closed"
+
+        closed = self.reconcile_preview()
+
+        self.assertEqual((closed["action"], closed["reason"]), ("none", "pull_request_not_open"))
+        self.assertIn("cleared preview feedback", self.comment_body())
+        self.assertNotIn("Waiting for:", self.comment_body())
+        feedback = cast(dict[str, object], closed["pr_feedback"])
+        self.assertEqual(
+            (feedback["status"], feedback["delivery_status"]), ("cleared", "delivered")
+        )
+        self.assertEqual(self.store.list_preview_records(), ())
+        self.assertEqual(self.provider.applied, [])
+        self.reconcile_preview()
+        self.assertEqual(self.comments.writes, [("POST", 5), ("PATCH", 5)])
+        record = max(
+            self.store.list_preview_pr_feedback_records(context_name="cm"),
+            key=lambda item: item.requested_at,
+        )
+        self.assertEqual((record.status, record.delivery_status), ("cleared", "delivered"))
+
+    def test_closed_pr_without_feedback_history_posts_nothing(self) -> None:
+        self.github.pull_request["state"] = "closed"
+
+        self.assertEqual(self.reconcile_preview()["action"], "none")
+
+        self.assertEqual(self.comments.writes, [])
+        self.assertEqual(self.store.list_preview_pr_feedback_records(context_name="cm"), ())
+
     def test_preview_result_is_one_comment_edited_in_place(self) -> None:
         self.assertEqual(self.reconcile_preview()["action"], "wait")
         self.assertIn("Waiting for: a verified build of this commit", self.comment_body())

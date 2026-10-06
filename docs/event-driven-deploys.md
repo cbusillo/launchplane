@@ -231,8 +231,10 @@ needs no workflow to report previews or testing deploys.
 - **Preview:** one comment on the PR, marked `<!-- launchplane-reconcile-preview -->`
   and edited in place: waiting for a verified build of the head commit, ready
   (with the preview URL), retired, or failed with a short, redacted reason
-  (`cleanup_failed` when a destroy failed). A plan that changes nothing, is
-  deferred, or is held for another driver says nothing.
+  (`cleanup_failed` when a destroy failed). Closing a PR before its preview
+  build arrives replaces its pending feedback with a terminal cleared note;
+  a closed PR without feedback history posts nothing. Other plans that change
+  nothing, are deferred, or are held for another driver say nothing.
 - **Testing:** one comment on the PR GitHub merged as the desired commit
   (`merge_commit_sha` equals it), marked `<!-- launchplane-reconcile-testing -->`:
   the deploy is queued, the testing lane runs it, it is waiting because the

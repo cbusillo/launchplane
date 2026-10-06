@@ -193,6 +193,14 @@ def _preview_feedback(
         status, preview_url = "ready", _text(plan.get("current_preview_url"))
     elif action == "destroy" and plan.get("preview_result_status") == "pass":
         status, revision = "destroyed", ""
+    elif (
+        action == "none"
+        and plan.get("reason") == "pull_request_not_open"
+        and not error
+        and isinstance(previous := request.last_plan.get(PR_FEEDBACK_PLAN_KEY), dict)
+        and previous.get("status") == "pending"
+    ):
+        status, revision = "cleared", ""
     else:
         return None
     assert request.pull_request_number is not None
