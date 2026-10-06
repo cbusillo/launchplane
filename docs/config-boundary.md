@@ -331,6 +331,24 @@ routing values and unknown Launchplane fields remain findings. The workflow
 repository allowance applies only to its exact catalog field in this file.
 Omit unused optional fields rather than supplying null or empty routing values.
 
+In `pyproject.toml`, Black's `tool.black.target-version` list accepts its
+supported lowercase Python target identifiers with
+`repo_metadata_ergonomics` evidence. The allowance applies only to that list's
+string elements; other target fields, runtime/provider values, credentials and
+unsupported identifiers remain findings. Black's target vocabulary is defined
+in [its TargetVersion enum](https://github.com/psf/black/blob/26.5.1/src/black/mode.py).
+
+The reusable config-authority workflow's `python-version` input selects the
+interpreter for both the audit tool and Python AST parsing. Consumers using
+syntax newer than the default must supply their supported interpreter version
+(for example, `python-version: "3.14"`). The workflow passes that choice directly
+to `uv run --python`, including when a checkout already has a virtual environment.
+Syntax the selected interpreter cannot parse remains a reported coverage gap;
+`--fail-on-findings` enforces classified findings, not parser completeness.
+Adopt the landed immutable workflow/scanner revision and the input in
+the consumer's own maintenance issue; changing formatter settings to evade a
+finding or suppressing parser gaps is not the repair.
+
 Runner mechanic selectors use the same
 allowed labels in scalar, JSON, and YAML flow-list forms (for example,
 `self-hosted` and `[self-hosted]`); empty lists and lists containing custom

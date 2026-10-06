@@ -116,16 +116,28 @@ class RepositoryPinVerifierTests(unittest.TestCase):
                 "BASE_SHA": base,
                 "HEAD_SHA": head,
                 "FAIL_ON_FINDINGS": "true",
+                "AUDIT_PYTHON_VERSION": "3.14",
             }
-            for event in ("pull_request", "push", "merge_group"):
+            for event, version, enforce in (
+                ("pull_request", "3.14", "true"),
+                ("push", "3.13", "false"),
+                ("merge_group", "3.14", "true"),
+            ):
                 result = subprocess.run(
                     ["bash", "-c", step.run],
-                    env=env | {"EVENT_NAME": event},
+                    env=env
+                    | {
+                        "EVENT_NAME": event,
+                        "AUDIT_PYTHON_VERSION": version,
+                        "FAIL_ON_FINDINGS": enforce,
+                    },
                     capture_output=True,
                     text=True,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 arguments = capture.read_text().splitlines()
+                self.assertEqual(arguments[:3], ["run", "--python", version])
+                self.assertEqual("--fail-on-findings" in arguments, enforce == "true")
                 self.assertEqual(arguments[arguments.index("--base-sha") + 1], base)
                 self.assertEqual(arguments[arguments.index("--head-sha") + 1], head)
                 capture.unlink()
