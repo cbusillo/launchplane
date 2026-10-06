@@ -1788,7 +1788,7 @@ def service_inspect_config_boundary(control_plane_root: Path | None) -> None:
     "--fail-on-findings",
     is_flag=True,
     default=False,
-    help="Exit non-zero when unallowed config-authority findings are present.",
+    help="Exit non-zero for unallowed authority findings or incomplete Python parsing.",
 )
 @click.option(
     "--gate-profile",
@@ -1832,6 +1832,13 @@ def service_audit_config_authority(
     else:
         click.echo(json.dumps(payload, indent=2, sort_keys=True))
     if gate is not None and gate.get("status") == "fail":
+        if gate.get("rejected_coverage_gap_count"):
+            raise click.ClickException(
+                "Config authority audit has incomplete Python authority coverage. "
+                "Run the scanner with the consumer's supported Python interpreter "
+                "(reusable workflow python-version input) or repair invalid source, then rerun. "
+                "See the report for coverage gaps and any rejected findings."
+            )
         raise click.ClickException(
             "Config authority audit found unallowed checked-in runtime authority."
         )

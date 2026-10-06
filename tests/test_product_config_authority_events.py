@@ -148,6 +148,24 @@ class ConfigAuthorityEventTests(unittest.TestCase):
                 self.assertEqual(actual["status"], "fail")
                 self.assertNotIn("target-new", json.dumps(actual))
 
+    def test_unparsed_python_authority_fails_the_service_snapshot_gate(self) -> None:
+        from tests.test_config_authority_python_coverage import INVALID_CONSUMER_SOURCE
+
+        self.base = self.head
+        source = self.root / "consumer.py"
+        source.write_text(INVALID_CONSUMER_SOURCE)
+        _commit_all(self.root)
+        self.head = _git(self.root, "rev-parse", "HEAD")
+        source.write_text("# dirty repair must not change the GitHub snapshot\n")
+        actual = self.scan()
+        self.assertEqual(actual["status"], "fail")
+        gate = actual["gate"]
+        assert isinstance(gate, dict)
+        self.assertEqual(gate["rejected_findings"], [])
+        self.assertEqual(gate["rejected_coverage_gap_count"], 1)
+        self.assertEqual(gate["rejected_coverage_gaps"][0]["path"], "consumer.py")
+        self.assertNotIn("live.example", json.dumps(actual))
+
     def test_only_source_edits_request_a_rescan(self) -> None:
         from control_plane.product_config_authority_events import config_authority_event_supported
 
@@ -416,7 +434,7 @@ class ConfigAuthorityEventTests(unittest.TestCase):
 
         names = set()
         for event in ("pull_request", "push", "merge_group"):
-            for status in ("pass", "fail", "unavailable", "unavailable-retry"):
+            for status in ("pass", "fail", "incomplete", "unavailable", "unavailable-retry"):
                 pending = status == "unavailable-retry"
                 expected_conclusion: AdvisoryCheckConclusion | None = (
                     None if pending else "success" if status == "pass" else "failure"
@@ -455,7 +473,11 @@ class ConfigAuthorityEventTests(unittest.TestCase):
                             conclusion=expected_conclusion,
                         )
                         evidence: dict[str, JsonValue] = {
-                            "status": "unavailable" if pending else status,
+                            "status": "unavailable"
+                            if pending
+                            else "fail"
+                            if status == "incomplete"
+                            else status,
                             "retry_pending": pending,
                             "event": event,
                             "base_sha": self.base,
@@ -469,6 +491,19 @@ class ConfigAuthorityEventTests(unittest.TestCase):
                                 "rejected_finding_count": len(findings),
                                 "rejected_findings": findings,
                             }
+                        if status == "incomplete":
+                            evidence["gate"] = {
+                                "rejected_finding_count": 0,
+                                "rejected_findings": [],
+                                "rejected_coverage_gap_count": 1,
+                                "rejected_coverage_gaps": [
+                                    {
+                                        "path": "consumer.py",
+                                        "reason": "parse_failure",
+                                        "rejection_reason": "python_authority_coverage_incomplete",
+                                    }
+                                ],
+                            }
                         publish_product_config_authority_evidence(_inventory(), evidence, Path("."))
                         projection = writer.call_args.kwargs["projection"]
                         self.assertEqual(projection.conclusion, expected_conclusion)
@@ -479,6 +514,13 @@ class ConfigAuthorityEventTests(unittest.TestCase):
                         self.assertIn(
                             "repository_id=424242&delivery_id=verified-delivery", projection.summary
                         )
+                        if status == "incomplete":
+                            self.assertIn('"rejected_finding_count": 0', projection.summary)
+                            self.assertIn('"rejected_coverage_gap_count": 1', projection.summary)
+                            self.assertIn(
+                                "python_authority_coverage_incomplete", projection.summary
+                            )
+                            self.assertIn("consumer.py", projection.summary)
                         names.add(projection.name)
                         evidence["base_branch"] = "release/stable"
                         publish_product_config_authority_evidence(_inventory(), evidence, Path("."))
