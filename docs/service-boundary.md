@@ -132,6 +132,16 @@ governed expectation, custody and currentness contract.
     `launchplane_service.read` for the Launchplane service context and returning
     VeriReel backup-gate operation worker queue counters without request
     payloads
+  - `GET /v1/service/github-delivery`, using the source-declared observation
+    path with `launchplane_service.read` for machine identities on the
+    Launchplane service context. It returns Delivery/Advisory App selectors,
+    managed key identifiers and obsolete service-token record/binding
+    identifiers, never secret values. Human admins retain `product_config.plan`.
+    See [operation effects](driver-descriptors.md#operation-effects-and-standing-observation)
+    for declaration and revocation checks and [service controls](operations.md)
+    for the separate human-admin mutation guards. Before activating this
+    surface, review the active DB policy's holders of the standing permission;
+    existing holders can read this metadata without a new action grant.
 - native FastAPI Odoo operation status reads:
   - `GET /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}`,
     `.../target-replacement/operations/{operation_id}`,
