@@ -193,6 +193,35 @@ class CodeOwnerLandingTests(unittest.TestCase):
                 self.assertTrue(prs[0].requires_individual_landing)
                 self.assertFalse(prs[1].requires_individual_landing)
 
+    def test_unlabelled_eligible_change_still_lands_individually(self) -> None:
+        prs = (_pr(1).model_copy(update={"labels": (), "label_actors": ()}), _pr(2))
+        routed = individual_landing_snapshots(
+            transport=RecordingMergeTrainGitHubTransport(
+                responses=(
+                    _owners("/DIRECTION.md @owner"),
+                    [{"filename": "DIRECTION.md"}],
+                    {"head": {"sha": "head-1"}},
+                    [{"filename": "app.py"}],
+                    {"head": {"sha": "head-2"}},
+                )
+            ),
+            repository_path="example/repo",
+            base_sha="base",
+            pull_requests=prs,
+        )
+        self.assertTrue(routed[0].requires_individual_landing)
+        policy = build_test_merge_train_policy(repository="example/repo")
+        policy.policies[0].enqueue.label_required = False
+        result = build_merge_train_dry_run_result(
+            policy=policy,
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="example/repo", base_branch="main", pull_requests=routed
+            ),
+            batch_landing=True,
+        )
+        self.assertEqual(result.queue_order, (1,))
+        self.assertEqual(result.intended_next_action, "merge")
+
     def test_provider_failure_does_not_change_candidate_routing(self) -> None:
         for status in (None, 502, 403):
             with self.subTest(status=status), self.assertRaises(MergeTrainGitHubError):

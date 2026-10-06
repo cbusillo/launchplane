@@ -31,7 +31,7 @@ def individual_landing_snapshots(
 ) -> tuple["MergeTrainPullRequestSnapshot", ...]:
     from control_plane.merge_train_github import MergeTrainGitHubError
 
-    if not any(pr.state == "open" and not pr.is_draft and pr.labels for pr in pull_requests):
+    if not any(pr.state == "open" and not pr.is_draft for pr in pull_requests):
         return pull_requests
     if not base_sha:
         raise MergeTrainGitHubError("Code-owner batch routing requires the current base SHA.")
@@ -40,7 +40,7 @@ def individual_landing_snapshots(
         return pull_requests
     result = []
     for pr in pull_requests:
-        if pr.state != "open" or pr.is_draft or not pr.labels:
+        if pr.state != "open" or pr.is_draft:
             result.append(pr)
             continue
         try:

@@ -340,6 +340,12 @@ def _evaluate_live(
 
 
 class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # The dependency refresh provider fixture has no CODEOWNERS.
+        fixture = patch("control_plane.merge_train_codeowners._read_patterns", return_value=())
+        fixture.start()
+        self.addCleanup(fixture.stop)
+
     def test_merge_admission_needs_no_retired_owner_or_impact_records(self) -> None:
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(state_dir=Path(directory))
