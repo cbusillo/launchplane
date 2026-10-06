@@ -57,11 +57,22 @@ visible checklist blockers. `Nothing for the Client to test` is valid test notes
 Pull requests written before the role words changed say `Owner test notes` and
 `Nothing for the owner to test`; Launchplane and the CI action read both.
 Previous preview acceptance is an annotation, never release approval.
-Changes to shared Odoo addon sources or selections are also bound into the
-checklist and shown as an explicit blocker. They cannot be represented as an
-empty, acceptable website checklist. Until their test instructions are supported
-across repositories, an admin must review them and record a release-scoped
-override; ordinary Client acceptance cannot waive the coverage gap.
+Changes to existing shared Odoo addon sources appear in separate Client checklist
+sections, with each repository's exact production-to-testing SHA range, merged
+pull requests and Client test notes. The same commit coverage and missing-note
+checks apply to product and shared repositories. Added or removed sources,
+unexplained selection changes, and ambiguous or inconsistent source evidence
+remain blockers. A failed shared-repository read or a non-forward SHA range stays an explicit
+coverage blocker, preserving the existing release-scoped admin review path.
+Launchplane uses that repository's existing scoped Delivery App access and never
+adds a grant. The complete shared evidence is saved in the release decision and
+published in its release record. Ordinary Client acceptance cannot waive missing
+coverage.
+
+The server reports checklist completeness for the Client button, including
+missing notes inside merge-train batches. Historical shared-input overrides
+remain readable, but replacing the blanket blocker with detailed shared coverage
+changes the checklist digest and requires a new decision.
 
 The decision stores the complete checklist and its digest. The digest includes
 the production and candidate artifact and commit, repository, Client identity,

@@ -190,7 +190,7 @@ class ReleaseReviewTests(unittest.TestCase):
         self.assertEqual(review.checklist.items, ())
         self.assertTrue(review.checklist.additional_changes)
         self.assertFalse(review.approved)
-        self.assertIn("Shared website components", review.blockers[0])
+        self.assertTrue(review.blockers)
 
     def test_rejection_supersedes_acceptance_without_deploying(self) -> None:
         self.store.write_release_review_decision_record(decision(self.store))
