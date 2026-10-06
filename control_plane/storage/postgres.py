@@ -10500,7 +10500,17 @@ class PostgresRecordStore(HumanSessionStore):
                     update={
                         "status": "running",
                         "phase": "running",
-                        "checkpoints": (),
+                        "checkpoints": (
+                            (
+                                *record.checkpoints,
+                                type(record.checkpoints[0])(
+                                    phase="running",
+                                    recorded_at=claimed_at,
+                                ),
+                            )
+                            if record.checkpoints
+                            else ()
+                        ),
                         "started_at": record.started_at or claimed_at,
                         "updated_at": claimed_at,
                         "lease_owner": normalized_lease_owner,
@@ -10594,10 +10604,18 @@ class PostgresRecordStore(HumanSessionStore):
             return checkpointed_record
 
     def _complete_release_operation(
-        self, record: Any, *, row_type: Any, model_type: Any, lease_owner: str
+        self, record: Any, *, row_type: Any, model_type: Any, lease_owner: str, recovery: Any = None
     ) -> bool:
         with self._session_factory() as session:
-            self._begin_serialized_write(session)
+            if recovery is not None:
+                self._lock_odoo_stable_lane(
+                    session,
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                )
+            else:
+                self._begin_serialized_write(session)
             row = self._locked_release_operation_row(session, row_type, record.operation_id)
             current_record = self._read_payload(model_type=model_type, payload=row.payload)
             if not self._release_operation_lease_is_current(
@@ -10605,6 +10623,10 @@ class PostgresRecordStore(HumanSessionStore):
             ):
                 return False
             self._sync_release_operation_row(row, record)
+            if recovery is not None:
+                session.add(
+                    self._release_operation_row(LaunchplaneOdooProdRollbackOperationRow, recovery)
+                )
             session.commit()
             return True
 
@@ -10643,7 +10665,11 @@ class PostgresRecordStore(HumanSessionStore):
                             **released_lease,
                             "status": "pending",
                             "phase": "created",
-                            "checkpoints": (),
+                            "checkpoints": tuple(
+                                checkpoint
+                                for checkpoint in record.checkpoints
+                                if checkpoint.phase == "created"
+                            ),
                             "started_at": "",
                             "updated_at": now,
                         }
@@ -10839,11 +10865,37 @@ class PostgresRecordStore(HumanSessionStore):
     def complete_odoo_prod_promotion_operation_record(
         self, *, record: OdooProdPromotionOperationRecord, lease_owner: str
     ) -> bool:
+        from control_plane.odoo_release_recovery import (
+            build_odoo_release_recovery,
+            odoo_release_wrote_production,
+        )
+
+        recovery = build_odoo_release_recovery(self, record)
+        if (
+            record.status == "fail"
+            and record.authorization.grant == "client_release_acceptance"
+            and odoo_release_wrote_production(record)
+            and recovery is None
+        ):
+            record = record.model_copy(
+                update={
+                    "status": "reconciliation_required",
+                    "phase": record.checkpoints[-1].phase,
+                    "finished_at": "",
+                    "lease_owner": "",
+                    "lease_expires_at": "",
+                    "heartbeat_at": "",
+                    "result": None,
+                    "error_code": "operation_reconciliation_required",
+                    "error_message": "The failed Odoo release lacks verified recovery provenance; reconcile production before releasing the lane.",
+                }
+            )
         return self._complete_release_operation(
             record,
             row_type=LaunchplaneOdooProdPromotionOperationRow,
             model_type=OdooProdPromotionOperationRecord,
             lease_owner=lease_owner,
+            recovery=recovery,
         )
 
     def recover_expired_odoo_prod_promotion_operation_records(

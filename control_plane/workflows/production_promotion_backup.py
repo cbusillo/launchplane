@@ -30,9 +30,18 @@ GENERIC_WEB_PROMOTION_BACKUP_ACTION = "generic_web_prod_promotion.execute"
 class ProductionPromotionBackupGuard:
     checkpoint: Callable[[str], None]
     evidence: dict[str, str]
+    mark_effect_started: Callable[[], None] = lambda: None
 
     def __call__(self, phase: str) -> None:
+        self.before_provider_effect(phase)
+
+    def before_provider_effect(
+        self, phase: str, worker_checkpoint: Callable[[str], None] | None = None
+    ) -> None:
         self.checkpoint(phase)
+        if worker_checkpoint is not None:
+            worker_checkpoint(phase)
+        self.mark_effect_started()
 
 
 class ProductionPromotionBackupStore(Protocol):
@@ -242,11 +251,13 @@ def production_promotion_backup_guard(
             )
 
         def checkpoint(_phase: str) -> None:
-            nonlocal effects_started
             require_lock()
             if not effects_started:
                 require_evidence(active_promotion_record_id=pending_promotion.record_id)
-                effects_started = True
+
+        def mark_effect_started() -> None:
+            nonlocal effects_started
+            effects_started = True
 
         require_lock()
         require_evidence()
@@ -255,7 +266,9 @@ def production_promotion_backup_guard(
         # durable pending record, so the next attempt must take a fresh backup.
         record_store.write_promotion_record(pending_promotion)
         try:
-            yield ProductionPromotionBackupGuard(checkpoint, protection_evidence)
+            yield ProductionPromotionBackupGuard(
+                checkpoint, protection_evidence, mark_effect_started
+            )
             require_lock()
         except Exception:
             protection_evidence["provider_effects_status"] = (

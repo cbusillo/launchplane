@@ -7,6 +7,9 @@ from typing import Literal, Protocol, cast
 
 import click
 
+from control_plane.contracts.odoo_target_replacement_failures import (
+    OdooProviderEffectUncertainError,
+)
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.deployment_record import (
     DeploymentRecord,
@@ -236,6 +239,7 @@ def _write_rollback_state(
     started_at: str,
     finished_at: str,
     detail: str,
+    health_evidence: HealthcheckEvidence | None = None,
 ) -> PromotionRecord:
     updated_record = promotion_record.model_copy(
         update={
@@ -247,7 +251,8 @@ def _write_rollback_state(
                 started_at=started_at,
                 finished_at=finished_at,
             ),
-            "rollback_health": HealthcheckEvidence(
+            "rollback_health": health_evidence
+            or HealthcheckEvidence(
                 verified=False,
                 status=health_status,
             ),
@@ -315,6 +320,7 @@ def execute_odoo_prod_rollback(
     request: OdooProdRollbackRequest,
     target: OdooProdRollbackTarget | None = None,
     provider_effect_checkpoint: Callable[[str], None] | None = None,
+    hold_uncertain_effects: bool = False,
 ) -> OdooProdRollbackResult:
     """Roll prod back; a queued rollback passes the ``target`` it fixed at enqueue."""
 
@@ -355,6 +361,14 @@ def execute_odoo_prod_rollback(
         detail="Odoo prod rollback deployment is pending.",
     )
 
+    provider_effect_started = False
+
+    def before_provider_effect(effect_name: str) -> None:
+        nonlocal provider_effect_started
+        if provider_effect_checkpoint is not None:
+            provider_effect_checkpoint(effect_name)
+        provider_effect_started = True
+
     replacement_result = None
     health_status: Literal["pass", "fail", "skipped"] = (
         "fail" if request.verify_health else "skipped"
@@ -377,7 +391,8 @@ def execute_odoo_prod_rollback(
                 health_timeout_seconds=request.health_timeout_seconds,
                 no_cache=request.no_cache,
             ),
-            provider_effect_checkpoint=provider_effect_checkpoint,
+            provider_effect_checkpoint=before_provider_effect,
+            hold_uncertain_effects=hold_uncertain_effects,
         )
         deployment_record = typed_record_store.read_deployment_record(
             replacement_result.deployment_record_id
@@ -396,6 +411,10 @@ def execute_odoo_prod_rollback(
                 replacement_result.error_message or "Odoo prod rollback health verification failed."
             )
     except (click.ClickException, OSError) as error:
+        if hold_uncertain_effects and provider_effect_started and isinstance(error, OSError):
+            raise OdooProviderEffectUncertainError(
+                "Odoo recovery provider effect requires reconciliation."
+            ) from error
         finished_at = utc_now_timestamp()
         deployment_record_id = ""
         post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped"
@@ -446,6 +465,7 @@ def execute_odoo_prod_rollback(
         started_at=started_at,
         finished_at=finished_at,
         detail=rollback_source.detail,
+        health_evidence=deployment_record.destination_health,
     )
     return OdooProdRollbackResult(
         context=request.context,

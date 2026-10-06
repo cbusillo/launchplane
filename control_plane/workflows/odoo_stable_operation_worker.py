@@ -61,6 +61,14 @@ from control_plane.client_release import (
     advance_client_releases,
     client_release_grant_allows,
 )
+from control_plane.odoo_release_recovery import (
+    PRODUCTION_WRITE_KEY,
+    odoo_release_wrote_production,
+    odoo_release_recovery_source,
+    odoo_release_recovery_allows,
+    require_odoo_release_recovery_pin,
+)
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.release_invitation import ReleaseInvitationBackoff
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationDeniedError,
@@ -1477,7 +1485,8 @@ def _run_release_operation(
     lease_owner: str,
     heartbeat_seconds: int,
     renew_lease: Callable[[str], bool],
-    record_phase: Callable[[str], Any],
+    record_phase: Callable[[str, dict[str, str]], Any],
+    production_write_phase: str,
     read_current: Callable[[], Any],
     complete: Callable[[Any], bool],
     policy_record_reader: Callable[[], LaunchplaneAuthzPolicyRecord],
@@ -1516,7 +1525,7 @@ def _run_release_operation(
     def checkpoint_phase(phase: str) -> None:
         if heartbeat_lost_event.is_set():
             raise RuntimeError(f"{label} lost its lease before a checkpoint.")
-        if record_phase(phase) is None:
+        if record_phase(phase, {}) is None:
             heartbeat_lost_event.set()
             raise RuntimeError(f"{label} could not persist its durable checkpoint.")
 
@@ -1527,6 +1536,10 @@ def _run_release_operation(
             authorization_guard.recheck_provider_effect(effect_name)
         else:
             authorization_guard.checkpoint_provider_effect(effect_name)
+        if effect_name == TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE:
+            if record_phase(production_write_phase, {PRODUCTION_WRITE_KEY: "true"}) is None:
+                heartbeat_lost_event.set()
+                raise RuntimeError(f"{label} could not record its first production write.")
 
     def failed(error_message: str, error_code: str = "") -> Any:
         finished_at = _utc_now_timestamp()
@@ -1554,7 +1567,22 @@ def _run_release_operation(
         logging.exception(
             "%s operation %s failed before producing a result.", label, operation.operation_id
         )
-        terminal_operation = failed(str(error))
+        if odoo_release_wrote_production(read_current()):
+            terminal_operation = read_current().model_copy(
+                update={
+                    "status": "reconciliation_required",
+                    "updated_at": _utc_now_timestamp(),
+                    "finished_at": "",
+                    "lease_owner": "",
+                    "lease_expires_at": "",
+                    "heartbeat_at": "",
+                    "result": None,
+                    "error_code": "operation_reconciliation_required",
+                    "error_message": f"{label} may have changed production; reconcile the provider outcome. {error}",
+                }
+            )
+        else:
+            terminal_operation = failed(str(error))
     else:
         terminal_operation = terminal(read_current(), result)
     finally:
@@ -1580,6 +1608,16 @@ def _execute_prod_promotion_operation(
         checkpoint_phase: Callable[[str], None],
         checkpoint_provider_effect: Callable[[str], None],
     ) -> OdooProdPromotionRunResult:
+        def before_effect(effect_name: str) -> None:
+            if (
+                effect_name == TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE
+                and operation.authorization.grant == "client_release_acceptance"
+            ):
+                if not isinstance(record_store, PostgresRecordStore):
+                    raise ValueError("Odoo Client release recovery requires durable storage.")
+                require_odoo_release_recovery_pin(record_store, operation)
+            checkpoint_provider_effect(effect_name)
+
         return execute_odoo_prod_promotion_run(
             control_plane_root=control_plane_root_path,
             state_dir=control_plane_root_path / "state",
@@ -1587,7 +1625,8 @@ def _execute_prod_promotion_operation(
             record_store=cast(OdooProdPromotionRunStore, record_store),
             request=operation.request,
             phase_checkpoint=checkpoint_phase,
-            provider_effect_checkpoint=checkpoint_provider_effect,
+            provider_effect_checkpoint=before_effect,
+            hold_uncertain_effects=True,
         )
 
     def terminal(
@@ -1616,12 +1655,15 @@ def _execute_prod_promotion_operation(
                 lease_expires_at=_timestamp_after(heartbeat_at, seconds=lease_seconds),
             )
         ),
-        record_phase=lambda phase: record_store.checkpoint_odoo_prod_promotion_operation_record(
-            operation_id=operation.operation_id,
-            lease_owner=lease_owner,
-            phase=cast(OdooProdPromotionOperationPhase, phase),
-            checkpointed_at=_utc_now_timestamp(),
-            evidence={},
+        production_write_phase="promotion_started",
+        record_phase=lambda phase, evidence: (
+            record_store.checkpoint_odoo_prod_promotion_operation_record(
+                operation_id=operation.operation_id,
+                lease_owner=lease_owner,
+                phase=cast(OdooProdPromotionOperationPhase, phase),
+                checkpointed_at=_utc_now_timestamp(),
+                evidence=evidence,
+            )
         ),
         read_current=lambda: record_store.read_odoo_prod_promotion_operation_record(
             operation.operation_id
@@ -1667,7 +1709,8 @@ def _execute_prod_rollback_operation(
             nonlocal started
             checkpoint_provider_effect(effect_name)
             if not started:
-                checkpoint_phase("rollback_started")
+                if effect_name != TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE:
+                    checkpoint_phase("rollback_started")
                 started = True
 
         return execute_odoo_prod_rollback(
@@ -1677,6 +1720,7 @@ def _execute_prod_rollback_operation(
             request=operation.request,
             target=operation.target,
             provider_effect_checkpoint=before_effect,
+            hold_uncertain_effects=True,
         )
 
     def terminal(
@@ -1703,12 +1747,15 @@ def _execute_prod_rollback_operation(
             heartbeat_at=heartbeat_at,
             lease_expires_at=_timestamp_after(heartbeat_at, seconds=lease_seconds),
         ),
-        record_phase=lambda phase: record_store.checkpoint_odoo_prod_rollback_operation_record(
-            operation_id=operation.operation_id,
-            lease_owner=lease_owner,
-            phase=cast(OdooProdRollbackOperationPhase, phase),
-            checkpointed_at=_utc_now_timestamp(),
-            evidence={},
+        production_write_phase="rollback_started",
+        record_phase=lambda phase, evidence: (
+            record_store.checkpoint_odoo_prod_rollback_operation_record(
+                operation_id=operation.operation_id,
+                lease_owner=lease_owner,
+                phase=cast(OdooProdRollbackOperationPhase, phase),
+                checkpointed_at=_utc_now_timestamp(),
+                evidence=evidence,
+            )
         ),
         read_current=lambda: record_store.read_odoo_prod_rollback_operation_record(
             operation.operation_id
@@ -1717,8 +1764,10 @@ def _execute_prod_rollback_operation(
             record=record, lease_owner=lease_owner
         ),
         policy_record_reader=lambda: read_active_authz_policy_record(record_store),
-        client_release_grant_allows=lambda authorization: client_release_grant_allows(
-            record_store, authorization
+        client_release_grant_allows=lambda authorization: (
+            client_release_grant_allows(record_store, authorization)
+            if not odoo_release_recovery_source(operation)
+            else odoo_release_recovery_allows(record_store, operation)
         ),
         boundary_effects=frozenset(),
         run=run,

@@ -1,4 +1,41 @@
 import { expect, test } from "@playwright/test";
+import type { ClientReleaseRunView } from "../../src/generated/openapi.ts";
+
+test("Failed releases distinguish automatic recovery from the rollback drill", async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=products");
+  await expect(page.getByRole("heading", { name: "Review this release" })).toBeVisible();
+  const response = await page.evaluate(async () => {
+    const modulePath = "/ui/src/dev-fixtures.ts";
+    const fixtures = await import(modulePath);
+    return fixtures.releaseDecisionForFixture(fixtures.releaseReviewForFixture("products"), "accepted", "");
+  });
+  const run: ClientReleaseRunView = {
+    decision_record_id: "fixture-release-decision", rollback_drill: true, state: "stopped",
+    blocked_reason: "",
+    steps: [
+      { step: "promote-1", kind: "promote", status: "fail", operation_id: "failed-promotion" },
+      { step: "failure-recovery-1", kind: "recovery", status: "pass", operation_id: "verified-recovery" },
+      { step: "rollback-drill", kind: "rollback", status: "not_started", operation_id: "" },
+    ],
+  };
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: { ...response, release_run: run } }));
+  await page.goto("/ui/owner-review?product=example-site");
+  const progress = page.getByRole("region", { name: "Release progress" });
+  await expect(progress.getByRole("heading")).toHaveText("Release progress: Stopped");
+  await expect(progress).toContainText("Put this version live: Failed");
+  await expect(progress).toContainText("Automatic recovery: restore the previous passing version: Done");
+  await expect(progress).toContainText("Rollback drill: return to the current version: Not started");
+  await page.screenshot({ path: testInfo.outputPath("release-recovered.png"), fullPage: true });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+  run.state = "waiting";
+  run.steps = [];
+  run.blocked_reason = "Launchplane needs a verified previous passing version before this release can start.";
+  await page.reload();
+  await expect(progress.getByRole("status")).toHaveText(run.blocked_reason);
+  await page.screenshot({ path: testInfo.outputPath("release-no-baseline.png"), fullPage: true });
+});
 
 test("Owner cannot accept undisclosed shared component changes", async ({ page }) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=missing");

@@ -314,6 +314,7 @@ export type ChangeImpactCoverage = {
 };
 
 export type ClientReleaseRunView = {
+    blocked_reason: string;
     decision_record_id: string;
     rollback_drill: boolean;
     state: 'waiting' | 'running' | 'passed' | 'stopped';
@@ -321,7 +322,7 @@ export type ClientReleaseRunView = {
 };
 
 export type ClientReleaseStepView = {
-    kind: 'backup' | 'promote' | 'rollback';
+    kind: 'backup' | 'promote' | 'rollback' | 'recovery';
     operation_id: string;
     status: 'not_started' | 'pending' | 'running' | 'reconciliation_required' | 'pass' | 'fail' | 'cancelled';
     step: string;
