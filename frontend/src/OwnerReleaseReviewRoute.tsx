@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { readReleaseReview, writeReleaseReviewDecision } from "./api";
 import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
-import type { ClientReleaseRunView, ReleaseReviewDecisionEnvelope, ReleaseReviewResponse } from "./generated/openapi.ts";
+import type { ClientReleaseRunView, ReleaseReviewDecisionEnvelope, ReleaseReviewResponse, ReleaseReviewItem } from "./generated/openapi.ts";
 import { groupReleaseItems, untestedReason } from "./release-review-model";
 import { safeExternalUrl } from "./url";
 
@@ -31,6 +31,26 @@ function ReleaseRunProgress({ run }: { run: ClientReleaseRunView }) {
     <h3>Release progress: {RELEASE_RUN_STATE[run.state]}</h3>
     <ol>{run.steps.map(step => <li key={step.step}>{RELEASE_STEP_LABELS[step.kind]}: {RELEASE_STEP_STATUS[step.status]}</li>)}</ol>
   </section>;
+}
+
+function ReleaseItems({ items, viewerIsOwner }: { items: readonly ReleaseReviewItem[]; viewerIsOwner: boolean }) {
+  const grouped = groupReleaseItems(items);
+  return <>
+        {grouped.checks.length ? <ol className="release-review-checklist">{grouped.checks.map(check => <li key={check.items[0].url}>
+          <p className="release-review-notes">{check.notes || "Test notes are missing for this change."}</p>
+          <ul className="release-review-changes">{check.items.map(item => <li key={item.url}>
+            {item.title}
+            {item.already_reviewed ? <span>{`${viewerIsOwner ? "You" : "The Client"} accepted this change in its preview. Check it again as part of this release.`}</span> : null}
+          </li>)}</ul>
+        </li>)}</ol> : <p>{items.length ? "Nothing in this release needs you to test it." : "No merged pull request changes between these versions."}</p>}
+        {grouped.nothingToTest.length ? <details className="release-review-untested">
+          <summary>{grouped.nothingToTest.length === 1 ? "1 change needs nothing from you" : `${grouped.nothingToTest.length} changes need nothing from you`}</summary>
+          <ul>{grouped.nothingToTest.map(item => <li key={item.url}>
+            {item.title}
+            {untestedReason(item.owner_test_notes) ? <span>{untestedReason(item.owner_test_notes)}</span> : null}
+          </li>)}</ul>
+        </details> : null}
+  </>;
 }
 
 export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: string; fixtureMode: DevFixtureMode }) {
@@ -81,13 +101,12 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
 
   const checklist = response?.review.checklist;
   const latestDecision = response?.review.latest_decision;
-  const grouped = checklist ? groupReleaseItems(checklist.items) : null;
   const testingUrl = checklist ? safeExternalUrl(checklist.testing_url) : null;
   // Whether Accept starts the release, said before the button.
   const releaseStarts = !!response && response.release_on_acceptance !== "held";
   const liveSite = response ? safeExternalUrl(response.live_site_url) : null;
   const liveSiteName = response ? `${response.display_name}${liveSite ? ` (${liveSite.host})` : ""}` : "";
-  const incomplete = !checklist || !checklist.owner_github_id || !testingUrl || checklist.untracked_commits.length > 0 || checklist.additional_changes.length > 0 || checklist.items.some(item => !item.owner_test_notes.trim());
+  const incomplete = !checklist || !checklist.owner_github_id || !testingUrl || checklist.untracked_commits.length > 0 || checklist.additional_changes.length > 0 || [checklist, ...(checklist.shared_sources ?? [])].some(source => source.untracked_commits.length > 0 || source.items.some(item => !item.owner_test_notes.trim()));
   return <section className="owner-review-page">
     <div className="owner-review-intro">
       <p className="eyebrow">Release decision</p>
@@ -109,22 +128,13 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
         {!latestDecision.release_issue_url ? <p role="alert" className="owner-review-alert">Decision saved, but its release record has not been published. Approval cannot be used for deployment yet. Retry the same decision to publish its record.</p> : null}
       </section> : null}
       {response.release_run ? <ReleaseRunProgress run={response.release_run} /> : null}
-      {checklist && grouped ? <>
+      {checklist ? <>
         <h3>What to test</h3>
-        {grouped.checks.length ? <ol className="release-review-checklist">{grouped.checks.map(check => <li key={check.items[0].pull_request_number}>
-          <p className="release-review-notes">{check.notes || "Test notes are missing for this change."}</p>
-          <ul className="release-review-changes">{check.items.map(item => <li key={item.pull_request_number}>
-            {item.title}
-            {item.already_reviewed ? <span>{`${response.viewer_is_owner ? "You" : "The Client"} accepted this change in its preview. Check it again as part of this release.`}</span> : null}
-          </li>)}</ul>
-        </li>)}</ol> : <p>{checklist.items.length ? "Nothing in this release needs you to test it." : "No merged pull request changes between these versions."}</p>}
-        {grouped.nothingToTest.length ? <details className="release-review-untested">
-          <summary>{grouped.nothingToTest.length === 1 ? "1 change needs nothing from you" : `${grouped.nothingToTest.length} changes need nothing from you`}</summary>
-          <ul>{grouped.nothingToTest.map(item => <li key={item.pull_request_number}>
-            {item.title}
-            {untestedReason(item.owner_test_notes) ? <span>{untestedReason(item.owner_test_notes)}</span> : null}
-          </li>)}</ul>
-        </details> : null}
+        <ReleaseItems items={checklist.items} viewerIsOwner={response.viewer_is_owner} />
+        {(checklist.shared_sources ?? []).map(source => <section key={source.repository} aria-label={`Shared website components from ${source.repository}`}>
+          <h4>Shared website components</h4>
+          <ReleaseItems items={source.items} viewerIsOwner={response.viewer_is_owner} />
+        </section>)}
       </> : null}
       {response.review.blockers.length ? <ul>{response.review.blockers.map(blocker => <li key={blocker}>{blocker}</li>)}</ul> : null}
       {response.review.unavailable_reason ? <p className="owner-review-state">Reason code <code>{response.review.unavailable_reason}</code> · Trace ID <code>{response.trace_id}</code></p> : null}

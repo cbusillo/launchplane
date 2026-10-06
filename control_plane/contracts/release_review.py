@@ -25,6 +25,16 @@ class ReleaseReviewItem(BaseModel):
     already_reviewed: bool = False
 
 
+class SharedSourceReview(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    repository: str
+    production_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    candidate_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    items: tuple[ReleaseReviewItem, ...]
+    untracked_commits: tuple[str, ...] = ()
+
+
 class ReleaseChecklist(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -37,6 +47,12 @@ class ReleaseChecklist(BaseModel):
     items: tuple[ReleaseReviewItem, ...]
     untracked_commits: tuple[str, ...] = ()
     additional_changes: tuple[str, ...] = ()
+    # Preserve the serialized shape and digest of historical website-only decisions.
+    shared_sources: tuple[SharedSourceReview, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 ReleaseDecision = Literal["accepted", "changes_requested", "overridden"]

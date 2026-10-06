@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
-from urllib.parse import urlsplit
+from urllib.parse import unquote
 
 import click
 
@@ -21,6 +21,7 @@ from control_plane.contracts.release_review import (
     ReleaseReviewDecisionRecord,
     ReleaseReviewStatus,
     ReleaseVersion,
+    SharedSourceReview,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.release_review_github import (
@@ -28,6 +29,7 @@ from control_plane.release_review_github import (
     pull_requests_missing_owner_test_notes,
     read_release_changes,
 )
+from control_plane.release_review_shared import read_shared_source_changes, repository_key
 from control_plane.workflows.launchplane import github_api_request, resolve_launchplane_github_token
 
 
@@ -102,6 +104,9 @@ def checklist_digest(checklist: ReleaseChecklist) -> str:
     # Prior preview decisions are helpful annotations, never release approval.
     for item in payload["items"]:
         item.pop("already_reviewed")
+    for source in payload.get("shared_sources", ()):
+        for item in source["items"]:
+            item.pop("already_reviewed")
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -125,15 +130,6 @@ def release_version(
             raise ReleaseEvidenceUnavailable("release_record_missing") from error
         if release.context != lane.context or release.channel != instance:
             raise _identity_missing(instance)
-
-        def repository_key(value: str) -> str:
-            if value.startswith("git@github.com:"):
-                value = value.removeprefix("git@github.com:")
-            elif "://" in value:
-                parsed = urlsplit(value)
-                if parsed.hostname == "github.com":
-                    value = parsed.path.strip("/")
-            return value.removesuffix(".git").casefold()
 
         sources = sorted(
             (repository_key(source.repository), source.ref)
@@ -184,6 +180,8 @@ def build_release_review(
     production = release_version(store=store, profile=profile, instance="prod")
     candidate = release_version(store=store, profile=profile, instance="testing")
     lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+    shared_sources: tuple[SharedSourceReview, ...] = ()
+    additional_changes: tuple[str, ...] = ()
     try:
         items, untracked = read_release_changes(
             repository=profile.repository,
@@ -191,6 +189,15 @@ def build_release_review(
             candidate_commit=candidate.source_commit,
             read=read,
         )
+        if production.shared_addons_digest != candidate.shared_addons_digest:
+            shared_sources, additional_changes = read_shared_source_changes(
+                production=store.read_artifact_manifest(production.artifact_id),
+                candidate=store.read_artifact_manifest(candidate.artifact_id),
+                repository=profile.repository,
+                read=read,
+            )
+    except ReleaseEvidenceUnavailable:
+        raise
     except (ValueError, click.ClickException) as error:
         raise ReleaseEvidenceUnavailable("github_read_failed") from error
     annotated = []
@@ -229,15 +236,8 @@ def build_release_review(
         candidate=candidate,
         items=tuple(annotated),
         untracked_commits=untracked,
-        additional_changes=(
-            (
-                # role-words: legacy. This text is part of checklist_digest, so rewording it
-                # would orphan every recorded decision on a release with this change.
-                "Shared website components changed outside this repository's checklist. Operator review is required.",
-            )
-            if production.shared_addons_digest != candidate.shared_addons_digest
-            else ()
-        ),
+        shared_sources=shared_sources,
+        additional_changes=additional_changes,
     )
     digest = checklist_digest(checklist)
     matching = [
@@ -277,19 +277,26 @@ def checklist_blockers(checklist: ReleaseChecklist) -> tuple[str, ...]:
         blockers.append("No Client set for this product.")
     if not checklist.testing_url:
         blockers.append("The testing site URL is unavailable.")
-    for item in checklist.items:
-        if not item.owner_test_notes:
-            blockers.append(f"Pull request #{item.pull_request_number} has no Client test notes.")
-        # A merge-train batch PR names each of its pull requests that came without notes.
-        for number in pull_requests_missing_owner_test_notes(item.owner_test_notes):
+    groups = [("", checklist.items, checklist.untracked_commits)] + [
+        (f"{source.repository} ", source.items, source.untracked_commits)
+        for source in checklist.shared_sources
+    ]
+    for repository, items, untracked in groups:
+        for item in items:
+            if not item.owner_test_notes.strip():
+                blockers.append(
+                    f"Pull request {repository}#{item.pull_request_number} has no Client test notes."
+                )
+            # A merge-train batch PR names each of its pull requests that came without notes.
+            for number in pull_requests_missing_owner_test_notes(item.owner_test_notes):
+                blockers.append(
+                    f"Pull request {repository}#{number}, landed in {repository}#{item.pull_request_number},"
+                    " has no Client test notes."
+                )
+        if untracked:
             blockers.append(
-                f"Pull request #{number}, landed in #{item.pull_request_number},"
-                " has no Client test notes."
+                f"The release contains {repository}commits without a merged pull request and Client test notes."
             )
-    if checklist.untracked_commits:
-        blockers.append(
-            "The release contains commits without a merged pull request and Client test notes."
-        )
     blockers.extend(checklist.additional_changes)
     return tuple(blockers)
 
@@ -317,17 +324,26 @@ def current_release_review(
         lane = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
         if lane is None:
             raise ReleaseEvidenceUnavailable("testing_lane_missing")
-        token = resolve_launchplane_github_token(
-            control_plane_root=control_plane_root,
-            context_name=lane.context,
-            repository=profile.repository,
-        )
-        if not token:
-            raise ReleaseEvidenceUnavailable("source_control_access_unavailable")
+        tokens: dict[str, str] = {}
+
+        def read(path: str) -> object:
+            # Each repository uses its existing scoped App access, including shared sources.
+            parts = path.split("/")
+            repository = unquote("/".join(parts[2:4]))
+            if repository not in tokens:
+                tokens[repository] = resolve_launchplane_github_token(
+                    control_plane_root=control_plane_root,
+                    context_name=lane.context,
+                    repository=repository,
+                )
+            if not tokens[repository]:
+                raise ReleaseEvidenceUnavailable("source_control_access_unavailable")
+            return github_api_request(path=path, token=tokens[repository])
+
         return build_release_review(
             store=cast(ReleaseReviewStore, record_store),
             profile=profile,
-            read=lambda path: github_api_request(path=path, token=token),
+            read=read,
         )
     # Provider errors may contain private URLs: log and return only the fixed code.
     except ReleaseEvidenceUnavailable as error:

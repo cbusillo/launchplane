@@ -3888,6 +3888,7 @@ export type ReleaseChecklist = {
     product: string;
     production: ReleaseVersion;
     repository: string;
+    shared_sources?: Array<SharedSourceReview>;
     testing_url: string;
     untracked_commits: Array<string>;
 };
@@ -4128,6 +4129,14 @@ export type ServiceTokenRetirementResponse = {
     status: 'ok';
     tokens: Array<ObsoleteServiceToken>;
     trace_id: string;
+};
+
+export type SharedSourceReview = {
+    candidate_commit: string;
+    items: Array<ReleaseReviewItem>;
+    production_commit: string;
+    repository: string;
+    untracked_commits: Array<string>;
 };
 
 export type StructuredHealthEvidence = {

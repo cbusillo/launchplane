@@ -3220,6 +3220,10 @@ export function releaseReviewForFixture(mode: string): import("./generated/opena
         candidate: { artifact_id: "testing-image", source_commit: "b".repeat(40), shared_addons_digest: "" },
         untracked_commits: [],
         additional_changes: additionalChanges,
+        shared_sources: mode === "products" || mode === "denied" ? ["example/shared-addons", "example/disable-online"].map(repository => ({
+          repository, production_commit: "d".repeat(40), candidate_commit: "e".repeat(40), untracked_commits: [],
+          items: [{ pull_request_number: 42, title: "Preserve staff sign-in", url: `https://github.com/${repository}/pull/42`, head_sha: "e".repeat(40), merge_commit: "e".repeat(40), owner_test_notes: mode === "denied" ? "" : "Sign in as a staff user and confirm your usual pages open.", already_reviewed: false }],
+        })) : [],
         items: [{ pull_request_number: 42, title: "Make the repair options easier to find", url: "https://github.com/example/site/pull/42", head_sha: "c".repeat(40), merge_commit: "b".repeat(40), owner_test_notes: "Open Services and confirm each repair option has a clear price.\nOn a phone, confirm the booking button is visible.", already_reviewed: true },
           // role-words: legacy marker that product pull requests write.
           { pull_request_number: 44, title: "Bump the app-dependencies group", url: "https://github.com/example/site/pull/44", head_sha: "d".repeat(40), merge_commit: "b".repeat(40), owner_test_notes: "Nothing for the owner to test. Automated dependency update, covered by CI.", already_reviewed: false },
