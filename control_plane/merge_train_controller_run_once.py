@@ -1797,10 +1797,18 @@ def _annotate_historical_closed_stack_children(
                 )
             except MergeTrainGitHubStaleHeadError:
                 continue  # Old expectations cannot dispose of a moved child.
-            if not closed or not github_client.branch_contains_commit(
-                repository=landing.repository,
-                branch_ref=root.merge_commit_sha,
-                commit_sha=child.expected_head_sha,
+            if (
+                not closed
+                or not github_client.branch_contains_commit(
+                    repository=landing.repository,
+                    branch_ref=root.expected_head_sha,
+                    commit_sha=child.expected_head_sha,
+                )
+                or not github_client.branch_contains_commit(
+                    repository=landing.repository,
+                    branch_ref=root.merge_commit_sha,
+                    commit_sha=child.expected_head_sha,
+                )
             ):
                 continue
             label = repository_policy.stack_child_disposition_label

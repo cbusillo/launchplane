@@ -82,12 +82,14 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         annotation_interrupted: bool = False,
         landing_contains_child: bool = True,
         label_configured: bool = True,
+        child_only_in_base: bool = False,
     ) -> None:
         graph = _StackTransport()
         if deeper:
             graph.heads["feature/leaf"] = "head-leaf"
         child_held = False
         comments: list[int] = []
+        comment_bodies: dict[int, list[str]] = {}
         closed: set[int] = set()
         labels: set[int] = set()
         label_attempts: list[int] = []
@@ -107,7 +109,9 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     and graph.contains(graph.heads[child.head_ref], "head-leaf")
                 ):
                     closed.add(3)
-                if indirectly_merged and graph.contains(graph.heads[root.head_ref], child.head_sha):
+                if indirectly_merged and (
+                    2 in closed or graph.contains(graph.heads[root.head_ref], child.head_sha)
+                ):
                     closed.add(2)
                     return snapshot.model_copy(
                         update={
@@ -157,7 +161,9 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 landed = super().land_batch_candidate(**kwargs)
                 for entry in landed.entries:
                     graph.parents[entry.merge_commit_sha] = (
-                        (entry.expected_head_sha,) if landing_contains_child else ()
+                        (entry.expected_head_sha, "current-base-main")
+                        if landing_contains_child
+                        else ()
                     )
                 return landed
 
@@ -199,10 +205,17 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
             def find_pull_request_comment_url(self, **kwargs: Any) -> str:
                 number = kwargs["pull_request_number"]
-                return f"https://example.test/comments/{number}" if number in comments else ""
+                return (
+                    f"https://example.test/comments/{number}"
+                    if any(
+                        kwargs["body_contains"] in body for body in comment_bodies.get(number, [])
+                    )
+                    else ""
+                )
 
             def comment_pull_request(self, **kwargs: Any) -> str:
                 comments.append(kwargs["pull_request_number"])
+                comment_bodies.setdefault(kwargs["pull_request_number"], []).append(kwargs["body"])
                 return f"https://example.test/comments/{comments[-1]}"
 
             def pull_request_is_closed(
@@ -306,6 +319,12 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 if moved:
                     graph.parents["root-push"] = (graph.heads["feature/root"],)
                     graph.heads["feature/root"] = "root-push"
+                if child_only_in_base:
+                    # Child lands independently; root is pushed without the carried merge.
+                    closed.add(2)
+                    graph.parents["root-without-child"] = ("head-root",)
+                    graph.heads["feature/root"] = "root-without-child"
+                    graph.parents["current-base-main"] = ("head-child",)
                 if child_changed:
                     graph.parents["new-child"] = (graph.heads["feature/child"],)
                     graph.heads["feature/child"] = "new-child"
@@ -336,7 +355,7 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(closed, {2, 3} if deeper else {2})
                     expected_annotations = (
                         ([2, 3] if deeper else [2])
-                        if landing_contains_child and not child_changed
+                        if landing_contains_child and not child_changed and not child_only_in_base
                         else []
                     )
                     self.assertEqual(comments, expected_annotations)
@@ -501,4 +520,9 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_removed_label_does_not_stall_landed_root_cleanup(self) -> None:
         await self._recovery(
             checkpointed=False, moved=False, indirectly_merged=True, label_configured=False
+        )
+
+    async def test_child_landed_only_in_base_is_not_credited_to_root(self) -> None:
+        await self._recovery(
+            checkpointed=False, moved=False, indirectly_merged=True, child_only_in_base=True
         )
