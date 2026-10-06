@@ -1533,6 +1533,21 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             self.assertIn("generic-web deploy recovery", completed.last_error)
             self.assertNotIn("host-7", completed.last_error)
         self.assertEqual(len(self.deploys.runtime_identities), 1)
+        from control_plane.event_deploy_recovery_reference import (
+            resolve_event_deploy_recovery_coordinates,
+        )
+        from control_plane.http_app import idempotency_request_fingerprint
+
+        coordinates = resolve_event_deploy_recovery_coordinates(
+            store=self.store,
+            product="site",
+            context="cm",
+            fingerprint=idempotency_request_fingerprint,
+        )
+        self.assertEqual(
+            coordinates.reservation.idempotency_key, first.last_plan["deploy_idempotency_key"]
+        )
+        self.assertEqual(coordinates.original_deploy.deploy.source_git_ref, DEPLOYABLE)
 
     def test_a_held_testing_lane_waits_and_deploys_nothing(self) -> None:
         self.github.add_run(20, DEPLOYABLE)

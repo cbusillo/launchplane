@@ -8,6 +8,8 @@ from fastapi import Depends, Header, Request
 from pydantic import ValidationError
 
 from control_plane.contracts.generic_web_deploy_recovery import (
+    GenericWebDeployRecoveryReferenceRequest,
+    GenericWebDeployRecoveryReferenceApplyRequest,
     GenericWebDeployRecoveryAction,
     GenericWebDeployRecoveryApplyRequest,
     GenericWebDeployRecoveryApplyResponse,
@@ -21,6 +23,10 @@ from control_plane.contracts.generic_web_deploy_recovery import (
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     parse_launchplane_mutation_timestamp,
+)
+from control_plane.event_deploy_recovery_reference import (
+    EventDeployRecoveryCoordinates,
+    resolve_event_deploy_recovery_coordinates,
 )
 from control_plane.generic_web_deploy_http import (
     GENERIC_WEB_DEPLOY_ROUTE,
@@ -39,7 +45,13 @@ from control_plane.provider_operations import (
     build_provider_operation_key,
     resume_acquired_provider_operation,
 )
-from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    LaunchplaneIdentity,
+    LocalAdminIdentity,
+    LocalOperatorIdentity,
+    GitHubHumanIdentity,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.provider_operations import provider_operation_response_payload
 from control_plane.workflows.generic_web_deploy import (
@@ -445,6 +457,8 @@ async def _inspect_generic_web_deploy_recovery(
     idempotency_key: str,
     trace_id: str,
     dependencies: GenericWebDeployRecoveryDependencies,
+    original_payload: dict[str, object] | None = None,
+    expected_reservation: LaunchplaneIdempotencyRecord | None = None,
     authorization_actions: tuple[str, ...] = ("generic_web_deploy.execute",),
 ) -> _GenericWebDeployRecoveryInspection:
     try:
@@ -506,8 +520,11 @@ async def _inspect_generic_web_deploy_recovery(
             code="database_storage_required",
             message="Generic web deploy recovery requires database storage.",
         )
-    raw_payload = await request.json()
-    original_payload = raw_payload.get("original_deploy") if isinstance(raw_payload, dict) else None
+    if original_payload is None:
+        raw_payload = await request.json()
+        original_payload = (
+            raw_payload.get("original_deploy") if isinstance(raw_payload, dict) else None
+        )
     if not isinstance(original_payload, dict):
         raise dependencies.http_error(
             status_code=400,
@@ -563,6 +580,14 @@ async def _inspect_generic_web_deploy_recovery(
             trace_id=trace_id,
             code="reservation_conflict",
             message="Generic web deploy recovery reservation identity is not exact.",
+        )
+
+    if expected_reservation is not None and reservation != expected_reservation:
+        raise dependencies.http_error(
+            status_code=409,
+            trace_id=trace_id,
+            code="recovery_reference_changed",
+            message="Held event deploy recovery reference changed during inspection.",
         )
 
     provider_outcome: GenericWebDeployRecoveryProviderOutcome = "not_inspected"
@@ -842,14 +867,30 @@ def build_generic_web_deploy_recovery_dry_run_handler(
 ) -> Callable[..., Any]:
     async def dry_run_generic_web_deploy_recovery(
         request: Request,
-        recovery_request: GenericWebDeployRecoveryDryRunRequest,
+        recovery_request: GenericWebDeployRecoveryDryRunRequest
+        | GenericWebDeployRecoveryReferenceRequest,
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_write_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> GenericWebDeployRecoveryDryRunResponse:
         trace_id = dependencies.next_trace_id()
+        original_payload = None
+        expected_reservation = None
+        if isinstance(recovery_request, GenericWebDeployRecoveryReferenceRequest):
+            resolved, idempotency_key, expected_reservation = _resolve_reference_request(
+                recovery_request=recovery_request,
+                identity=identity,
+                record_store=record_store,
+                dependencies=dependencies,
+                trace_id=trace_id,
+                apply=False,
+            )
+            recovery_request = GenericWebDeployRecoveryDryRunRequest.model_validate(resolved)
+            original_payload = resolved["original_deploy"]
         inspection = await _inspect_generic_web_deploy_recovery(
             request=request,
+            original_payload=original_payload,
+            expected_reservation=expected_reservation,
             recovery_request=recovery_request,
             identity=identity,
             record_store=record_store,
@@ -867,14 +908,30 @@ def build_generic_web_deploy_recovery_provider_evidence_handler(
 ) -> Callable[..., Any]:
     async def inspect_generic_web_deploy_recovery_provider_evidence(
         request: Request,
-        recovery_request: GenericWebDeployRecoveryDryRunRequest,
+        recovery_request: GenericWebDeployRecoveryDryRunRequest
+        | GenericWebDeployRecoveryReferenceRequest,
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_write_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> GenericWebDeployRecoveryProviderEvidenceResponse:
         trace_id = dependencies.next_trace_id()
+        original_payload = None
+        expected_reservation = None
+        if isinstance(recovery_request, GenericWebDeployRecoveryReferenceRequest):
+            resolved, idempotency_key, expected_reservation = _resolve_reference_request(
+                recovery_request=recovery_request,
+                identity=identity,
+                record_store=record_store,
+                dependencies=dependencies,
+                trace_id=trace_id,
+                apply=False,
+            )
+            recovery_request = GenericWebDeployRecoveryDryRunRequest.model_validate(resolved)
+            original_payload = resolved["original_deploy"]
         inspection = await _inspect_generic_web_deploy_recovery(
             request=request,
+            original_payload=original_payload,
+            expected_reservation=expected_reservation,
             recovery_request=recovery_request,
             identity=identity,
             record_store=record_store,
@@ -921,14 +978,30 @@ def build_generic_web_deploy_recovery_apply_handler(
 ) -> Callable[..., Any]:
     async def apply_generic_web_deploy_recovery(
         request: Request,
-        recovery_request: GenericWebDeployRecoveryApplyRequest,
+        recovery_request: GenericWebDeployRecoveryApplyRequest
+        | GenericWebDeployRecoveryReferenceApplyRequest,
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_write_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> GenericWebDeployRecoveryApplyResponse:
         trace_id = dependencies.next_trace_id()
+        original_payload = None
+        expected_reservation = None
+        if isinstance(recovery_request, GenericWebDeployRecoveryReferenceRequest):
+            resolved, idempotency_key, expected_reservation = _resolve_reference_request(
+                recovery_request=recovery_request,
+                identity=identity,
+                record_store=record_store,
+                dependencies=dependencies,
+                trace_id=trace_id,
+                apply=True,
+            )
+            recovery_request = GenericWebDeployRecoveryApplyRequest.model_validate(resolved)
+            original_payload = resolved["original_deploy"]
         inspection = await _inspect_generic_web_deploy_recovery(
             request=request,
+            original_payload=original_payload,
+            expected_reservation=expected_reservation,
             recovery_request=recovery_request,
             identity=identity,
             record_store=record_store,
@@ -1082,3 +1155,104 @@ def build_generic_web_deploy_recovery_apply_handler(
         )
 
     return apply_generic_web_deploy_recovery
+
+
+def _resolve_reference_request(
+    *,
+    recovery_request: GenericWebDeployRecoveryReferenceRequest,
+    identity: LaunchplaneIdentity,
+    record_store: object,
+    dependencies: GenericWebDeployRecoveryDependencies,
+    trace_id: str,
+    apply: bool,
+) -> tuple[dict[str, Any], str, LaunchplaneIdempotencyRecord]:
+    coordinates = authorized_event_deploy_coordinates(
+        product=recovery_request.product,
+        identity=identity,
+        record_store=record_store,
+        dependencies=dependencies,
+        trace_id=trace_id,
+        apply=apply,
+    )
+    if coordinates.reference != recovery_request.recovery_reference:
+        raise dependencies.http_error(
+            status_code=409,
+            trace_id=trace_id,
+            code="recovery_reference_changed",
+            message="Held event deploy recovery reference changed.",
+        )
+    payload: dict[str, Any] = {
+        "product": recovery_request.product,
+        "instance": recovery_request.instance,
+        "reason": recovery_request.reason,
+        "original_deploy": coordinates.original_deploy.model_dump(mode="json"),
+    }
+    if isinstance(recovery_request, GenericWebDeployRecoveryReferenceApplyRequest):
+        payload["expected_recovery_digest"] = recovery_request.expected_recovery_digest
+    return payload, coordinates.reservation.idempotency_key, coordinates.reservation
+
+
+def authorized_event_deploy_coordinates(
+    *,
+    product: str,
+    identity: LaunchplaneIdentity,
+    record_store: object,
+    dependencies: GenericWebDeployRecoveryDependencies,
+    trace_id: str,
+    apply: bool,
+) -> EventDeployRecoveryCoordinates:
+    admin = isinstance(identity, LocalAdminIdentity | LocalOperatorIdentity) or (
+        isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
+    )
+    if not admin:
+        raise dependencies.http_error(
+            status_code=403,
+            trace_id=trace_id,
+            code="authorization_denied",
+            message="Event deploy recovery requires a scoped admin.",
+        )
+    if not isinstance(record_store, PostgresRecordStore):
+        raise dependencies.http_error(
+            status_code=503,
+            trace_id=trace_id,
+            code="database_storage_required",
+            message="Event deploy recovery requires database storage.",
+        )
+    try:
+        _, lane = resolve_generic_web_deploy_lane(
+            record_store=record_store, product=product, instance="testing"
+        )
+        if not _recovery_authorization_allows(
+            dependencies=dependencies,
+            identity=identity,
+            actions=("generic_web_deploy.execute",) if apply else ("product_environment.read",),
+            product=product,
+            context=lane.context,
+            instance=lane.instance,
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot read or recover this event deploy.",
+            )
+        return resolve_event_deploy_recovery_coordinates(
+            store=record_store,
+            product=product,
+            context=lane.context,
+            fingerprint=dependencies.idempotency_request_fingerprint,
+        )
+    except FileNotFoundError as error:
+        raise dependencies.http_error(
+            status_code=404,
+            trace_id=trace_id,
+            code="reservation_not_found",
+            message="No held event deploy was found.",
+        ) from error
+    except (ValueError, click.ClickException) as error:
+        raise dependencies.http_error(
+            status_code=409,
+            trace_id=trace_id,
+            code="recovery_evidence_conflict",
+            message="Held event deploy evidence is not unique and exact.",
+        ) from error

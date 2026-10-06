@@ -490,6 +490,29 @@ mutation_in_progress`; a completed effect replays; a different request
 
 ### Generic-web deploy recovery dry-run/apply
 
+For a held event-driven testing deploy, a scoped admin can first call
+`GET /v1/admin/generic-web/deploy-recovery/{product}/testing` under the existing
+`product_environment.read` authority. This database-only read returns one opaque
+`recovery_reference`, lane and reservation state/attempt. It requires one exact
+held reservation in the event reconciler's scope and an original deploy request
+whose retained request or saved reconcile inputs match the reservation fingerprint.
+New event reservations retain their exact request in the service-owned target snapshot;
+older reservations require fingerprint-matched saved reconcile inputs. Missing,
+ambiguous, cross-lane or changed evidence refuses; the original request, key and
+provider coordinates remain inside Launchplane.
+
+Submit `product`, `instance: "testing"`, `recovery_reference` and `reason` to the
+existing dry-run or provider-evidence POST route, without an `Idempotency-Key`
+header. Apply also requires `expected_recovery_digest` from the reviewed dry run.
+These reference requests require scoped admin identity and the existing recovery
+authority; apply requires `generic_web_deploy.execute`. The service resolves the
+original coordinates and runs the same recovery inspector and atomic transition
+as the legacy path. The reference binds the reservation snapshot; changes during
+resolution or inspection refuse. Changed provider observations or reasons invalidate
+the reviewed digest. Reads never create a reservation or inspect a provider;
+dry-run never writes. Unknown outcomes remain held under the existing recovery
+rules. A settled reservation is no longer selectable by a held-event reference.
+
 Legacy generic-web deploy recovery starts read-only. Admins call
 `POST /v1/admin/generic-web/deploy-recovery/dry-run` with the exact original
 `GenericWebDeployEnvelope` under `original_deploy`, the original
