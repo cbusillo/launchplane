@@ -366,10 +366,13 @@ the blocking pull request with `blocked_label` before stopping.
 higher throughput over strict ordering. A worker must still mark the failed pull
 request with `blocked_label` before considering later entries.
 
+These ordering rules apply to the single-transition worker. The service batch
+controller holds a failing queue PR independently, as described below.
+
 The service controller applies a queue block as one leased transition in mutate
 mode and reports `block_result`, including the selected PR and whether policy
 permits immediate continuation. Dry-run reports the intent without applying it.
-A PR carrying `blocked_label` is excluded from subsequent queue selection,
+For service batches, a PR carrying `blocked_label` is excluded from subsequent queue selection,
 including label-free dependency updates, so the next controller pass can select
 other eligible work. Remove the block label after resolving the failure to admit
 that PR again. The GitHub adapter creates a missing policy label when label
@@ -379,9 +382,10 @@ fail-closed.
 For the reconciled pilot, ordinary missing acceptance or check evidence holds the
 affected change rather than pausing unrelated eligible work. A broader pause is
 valid only for a proven dependency edge, a shared-state/integration fence, or an
-unknown effect that makes later mutation unsafe. Existing active policies retain
-their current behavior until a reviewed DB-backed policy replacement is
-activated; this target paragraph does not change live scheduling.
+unknown effect that makes later mutation unsafe. The single-transition worker retains the selected policy's ordering behavior.
+The service batch controller applies independent queue holds without changing
+policy records. A policy replacement still requires its reviewed DB-backed
+activation.
 
 ## Batch Train Target
 
@@ -934,8 +938,8 @@ excludes draft, closed, unlabeled, or unauthorized entries and fails closed when
 the snapshot repository/base branch has no explicit policy.
 
 When the selected pull request is blocked by failed checks or conflicts, the
-first live mutation is idempotent application of `blocked_label`. Repositories
-using `pause_train` stop after that label action; repositories using
+first live mutation is idempotent application of `blocked_label`. Single-transition workers
+using `pause_train` stop after that label action; workers using
 `continue_after_blocking_pr` may continue to the next eligible pull request once
 the blocked pull request has been labeled.
 

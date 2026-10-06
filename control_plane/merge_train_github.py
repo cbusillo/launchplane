@@ -3914,6 +3914,8 @@ def _github_request_route_template(path: str) -> str:
         "/repos/{owner}/{repo}/pulls/{number}/commits",
         "/repos/{owner}/{repo}/issues/{number}/comments",
         "/repos/{owner}/{repo}/issues/{number}/labels",
+        "/repos/{owner}/{repo}/labels",
+        "/repos/{owner}/{repo}/labels/{label}",
         "/repos/{owner}/{repo}/issues/{number}/timeline",
         "/repos/{owner}/{repo}/issues/{number}/events",
         "/repos/{owner}/{repo}/branches/{branch}",

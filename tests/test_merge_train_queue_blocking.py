@@ -1,11 +1,19 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.merge_train import MergeTrainDryRunSnapshot
+from control_plane.merge_train import MergeTrainDryRunSnapshot, build_merge_train_dry_run_result
+from control_plane.merge_train_controller_run_once import (
+    MergeTrainControllerLeaseContext,
+    MergeTrainControllerRunOnceEnvelope,
+    _apply_queue_block,
+)
+from control_plane.ordinary_agent_merge_train_client import _NoAmbientTransport
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     MergeTrainGitHubError,
@@ -130,6 +138,38 @@ class QueueBlockingTests(unittest.IsolatedAsyncioTestCase):
                 [2],
             )
             self.assertEqual(labels, [(1, repository_policy.blocked_label)])
+
+    def test_bound_controller_reports_queue_block_without_ambient_provider_write(self) -> None:
+        policy = build_test_merge_train_policy_record().policy
+        snapshot = _FakeExpandedMergeTrainSnapshotReader(transport=None).read_merge_train_snapshot(
+            repository=policy.policies[0].repository, base_branch="main"
+        )
+        failing, green = snapshot.pull_requests
+        snapshot = snapshot.model_copy(
+            update={
+                "pull_requests": (
+                    failing.model_copy(update={"required_checks_status": "fail"}),
+                    green,
+                ),
+            }
+        )
+        intent = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
+        self.assertEqual(intent.intended_next_action, "block")
+        lease = cast(
+            MergeTrainControllerLeaseContext,
+            SimpleNamespace(record=SimpleNamespace(ordinary_job_binding=object())),
+        )
+        result = _apply_queue_block(
+            request=MergeTrainControllerRunOnceEnvelope(
+                repository=snapshot.repository, mutate=True
+            ),
+            dry_run_result=intent,
+            github_client=GitHubMergeTrainClient(transport=_NoAmbientTransport()),
+            lease=lease,
+        )
+        self.assertEqual(result["controller_action"], "block")
+        self.assertEqual(result["mode"], "dry-run")
+        self.assertNotIn("block_result", result)
 
 
 class BlockLabelTests(unittest.TestCase):

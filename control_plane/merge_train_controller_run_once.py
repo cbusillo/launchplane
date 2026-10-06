@@ -3400,11 +3400,13 @@ def _apply_queue_block(
     result: dict[str, object] = {
         "repository": request.repository,
         "base_branch": request.base_branch,
-        "mode": "block" if request.mutate else "dry-run",
+        "mode": (
+            "block" if request.mutate and lease.record.ordinary_job_binding is None else "dry-run"
+        ),
         "controller_action": "block",
         "dry_run_result": dry_run_result.model_dump(mode="json"),
     }
-    if request.mutate:
+    if request.mutate and lease.record.ordinary_job_binding is None:
         assert dry_run_result.selected_pr is not None
         lease.checkpoint(
             active_action=MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
