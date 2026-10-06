@@ -119,6 +119,7 @@ class MergeTrainPullRequestSnapshot(BaseModel):
     base_ref: str = ""
     base_repository: str = ""
     mergeable: MergeTrainMergeableState = "unknown"
+    requires_individual_landing: bool = Field(default=False, exclude_if=lambda value: not value)
     owner_review_required: bool = Field(default=False, exclude_if=lambda value: not value)
     required_checks_status: MergeTrainCheckStatus = "unknown"
     branch_update_required: bool = False
@@ -183,6 +184,7 @@ class MergeTrainQueueEntry(BaseModel):
     labels: tuple[str, ...]
     actor_role: str
     mergeable: MergeTrainMergeableState
+    requires_individual_landing: bool = Field(default=False, exclude_if=lambda value: not value)
     owner_review_required: bool = Field(default=False, exclude_if=lambda value: not value)
     required_checks_status: MergeTrainCheckStatus
     branch_update_required: bool
@@ -312,14 +314,24 @@ def build_merge_train_dry_run_result(
             base_pull_requests, key=lambda item: (item.created_at, item.number)
         )
     )
-    selected_pr = next((entry for entry in queue if entry.eligible), None)
+    eligible_entries = tuple(entry for entry in queue if entry.eligible)
+    if batch_landing:
+        batch_entries: list[MergeTrainQueueEntry] = []
+        for entry in eligible_entries:
+            if entry.requires_individual_landing:
+                if not batch_entries:
+                    batch_entries.append(entry)
+                break
+            batch_entries.append(entry)
+        eligible_entries = tuple(batch_entries)
+    selected_pr = next(iter(eligible_entries), None)
     intended_next_action, next_action_detail = _next_action_for_selected_pr(
         repository_policy,
         selected_pr,
         skip_branch_update=(
             batch_landing
             and repository_policy.merge_method == "merge"
-            and sum(entry.eligible for entry in queue) > 1
+            and len(eligible_entries) > 1
         ),
     )
     if batch_landing and intended_next_action == "merge":
@@ -328,10 +340,8 @@ def build_merge_train_dry_run_result(
         waiting_review = next(
             (
                 entry
-                for entry in queue
-                if entry.eligible
-                and entry.owner_review_required
-                and entry.required_checks_status != "pass"
+                for entry in eligible_entries
+                if entry.owner_review_required and entry.required_checks_status != "pass"
             ),
             None,
         )
@@ -348,7 +358,7 @@ def build_merge_train_dry_run_result(
         failure_policy=repository_policy.failure_policy,
         enqueue_label=repository_policy.enqueue_label,
         blocked_label=repository_policy.blocked_label,
-        queue_order=tuple(entry.number for entry in queue if entry.eligible),
+        queue_order=tuple(entry.number for entry in eligible_entries),
         queue=queue,
         selected_pr=selected_pr,
         intended_next_action=intended_next_action,
@@ -655,6 +665,7 @@ def _build_queue_entry(
         labels=pull_request.labels,
         actor_role=actor_role,
         mergeable=pull_request.mergeable,
+        requires_individual_landing=pull_request.requires_individual_landing,
         owner_review_required=pull_request.owner_review_required,
         required_checks_status=pull_request.required_checks_status,
         branch_update_required=pull_request.branch_update_required,

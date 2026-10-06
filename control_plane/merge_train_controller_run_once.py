@@ -2498,12 +2498,14 @@ def _reflow_stale_candidate_record(
     if candidate_record.ordinary_job_binding is None and any(
         pr.owner_review_required and pr.required_checks_status != "pass"
         for pr in dry_run_result.queue
-        if pr.eligible
+        if pr.number in dry_run_result.queue_order
     ):
         waiting_pr = next(
             pr
             for pr in dry_run_result.queue
-            if pr.eligible and pr.owner_review_required and pr.required_checks_status != "pass"
+            if pr.number in dry_run_result.queue_order
+            and pr.owner_review_required
+            and pr.required_checks_status != "pass"
         )
         dry_run_result = dry_run_result.model_copy(
             update={

@@ -8,6 +8,17 @@ eligible entry, and applies at most one worker transition per service call. The
 controller runs the batch-validating train and is the preferred entrypoint; see
 `POST /v1/work-graph/merge-train/controller/run-once` below.
 
+Changes owned by the base revision's CODEOWNERS land individually on their
+original pull request. Queue planning stops the current batch before an owned
+change; when that change is first, it selects only that PR. GitHub checks its
+existing code-owner approval and protected requirements on the original PR.
+Ownership-file changes also land individually. The GitHub adapter reads the
+base revision's ownership file in GitHub's directory precedence, including
+rename origins in the changed-file evidence; unreadable or incomplete evidence
+stops planning. Matching is conservative: unusual patterns and overridden
+ownership may cause extra individual landings, never approval transfer to a
+generated batch. No owner identities or owned paths are copied into train policy.
+
 The merge train is provider-neutral and batch-validating. Source-control-specific
 reads and effects belong behind an adapter; the steps below describe the current
 GitHub adapter:
