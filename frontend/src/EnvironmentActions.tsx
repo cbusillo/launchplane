@@ -42,11 +42,13 @@ export function EnvironmentActionsView({
   fixtureMode,
   onRefresh,
   promotionResource,
+  refreshToken,
 }: {
   detail: ProductEnvironmentDetail;
   fixtureMode: DevFixtureMode;
   onRefresh: () => void;
   promotionResource: ResourceState<ProductPromotionStatus>;
+  refreshToken: number;
 }) {
   const actions = detail.available_actions
     .map((action) => browserActionPresentation(detail.driver_id, action))
@@ -103,6 +105,7 @@ export function EnvironmentActionsView({
         actions={detail.available_actions}
         detail={detail}
         fixtureMode={fixtureMode}
+        refreshToken={refreshToken}
         key={`${detail.product}:${detail.context}:${detail.environment}`}
       />
 

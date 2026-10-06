@@ -654,6 +654,15 @@ provider-recorded, and observed topology as distinct evidence; a verified read
 is not presented as healthy when the recorded ingress, TLS, or runtime identity
 condition is failing.
 
+Open product inventories, workspaces, and environment evidence views refresh
+their read resources once a minute after a completed read. Hidden tabs pause
+automatic reads and catch up on focus or visibility return when due. Pending
+reads do not overlap; access-denied and missing resources require a manual retry.
+Evidence still expires at its recorded deadline while a read is delayed or
+failed. Only a new service response with fresh passing health and current runtime
+identity can restore green. Automatic reads do not reset action, settings, or
+promotion resources; the manual Refresh remains available.
+
 Each Delivery Governance or transitional engineering child route owns an
 abortable request lifecycle. Initial
 loading, denied, empty, unavailable, and cancelled states are distinct. A failed

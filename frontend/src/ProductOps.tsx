@@ -30,6 +30,7 @@ import {
   type AppRoute,
 } from "./router";
 import { safeExternalUrl } from "./url";
+import { useEvidenceRefresh } from "./use-evidence-refresh";
 
 import type {
   DataProvenance,
@@ -161,6 +162,7 @@ export function ProductWorkspaceRoute({
   );
   const loadedProductKey = useRef("");
   useEvidenceExpiry(resource.data?.environments ?? []);
+  useEvidenceRefresh(productKey, !fixtureMode, resource, () => setRetryToken(value => value + 1));
 
   useEffect(() => {
     if (fixtureResource) {
