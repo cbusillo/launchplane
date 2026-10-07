@@ -2866,6 +2866,39 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
                 self.assertEqual(self.comments.on(5), [])
                 self.assertEqual(self.provider.applied, [])
 
+    def test_a_verified_close_gets_cleanup_retries_after_open_pr_reads_exhausted(self) -> None:
+        self.reconcile_preview()
+        for _ in range(PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS):
+            self.request("preview", 5)
+            with patch.object(self.github, "get_json", side_effect=OSError("GitHub unavailable")):
+                self.run_once()
+        self.assertFalse(self.sweep_preview())
+        self.github.pull_request["state"] = "closed"
+        self.comments.fail_writes = True
+        self.reconcile_preview()
+        self.comments.fail_writes = False
+
+        self.assertTrue(self.sweep_preview())
+        recovered = self.run_swept_preview()
+
+        self.assertEqual(recovered.last_plan["action"], "none")
+        self.assertEqual(self.comments.on(5), [])
+
+    def test_read_failures_after_verified_close_do_not_reset_the_cleanup_budget(self) -> None:
+        self.reconcile_preview()
+        self.github.pull_request["state"] = "closed"
+        self.comments.fail_writes = True
+        self.reconcile_preview()
+        recoveries = 0
+        while self.sweep_preview():
+            with patch.object(self.github, "get_json", side_effect=OSError("GitHub unavailable")):
+                failed = self.run_swept_preview()
+            recoveries += 1
+            self.assertLessEqual(recoveries, PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS)
+        self.assertGreater(recoveries, 0)
+        self.assertIn("feedback_recovery_stop_reason", failed.last_plan)
+        self.assertIn("Waiting for:", self.comment_body())
+
     def test_closing_before_a_preview_build_clears_pending_feedback(self) -> None:
         self.assertEqual(self.reconcile_preview()["action"], "wait")
         self.assertIn("Waiting for: a verified build", self.comment_body())
@@ -3654,6 +3687,16 @@ class ProductReconcileFailureTests(ProductReconcileTestCase):
 
 
 class ProductReconcileSweepTests(ProductReconcileTestCase):
+    def test_unreadable_feedback_history_keeps_other_sweep_targets(self) -> None:
+        self.write_preview(number=5)
+        self.github.open_pulls = [{"number": 7}]
+        with patch.object(self.store, "list_product_reconcile_requests", side_effect=ValueError):
+            with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                requested = request_product_reconcile_sweep(
+                    self.store, "2026-09-29T12:00:00Z", lambda _store, _profile: self.github
+                )
+        self.assertEqual(set(requested), {"site:testing", "site:preview:5", "site:preview:7"})
+
     def test_sweep_requests_mapped_testing_targets_and_live_previews(self) -> None:
         self.store.write_product_profile_record(
             LaunchplaneProductProfileRecord.model_validate(_profile("unmapped"))

@@ -352,10 +352,15 @@ the events, and a missed or out-of-order event is corrected within one sweep.
 For PRs with no live preview, the sweep also revisits recorded pending feedback
 and failed cleared-feedback delivery. It reads the PR through the normal reconcile
 path before clearing anything; a refused read never proves the PR is closed.
-Unresolved reads or terminal clear deliveries stop automatic recovery after three
-failed attempts, recorded as `feedback_recovery_failed_attempts` and
+Unresolved reads or terminal clear deliveries stop automatic recovery at
+`PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS` in
+[`product_reconcile.py`](../control_plane/product_reconcile.py), recorded as `feedback_recovery_failed_attempts` and
 `feedback_recovery_stop_reason` on the plan; supported reconciliation or remediation
 is required after exhaustion.
+The first successfully observed close gets a fresh cleanup budget, so read failures
+while open do not consume it. Further read failures retain that budget until the
+feedback is delivered or the PR is observed open again. An unreadable history skips
+only that product's supplemental recovery, leaving other sweep targets eligible.
 Successful delivery leaves the recovery set; a new event can retry an exhausted
 target. Open PRs waiting for a build retain normal sweep coverage. Failed feedback
 and legacy entries without a status remain visible for supported observation rather

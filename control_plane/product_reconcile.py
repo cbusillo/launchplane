@@ -1946,16 +1946,24 @@ def run_product_reconcile_once(
         # Only unresolved reads or terminal clear delivery consume this budget. Open
         # PRs waiting for builds retain their ordinary event/sweep coverage.
         if outcome.error or plan.get("reason") == "pull_request_not_open":
-            plan["feedback_recovery_failed_attempts"] = (
-                _feedback_recovery_failed_attempts(request.last_plan) + 1
-            )
+            closed = not outcome.error and plan.get("reason") == "pull_request_not_open"
+            previously_closed = request.last_plan.get("feedback_recovery_closed_observed") is True
+            attempts = _feedback_recovery_failed_attempts(request.last_plan)
+            if closed and not previously_closed:
+                # Reads failing while open must not spend the later close's cleanup
+                # budget. Once closed is observed, read failures keep that same budget.
+                attempts = 0
+            if closed or previously_closed:
+                plan["feedback_recovery_closed_observed"] = True
+            plan["feedback_recovery_failed_attempts"] = attempts + 1
             if (
                 _feedback_recovery_failed_attempts(plan)
                 >= PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS
             ):
                 plan["feedback_recovery_stop_reason"] = (
-                    "Automatic preview feedback recovery exhausted; supported reconciliation "
-                    "or remediation is required. The failed read or delivery remains unresolved."
+                    "Supplemental preview feedback recovery exhausted; open-PR sweeps and new "
+                    "events remain eligible. A closed target requires supported reconciliation "
+                    "or remediation; the failed read or delivery remains unresolved."
                 )
     if outcome.deferred:
         # Folding a request into our running one returns it to pending on completion.
@@ -2112,9 +2120,16 @@ def request_product_reconcile_sweep(
             if preview.state not in _ENDED_PREVIEW_STATES
         }
         if profile.preview.enabled:
-            for request in record_store.list_product_reconcile_requests(
-                product=profile.product, limit=None
-            ):
+            try:
+                requests = record_store.list_product_reconcile_requests(
+                    product=profile.product, limit=None
+                )
+            except (OSError, ValueError, SQLAlchemyError) as error:
+                _LOGGER.warning(
+                    "Sweep could not read %s's preview feedback history: %s", profile.product, error
+                )
+                continue
+            for request in requests:
                 if (
                     request.target_kind == "preview"
                     and request.state in {"done", "failed"}
