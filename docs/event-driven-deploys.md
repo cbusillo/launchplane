@@ -349,16 +349,19 @@ requests per product, with the build-provenance token). A missed event is
 corrected within one sweep. Reconciling is idempotent, so the sweep runs the same code as
 the events, and a missed or out-of-order event is corrected within one sweep.
 
-For PRs with no preview record, the sweep also revisits recorded pending feedback
+For PRs with no live preview, the sweep also revisits recorded pending feedback
 and failed cleared-feedback delivery. It reads the PR through the normal reconcile
 path before clearing anything; a refused read never proves the PR is closed.
 Unresolved reads or terminal clear deliveries stop automatic recovery after three
-failed attempts, recorded as `feedback_recovery_failed_attempts` on the plan.
+failed attempts, recorded as `feedback_recovery_failed_attempts` and
+`feedback_recovery_stop_reason` on the plan; supported reconciliation or remediation
+is required after exhaustion.
 Successful delivery leaves the recovery set; a new event can retry an exhausted
 target. Open PRs waiting for a build retain normal sweep coverage. Failed feedback
 and legacy entries without a status remain visible for supported observation rather
-than being assumed pending. No additional provider retry is introduced for targets
-with preview records.
+than being assumed pending. Destroyed and teardown-pending preview records do not
+hide stale pending feedback; their reconciliation remains a no-op. Previews still
+requiring lifecycle work retain their existing sweep coverage and retry rules.
 
 ## Director steps
 

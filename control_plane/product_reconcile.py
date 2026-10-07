@@ -205,6 +205,7 @@ GENERIC_WEB_PREVIEW_TIMEOUT_SECONDS = 300
 TESTING_BUILD_RUN_PAGE_SIZE = 50
 TESTING_VERIFY_LIMIT = 3
 _ENDED_PREVIEW_STATES = frozenset({"destroyed", "teardown_pending"})
+PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS = 3
 OPEN_PULL_REQUEST_SWEEP_PAGES = 5
 _LEASE_LOST = "This worker no longer holds the reconcile request's lease; nothing more was changed."
 _LOGGER = logging.getLogger(__name__)
@@ -1948,6 +1949,14 @@ def run_product_reconcile_once(
             plan["feedback_recovery_failed_attempts"] = (
                 _feedback_recovery_failed_attempts(request.last_plan) + 1
             )
+            if (
+                _feedback_recovery_failed_attempts(plan)
+                >= PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS
+            ):
+                plan["feedback_recovery_stop_reason"] = (
+                    "Automatic preview feedback recovery exhausted; supported reconciliation "
+                    "or remediation is required. The failed read or delivery remains unresolved."
+                )
     if outcome.deferred:
         # Folding a request into our running one returns it to pending on completion.
         record_store.request_product_reconcile(
@@ -2097,7 +2106,11 @@ def request_product_reconcile_sweep(
                         pull_request_number=preview.anchor_pr_number,
                     )
                 )
-        preview_numbers = {preview.anchor_pr_number for preview in previews}
+        preview_numbers = {
+            preview.anchor_pr_number
+            for preview in previews
+            if preview.state not in _ENDED_PREVIEW_STATES
+        }
         if profile.preview.enabled:
             for request in record_store.list_product_reconcile_requests(
                 product=profile.product, limit=None
@@ -2121,9 +2134,6 @@ def request_product_reconcile_sweep(
     for target in unique_targets.values():
         record_store.request_product_reconcile(target, now)
     return tuple(unique_targets)
-
-
-PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS = 3
 
 
 def _feedback_recovery_failed_attempts(plan: Mapping[str, object]) -> int:

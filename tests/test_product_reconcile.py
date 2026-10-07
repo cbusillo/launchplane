@@ -83,6 +83,7 @@ from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.product_reconcile import (
     PLAN_BLOCKER_DESCRIPTIONS,
     PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS,
+    PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS,
     TESTING_FAILURE_DESCRIPTIONS,
     RECONCILE_SOURCE,
     PreviewProviderHooks,
@@ -2778,12 +2779,17 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
             self.run_once()
             recoveries = 0
             while self.sweep_preview():
-                self.run_swept_preview()
+                failed = self.run_swept_preview()
                 recoveries += 1
-                self.assertLess(recoveries, 10, "unbounded feedback recovery")
+                self.assertLessEqual(
+                    recoveries,
+                    PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS,
+                    "unbounded feedback recovery",
+                )
         self.assertIn("Waiting for:", self.comment_body())
         self.assertEqual(self.provider.applied, [])
         self.assertGreater(recoveries, 0)
+        self.assertIn("feedback_recovery_stop_reason", failed.last_plan)
         self.assertFalse(self.sweep_preview())
 
         self.reconcile_preview()
@@ -2830,12 +2836,35 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.reconcile_preview()
         recoveries = 0
         while self.sweep_preview():
-            self.run_swept_preview()
+            failed = self.run_swept_preview()
             recoveries += 1
-            self.assertLess(recoveries, 10, "unbounded failed deletion recovery")
+            self.assertLessEqual(
+                recoveries,
+                PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS,
+                "unbounded failed deletion recovery",
+            )
         self.assertGreater(recoveries, 0)
+        self.assertIn("feedback_recovery_stop_reason", failed.last_plan)
         self.assertIn("Waiting for:", self.comment_body())
         self.assertEqual(self.provider.applied, [])
+
+    def test_ended_preview_does_not_hide_failed_pending_cleanup_from_the_sweep(self) -> None:
+        for state in ("destroyed", "teardown_pending"):
+            with self.subTest(state=state):
+                self.github.pull_request["state"] = "open"
+                self.reconcile_preview()
+                self.write_preview(number=5, state=state)
+                self.github.pull_request["state"] = "closed"
+                self.comments.fail_writes = True
+                self.reconcile_preview()
+                self.comments.fail_writes = False
+
+                self.assertTrue(self.sweep_preview())
+                recovered = self.run_swept_preview()
+
+                self.assertEqual(recovered.last_plan["action"], "none")
+                self.assertEqual(self.comments.on(5), [])
+                self.assertEqual(self.provider.applied, [])
 
     def test_closing_before_a_preview_build_clears_pending_feedback(self) -> None:
         self.assertEqual(self.reconcile_preview()["action"], "wait")
