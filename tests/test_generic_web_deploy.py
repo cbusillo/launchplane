@@ -2,7 +2,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import click
 
@@ -111,6 +111,14 @@ class _GenericWebDeployStore:
             if (existing.context, existing.instance) != (record.context, record.instance)
         ]
         self.inventories.append(record)
+
+    def read_environment_inventory(
+        self, *, context_name: str, instance_name: str
+    ) -> EnvironmentInventory:
+        for record in self.inventories:
+            if (record.context, record.instance) == (context_name, instance_name):
+                return record
+        raise FileNotFoundError(f"{context_name}/{instance_name}")
 
 
 class _IntegrationKeyGenericWebDeployStore(_GenericWebDeployStore):
@@ -540,6 +548,63 @@ class _LegacyFakeGenericWebDeployProvider(_FakeGenericWebDeployProvider):
 
 
 class GenericWebDeployTests(unittest.TestCase):
+    def test_stale_deploy_and_recovery_retry_cannot_replace_a_newer_lane_build(self) -> None:
+        for instance in ("testing", "prod"):
+            with self.subTest(instance=instance):
+                profile = _profile()
+                profile = profile.model_copy(
+                    update={"lanes": (profile.lanes[0].model_copy(update={"instance": instance}),)}
+                )
+                store = _GenericWebDeployStore(profile)
+                provider = _FakeGenericWebDeployProvider()
+                current = _request(instance).model_copy(update={"source_git_ref": "2" * 40})
+                first = execute_generic_web_deploy(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    request=current,
+                    deploy_provider=provider,
+                )
+                self.assertEqual(first.deploy_status, "pass")
+                before = tuple(provider.runtime_identities)
+                older = current.model_copy(
+                    update={
+                        "artifact_id": profile.image.repository + "@sha256:" + "1" * 64,
+                        "source_git_ref": "1" * 40,
+                    }
+                )
+                transport = Mock()
+                transport.get_json.return_value = {
+                    "status": "behind",
+                    "base_commit": {"sha": current.source_git_ref},
+                    "merge_base_commit": {"sha": older.source_git_ref},
+                }
+                with patch(
+                    "control_plane.product_reconcile.resolve_build_provenance_transport",
+                    return_value=transport,
+                ):
+                    for recorded in (False, True):
+                        refused = execute_generic_web_deploy(
+                            control_plane_root=Path("."),
+                            record_store=store,
+                            request=older,
+                            deploy_provider=provider,
+                            recorded_artifact=recorded,
+                        )
+                        self.assertEqual(refused.deploy_status, "fail")
+                        self.assertFalse(refused.provider_effect_attempted)
+                        self.assertEqual(tuple(provider.runtime_identities), before)
+                        failure = store.deployments[-1].failure
+                        assert failure is not None
+                        self.assertEqual(failure.code, "lane_movement.ancestor_build")
+                    rolled_back = execute_generic_web_deploy(
+                        control_plane_root=Path("."),
+                        record_store=store,
+                        request=older,
+                        deploy_provider=provider,
+                        rollback=True,
+                    )
+                    self.assertEqual(rolled_back.deploy_status, "pass")
+
     @staticmethod
     def _provider_mutation_adapter(
         *,

@@ -12,6 +12,7 @@ import click
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
+from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
@@ -50,6 +51,9 @@ from control_plane.workflows.preview_desired_state import render_preview_slug
 
 
 class _GenericWebPreviewStore:
+    def list_preview_records(self, **_: object) -> tuple[PreviewRecord, ...]:
+        return ()
+
     def __init__(
         self,
         profile: LaunchplaneProductProfileRecord,

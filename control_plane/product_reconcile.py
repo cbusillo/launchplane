@@ -11,6 +11,12 @@ the plan on its request.
 from __future__ import annotations
 
 from control_plane.event_testing_deploy import event_testing_deploy_request
+from control_plane.lane_movement import (
+    LANE_MOVEMENT_REFUSALS,
+    LaneBuild,
+    LaneMovementRefused,
+    require_forward_build,
+)
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -1104,8 +1110,10 @@ def _testing_failure_reason(
             f"{PLAN_BLOCKER_DESCRIPTIONS.get(blocker_code, _UNKNOWN_PLAN_BLOCKER)}"
         )
     else:
-        description = deploy_failure_description(error_code) or TESTING_FAILURE_DESCRIPTIONS.get(
-            error_code, _UNKNOWN_TESTING_FAILURE
+        description = (
+            LANE_MOVEMENT_REFUSALS.get(error_code.removeprefix("lane_movement."))
+            or deploy_failure_description(error_code)
+            or TESTING_FAILURE_DESCRIPTIONS.get(error_code, _UNKNOWN_TESTING_FAILURE)
         )
     parts = [description]
     if operation.error_detail_keys:
@@ -1153,11 +1161,34 @@ def _plan_testing_target(
     lane = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
     if lane is None:
         raise ProductReconcileError(f"Product {profile.product} has no testing lane.")
-    desired, rejected, absent_reason = _desired_release(
-        transport=transport, profile=profile, repository_id=repository_id, lane=lane
-    )
     current_artifact_id, current_digest = _current_testing_release(
         record_store=record_store, profile=profile, lane=lane
+    )
+    current_commit = ""
+    current_run_id = 0
+    if current_artifact_id:
+        try:
+            current_manifest = record_store.read_artifact_manifest(current_artifact_id)
+            current_commit = current_manifest.source_commit
+            if current_manifest.source_build is not None:
+                current_run_id = current_manifest.source_build.run_id
+        except FileNotFoundError:
+            try:
+                inventory = record_store.read_environment_inventory(
+                    context_name=lane.context, instance_name="testing"
+                )
+                current_commit = inventory.source_git_ref
+            except FileNotFoundError:
+                pass
+    selection: dict[str, object] = {}
+    desired, rejected, absent_reason = _desired_release(
+        transport=transport,
+        profile=profile,
+        repository_id=repository_id,
+        lane=lane,
+        current_commit=current_commit,
+        current_run_id=current_run_id,
+        selection=selection,
     )
     plan: dict[str, object] = {
         "target": "testing",
@@ -1167,11 +1198,17 @@ def _plan_testing_target(
         "desired_image_digest": "",
         "current_artifact_id": current_artifact_id,
         "current_image_digest": current_digest,
+        "current_commit": current_commit,
+        **selection,
     }
     if rejected:
         plan["rejected_builds"] = rejected
     if desired is None:
-        plan.update(action="none", reason=absent_reason, held=False)
+        plan.update(
+            action="none",
+            reason=absent_reason,
+            held=absent_reason in {"incomplete_build_runs", "incomplete_commit_history"},
+        )
         return plan, None
     desired_artifact_id = (
         desired.image_reference
@@ -1187,6 +1224,31 @@ def _plan_testing_target(
     if desired_artifact_id == current_artifact_id or desired_digest == current_digest:
         plan.update(action="none", reason="already_deployed", held=False)
     else:
+        if current_artifact_id and not current_commit:
+            plan.update(action="none", reason="current_source_unverified", held=True)
+            return plan, None
+        try:
+            require_forward_build(
+                record_store=record_store,
+                profile=profile,
+                transport=transport,
+                current=LaneBuild(
+                    current_artifact_id,
+                    current_commit,
+                    f"{profile.image.repository}@{current_digest}",
+                ),
+                desired=LaneBuild(
+                    desired_artifact_id,
+                    desired.manifest.source_commit,
+                    f"{profile.image.repository}@{desired_digest}",
+                    desired.source_build
+                    if isinstance(desired, VerifiedGenericWebBuild)
+                    else desired.manifest.source_build,
+                ),
+            )
+        except LaneMovementRefused as error:
+            plan.update(action="none", reason=error.code, held=True)
+            return plan, None
         plan.update(action="deploy")
     return plan, desired
 
@@ -1389,6 +1451,28 @@ def _plan_preview_target(
     if live and desired_digest == current["current_image_digest"]:
         plan.update(action="none", reason="already_serving", held=False)
     else:
+        try:
+            require_forward_build(
+                record_store=record_store,
+                profile=profile,
+                transport=transport,
+                current=LaneBuild(
+                    commit=str(current["current_head_sha"]),
+                    image=f"{profile.image.repository}@{current['current_image_digest']}"
+                    if current["current_image_digest"]
+                    else "",
+                ),
+                desired=LaneBuild(
+                    verified.manifest.artifact_id
+                    if isinstance(verified, VerifiedBuildArtifact)
+                    else verified.image_reference,
+                    manifest.source_commit,
+                    f"{profile.image.repository}@{desired_digest}",
+                ),
+            )
+        except LaneMovementRefused as error:
+            plan.update(action="wait", reason=error.code, held=True)
+            return _PreviewDecision(plan=plan, lifecycle_token=lifecycle_token, observed=observed)
         plan.update(action="apply", held=False)
     return _PreviewDecision(
         plan=plan, verified=verified, lifecycle_token=lifecycle_token, observed=observed
@@ -2140,6 +2224,9 @@ def _desired_release(
     profile: LaunchplaneProductProfileRecord,
     repository_id: str,
     lane: ProductLaneProfile,
+    current_commit: str = "",
+    current_run_id: int = 0,
+    selection: dict[str, object] | None = None,
 ) -> tuple[VerifiedBuildArtifact | VerifiedGenericWebBuild | None, list[dict[str, str]], str]:
     default_branch = profile.default_branch
     workflow_file = BUILD_WORKFLOW_PATH.rsplit("/", 1)[-1]
@@ -2177,24 +2264,47 @@ def _desired_release(
         ):
             raise
         return None, [], "build_workflow_missing"
+    runs = _list(payload.get("workflow_runs"))
+    audit = selection if selection is not None else {}
+    audit.update(build_runs_seen=len(runs), build_runs_total=payload.get("total_count"))
     built_commits = {
         str(run.get("head_sha") or "").lower()
-        for run in (item for item in _list(payload.get("workflow_runs")) if isinstance(item, dict))
+        for run in (item for item in runs if isinstance(item, dict))
         if run.get("path") == BUILD_WORKFLOW_PATH
         and run.get("event") == "push"
         and run.get("head_branch") == default_branch
         and run.get("conclusion") == "success"
         and run.get("head_sha")
     }
+    if current_commit and (
+        current_commit not in built_commits
+        or (
+            current_run_id
+            and not any(isinstance(run, dict) and run.get("id") == current_run_id for run in runs)
+        )
+    ):
+        return None, [], "incomplete_build_runs"
     ordered: list[str] = []
+    history_seen = 0
+    current_seen = not current_commit
     if built_commits:
         for sha in first_parent_history(
             transport=transport, repository=profile.repository, default_branch=default_branch
         ):
+            history_seen += 1
+            current_seen = current_seen or sha == current_commit
             if sha in built_commits:
                 ordered.append(sha)
                 if len(ordered) == len(built_commits):
                     break
+    audit.update(
+        commit_history_seen=history_seen,
+        current_commit_seen=current_seen,
+        built_commits_seen=len(built_commits),
+        ordered_built_commits=len(ordered),
+    )
+    if not current_seen:
+        return None, [], "incomplete_commit_history"
     rejected: list[dict[str, str]] = []
     generic_web = reconciles_as_generic_web(profile)
     for commit in ordered[:TESTING_VERIFY_LIMIT]:

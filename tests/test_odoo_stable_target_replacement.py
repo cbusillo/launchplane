@@ -2163,9 +2163,20 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         )
 
     def test_apply_can_deploy_explicit_stored_artifact(self) -> None:
+        self._apply_stored_artifact()
+
+    def test_stale_replacement_refuses_ancestor_before_provider_writes(self) -> None:
+        self._apply_stored_artifact(backwards=True)
+
+    def test_explicit_rollback_can_replace_a_newer_build(self) -> None:
+        self._apply_stored_artifact(backwards=True, rollback=True)
+
+    def _apply_stored_artifact(self, *, backwards: bool = False, rollback: bool = False) -> None:
+        current_commit = ("b" if backwards else "a") * 40
+        desired_commit = ("a" if backwards else "b") * 40
         fresh_manifest = _artifact_manifest(
             artifact_id="artifact-cm-fresh",
-            source_commit="feed123",
+            source_commit=desired_commit,
             digest="sha256:fresh",
             odoo_install_modules=(
                 "launchplane_settings",
@@ -2191,8 +2202,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             profile=profile,
             target_record=_target_record(),
             target_id_record=_target_id_record(),
-            inventory=_inventory(),
-            artifact_manifests=(_artifact_manifest(), fresh_manifest),
+            inventory=_inventory().model_copy(update={"source_git_ref": current_commit}),
+            artifact_manifests=(_artifact_manifest(source_commit=current_commit), fresh_manifest),
         )
         persisted_env = ""
 
@@ -2218,7 +2229,17 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             nonlocal persisted_env
             persisted_env = env_text
 
+        transport = Mock()
+        transport.get_json.return_value = {
+            "status": "behind" if backwards else "ahead",
+            "base_commit": {"sha": current_commit},
+            "merge_base_commit": {"sha": desired_commit if backwards else current_commit},
+        }
         with (
+            patch(
+                "control_plane.product_reconcile.resolve_build_provenance_transport",
+                return_value=transport,
+            ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
@@ -2284,11 +2305,21 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     product="odoo-tenant-cm",
                     instance="testing",
                     artifact_id="artifact-cm-fresh",
-                    source_git_ref="feed123",
+                    source_git_ref=desired_commit,
                 ),
                 dokploy_request=cast(DokployRequest, _request),
+                rollback=rollback,
             )
 
+        if backwards and not rollback:
+            self.assertEqual(result.deploy_status, "fail")
+            self.assertEqual(result.error_code, "lane_movement.ancestor_build")
+            sync_source.assert_not_called()
+            self.assertEqual(store.environment_inventories, [])
+            failure = store.deployment_records[-1].failure
+            assert failure is not None
+            self.assertEqual(failure.code, result.error_code)
+            return
         self.assertEqual(result.deploy_status, "pass")
         self.assertEqual(result.artifact_id, "artifact-cm-fresh")
         self.assertEqual(
@@ -2302,10 +2333,10 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             "launchplane_settings,disable_odoo_online,cm_website",
         )
         final_deployment = store.deployment_records[-1]
-        self.assertEqual(final_deployment.source_git_ref, "feed123")
+        self.assertEqual(final_deployment.source_git_ref, desired_commit)
         assert final_deployment.runtime_identity is not None
         self.assertEqual(final_deployment.runtime_identity.artifact_id, "artifact-cm-fresh")
-        self.assertEqual(final_deployment.runtime_identity.source_git_ref, "feed123")
+        self.assertEqual(final_deployment.runtime_identity.source_git_ref, desired_commit)
         self.assertEqual(final_deployment.destination_health.runtime_identity_status, "unchecked")
         verify_runtime_identity.assert_not_called()
         self.assertEqual(sync_source.call_args.kwargs["compose_name"], "cm-testing")

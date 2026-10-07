@@ -83,6 +83,12 @@ from control_plane.workflows.ship import (
     utc_now_timestamp,
 )
 from control_plane.dokploy import api as dokploy_api
+from control_plane.lane_movement import (
+    LaneBuild,
+    LaneMovementRefused,
+    require_forward_build,
+    require_forward_lane_build,
+)
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import compose as dokploy_compose
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
@@ -1048,6 +1054,8 @@ def _deploy_step_failure(error: BaseException) -> RecordFailure:
     """
     code = ""
     keys: tuple[str, ...] = ()
+    if isinstance(error, LaneMovementRefused):
+        return error.record_failure()
     if isinstance(error, OdooTargetReplacementStageError):
         code, keys = error.code, error.detail_keys
     elif isinstance(error, PlatformCredentialRefusedError):
@@ -1567,6 +1575,7 @@ def execute_odoo_stable_target_replacement_apply(
     dokploy_request: DokployRequest = dokploy_api.dokploy_request,
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     hold_uncertain_effects: bool = False,
+    rollback: bool = False,
 ) -> OdooStableTargetReplacementApplyResult:
     with _failure_stage("plan_build_failed"):
         plan = build_odoo_stable_target_replacement_plan(
@@ -1982,6 +1991,33 @@ def execute_odoo_stable_target_replacement_apply(
                 ).items()
             }
         )
+        if not rollback:
+            desired_build = LaneBuild(artifact_id, source_git_ref, image_reference)
+            require_forward_lane_build(
+                record_store=record_store,
+                profile=profile,
+                context=plan.context,
+                instance=plan.instance,
+                desired=desired_build,
+            )
+            current_identity = _runtime_identity_map(current_env_map)
+            if current_identity:
+                if (
+                    current_identity.get("product") != profile.product
+                    or current_identity.get("context") != plan.context
+                    or current_identity.get("instance") != plan.instance
+                ):
+                    raise LaneMovementRefused("source_order_unverified")
+                require_forward_build(
+                    record_store=record_store,
+                    profile=profile,
+                    current=LaneBuild(
+                        current_identity.get("artifact_id", ""),
+                        current_identity.get("source_git_ref", ""),
+                        current_identity.get("image_reference", ""),
+                    ),
+                    desired=desired_build,
+                )
         if provider_effect_checkpoint is not None:
             provider_effect_checkpoint(TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
         production_write_started = True

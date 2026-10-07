@@ -1133,6 +1133,18 @@ def _store_with_production(
 class GenericWebProdPromotionRollbackTests(unittest.TestCase):
     def setUp(self) -> None:
         stub_verified_promotion_backup(self, "control_plane.workflows.generic_web_promotion")
+        transport = Mock()
+        transport.get_json.return_value = {
+            "status": "ahead",
+            "base_commit": {"sha": "1" * 40},
+            "merge_base_commit": {"sha": "1" * 40},
+        }
+        self.enterContext(
+            patch(
+                "control_plane.product_reconcile.resolve_build_provenance_transport",
+                return_value=transport,
+            )
+        )
         self.enterContext(
             patch(
                 "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
@@ -1149,6 +1161,14 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
         deployment_record_id: str = "deployment-promotion-syo-prod",
         provider_effect_checkpoint: Callable[[str], None] | None = None,
     ) -> GenericWebProdPromotionResult:
+        inventory = store.inventories[("sellyouroutboard-testing", "prod")]
+        store.inventories[("sellyouroutboard-testing", "prod")] = inventory.model_copy(
+            update={"source_git_ref": "1" * 40}
+        )
+        testing = store.inventories[("sellyouroutboard-testing", "testing")]
+        store.inventories[("sellyouroutboard-testing", "testing")] = testing.model_copy(
+            update={"source_git_ref": "2" * 40}
+        )
         with patch(
             "control_plane.workflows.generic_web_promotion.wait_for_runtime_identity_healthcheck_with_retry",
             side_effect=provider.healthcheck,
@@ -1156,7 +1176,7 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
             return execute_generic_web_prod_promotion(
                 control_plane_root=Path("."),
                 record_store=store,
-                request=_request(),
+                request=_request(source_git_ref="2" * 40),
                 deploy_provider=provider,
                 provider_operation_title=provider_operation_title,
                 deployment_record_id=deployment_record_id,
@@ -1246,7 +1266,7 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
             execute_generic_web_prod_promotion(
                 control_plane_root=Path("."),
                 record_store=store,
-                request=_request(dry_run=True),
+                request=_request(dry_run=True, source_git_ref="2" * 40),
             )
 
         self.assertEqual(provider.deployed_artifacts, [])

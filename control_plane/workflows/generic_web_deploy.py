@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable, Literal, Protocol, cast
 
 import click
+from control_plane.lane_movement import LaneBuild, LaneMovementRefused, require_forward_lane_build
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.deploy_target import DeployTargetCategory
@@ -453,6 +454,7 @@ def execute_generic_web_deploy(
     deployment_record_id: str = "",
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     recorded_artifact: bool = False,
+    rollback: bool = False,
 ) -> GenericWebDeployResult:
     """Deploy ``request``; ``recorded_artifact`` marks its artifact as Launchplane's own record."""
     normalized_provider_operation_title = provider_operation_title.strip()
@@ -540,6 +542,18 @@ def execute_generic_web_deploy(
         provider_effect_attempted = True
 
     try:
+        if not rollback:
+            require_forward_lane_build(
+                record_store=record_store,
+                profile=resolved_profile,
+                context=resolved_lane.context,
+                instance=resolved_lane.instance,
+                desired=LaneBuild(
+                    request.artifact_id,
+                    request.source_git_ref,
+                    request.deploy_reference or request.artifact_id,
+                ),
+            )
         untitled_deployment_observation = resolved_deploy_provider.execute_artifact_deploy(
             control_plane_root=control_plane_root,
             resolved_deploy_target=prepared_deploy_target,
@@ -655,6 +669,10 @@ def execute_generic_web_deploy(
             post_deploy_update=post_deploy_update,
             runtime_identity=runtime_identity,
         ).model_copy(update={"integration_key_readback": key_readback})
+        if isinstance(exc, LaneMovementRefused):
+            deployment_record = deployment_record.model_copy(
+                update={"failure": exc.record_failure()}
+            )
         record_store.write_deployment_record(deployment_record)
         if deploy_completed:
             record_store.write_environment_inventory(

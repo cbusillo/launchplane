@@ -22,6 +22,7 @@ from control_plane.build_provenance import (
     BUILD_WORKFLOW_PATH,
     BuildProvenanceError,
     GitHubBuildProvenanceTransport,
+    verify_build_artifact,
 )
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetPolicies,
@@ -169,6 +170,9 @@ class FakeGitHub:
         self.pull_request_move: tuple[int, dict[str, object]] | None = None
 
     def add_run(self, run_id: int, commit: str, *, event: str = "push") -> None:
+        if event == "pull_request" and commit not in self.first_parents:
+            earlier = [run for run in self.runs.values() if run["event"] == "pull_request"]
+            self.first_parents[commit] = str(earlier[-1]["head_sha"]) if earlier else ""
         self.runs[run_id] = {
             "id": run_id,
             "run_attempt": 1,
@@ -183,6 +187,19 @@ class FakeGitHub:
         }
 
     def get_json(self, path: str) -> object:
+        if "/compare/" in path:
+            base, head = path.split("/compare/")[1].split("...")
+            chain: set[str] = set()
+            cursor = head
+            while cursor and cursor not in chain:
+                chain.add(cursor)
+                cursor = self.first_parents.get(cursor, "")
+            status = "ahead" if base in chain else "behind"
+            return {
+                "status": status,
+                "base_commit": {"sha": base},
+                "merge_base_commit": {"sha": base if status == "ahead" else head},
+            }
         if path == f"/repos/{REPOSITORY}":
             return {"id": int(REPOSITORY_ID), "default_branch": "main"}
         if path.startswith(f"/repos/{REPOSITORY}/actions/workflows/build.yml/runs?"):
@@ -444,6 +461,12 @@ class ProductReconcileTestCase(unittest.TestCase):
             LaunchplaneProductProfileRecord.model_validate(_profile())
         )
         self.github = FakeGitHub()
+        transport = patch(
+            "control_plane.product_reconcile.resolve_build_provenance_transport",
+            side_effect=lambda _store, _profile: self.github,
+        )
+        transport.start()
+        self.addCleanup(transport.stop)
         self.provider = FakePreviewProvider()
         self.root = Path(temporary_directory.name)
         self.comments = FakeGitHubComments()
@@ -682,6 +705,79 @@ class ProductReconcileStoreTests(ProductReconcileTestCase):
 
 
 class ProductReconcileTestingTests(ProductReconcileTestCase):
+    def _running_release(self, run_id: int, commit: str) -> None:
+        self.github.add_run(run_id, commit)
+        verified = verify_build_artifact(
+            transport=self.github,
+            repository=REPOSITORY,
+            repository_id=REPOSITORY_ID,
+            commit=commit,
+            purpose="release",
+            context="cm",
+            image_repository=IMAGE_REPOSITORY,
+        )
+        self.store.write_artifact_manifest(verified.manifest)
+        self.store.write_release_tuple_record(
+            ReleaseTupleRecord(
+                tuple_id="running-testing",
+                context="cm",
+                channel="testing",
+                artifact_id=verified.manifest.artifact_id,
+                repo_shas={"site": commit},
+                image_repository=IMAGE_REPOSITORY,
+                image_digest=_digest(commit),
+                provenance="ship",
+                minted_at="2026-09-30T12:00:00Z",
+            )
+        )
+
+    def test_incomplete_run_listing_cannot_downgrade_testing(self) -> None:
+        self._running_release(20, DEPLOYABLE)
+        self.github.add_run(10, OLDER)
+        get_json = self.github.get_json
+
+        def incomplete(path: str) -> object:
+            if "/actions/workflows/build.yml/runs?" in path:
+                return {"total_count": 2, "workflow_runs": [self.github.runs[10]]}
+            return get_json(path)
+
+        self.request()
+        with patch.object(self.github, "get_json", incomplete):
+            plan = self.reconcile()
+        self.assertEqual(plan["reason"], "incomplete_build_runs")
+        self.assertEqual(plan["action"], "none")
+        self.assertEqual(plan["build_runs_seen"], 1)
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
+
+    def test_truncated_first_parent_history_cannot_downgrade_testing(self) -> None:
+        self._running_release(20, DEPLOYABLE)
+        self.github.add_run(10, OLDER)
+        self.github.first_parents = {NEWEST: DEPLOYABLE, OLDER: ""}
+        self.request()
+        plan = self.reconcile()
+        self.assertEqual(plan["reason"], "incomplete_commit_history")
+        self.assertFalse(plan["current_commit_seen"])
+        self.assertEqual(plan["action"], "none")
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
+
+    def test_failed_verification_of_current_build_cannot_fall_back_to_its_ancestor(self) -> None:
+        self._running_release(20, DEPLOYABLE)
+        self.github.add_run(10, OLDER)
+        download = self.github.get_bytes
+
+        def unavailable(path: str) -> bytes:
+            if "/artifacts/200/" in path:
+                raise BuildProvenanceError("Manifest temporarily unavailable")
+            return download(path)
+
+        self.request()
+        with patch.object(self.github, "get_bytes", unavailable):
+            plan = self.reconcile()
+        self.assertEqual(plan["reason"], "ancestor_build")
+        self.assertEqual(plan["action"], "none")
+        self.assertTrue(plan["rejected_builds"])
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
+
     def test_testing_deploy_queues_one_target_replacement_on_the_reconcile_grant(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
         self.github.add_run(30, OLDER)
@@ -1470,6 +1566,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
 
     def test_testing_rolled_back_to_the_same_older_image_is_deployed_again(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
+        self.github.add_run(10, OLDER)
         self.request()
         self.reconcile()
         deployed = self.store.read_environment_inventory(context_name="cm", instance_name="testing")
@@ -1480,8 +1577,13 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             deployed.model_copy(
                 update={
                     "deployment_record_id": "deployment-rollback",
+                    "source_git_ref": OLDER,
                     "runtime_identity": deployed.runtime_identity.model_copy(
-                        update={"artifact_id": older, "image_reference": older}
+                        update={
+                            "artifact_id": older,
+                            "image_reference": older,
+                            "source_git_ref": OLDER,
+                        }
                     ),
                 }
             )
@@ -1700,6 +1802,20 @@ class _MinuteClock(datetime):
 
 
 class ProductReconcilePreviewTests(ProductReconcileTestCase):
+    def test_reset_preview_head_cannot_replace_the_serving_newer_build(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.reconcile()
+        before = list(self.provider.applied)
+        self.github.first_parents[PR_HEAD] = OLDER
+        self.github.pull_request["head"] = {"sha": OLDER}
+        self.github.add_run(51, OLDER, event="pull_request")
+        self.request("preview", 5)
+        plan = self.reconcile()
+        self.assertEqual(plan["reason"], "ancestor_build")
+        self.assertEqual(plan["action"], "wait")
+        self.assertEqual(self.provider.applied, before)
+
     def install_refused_domain_provider(
         self, refused_path: str = "/api/domain.delete", *, real_inputs: bool = False
     ) -> list[str]:
@@ -2400,6 +2516,20 @@ class FakeGenericWebPreviewDriver:
 
 
 class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
+    def test_reset_preview_head_keeps_the_serving_build(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.reconcile()
+        before = list(self.driver.changes)
+        self.github.first_parents[PR_HEAD] = OLDER
+        self.github.pull_request["head"] = {"sha": OLDER}
+        self.github.add_run(51, OLDER, event="pull_request")
+        self.request("preview", 5)
+        plan = self.reconcile()
+        self.assertEqual(plan["reason"], "ancestor_build")
+        self.assertEqual(plan["action"], "wait")
+        self.assertEqual(self.driver.changes, before)
+
     def setUp(self) -> None:
         super().setUp()
         self.store.write_product_profile_record(_generic_web_preview_profile())

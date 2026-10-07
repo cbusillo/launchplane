@@ -393,6 +393,7 @@ def execute_odoo_prod_rollback(
             ),
             provider_effect_checkpoint=before_provider_effect,
             hold_uncertain_effects=hold_uncertain_effects,
+            rollback=True,
         )
         deployment_record = typed_record_store.read_deployment_record(
             replacement_result.deployment_record_id

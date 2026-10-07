@@ -406,6 +406,20 @@ def execute_odoo_preview_apply_result(
         manifest=current_request.apply.manifest,
         database_url=database_url,
     ).values
+    if current_request.apply.dry_run_plan.operation == "refresh":
+        from control_plane.lane_movement import LaneBuild, require_forward_preview_build
+
+        manifest = current_request.apply.manifest
+        if manifest is None:
+            raise ValueError("Preview refresh requires its artifact manifest.")
+        require_forward_preview_build(
+            record_store=record_store,
+            profile=profile,
+            preview_slug=current_request.apply.dry_run_plan.preview_slug,
+            desired=LaneBuild(
+                manifest.artifact_id, manifest.source_commit, current_request.apply.image_reference
+            ),
+        )
     resolved_runtime_identity = runtime_identity
     if current_request.apply.dry_run_plan.operation == "refresh":
         expected_runtime_identity = build_odoo_preview_runtime_identity(

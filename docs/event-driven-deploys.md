@@ -71,6 +71,10 @@ reservation. The webhook request never waits on a deploy.
   branch's first-parent history that has a verified release build. A late
   build of an older commit is never desired while a newer one exists, so it
   cannot replace a newer deploy.
+  - Selection refuses an incomplete read: the run list must include the running
+    commit and its recorded build run, and first-parent history must reach the
+    running commit. The saved plan includes run and history counts and rejected
+    builds. Missing evidence leaves the lane unchanged with a recorded reason.
   - If testing already runs the desired artifact, stop.
   - Otherwise, `record_verified_build_artifact` and queue the stable target
     replacement for the testing lane. Its idempotency key is the lane plus
@@ -278,6 +282,28 @@ needs no workflow to report previews or testing deploys.
 - **Missing preview settings:** a preview refused because its runtime
   environment is incomplete names the missing keys (names only, never values)
   on the plan as `missing_keys`, in the request's error, and in the PR comment.
+
+## Forward build changes
+
+Testing and preview selection, stable deploys (including Client promotions and
+generic-web recovery retries), and preview applies check the requested build
+against the lane's current recorded build before provider effects. A different
+commit must be a proven descendant; an ancestor, divergent or unreadable
+comparison is refused. Changing an image at the same commit requires recorded
+newer build provenance. Missing ordering evidence is a refusal, not permission
+to replace the lane. Existing explicit rollback operations, including pinned
+failed-release recovery and the release drill, retain their rollback authority.
+Requests cannot supply a rollback exception to a deploy or preview apply.
+
+The supported forward path is a verified descendant build, or a same-commit
+rebuild whose provenance proves it is newer. An intentional backward change
+uses the existing rollback operation and its own authority. Refusals remain in
+the reconcile plan or failed deployment/operation record. Stable-lane profile
+repair edits routing metadata and does not deploy an image.
+
+This guards code order, not database reversibility. An Odoo rollback preserves
+the existing database and runs post-deploy module work; it does not undo schema
+or data migrations. Backup, restore and release gates retain their own rules.
 
 ## Staff-testing hold
 

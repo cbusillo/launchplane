@@ -1410,6 +1410,16 @@ def execute_generic_web_preview_refresh(
     token = ""
     preview_runtime_identity: RuntimeIdentity | None = None
     try:
+        from control_plane.lane_movement import LaneBuild, require_forward_preview_build
+
+        require_forward_preview_build(
+            record_store=record_store,
+            profile=resolved_profile,
+            preview_slug=request.preview_slug,
+            desired=LaneBuild(
+                request.image_reference, request.anchor_head_sha, request.image_reference
+            ),
+        )
         host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
         target_definition, template_application, target_error = _read_template_payload(
             control_plane_root=control_plane_root,
