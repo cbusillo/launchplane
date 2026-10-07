@@ -29,6 +29,7 @@ class DeliveryTokenLifetimeTests(unittest.TestCase):
         ):
             with self.subTest(failure=type(failure).__name__):
                 fixture.revoked = False
+                observed: BaseException | None = None
                 try:
                     with launchplane_github_token(
                         control_plane_root=fixture.root,
@@ -43,7 +44,8 @@ class DeliveryTokenLifetimeTests(unittest.TestCase):
                         if failure is not None:
                             raise failure
                 except BaseException as error:
-                    self.assertIs(error, failure)
+                    observed = error
+                self.assertIs(observed, failure)
                 self.assertTrue(fixture.revoked)
 
     def test_revocation_failure_preserves_provider_result_and_exception_without_secret_logging(
@@ -64,6 +66,7 @@ class DeliveryTokenLifetimeTests(unittest.TestCase):
                 self.subTest(error=error),
                 self.assertLogs("control_plane.workflows.launchplane", level="WARNING") as logs,
             ):
+                observed: ValueError | None = None
                 try:
                     with launchplane_github_token(
                         control_plane_root=Path("."),
@@ -75,7 +78,8 @@ class DeliveryTokenLifetimeTests(unittest.TestCase):
                         if error:
                             raise error
                 except ValueError as caught:
-                    self.assertIs(caught, failure)
+                    observed = caught
+                self.assertIs(observed, error)
                 self.assertNotIn(token, " ".join(logs.output))
                 self.assertNotIn("private.example", " ".join(logs.output))
         self.assertEqual(revoked, [token, token])
