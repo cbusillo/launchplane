@@ -674,6 +674,8 @@ def execute_generic_web_deploy(
                 update={"failure": exc.record_failure()}
             )
         record_store.write_deployment_record(deployment_record)
+        if isinstance(exc, LaneMovementRefused) and exc.code == "source_order_unavailable":
+            raise
         if deploy_completed:
             record_store.write_environment_inventory(
                 build_environment_inventory(

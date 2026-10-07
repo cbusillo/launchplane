@@ -760,6 +760,44 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
         self.assertEqual(plan["action"], "none")
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
 
+    def test_held_testing_build_is_found_beyond_first_run_and_commit_pages(self) -> None:
+        self._running_release(1, OLDER)
+        for run_id in range(2, 52):
+            self.github.add_run(run_id, DEPLOYABLE)
+        intermediate = [f"{index:040x}" for index in range(100, 450)]
+        chain = [DEPLOYABLE, *intermediate, OLDER]
+        self.github.first_parents = dict(zip(chain, [*chain[1:], ""], strict=True))
+        get_json = self.github.get_json
+
+        def paged(path: str) -> object:
+            page = int(path.rsplit("page=", 1)[1]) if "&page=" in path else 1
+            if "/actions/workflows/build.yml/runs?" in path:
+                runs = sorted(self.github.runs.values(), key=lambda run: -int(str(run["id"])))
+                return {
+                    "total_count": len(runs),
+                    "workflow_runs": runs[(page - 1) * 50 : page * 50],
+                }
+            if "/commits?" in path:
+                return [
+                    {
+                        "sha": sha,
+                        "parents": [{"sha": self.github.first_parents[sha]}]
+                        if self.github.first_parents[sha]
+                        else [],
+                    }
+                    for sha in chain[(page - 1) * 100 : page * 100]
+                ]
+            return get_json(path)
+
+        self.request()
+        with patch.object(self.github, "get_json", paged):
+            plan = self.reconcile()
+        self.assertEqual(plan["action"], "deploy")
+        self.assertEqual(plan["desired_commit"], DEPLOYABLE)
+        self.assertTrue(plan["current_commit_seen"])
+        self.assertGreater(cast(int, plan["commit_history_seen"]), 300)
+        self.assertGreater(cast(int, plan["build_runs_seen"]), 50)
+
     def test_failed_verification_of_current_build_cannot_fall_back_to_its_ancestor(self) -> None:
         self._running_release(20, DEPLOYABLE)
         self.github.add_run(10, OLDER)
@@ -2528,6 +2566,27 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
         plan = self.reconcile()
         self.assertEqual(plan["reason"], "ancestor_build")
         self.assertEqual(plan["action"], "wait")
+        self.assertEqual(self.driver.changes, before)
+
+    def test_failed_active_generation_does_not_allow_repeated_ancestor_refresh(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.reconcile()
+        pushed = "b" * 40
+        self.github.pull_request["head"] = {"sha": pushed}
+        self.github.add_run(51, pushed, event="pull_request")
+        self.driver.refresh_status = "fail"
+        self.request("preview", 5)
+        self.assertEqual(self.run_once().state, "failed")
+        before = list(self.driver.changes)
+        self.github.first_parents[PR_HEAD] = OLDER
+        self.github.pull_request["head"] = {"sha": OLDER}
+        self.github.add_run(52, OLDER, event="pull_request")
+        self.driver.refresh_status = "pass"
+        for _ in range(2):
+            self.request("preview", 5)
+            plan = self.reconcile()
+            self.assertEqual((plan["action"], plan["reason"]), ("wait", "ancestor_build"))
         self.assertEqual(self.driver.changes, before)
 
     def setUp(self) -> None:

@@ -248,6 +248,41 @@ def _restore_operation(
 
 
 class OdooStableOperationWorkerTests(unittest.TestCase):
+    def test_source_history_outage_keeps_target_replacement_pending_without_a_failed_attempt(
+        self,
+    ) -> None:
+        from control_plane.lane_movement import LaneMovementRefused
+
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_odoo_stable_target_replacement_operation_record(
+                OdooStableTargetReplacementOperationRecord.model_validate(_replacement_payload())
+            )
+            with (
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_stable_target_replacement_apply",
+                    side_effect=LaneMovementRefused("source_order_unavailable"),
+                ),
+                self.assertLogs(level=logging.ERROR),
+            ):
+                for _ in range(4):
+                    result = run_odoo_stable_operation_worker_once(
+                        record_store=store,
+                        control_plane_root_path=root,
+                        lease_owner="worker-a",
+                        lease_seconds=300,
+                        heartbeat_seconds=60,
+                    )
+                    self.assertTrue(result.terminal_write_committed)
+                    operation = store.read_odoo_stable_target_replacement_operation_record(
+                        "operation-cm-testing"
+                    )
+                    self.assertEqual(operation.status, "pending")
+                    self.assertEqual(operation.error_code, "lane_movement.source_order_unavailable")
+                    self.assertFalse(operation.finished_at)
+                    self.assertFalse(operation.lease_owner)
+
     def test_client_release_wait_does_not_block_odoo_operation_poll(self) -> None:
         started = Event()
         polled = Event()

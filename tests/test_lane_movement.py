@@ -9,6 +9,7 @@ class LaneMovementTests(unittest.TestCase):
     def setUp(self) -> None:
         self.profile = _generic_web_profile()
         self.store = Mock()
+        self.store.read_artifact_manifest.side_effect = FileNotFoundError
         self.github = FakeGitHub()
         self.current = LaneBuild("current", DEPLOYABLE, "image@sha256:new")
 
@@ -86,3 +87,81 @@ class LaneMovementTests(unittest.TestCase):
                 desired=LaneBuild("other", DEPLOYABLE),
                 transport=self.github,
             )
+
+    def test_newer_source_cannot_replace_a_later_rebuilt_artifact_with_an_older_one(self) -> None:
+        before, after = Mock(), Mock()
+        before.repository = after.repository = self.profile.repository
+        before.run_id, before.run_attempt = 50, 1
+        after.run_id, after.run_attempt = 40, 1
+        with self.assertRaises(LaneMovementRefused) as caught:
+            require_forward_build(
+                record_store=self.store,
+                profile=self.profile,
+                current=LaneBuild("before", OLDER, source_build=before),
+                desired=LaneBuild("after", DEPLOYABLE, source_build=after),
+                transport=self.github,
+            )
+        self.assertEqual(caught.exception.code, "older_artifact")
+
+    def test_rebased_preview_requires_a_newer_artifact_and_stable_lane_refuses_divergence(
+        self,
+    ) -> None:
+        before, after = Mock(), Mock()
+        before.repository = after.repository = self.profile.repository
+        before.run_id, before.run_attempt = 40, 1
+        after.run_id, after.run_attempt = 50, 1
+        comparison = {"status": "diverged", "base_commit": {"sha": OLDER}}
+        with patch.object(self.github, "get_json", return_value=comparison):
+            require_forward_build(
+                record_store=self.store,
+                profile=self.profile,
+                current=LaneBuild("before", OLDER, source_build=before, pull_request_number=5),
+                desired=LaneBuild("after", DEPLOYABLE, source_build=after),
+                transport=self.github,
+            )
+            with self.assertRaises(LaneMovementRefused):
+                require_forward_build(
+                    record_store=self.store,
+                    profile=self.profile,
+                    current=LaneBuild("before", OLDER, source_build=before),
+                    desired=LaneBuild("after", DEPLOYABLE, source_build=after),
+                    transport=self.github,
+                )
+
+    def test_legacy_preview_same_commit_rebuild_needs_verified_later_start_time(self) -> None:
+        after = Mock(repository=self.profile.repository, run_id=50, run_attempt=2)
+        for started, allowed in (("2026-10-01T11:00:00Z", False), ("2026-10-01T13:00:00Z", True)):
+            with (
+                self.subTest(started=started),
+                patch.object(
+                    self.github,
+                    "get_json",
+                    return_value={
+                        "id": 50,
+                        "run_attempt": 2,
+                        "head_sha": DEPLOYABLE,
+                        "conclusion": "success",
+                        "run_started_at": started,
+                    },
+                ),
+            ):
+
+                def require() -> None:
+                    require_forward_build(
+                        record_store=self.store,
+                        profile=self.profile,
+                        current=LaneBuild(
+                            "before",
+                            DEPLOYABLE,
+                            observed_at="2026-10-01T12:00:00Z",
+                            pull_request_number=5,
+                        ),
+                        desired=LaneBuild("after", DEPLOYABLE, source_build=after),
+                        transport=self.github,
+                    )
+
+                if allowed:
+                    require()
+                else:
+                    with self.assertRaises(LaneMovementRefused):
+                        require()

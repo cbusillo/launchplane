@@ -288,9 +288,11 @@ needs no workflow to report previews or testing deploys.
 Testing and preview selection, stable deploys (including Client promotions and
 generic-web recovery retries), and preview applies check the requested build
 against the lane's current recorded build before provider effects. A different
-commit must be a proven descendant; an ancestor, divergent or unreadable
-comparison is refused. Changing an image at the same commit requires recorded
-newer build provenance. Missing ordering evidence is a refusal, not permission
+stable-lane commit must be a proven descendant. Previews may also follow a
+rebased PR head when verified build provenance proves its artifact is newer.
+An ancestor is always refused. Changing an image at the same commit requires
+newer build provenance; legacy preview records can use a verified build that
+started after the serving generation was recorded. Missing ordering evidence is a refusal, not permission
 to replace the lane. Existing explicit rollback operations, including pinned
 failed-release recovery and the release drill, retain their rollback authority.
 Requests cannot supply a rollback exception to a deploy or preview apply.
@@ -300,6 +302,16 @@ rebuild whose provenance proves it is newer. An intentional backward change
 uses the existing rollback operation and its own authority. Refusals remain in
 the reconcile plan or failed deployment/operation record. Stable-lane profile
 repair edits routing metadata and does not deploy an image.
+
+Testing searches up to 20 pages of successful build runs and first-parent
+history to find its running build. An omitted running run or commit still
+holds selection with the observed counts. If the running build is beyond
+those bounds, the supported service deploy/target-replacement operation can
+request an exact verified forward build; it still checks source order before
+effects. A source read outage before effects retains refusal evidence and
+allows another attempt, without consuming the testing failure budget or
+stopping an accepted Client release. Preview refusals retain the serving
+generation and are stored in the operation response or reconcile plan.
 
 This guards code order, not database reversibility. An Odoo rollback preserves
 the existing database and runs post-deploy module work; it does not undo schema

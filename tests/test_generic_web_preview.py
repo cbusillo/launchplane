@@ -32,6 +32,8 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDestroyRequest,
     GenericWebPreviewInventoryRequest,
     GenericWebPreviewReadinessRequest,
+    GenericWebPreviewReadinessResult,
+    GenericWebPreviewTransportSummary,
     GenericWebPreviewRefreshRequest,
     MissingPreviewBaseUrlError,
     discover_generic_web_preview_desired_state,
@@ -235,6 +237,79 @@ def _runtime_secret_binding(*, status: SecretStatus = "configured") -> SecretBin
 
 
 class GenericWebPreviewTests(unittest.TestCase):
+    def test_backward_refusal_is_blocked_and_cached_without_provider_or_generation_changes(
+        self,
+    ) -> None:
+        from control_plane.lane_movement import LaneMovementRefused
+        from control_plane.generic_web_preview_http import (
+            GenericWebPreviewRefreshEnvelope,
+            apply_generic_web_preview_refresh_result,
+            should_store_generic_web_preview_idempotency,
+        )
+
+        profile = _profile()
+        store = _GenericWebPreviewStore(profile)
+        readiness = GenericWebPreviewReadinessResult(
+            readiness_status="pass",
+            checked_at="2026-10-01T12:00:00Z",
+            product=profile.product,
+            context=profile.preview.context,
+            template_context=profile.lanes[0].context,
+            template_instance="testing",
+            source="test",
+            missing_template_env_keys=(),
+            missing_provider_fields=(),
+            transport=GenericWebPreviewTransportSummary(
+                data_transport_mode="none",
+                copied_env_keys=(),
+                omitted_env_keys=(),
+                override_env_keys=(),
+                preview_url_env_keys=(),
+                preview_domain_env_keys=(),
+                migration_command_configured=False,
+                seed_command_configured=False,
+            ),
+            checks=(),
+        )
+        request = GenericWebPreviewRefreshEnvelope(
+            product=profile.product,
+            refresh=GenericWebPreviewRefreshRequest(
+                product=profile.product,
+                preview_slug="preview-42-site",
+                anchor_pr_number=42,
+                preview_url="https://preview-42.example.test",
+                anchor_head_sha="a" * 40,
+                image_reference=profile.image.repository + "@sha256:" + "1" * 64,
+            ),
+        )
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.evaluate_generic_web_preview_readiness",
+                return_value=readiness,
+            ),
+            patch(
+                "control_plane.lane_movement.require_forward_preview_build",
+                side_effect=LaneMovementRefused("ancestor_build"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request"
+            ) as provider,
+        ):
+            for _ in range(2):
+                records, result = apply_generic_web_preview_refresh_result(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    request=request,
+                    profile=profile,
+                )
+                self.assertEqual(records, {})
+                self.assertEqual(result["refresh_status"], "blocked")
+                self.assertTrue(
+                    str(result["error_message"]).startswith("lane_movement.ancestor_build:")
+                )
+                self.assertTrue(should_store_generic_web_preview_idempotency(result))
+        provider.assert_not_called()
+
     def test_resolve_generic_web_preview_profile_accepts_based_driver(self) -> None:
         profile = _profile(driver_id="odoo")
 

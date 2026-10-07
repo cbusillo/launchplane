@@ -1451,16 +1451,26 @@ def _plan_preview_target(
     if live and desired_digest == current["current_image_digest"]:
         plan.update(action="none", reason="already_serving", held=False)
     else:
+        movement, _ = _current_preview(
+            record_store=record_store,
+            profile=profile,
+            preview_context=preview_context,
+            pull_request_number=pull_request_number,
+            for_movement=True,
+        )
         try:
             require_forward_build(
                 record_store=record_store,
                 profile=profile,
                 transport=transport,
                 current=LaneBuild(
-                    commit=str(current["current_head_sha"]),
-                    image=f"{profile.image.repository}@{current['current_image_digest']}"
-                    if current["current_image_digest"]
+                    artifact_id=str(movement.get("current_artifact_id", "")),
+                    commit=str(movement["current_head_sha"]),
+                    image=f"{profile.image.repository}@{movement['current_image_digest']}"
+                    if movement["current_image_digest"]
                     else "",
+                    observed_at=str(movement.get("current_observed_at", "")),
+                    pull_request_number=pull_request_number,
                 ),
                 desired=LaneBuild(
                     verified.manifest.artifact_id
@@ -1468,6 +1478,9 @@ def _plan_preview_target(
                     else verified.image_reference,
                     manifest.source_commit,
                     f"{profile.image.repository}@{desired_digest}",
+                    verified.manifest.source_build
+                    if isinstance(verified, VerifiedBuildArtifact)
+                    else verified.source_build,
                 ),
             )
         except LaneMovementRefused as error:
@@ -1511,6 +1524,9 @@ def _run_preview_operation(
         f"{RECONCILE_SOURCE}:{profile.product}:pr-{pull_request_number}:{build_token}:"
         f"{hashlib.sha256(decision.lifecycle_token.encode()).hexdigest()[:16]}"
     )
+    if previous_plan.get("preview_result_error_code") == "lane_movement.source_order_unavailable":
+        previous_key = str(previous_plan.get("preview_operation_key", ""))
+        operation_key += f":retry-{hashlib.sha256(previous_key.encode()).hexdigest()[:16]}"
     reservation_scope = reconcile_reservation_scope(profile.product)
     plan_id = build_odoo_preview_plan_id(scope=reservation_scope, idempotency_key=operation_key)
     plan.update(preview_operation_key=operation_key, preview_plan_id=plan_id)
@@ -1615,6 +1631,7 @@ def _run_preview_operation(
         driver_result = driver_result if isinstance(driver_result, dict) else {}
         result_status = str(driver_result.get("status") or "")
         plan["preview_result_status"] = result_status
+        plan["preview_result_error_code"] = str(driver_result.get("error_code") or "")
         if operation_result.status in {"conflict", "reconcile_required"} or result_status != "pass":
             if (
                 operation == "destroy"
@@ -1758,9 +1775,12 @@ def _run_generic_web_preview_operation(
     if isinstance(verified, VerifiedGenericWebBuild):
         build_run = f"run-{verified.source_build.run_id}-{verified.source_build.run_attempt}"
         plan["preview_build_run"] = build_run
-        if previous_plan.get("preview_build_run") == build_run and previous_plan.get(
-            "preview_result_status"
-        ) in {"fail", "blocked"}:
+        if (
+            previous_plan.get("preview_build_run") == build_run
+            and previous_plan.get("preview_result_status") in {"fail", "blocked"}
+            and previous_plan.get("preview_result_error_code")
+            != "lane_movement.source_order_unavailable"
+        ):
             # Every sweep would otherwise run the same failing refresh again.
             plan["preview_result_status"] = previous_plan["preview_result_status"]
             return _preview_failure(plan, "preview_build_failed")
@@ -1820,6 +1840,7 @@ def _run_generic_web_preview_operation(
         plan["preview_result_status"] = "refused"
         return _preview_failure(plan, "preview_apply_failed")
     plan["preview_result_status"] = status
+    plan["preview_result_error_code"] = str(result.get("error_message", "")).split(":", 1)[0]
     if status != "pass":
         _LOGGER.warning(
             "Generic-web preview %s of %s ended %s: %s",
@@ -2265,6 +2286,25 @@ def _desired_release(
             raise
         return None, [], "build_workflow_missing"
     runs = _list(payload.get("workflow_runs"))
+    # A held or explicitly rolled-back lane may be beyond the newest page.
+    # Search bounded history rather than making a busy repository stay held.
+    for page in range(2, 21):
+        if not current_commit or any(
+            isinstance(run, dict)
+            and str(run.get("head_sha", "")).lower() == current_commit
+            and (not current_run_id or run.get("id") == current_run_id)
+            for run in runs
+        ):
+            break
+        if len(runs) < (page - 1) * TESTING_BUILD_RUN_PAGE_SIZE:
+            break
+        more = _object(
+            transport.get_json(
+                f"/repos/{_repository_path(profile)}/actions/workflows/{workflow_file}/runs?{query}&page={page}"
+            ),
+            "workflow runs",
+        )
+        runs.extend(_list(more.get("workflow_runs")))
     audit = selection if selection is not None else {}
     audit.update(build_runs_seen=len(runs), build_runs_total=payload.get("total_count"))
     built_commits = {
@@ -2289,7 +2329,10 @@ def _desired_release(
     current_seen = not current_commit
     if built_commits:
         for sha in first_parent_history(
-            transport=transport, repository=profile.repository, default_branch=default_branch
+            transport=transport,
+            repository=profile.repository,
+            default_branch=default_branch,
+            max_pages=20,
         ):
             history_seen += 1
             current_seen = current_seen or sha == current_commit
@@ -2371,6 +2414,7 @@ def _current_preview(
     profile: LaunchplaneProductProfileRecord,
     preview_context: str,
     pull_request_number: int,
+    for_movement: bool = False,
 ) -> tuple[dict[str, object], str]:
     """The live preview, and a token that changes with every lifecycle step of its record."""
     current: dict[str, object] = {
@@ -2403,7 +2447,7 @@ def _current_preview(
     # latest generation is what runs, whatever an earlier one served.
     generation_id = (
         preview.active_generation_id or preview.serving_generation_id
-        if generic_web
+        if generic_web and not for_movement
         else preview.serving_generation_id or preview.active_generation_id
     )
     if not generation_id:
@@ -2424,6 +2468,8 @@ def _current_preview(
     current.update(
         current_head_sha=generation.anchor_summary.head_sha.lower(),
         current_image_digest=digest.lower(),
+        current_artifact_id=generation.artifact_id,
+        current_observed_at=generation.ready_at or generation.requested_at,
     )
     return current, lifecycle_token
 

@@ -470,6 +470,30 @@ class ClientReleaseTests(unittest.TestCase):
         self.assertTrue(result.terminal_write_committed)
         return result
 
+    def test_source_read_outage_does_not_stop_accepted_promotion_or_queue_recovery(self) -> None:
+        from control_plane.lane_movement import LaneMovementRefused
+
+        accepted, source = self.queued_promotion()
+        with patch(
+            "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_prod_promotion_run",
+            side_effect=LaneMovementRefused("source_order_unavailable"),
+        ):
+            for _ in range(4):
+                self.run_release_worker()
+                operation = self.store.read_odoo_prod_promotion_operation_record(
+                    source.operation_id
+                )
+                self.assertEqual(operation.status, "pending")
+                self.assertEqual(operation.error_code, "lane_movement.source_order_unavailable")
+                run = read_client_release_run(
+                    store=self.store,
+                    profile=self.store.read_product_profile_record(PRODUCT),
+                    decision=accepted,
+                )
+                assert run is not None
+                self.assertNotEqual(run.state, "stopped")
+                self.assertEqual(self.store.list_odoo_prod_rollback_operation_records(), ())
+
     def promotion_providers(
         self, *, failure: str = "post_deploy", after_write: Callable[[], None] | None = None
     ) -> ExitStack:

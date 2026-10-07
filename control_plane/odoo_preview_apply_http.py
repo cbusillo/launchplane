@@ -417,7 +417,10 @@ def execute_odoo_preview_apply_result(
             profile=profile,
             preview_slug=current_request.apply.dry_run_plan.preview_slug,
             desired=LaneBuild(
-                manifest.artifact_id, manifest.source_commit, current_request.apply.image_reference
+                manifest.artifact_id,
+                manifest.source_commit,
+                current_request.apply.image_reference,
+                manifest.source_build,
             ),
         )
     resolved_runtime_identity = runtime_identity

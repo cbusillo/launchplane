@@ -396,22 +396,31 @@ def _require_first_parent(
 
 
 def first_parent_history(
-    *, transport: BuildProvenanceTransport, repository: str, default_branch: str
+    *,
+    transport: BuildProvenanceTransport,
+    repository: str,
+    default_branch: str,
+    max_pages: int = FIRST_PARENT_PAGE_LIMIT,
 ) -> Iterator[str]:
     """Yield the default branch's first-parent commits from the tip, newest first, bounded."""
     return _first_parent_history(
         transport=transport,
         repository_path=_repository_path(repository),
         default_branch=default_branch,
+        max_pages=max_pages,
     )
 
 
 def _first_parent_history(
-    *, transport: BuildProvenanceTransport, repository_path: str, default_branch: str
+    *,
+    transport: BuildProvenanceTransport,
+    repository_path: str,
+    default_branch: str,
+    max_pages: int = FIRST_PARENT_PAGE_LIMIT,
 ) -> Iterator[str]:
     parents: dict[str, str] = {}
     cursor = ""
-    for page in range(1, FIRST_PARENT_PAGE_LIMIT + 1):
+    for page in range(1, max_pages + 1):
         query = urlencode({"sha": default_branch, "per_page": "100", "page": str(page)})
         commits = _list(transport.get_json(f"/repos/{repository_path}/commits?{query}"))
         for item in commits:

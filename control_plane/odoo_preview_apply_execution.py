@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import click
+from control_plane.lane_movement import LaneMovementRefused
 
 from control_plane.contracts.idempotency_record import (
     build_launchplane_mutation_reservation_id,
@@ -201,6 +202,21 @@ class OdooPreviewProviderMutationAdapter:
                 provider_lease_check=lease.assert_current,
                 deployment_record_id=self._deployment_record_id,
                 runtime_identity=self._runtime_identity,
+            )
+        except LaneMovementRefused as error:
+            return ProviderMutationOutcome(
+                response_status_code=409,
+                response_payload=provider_operation_response_payload(
+                    trace_id=self._trace_id,
+                    records={},
+                    result={
+                        "status": "blocked",
+                        "error_code": f"lane_movement.{error.code}",
+                        "error_message": error.record_failure().description,
+                    },
+                ),
+                durable=True,
+                provider_effect_performed=False,
             )
         except (
             OdooPreviewApplyConfigError,

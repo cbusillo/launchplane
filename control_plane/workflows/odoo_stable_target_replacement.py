@@ -2003,7 +2003,7 @@ def execute_odoo_stable_target_replacement_apply(
             current_identity = _runtime_identity_map(current_env_map)
             if current_identity:
                 if (
-                    current_identity.get("product") != profile.product
+                    current_identity.get("product", "") not in {"", profile.product}
                     or current_identity.get("context") != plan.context
                     or current_identity.get("instance") != plan.instance
                 ):
@@ -2281,6 +2281,8 @@ def execute_odoo_stable_target_replacement_apply(
             raise OdooProviderEffectUncertainError(
                 "Odoo provider effect requires reconciliation."
             ) from error
+        if isinstance(error, LaneMovementRefused) and error.code == "source_order_unavailable":
+            raise
         return base_result.result(
             deploy_status="fail",
             runtime_identity_injected=False,

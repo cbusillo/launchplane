@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import click
+from control_plane.lane_movement import LaneMovementRefused
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
@@ -1521,7 +1522,7 @@ def execute_generic_web_preview_refresh(
         if rollback_errors:
             message = f"{message}\n" + "\n".join(rollback_errors)
         return GenericWebPreviewRefreshResult(
-            refresh_status="fail",
+            refresh_status="blocked" if isinstance(exc, LaneMovementRefused) else "fail",
             refresh_started_at=started_at,
             refresh_finished_at=finished_at,
             product=resolved_profile.product,
@@ -1532,7 +1533,11 @@ def execute_generic_web_preview_refresh(
             preview_url=preview_url,
             readiness=readiness,
             runtime_identity=preview_runtime_identity,
-            error_message=message,
+            error_message=(
+                f"lane_movement.{exc.code}: {exc.record_failure().description}"
+                if isinstance(exc, LaneMovementRefused)
+                else message
+            ),
         )
 
     finished_at = utc_now_timestamp()
