@@ -1,3 +1,4 @@
+import threading
 import unittest
 from collections.abc import Callable
 from email.message import Message
@@ -71,16 +72,27 @@ async def _post_owner(
     github_api: Callable[..., object] = _github_user(),
     idempotency_key: str = "",
     headers: dict[str, str] | None = None,
+    revocations: list[tuple[str, int]] | None = None,
 ) -> Response:
     request_headers = dict(headers) if headers else {"Authorization": "Bearer valid-token"}
     if idempotency_key:
         request_headers["Idempotency-Key"] = idempotency_key
+
+    def provider(**kwargs: object) -> object:
+        if kwargs.get("path") == "/installation/token" and kwargs.get("method") == "DELETE":
+            token = kwargs["token"]
+            assert isinstance(token, str)
+            if revocations is not None:
+                revocations.append((token, threading.get_ident()))
+            return None
+        return github_api(**kwargs)
+
     with (
         patch(
             "control_plane.http_app.resolve_launchplane_github_token",
             return_value="managed-token",
         ),
-        patch("control_plane.http_app.github_api_request", side_effect=github_api),
+        patch("control_plane.http_app.github_api_request", side_effect=provider),
     ):
         return await _asgi_request(
             app, "POST", _OWNER_ROUTE, headers=request_headers, payload=payload
@@ -98,6 +110,23 @@ def _workflow_app(
 
 
 class ProductOwnerSettingHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lookup_revokes_off_event_loop_on_success_and_provider_failure(self) -> None:
+        loop_thread = threading.get_ident()
+        for provider, expected_status in ((_github_user(), 202), (_github_user_missing, 400)):
+            with self.subTest(expected_status=expected_status), TemporaryDirectory() as directory:
+                store = _store(Path(directory), _profile())
+                self.addCleanup(store.close)
+                revocations: list[tuple[str, int]] = []
+                response = await _post_owner(
+                    _workflow_app(store),
+                    {"mode": "dry-run", "github_login": "site-owner", "reason": "Name the Client."},
+                    github_api=provider,
+                    revocations=revocations,
+                )
+                self.assertEqual(response.status_code, expected_status)
+                self.assertEqual([token for token, _ in revocations], ["managed-token"])
+                self.assertTrue(all(thread != loop_thread for _, thread in revocations))
+
     async def test_dry_run_resolves_login_and_writes_nothing(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             original_profile = _profile()

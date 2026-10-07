@@ -53,7 +53,9 @@ class DeliveryTokenLifetimeTests(unittest.TestCase):
         revoked: list[str] = []
 
         def unavailable(**kwargs: object) -> object:
-            revoked.append(str(kwargs["token"]))
+            value = kwargs["token"]
+            assert isinstance(value, str)
+            revoked.append(value)
             raise click.ClickException(f"{token} https://private.example/secret")
 
         failure = ValueError("provider operation failed")
@@ -83,7 +85,7 @@ class DeliveryTokenLifetimeTests(unittest.TestCase):
             with self.subTest(value=value):
                 with patch("control_plane.workflows.launchplane.github_api_request") as provider:
 
-                    def resolver(**kwargs: object) -> str:
+                    def resolver(**_kwargs: object) -> str:
                         if isinstance(value, click.ClickException):
                             raise value
                         return value
@@ -109,19 +111,23 @@ class DeliveryTokenLifetimeTests(unittest.TestCase):
                 revoked: list[str] = []
 
                 def mint(**kwargs: object) -> str:
-                    token = str(kwargs["repository"])
+                    token = kwargs["repository"]
+                    assert isinstance(token, str)
                     active.add(token)
                     return token
 
                 def provider(**kwargs: object) -> object:
-                    token = str(kwargs["token"])
+                    token = kwargs["token"]
+                    assert isinstance(token, str)
                     self.assertIn(token, active)
                     if kwargs.get("method") == "DELETE":
                         self.assertEqual(kwargs["path"], "/installation/token")
                         active.remove(token)
                         revoked.append(token)
                         return None
-                    if str(kwargs["path"]).startswith(f"/repos/example/{failed_repository}/"):
+                    request_path = kwargs["path"]
+                    assert isinstance(request_path, str)
+                    if request_path.startswith(f"/repos/example/{failed_repository}/"):
                         raise click.ClickException("companion provider unavailable")
                     return {
                         "head": {"sha": "a" * 40},

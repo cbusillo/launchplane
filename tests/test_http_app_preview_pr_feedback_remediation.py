@@ -1,4 +1,3 @@
-from contextlib import nullcontext
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -74,10 +73,24 @@ class PreviewPrFeedbackRemediationHttpTests(unittest.IsolatedAsyncioTestCase):
                 "Authorization": "Bearer local-operator-token",
                 "Idempotency-Key": "preview-feedback-remediation-verireel-311",
             }
+            revoked: list[str] = []
+
+            def revoke(**kwargs: object) -> object:
+                self.assertEqual(kwargs["path"], "/installation/token")
+                self.assertEqual(kwargs["method"], "DELETE")
+                token = kwargs["token"]
+                assert isinstance(token, str)
+                revoked.append(token)
+                return None
+
             with (
                 patch(
-                    "control_plane.http_app.resolve_remediation_token",
-                    side_effect=lambda **kwargs: nullcontext("token"),
+                    "control_plane.preview_pr_feedback_remediation.resolve_launchplane_github_token",
+                    return_value="token",
+                ),
+                patch(
+                    "control_plane.preview_pr_feedback_remediation.github_api_request",
+                    side_effect=revoke,
                 ),
                 patch(
                     "control_plane.http_app.observe_managed_preview_pr_feedback",
@@ -116,6 +129,7 @@ class PreviewPrFeedbackRemediationHttpTests(unittest.IsolatedAsyncioTestCase):
                     payload=_payload(mode="apply"),
                 )
 
+            self.assertEqual(revoked, ["token", "token", "token"])
             self.assertEqual(missing_key.status_code, 400, missing_key.text)
             self.assertEqual(unmatched_apply.status_code, 409, unmatched_apply.text)
             self.assertEqual(unmatched_apply.json()["error"]["code"], "matching_dry_run_required")

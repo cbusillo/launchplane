@@ -12903,52 +12903,51 @@ def create_launchplane_fastapi_app(
             ) from error
         resolved_owner = control_plane_product_owner_setting.ProductOwnerIdentity()
         if not owner_request.clear:
-            with launchplane_github_token(
-                token_resolver=resolve_launchplane_github_token,
-                api_request=github_api_request,
-                control_plane_root=resolved_control_plane_root,
-                context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
-                repository=profile.repository,
-            ) as github_token:
-                if not github_token:
-                    raise _launchplane_http_error(
-                        status_code=503,
-                        trace_id=trace_id,
-                        code="github_credentials_unavailable",
-                        message=(
-                            "Launchplane has no GitHub read credential to look up the Owner login."
-                        ),
-                    )
-                try:
-                    resolved_owner = await run_in_threadpool(
-                        control_plane_product_owner_setting.resolve_github_user_owner,
+
+            def lookup_owner() -> control_plane_product_owner_setting.ProductOwnerIdentity:
+                with launchplane_github_token(
+                    token_resolver=resolve_launchplane_github_token,
+                    api_request=github_api_request,
+                    control_plane_root=resolved_control_plane_root,
+                    context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    repository=profile.repository,
+                ) as github_token:
+                    if not github_token:
+                        raise _launchplane_http_error(
+                            status_code=503,
+                            trace_id=trace_id,
+                            code="github_credentials_unavailable",
+                            message="Launchplane has no GitHub read credential to look up the Owner login.",
+                        )
+                    return control_plane_product_owner_setting.resolve_github_user_owner(
                         login=owner_request.github_login,
                         token=github_token,
                         api_request=github_api_request,
                     )
-                except control_plane_product_owner_setting.ProductOwnerLoginNotFoundError as error:
-                    raise _launchplane_http_error(
-                        status_code=400,
-                        trace_id=trace_id,
-                        code="owner_login_not_found",
-                        message=str(error),
-                    ) from error
-                except control_plane_product_owner_setting.ProductOwnerLoginNotUserError as error:
-                    raise _launchplane_http_error(
-                        status_code=400,
-                        trace_id=trace_id,
-                        code="owner_login_not_user",
-                        message=str(error),
-                    ) from error
-                except (
-                    control_plane_product_owner_setting.ProductOwnerLookupUnavailableError
-                ) as error:
-                    raise _launchplane_http_error(
-                        status_code=503,
-                        trace_id=trace_id,
-                        code="github_lookup_unavailable",
-                        message=str(error),
-                    ) from error
+
+            try:
+                resolved_owner = await run_in_threadpool(lookup_owner)
+            except control_plane_product_owner_setting.ProductOwnerLoginNotFoundError as error:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="owner_login_not_found",
+                    message=str(error),
+                ) from error
+            except control_plane_product_owner_setting.ProductOwnerLoginNotUserError as error:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="owner_login_not_user",
+                    message=str(error),
+                ) from error
+            except control_plane_product_owner_setting.ProductOwnerLookupUnavailableError as error:
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="github_lookup_unavailable",
+                    message=str(error),
+                ) from error
         plan = control_plane_product_owner_setting.build_product_owner_setting_plan(
             profile=profile,
             request=owner_request,

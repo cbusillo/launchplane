@@ -81,8 +81,10 @@ class _GitHub:
         if path == "/user":
             raise AssertionError("Installation tokens cannot resolve a user identity.")
         if path == "/installation/token" and method == "DELETE":
-            if kwargs["token"] == "feedback-token":
-                self.revoked_delivery_tokens.append(str(kwargs["token"]))
+            revoked_token = kwargs["token"]
+            assert isinstance(revoked_token, str)
+            if revoked_token == "feedback-token":
+                self.revoked_delivery_tokens.append(revoked_token)
             else:
                 self.revoked_app_tokens += 1
             return None
