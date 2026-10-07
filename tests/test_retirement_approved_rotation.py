@@ -201,6 +201,10 @@ class RetirementApprovedRotationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(
                             tuple(event.event_type for event in rotation_events), ("rotated",)
                         )
+                        self.assertEqual(
+                            rotation_events[0].metadata["new_version_id"],
+                            rotated.current_version_id,
+                        )
                     finally:
                         released.set()
                         response = await attempt
@@ -208,6 +212,9 @@ class RetirementApprovedRotationTests(unittest.IsolatedAsyncioTestCase):
                 after = store.read_secret_record(secret.secret_id)
                 self.assertEqual(after, rotated)
                 self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(
+                    response.json()["error"]["code"], "mutation_reconciliation_required"
+                )
                 self.assertEqual(
                     store.list_secret_audit_events(secret_id=secret.secret_id), rotation_events
                 )
@@ -255,6 +262,10 @@ class RetirementApprovedRotationTests(unittest.IsolatedAsyncioTestCase):
                     )
                 self.assertEqual(retry.status_code, 409, retry.text)
                 self.assertEqual(conflict.status_code, 409, conflict.text)
+                self.assertEqual(retry.json()["error"]["code"], "mutation_reconciliation_required")
+                self.assertEqual(
+                    conflict.json()["error"]["code"], "mutation_reconciliation_required"
+                )
                 self.assertEqual(store.read_secret_record(secret.secret_id), rotated)
                 delete.assert_not_called()
         finally:

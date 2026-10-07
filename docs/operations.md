@@ -3757,9 +3757,10 @@ The final secret-disable write also compares the reviewed secret authority under
 the storage write lock. An approved rotation committed after the last snapshot
 keeps its new version pointer and audit event; retirement refuses the stale
 disable and retains reconciliation. An already-disabled matching secret is
-adopted without rewriting it. SQLite and PostgreSQL fixtures exercise the
-privileged-operation HTTP plan/approval and internal worker during this pause
-with opaque ciphertext; this is not live-provider or key-retirement proof.
+adopted without rewriting it. Same-key recovery requires unchanged reviewed
+authority; retrying cannot repair a changed version or authorize a fresh plan
+to take over the held operation. This behavior has fixture proof with opaque
+ciphertext, not live-provider or key-retirement proof.
 Unconfirmed checkpoint conflicts retain reconciliation
 evidence and the target fence.
 A same-key retry can resume after target records
