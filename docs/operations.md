@@ -3753,6 +3753,13 @@ and authority match. It then uses the current validated profile and managed-secr
 records, preserving a concurrent winner's completed state and disable timestamps.
 Refreshed secrets must still match the reviewed snapshot; rotation or addition
 during the insert race refuses cleanup of that changed authority.
+The final secret-disable write also compares the reviewed secret authority under
+the storage write lock. An approved rotation committed after the last snapshot
+keeps its new version pointer and audit event; retirement refuses the stale
+disable and retains reconciliation. An already-disabled matching secret is
+adopted without rewriting it. SQLite and PostgreSQL fixtures exercise the
+privileged-operation HTTP plan/approval and internal worker during this pause
+with opaque ciphertext; this is not live-provider or key-retirement proof.
 Unconfirmed checkpoint conflicts retain reconciliation
 evidence and the target fence.
 A same-key retry can resume after target records

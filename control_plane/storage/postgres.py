@@ -445,7 +445,10 @@ from control_plane.contracts.production_backup_authority import (
     ProductionBackupPolicyRecord,
     ProductionBackupTargetRecord,
 )
-from control_plane.contracts.product_retirement import ProductRetirementRecord
+from control_plane.contracts.product_retirement import (
+    ProductRetirementRecord,
+    product_retirement_secret_disable_matches,
+)
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.product_reconcile import (
     PRODUCT_RECONCILE_REQUEST_STATES,
@@ -37712,6 +37715,36 @@ class PostgresRecordStore(HumanSessionStore):
     def write_secret_record(self, record: SecretRecord) -> None:
         # Existing records are row-guarded; concurrent direct creates arbitrate by uniqueness.
         self._write_row(self._secret_row(record))
+
+    def disable_product_retirement_secret(
+        self, *, expected_record: SecretRecord, updated_at: str, updated_by: str
+    ) -> bool:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = session.scalar(
+                select(LaunchplaneSecretRow)
+                .where(LaunchplaneSecretRow.secret_id == expected_record.secret_id)
+                .with_for_update()
+            )
+            if row is None:
+                return False
+            current = SecretRecord.model_validate(row.payload)
+            if not product_retirement_secret_disable_matches(current, expected_record):
+                return False
+            if current.status != "disabled":
+                session.merge(
+                    self._secret_row(
+                        current.model_copy(
+                            update={
+                                "status": "disabled",
+                                "updated_at": updated_at,
+                                "updated_by": updated_by,
+                            }
+                        )
+                    )
+                )
+                session.commit()
+            return True
 
     def _write_bundled_metadata_row(self, row: Base) -> None:
         with self._session_factory() as session:
