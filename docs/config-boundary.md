@@ -298,12 +298,16 @@ supplied snapshots exactly, rather than calculating a merge base: a PR behind
 its base can report authority absent from the newer base but present in its head.
 The reusable gate maps PR, merge-group and ordinary push events to their explicit
 commit pairs and fetches a missing named commit from the checked-out repository.
-A newly created default-branch train ref has a zero before SHA. For that event,
-the gate fetches the repository's event-supplied default branch and selects the
+A default-branch train ref uses its original candidate base on both creation
+(zero before SHA) and update. The gate fetches the repository's event-supplied
+default branch and selects the
 first shared commit in the candidate and target branch's first-parent histories.
 This recovers the train's original base across all batch entries, including when
 the target advances or merges the candidate while the job is queued. The
 comparison covers every batch entry and stays bound to committed snapshots.
+Comparing a reconstructed candidate to the previous candidate would hide
+rejected authority when their trees are identical; train updates therefore
+recover the base independently of the push's before SHA.
 Missing history, no shared base, a same-head base, other zero-SHA comparisons,
 and unmapped events fail closed. Branch/tag creation outside that default-branch
 train path uses pull_request or merge_group verification, or the CLI with an
