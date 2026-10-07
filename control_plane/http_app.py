@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from functools import cache
 from urllib.parse import unquote
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, MutableMapping
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path as FilePath
 from typing import Annotated, Any, Literal, NoReturn, NotRequired, Protocol, Self, TypedDict, cast
@@ -895,6 +895,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.launchplane import (
     github_api_request,
     resolve_launchplane_github_token,
+    launchplane_github_token,
 )
 from control_plane.work_graph_issue_inbox import (
     GitHubIssueInboxReconcileRequest,
@@ -5119,6 +5120,7 @@ def create_launchplane_fastapi_app(
         ),
         control_plane_root=resolved_control_plane_root,
         github_token=resolve_launchplane_github_token,
+        github_api=github_api_request,
     )
     driver_read_route_dependencies = DriverReadRouteDependencies(
         common=read_route_dependencies,
@@ -6252,6 +6254,7 @@ def create_launchplane_fastapi_app(
                 or GitHubRepositoryEvidenceProvider(
                     control_plane_root=resolved_control_plane_root,
                     github_token=lambda **_: token,
+                    github_token_scope=lambda **_: nullcontext(token),
                     github_api=github_api_request,
                     token_context=_LAUNCHPLANE_SERVICE_CONTEXT,
                 ),
@@ -12900,48 +12903,52 @@ def create_launchplane_fastapi_app(
             ) from error
         resolved_owner = control_plane_product_owner_setting.ProductOwnerIdentity()
         if not owner_request.clear:
-            github_token = resolve_launchplane_github_token(
+            with launchplane_github_token(
+                token_resolver=resolve_launchplane_github_token,
+                api_request=github_api_request,
                 control_plane_root=resolved_control_plane_root,
                 context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
                 repository=profile.repository,
-            )
-            if not github_token:
-                raise _launchplane_http_error(
-                    status_code=503,
-                    trace_id=trace_id,
-                    code="github_credentials_unavailable",
-                    message=(
-                        "Launchplane has no GitHub read credential to look up the Owner login."
-                    ),
-                )
-            try:
-                resolved_owner = await run_in_threadpool(
-                    control_plane_product_owner_setting.resolve_github_user_owner,
-                    login=owner_request.github_login,
-                    token=github_token,
-                    api_request=github_api_request,
-                )
-            except control_plane_product_owner_setting.ProductOwnerLoginNotFoundError as error:
-                raise _launchplane_http_error(
-                    status_code=400,
-                    trace_id=trace_id,
-                    code="owner_login_not_found",
-                    message=str(error),
-                ) from error
-            except control_plane_product_owner_setting.ProductOwnerLoginNotUserError as error:
-                raise _launchplane_http_error(
-                    status_code=400,
-                    trace_id=trace_id,
-                    code="owner_login_not_user",
-                    message=str(error),
-                ) from error
-            except control_plane_product_owner_setting.ProductOwnerLookupUnavailableError as error:
-                raise _launchplane_http_error(
-                    status_code=503,
-                    trace_id=trace_id,
-                    code="github_lookup_unavailable",
-                    message=str(error),
-                ) from error
+            ) as github_token:
+                if not github_token:
+                    raise _launchplane_http_error(
+                        status_code=503,
+                        trace_id=trace_id,
+                        code="github_credentials_unavailable",
+                        message=(
+                            "Launchplane has no GitHub read credential to look up the Owner login."
+                        ),
+                    )
+                try:
+                    resolved_owner = await run_in_threadpool(
+                        control_plane_product_owner_setting.resolve_github_user_owner,
+                        login=owner_request.github_login,
+                        token=github_token,
+                        api_request=github_api_request,
+                    )
+                except control_plane_product_owner_setting.ProductOwnerLoginNotFoundError as error:
+                    raise _launchplane_http_error(
+                        status_code=400,
+                        trace_id=trace_id,
+                        code="owner_login_not_found",
+                        message=str(error),
+                    ) from error
+                except control_plane_product_owner_setting.ProductOwnerLoginNotUserError as error:
+                    raise _launchplane_http_error(
+                        status_code=400,
+                        trace_id=trace_id,
+                        code="owner_login_not_user",
+                        message=str(error),
+                    ) from error
+                except (
+                    control_plane_product_owner_setting.ProductOwnerLookupUnavailableError
+                ) as error:
+                    raise _launchplane_http_error(
+                        status_code=503,
+                        trace_id=trace_id,
+                        code="github_lookup_unavailable",
+                        message=str(error),
+                    ) from error
         plan = control_plane_product_owner_setting.build_product_owner_setting_plan(
             profile=profile,
             request=owner_request,
@@ -22153,136 +22160,162 @@ def create_launchplane_fastapi_app(
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
-        trace_id = next_trace_id()
-        if not isinstance(identity, LocalOperatorIdentity | LocalAdminIdentity):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Preview PR feedback remediation requires a local operator identity.",
+        with ExitStack() as credentials:
+            trace_id = next_trace_id()
+            if not isinstance(identity, LocalOperatorIdentity | LocalAdminIdentity):
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Preview PR feedback remediation requires a local operator identity.",
+                )
+            action = (
+                "preview_pr_feedback_remediation.plan"
+                if remediation_request.mode == "dry-run"
+                else "preview_pr_feedback_remediation.apply"
             )
-        action = (
-            "preview_pr_feedback_remediation.plan"
-            if remediation_request.mode == "dry-run"
-            else "preview_pr_feedback_remediation.apply"
-        )
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action=action,
-            product=remediation_request.product,
-            context=remediation_request.context,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Identity is not authorized for preview PR feedback remediation.",
-            )
-        if not idempotency_key.strip():
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="idempotency_key_required",
-                message="Preview PR feedback remediation requires Idempotency-Key.",
-            )
-        try:
-            remediation_store = require_preview_pr_feedback_remediation_write_store(record_store)
-            target = bind_preview_pr_feedback_target(
-                record_store=remediation_store,
-                request=remediation_request,
-            )
-            token = resolve_remediation_token(
-                control_plane_root=resolved_control_plane_root,
+            if not resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action=action,
+                product=remediation_request.product,
                 context=remediation_request.context,
-                repository=target.profile.repository,
-            )
-            observation = observe_managed_preview_pr_feedback(
-                target=target,
-                token=token,
-            )
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="product_profile_not_found",
-                message=str(error),
-            ) from error
-        except (TypeError, ValueError, click.ClickException) as error:
-            raise _launchplane_http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="preview_pr_feedback_remediation_observation_failed",
-                message=str(error),
-            ) from error
+            ):
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Identity is not authorized for preview PR feedback remediation.",
+                )
+            if not idempotency_key.strip():
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="idempotency_key_required",
+                    message="Preview PR feedback remediation requires Idempotency-Key.",
+                )
+            try:
+                remediation_store = require_preview_pr_feedback_remediation_write_store(
+                    record_store
+                )
+                target = bind_preview_pr_feedback_target(
+                    record_store=remediation_store,
+                    request=remediation_request,
+                )
+                token = credentials.enter_context(
+                    resolve_remediation_token(
+                        control_plane_root=resolved_control_plane_root,
+                        context=remediation_request.context,
+                        repository=target.profile.repository,
+                    )
+                )
+                observation = observe_managed_preview_pr_feedback(
+                    target=target,
+                    token=token,
+                )
+            except FileNotFoundError as error:
+                raise _launchplane_http_error(
+                    status_code=404,
+                    trace_id=trace_id,
+                    code="product_profile_not_found",
+                    message=str(error),
+                ) from error
+            except (TypeError, ValueError, click.ClickException) as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="preview_pr_feedback_remediation_observation_failed",
+                    message=str(error),
+                ) from error
 
-        actor = launchplane_identity_actor(identity)
-        requested_at = utc_now_timestamp()
-        if remediation_request.mode == "dry-run":
-            remediation_record = build_remediation_record(
-                request=remediation_request,
-                target=target,
+            actor = launchplane_identity_actor(identity)
+            requested_at = utc_now_timestamp()
+            if remediation_request.mode == "dry-run":
+                remediation_record = build_remediation_record(
+                    request=remediation_request,
+                    target=target,
+                    actor=actor,
+                    trace_id=trace_id,
+                    idempotency_key=idempotency_key.strip(),
+                    requested_at=requested_at,
+                    observation=observation,
+                )
+                remediation_store.write_preview_pr_feedback_remediation_record(remediation_record)
+                return accepted_evidence_response(
+                    trace_id=trace_id,
+                    records={
+                        "preview_pr_feedback_remediation_id": remediation_record.remediation_id
+                    },
+                    result=remediation_record.model_dump(mode="json"),
+                )
+
+            (
+                normalized_key,
+                payload_fingerprint,
+                replayed_response,
+            ) = await replay_apply_idempotency(
+                request=request,
+                record_store=record_store,
+                identity=identity,
+                route_path=_PREVIEW_PR_FEEDBACK_REMEDIATION_ROUTE,
+                idempotency_key=idempotency_key,
+                trace_id=trace_id,
+                check_replay=True,
+            )
+            if replayed_response is not None:
+                return replayed_response
+            dry_run_record = matching_dry_run(
+                record_store=remediation_store,
                 actor=actor,
-                trace_id=trace_id,
-                idempotency_key=idempotency_key.strip(),
-                requested_at=requested_at,
-                observation=observation,
+                idempotency_key=normalized_key,
+                continuity_sha256=remediation_request.continuity_sha256,
             )
-            remediation_store.write_preview_pr_feedback_remediation_record(remediation_record)
-            return accepted_evidence_response(
-                trace_id=trace_id,
-                records={"preview_pr_feedback_remediation_id": remediation_record.remediation_id},
-                result=remediation_record.model_dump(mode="json"),
-            )
-
-        (
-            normalized_key,
-            payload_fingerprint,
-            replayed_response,
-        ) = await replay_apply_idempotency(
-            request=request,
-            record_store=record_store,
-            identity=identity,
-            route_path=_PREVIEW_PR_FEEDBACK_REMEDIATION_ROUTE,
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-            check_replay=True,
-        )
-        if replayed_response is not None:
-            return replayed_response
-        dry_run_record = matching_dry_run(
-            record_store=remediation_store,
-            actor=actor,
-            idempotency_key=normalized_key,
-            continuity_sha256=remediation_request.continuity_sha256,
-        )
-        if dry_run_record is None:
-            raise _launchplane_http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="matching_dry_run_required",
-                message="Preview PR feedback remediation apply requires a prior matching dry-run.",
-            )
-        if (dry_run_record.observation.state == "absent" and observation.state != "absent") or (
-            dry_run_record.observation.state == "present"
-            and observation.state == "present"
-            and dry_run_record.observation.digest_sha256 != observation.digest_sha256
-        ):
-            raise _launchplane_http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="preview_pr_feedback_remediation_observation_changed",
-                message="Managed preview feedback changed after the reviewed dry-run.",
-            )
-        try:
-            outcome, mutation_evidence, feedback_record = apply_remediation(
-                request=remediation_request,
-                target=target,
-                token=token,
-                observation=observation,
-                requested_at=requested_at,
-            )
-        except PreviewPrFeedbackRemediationApplyError as error:
-            failed_record = build_remediation_record(
+            if dry_run_record is None:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="matching_dry_run_required",
+                    message="Preview PR feedback remediation apply requires a prior matching dry-run.",
+                )
+            if (dry_run_record.observation.state == "absent" and observation.state != "absent") or (
+                dry_run_record.observation.state == "present"
+                and observation.state == "present"
+                and dry_run_record.observation.digest_sha256 != observation.digest_sha256
+            ):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="preview_pr_feedback_remediation_observation_changed",
+                    message="Managed preview feedback changed after the reviewed dry-run.",
+                )
+            try:
+                outcome, mutation_evidence, feedback_record = apply_remediation(
+                    request=remediation_request,
+                    target=target,
+                    token=token,
+                    observation=observation,
+                    requested_at=requested_at,
+                )
+            except PreviewPrFeedbackRemediationApplyError as error:
+                failed_record = build_remediation_record(
+                    request=remediation_request,
+                    target=target,
+                    actor=actor,
+                    trace_id=trace_id,
+                    idempotency_key=normalized_key,
+                    requested_at=requested_at,
+                    observation=observation,
+                    outcome="failed",
+                    mutation_evidence=error.mutation_evidence,
+                )
+                failed_record.mutation_evidence.error_message = str(error)
+                remediation_store.write_preview_pr_feedback_remediation_record(failed_record)
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="preview_pr_feedback_remediation_apply_failed",
+                    message=str(error),
+                ) from error
+            remediation_record = build_remediation_record(
                 request=remediation_request,
                 target=target,
                 actor=actor,
@@ -22290,54 +22323,35 @@ def create_launchplane_fastapi_app(
                 idempotency_key=normalized_key,
                 requested_at=requested_at,
                 observation=observation,
-                outcome="failed",
-                mutation_evidence=error.mutation_evidence,
+                outcome=outcome,
+                mutation_evidence=mutation_evidence,
+                companion_feedback_id=feedback_record.feedback_id,
             )
-            failed_record.mutation_evidence.error_message = str(error)
-            remediation_store.write_preview_pr_feedback_remediation_record(failed_record)
-            raise _launchplane_http_error(
-                status_code=409,
+            response = accepted_evidence_response(
                 trace_id=trace_id,
-                code="preview_pr_feedback_remediation_apply_failed",
-                message=str(error),
-            ) from error
-        remediation_record = build_remediation_record(
-            request=remediation_request,
-            target=target,
-            actor=actor,
-            trace_id=trace_id,
-            idempotency_key=normalized_key,
-            requested_at=requested_at,
-            observation=observation,
-            outcome=outcome,
-            mutation_evidence=mutation_evidence,
-            companion_feedback_id=feedback_record.feedback_id,
-        )
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records={
-                "preview_pr_feedback_remediation_id": remediation_record.remediation_id,
-                "preview_pr_feedback_id": feedback_record.feedback_id,
-            },
-            result=remediation_record.model_dump(mode="json"),
-        )
-        idempotency_record = LaunchplaneIdempotencyRecord(
-            record_id=build_launchplane_idempotency_record_id(response_trace_id=trace_id),
-            scope=idempotency_scope(identity),
-            route_path=_PREVIEW_PR_FEEDBACK_REMEDIATION_ROUTE,
-            idempotency_key=normalized_key,
-            request_fingerprint=payload_fingerprint,
-            response_status_code=202,
-            response_trace_id=trace_id,
-            recorded_at=requested_at,
-            response_payload=response.model_dump(mode="json", exclude_none=True),
-        )
-        remediation_store.write_preview_pr_feedback_remediation_bundle(
-            remediation_record=remediation_record,
-            feedback_record=feedback_record,
-            idempotency_record=idempotency_record,
-        )
-        return response
+                records={
+                    "preview_pr_feedback_remediation_id": remediation_record.remediation_id,
+                    "preview_pr_feedback_id": feedback_record.feedback_id,
+                },
+                result=remediation_record.model_dump(mode="json"),
+            )
+            idempotency_record = LaunchplaneIdempotencyRecord(
+                record_id=build_launchplane_idempotency_record_id(response_trace_id=trace_id),
+                scope=idempotency_scope(identity),
+                route_path=_PREVIEW_PR_FEEDBACK_REMEDIATION_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint=payload_fingerprint,
+                response_status_code=202,
+                response_trace_id=trace_id,
+                recorded_at=requested_at,
+                response_payload=response.model_dump(mode="json", exclude_none=True),
+            )
+            remediation_store.write_preview_pr_feedback_remediation_bundle(
+                remediation_record=remediation_record,
+                feedback_record=feedback_record,
+                idempotency_record=idempotency_record,
+            )
+            return response
 
     async def apply_preview_pr_feedback(
         request: Request,
@@ -26674,6 +26688,7 @@ def create_launchplane_fastapi_app(
             common=read_route_dependencies,
             control_plane_root=resolved_control_plane_root,
             github_token=resolve_launchplane_github_token,
+            github_api=github_api_request,
         ),
     )
     register_repository_inventory_read_routes(app, dependencies=read_route_dependencies)

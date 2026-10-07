@@ -61,6 +61,7 @@ from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.launchplane import (
     github_api_request,
     resolve_launchplane_github_token,
+    launchplane_github_token,
 )
 from control_plane.workflows.runtime_identity_health import (
     RuntimeIdentityHealthcheckError,
@@ -1146,58 +1147,60 @@ def _create_or_verify_github_release(
     inventory_record_id: str,
 ) -> str:
     owner, repo = _repository_parts(profile.repository)
-    token = resolve_launchplane_github_token(
+    with launchplane_github_token(
+        token_resolver=resolve_launchplane_github_token,
+        api_request=github_api_request,
         control_plane_root=control_plane_root,
         context_name=context,
         repository=profile.repository,
         purpose="release_publish",
-    )
-    if not token:
-        raise click.ClickException(
-            f"Generic web prod promotion requires GitHub token for context '{context}' to create release '{request.release_tag}'."
+    ) as token:
+        if not token:
+            raise click.ClickException(
+                f"Generic web prod promotion requires GitHub token for context '{context}' to create release '{request.release_tag}'."
+            )
+        tag_target_sha = _github_tag_target_sha(
+            owner=owner,
+            repo=repo,
+            release_tag=request.release_tag,
+            token=token,
         )
-    tag_target_sha = _github_tag_target_sha(
-        owner=owner,
-        repo=repo,
-        release_tag=request.release_tag,
-        token=token,
-    )
-    if tag_target_sha and not _revisions_match(tag_target_sha, request.source_git_ref):
-        raise click.ClickException(
-            f"GitHub tag '{request.release_tag}' points at '{tag_target_sha}', not promoted revision '{request.source_git_ref}'."
+        if tag_target_sha and not _revisions_match(tag_target_sha, request.source_git_ref):
+            raise click.ClickException(
+                f"GitHub tag '{request.release_tag}' points at '{tag_target_sha}', not promoted revision '{request.source_git_ref}'."
+            )
+        existing_release = _github_release_for_tag(
+            owner=owner,
+            repo=repo,
+            release_tag=request.release_tag,
+            token=token,
         )
-    existing_release = _github_release_for_tag(
-        owner=owner,
-        repo=repo,
-        release_tag=request.release_tag,
-        token=token,
-    )
-    if existing_release is not None:
-        return _release_html_url(existing_release)
+        if existing_release is not None:
+            return _release_html_url(existing_release)
 
-    release_payload = github_api_request(
-        path=f"/repos/{owner}/{repo}/releases",
-        token=token,
-        method="POST",
-        body={
-            "tag_name": request.release_tag,
-            "target_commitish": request.source_git_ref,
-            "name": request.release_tag,
-            "body": _github_release_body(
-                request=request,
-                promotion_record_id=promotion_record_id,
-                deployment_record_id=deployment_record_id,
-                inventory_record_id=inventory_record_id,
-            ),
-            "draft": False,
-            "prerelease": False,
-        },
-    )
-    if not isinstance(release_payload, dict):
-        raise click.ClickException(
-            f"GitHub release create response for {owner}/{repo} {request.release_tag} must be an object."
+        release_payload = github_api_request(
+            path=f"/repos/{owner}/{repo}/releases",
+            token=token,
+            method="POST",
+            body={
+                "tag_name": request.release_tag,
+                "target_commitish": request.source_git_ref,
+                "name": request.release_tag,
+                "body": _github_release_body(
+                    request=request,
+                    promotion_record_id=promotion_record_id,
+                    deployment_record_id=deployment_record_id,
+                    inventory_record_id=inventory_record_id,
+                ),
+                "draft": False,
+                "prerelease": False,
+            },
         )
-    return _release_html_url(release_payload)
+        if not isinstance(release_payload, dict):
+            raise click.ClickException(
+                f"GitHub release create response for {owner}/{repo} {request.release_tag} must be an object."
+            )
+        return _release_html_url(release_payload)
 
 
 def _preflight_github_release(
@@ -1208,34 +1211,36 @@ def _preflight_github_release(
     request: GenericWebProdPromotionRequest,
 ) -> None:
     owner, repo = _repository_parts(profile.repository)
-    token = resolve_launchplane_github_token(
+    with launchplane_github_token(
+        token_resolver=resolve_launchplane_github_token,
+        api_request=github_api_request,
         control_plane_root=control_plane_root,
         context_name=context,
         repository=profile.repository,
         purpose="repository_read",
-    )
-    if not token:
-        raise click.ClickException(
-            f"Generic web prod promotion requires GitHub token for context '{context}' "
-            f"to validate release '{request.release_tag}'."
+    ) as token:
+        if not token:
+            raise click.ClickException(
+                f"Generic web prod promotion requires GitHub token for context '{context}' "
+                f"to validate release '{request.release_tag}'."
+            )
+        tag_target_sha = _github_tag_target_sha(
+            owner=owner,
+            repo=repo,
+            release_tag=request.release_tag,
+            token=token,
         )
-    tag_target_sha = _github_tag_target_sha(
-        owner=owner,
-        repo=repo,
-        release_tag=request.release_tag,
-        token=token,
-    )
-    if tag_target_sha and not _revisions_match(tag_target_sha, request.source_git_ref):
-        raise click.ClickException(
-            f"GitHub tag '{request.release_tag}' points at '{tag_target_sha}', "
-            f"not promoted revision '{request.source_git_ref}'."
+        if tag_target_sha and not _revisions_match(tag_target_sha, request.source_git_ref):
+            raise click.ClickException(
+                f"GitHub tag '{request.release_tag}' points at '{tag_target_sha}', "
+                f"not promoted revision '{request.source_git_ref}'."
+            )
+        _github_release_for_tag(
+            owner=owner,
+            repo=repo,
+            release_tag=request.release_tag,
+            token=token,
         )
-    _github_release_for_tag(
-        owner=owner,
-        repo=repo,
-        release_tag=request.release_tag,
-        token=token,
-    )
 
 
 def _repository_parts(repository: str) -> tuple[str, str]:

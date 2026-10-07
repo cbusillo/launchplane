@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from contextlib import AbstractContextManager, contextmanager
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from urllib.parse import quote
 
@@ -15,6 +16,8 @@ from control_plane.contracts.repository_evidence import (
     RepositoryTarget,
     RepositoryTargetReference,
 )
+
+from control_plane.workflows.launchplane import launchplane_github_token
 
 
 class RepositoryEvidenceError(RuntimeError):
@@ -55,6 +58,7 @@ class GitHubRepositoryEvidenceProvider:
         token_context: str,
         max_file_pages: int = 30,
         max_commit_pages: int = 10,
+        github_token_scope: Callable[..., AbstractContextManager[str]] = launchplane_github_token,
     ) -> None:
         if max_file_pages < 1:
             raise ValueError("GitHub evidence provider requires at least one file page")
@@ -63,6 +67,7 @@ class GitHubRepositoryEvidenceProvider:
         self._control_plane_root = control_plane_root
         self._github_token = github_token
         self._github_api = github_api
+        self._github_token_scope = github_token_scope
         self._token_context = token_context.strip()
         self._max_file_pages = max_file_pages
         self._max_commit_pages = max_commit_pages
@@ -78,28 +83,28 @@ class GitHubRepositoryEvidenceProvider:
         if limit < 1 or limit > 100:
             raise ValueError("GitHub open pull request limit must be 1 through 100")
         try:
-            token = self._token(repository)
-            repository_path = _repository_path(repository)
-            pull_requests = _list_payload(
-                self._github_api(
-                    path=(
-                        f"/repos/{repository_path}/pulls?state=open&sort=updated&direction=desc"
-                        f"&per_page={limit}&page=1"
+            with self._token(repository) as token:
+                repository_path = _repository_path(repository)
+                pull_requests = _list_payload(
+                    self._github_api(
+                        path=(
+                            f"/repos/{repository_path}/pulls?state=open&sort=updated&direction=desc"
+                            f"&per_page={limit}&page=1"
+                        ),
+                        token=token,
                     ),
-                    token=token,
-                ),
-                "GitHub open pull requests",
-            )
-            return tuple(
-                GitHubOpenPullRequest(
-                    repository=repository,
-                    pull_request_number=int(_positive_decimal(pull_request, "number")),
-                    title=_required_string(pull_request, "title"),
-                    url=_required_string(pull_request, "html_url"),
-                    updated_at=_required_string(pull_request, "updated_at"),
+                    "GitHub open pull requests",
                 )
-                for pull_request in pull_requests
-            )
+                return tuple(
+                    GitHubOpenPullRequest(
+                        repository=repository,
+                        pull_request_number=int(_positive_decimal(pull_request, "number")),
+                        title=_required_string(pull_request, "title"),
+                        url=_required_string(pull_request, "html_url"),
+                        updated_at=_required_string(pull_request, "updated_at"),
+                    )
+                    for pull_request in pull_requests
+                )
         except RepositoryEvidenceError:
             raise
         except Exception as error:
@@ -126,87 +131,87 @@ class GitHubRepositoryEvidenceProvider:
         max_file_pages: int,
     ) -> RepositoryEvidence:
         try:
-            token = self._token(target.repository)
-            repository_path = _repository_path(target.repository)
-            repository = _object_payload(
-                self._github_api(path=f"/repos/{repository_path}", token=token),
-                "GitHub repository",
-            )
-            canonical_repository = _required_string(repository, "full_name").lower()
-            if canonical_repository != target.repository:
-                raise RepositoryEvidenceError(
-                    "GitHub repository identity does not match the requested target."
+            with self._token(target.repository) as token:
+                repository_path = _repository_path(target.repository)
+                repository = _object_payload(
+                    self._github_api(path=f"/repos/{repository_path}", token=token),
+                    "GitHub repository",
                 )
-            repository_id = _positive_decimal(repository, "id")
-            repository_owner = _object_field(repository, "owner")
-            repository_owner_id = _positive_decimal(repository_owner, "id")
+                canonical_repository = _required_string(repository, "full_name").lower()
+                if canonical_repository != target.repository:
+                    raise RepositoryEvidenceError(
+                        "GitHub repository identity does not match the requested target."
+                    )
+                repository_id = _positive_decimal(repository, "id")
+                repository_owner = _object_field(repository, "owner")
+                repository_owner_id = _positive_decimal(repository_owner, "id")
 
-            pull_request_path = f"/repos/{repository_path}/pulls/{target.pull_request_number}"
-            pull_request = _object_payload(
-                self._github_api(path=pull_request_path, token=token),
-                "GitHub pull request",
-            )
-            _validate_pull_request_repository(
-                pull_request=pull_request,
-                repository=canonical_repository,
-                repository_id=repository_id,
-            )
-            head_sha = _pull_request_head_sha(pull_request)
-            base_sha = _pull_request_base_sha(pull_request)
-            base_ref = _pull_request_base_ref(pull_request)
-            merge_commit_sha = _pull_request_merge_commit_sha(pull_request)
-            updated_at = _required_string(pull_request, "updated_at")
-            tree_sha = _git_commit_tree_sha(
-                self._github_api(
-                    path=f"/repos/{repository_path}/git/commits/{head_sha}",
+                pull_request_path = f"/repos/{repository_path}/pulls/{target.pull_request_number}"
+                pull_request = _object_payload(
+                    self._github_api(path=pull_request_path, token=token),
+                    "GitHub pull request",
+                )
+                _validate_pull_request_repository(
+                    pull_request=pull_request,
+                    repository=canonical_repository,
+                    repository_id=repository_id,
+                )
+                head_sha = _pull_request_head_sha(pull_request)
+                base_sha = _pull_request_base_sha(pull_request)
+                base_ref = _pull_request_base_ref(pull_request)
+                merge_commit_sha = _pull_request_merge_commit_sha(pull_request)
+                updated_at = _required_string(pull_request, "updated_at")
+                tree_sha = _git_commit_tree_sha(
+                    self._github_api(
+                        path=f"/repos/{repository_path}/git/commits/{head_sha}",
+                        token=token,
+                    )
+                )
+                changed_files = self._changed_files(
+                    repository_path=repository_path,
+                    pull_request_number=target.pull_request_number,
+                    token=token,
+                    max_file_pages=max_file_pages,
+                )
+                authorship = self._authorship(
+                    repository_path=repository_path,
+                    pull_request=pull_request,
+                    pull_request_number=target.pull_request_number,
                     token=token,
                 )
-            )
-            changed_files = self._changed_files(
-                repository_path=repository_path,
-                pull_request_number=target.pull_request_number,
-                token=token,
-                max_file_pages=max_file_pages,
-            )
-            authorship = self._authorship(
-                repository_path=repository_path,
-                pull_request=pull_request,
-                pull_request_number=target.pull_request_number,
-                token=token,
-            )
 
-            confirmed_pull_request = _object_payload(
-                self._github_api(path=pull_request_path, token=token),
-                "GitHub pull request confirmation",
-            )
-            confirmed_head_sha = _pull_request_head_sha(confirmed_pull_request)
-            confirmed_base_sha = _pull_request_base_sha(confirmed_pull_request)
-            confirmed_merge_commit_sha = _pull_request_merge_commit_sha(confirmed_pull_request)
-            confirmed_updated_at = _required_string(confirmed_pull_request, "updated_at")
-            if (
-                confirmed_head_sha != head_sha
-                or confirmed_base_sha != base_sha
-                or confirmed_merge_commit_sha != merge_commit_sha
-                or confirmed_updated_at != updated_at
-            ):
-                raise RepositoryEvidenceStaleError(
-                    "GitHub pull request changed while resolving repository evidence."
+                confirmed_pull_request = _object_payload(
+                    self._github_api(path=pull_request_path, token=token),
+                    "GitHub pull request confirmation",
                 )
+                confirmed_head_sha = _pull_request_head_sha(confirmed_pull_request)
+                confirmed_base_sha = _pull_request_base_sha(confirmed_pull_request)
+                confirmed_merge_commit_sha = _pull_request_merge_commit_sha(confirmed_pull_request)
+                confirmed_updated_at = _required_string(confirmed_pull_request, "updated_at")
+                if (
+                    confirmed_head_sha != head_sha
+                    or confirmed_base_sha != base_sha
+                    or confirmed_merge_commit_sha != merge_commit_sha
+                    or confirmed_updated_at != updated_at
+                ):
+                    raise RepositoryEvidenceStaleError(
+                        "GitHub pull request changed while resolving repository evidence."
+                    )
 
-            return RepositoryEvidence(
-                target=RepositoryTarget(
-                    repository_id=repository_id,
-                    repository_owner_id=repository_owner_id,
-                    repository=canonical_repository,
-                    pull_request_number=target.pull_request_number,
-                    head_sha=head_sha,
-                    tree_sha=tree_sha,
-                ),
-                merge_commit_sha=merge_commit_sha,
-                changed_files=changed_files,
-                base=RepositoryBaseEvidence(base_ref=base_ref, base_sha=base_sha),
-                authorship=authorship,
-            )
+                return RepositoryEvidence(
+                    target=RepositoryTarget(
+                        repository_id=repository_id,
+                        repository_owner_id=repository_owner_id,
+                        repository=canonical_repository,
+                        pull_request_number=target.pull_request_number,
+                        head_sha=head_sha,
+                        tree_sha=tree_sha,
+                    ),
+                    merge_commit_sha=merge_commit_sha,
+                    changed_files=changed_files,
+                    base=RepositoryBaseEvidence(base_ref=base_ref, base_sha=base_sha),
+                    authorship=authorship,
+                )
         except RepositoryEvidenceError:
             raise
         except Exception as error:
@@ -214,17 +219,20 @@ class GitHubRepositoryEvidenceProvider:
                 "Launchplane could not resolve authoritative GitHub repository evidence."
             ) from error
 
-    def _token(self, repository: str) -> str:
-        token = self._github_token(
+    @contextmanager
+    def _token(self, repository: str) -> Iterator[str]:
+        with self._github_token_scope(
             control_plane_root=self._control_plane_root,
             context_name=self._token_context,
             repository=repository,
-        ).strip()
-        if not token:
-            raise RepositoryEvidenceError(
-                "Launchplane GitHub repository evidence credentials are unavailable."
-            )
-        return token
+            token_resolver=self._github_token,
+            api_request=self._github_api,
+        ) as token:
+            if not token.strip():
+                raise RepositoryEvidenceError(
+                    "Launchplane GitHub repository evidence credentials are unavailable."
+                )
+            yield token.strip()
 
     def _authorship(
         self,

@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -74,7 +75,10 @@ class PreviewPrFeedbackRemediationHttpTests(unittest.IsolatedAsyncioTestCase):
                 "Idempotency-Key": "preview-feedback-remediation-verireel-311",
             }
             with (
-                patch("control_plane.http_app.resolve_remediation_token", return_value="token"),
+                patch(
+                    "control_plane.http_app.resolve_remediation_token",
+                    side_effect=lambda **kwargs: nullcontext("token"),
+                ),
                 patch(
                     "control_plane.http_app.observe_managed_preview_pr_feedback",
                     return_value=observation,

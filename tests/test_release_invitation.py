@@ -58,6 +58,8 @@ class ReleaseInvitationTests(unittest.TestCase):
 
     def github(self, *, path: str, token: str, **kwargs: Any) -> object:
         self.assertEqual(token, "delivery-token")
+        if path == "/installation/token" and kwargs.get("method") == "DELETE":
+            return None
         self.assertTrue(path.startswith("/repos/example/site/issues"))
         if kwargs.get("method") == "POST":
             body = kwargs["body"]
@@ -328,7 +330,7 @@ class ReleaseInvitationTests(unittest.TestCase):
 
         with patch("control_plane.release_invitation.github_api_request", paged):
             self.publish()
-        self.assertEqual(len(pages), 2)
+        self.assertEqual(len([page for page in pages if page.startswith("/repos/")]), 2)
         self.assertEqual(len(self.comments), 1)
         self.assertEqual(len(self.posts), 1)
 

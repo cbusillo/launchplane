@@ -68,6 +68,7 @@ class _GitHub:
         self.writes: list[tuple[str, str, dict[str, object]]] = []
         self.fail_writes = False
         self.revoked_app_tokens = 0
+        self.revoked_delivery_tokens: list[str] = []
         self.lose_comment_response = False
         self.fail_comment_reads = False
         self.fail_comment_repairs = False
@@ -80,7 +81,10 @@ class _GitHub:
         if path == "/user":
             raise AssertionError("Installation tokens cannot resolve a user identity.")
         if path == "/installation/token" and method == "DELETE":
-            self.revoked_app_tokens += 1
+            if kwargs["token"] == "feedback-token":
+                self.revoked_delivery_tokens.append(str(kwargs["token"]))
+            else:
+                self.revoked_app_tokens += 1
             return None
         if method != "GET":
             assert isinstance(body, dict)
@@ -252,6 +256,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self.assertEqual(github.check_runs[-1]["name"], "launchplane/owner-review")
         self.assertEqual(github.check_runs[-1]["app"], {"id": _APP_ID})
         self.assertEqual(github.revoked_app_tokens, 1)
+        self.assertEqual(github.revoked_delivery_tokens, ["feedback-token"])
 
     def test_review_link_encodes_target_and_rejects_non_origin_urls(self) -> None:
         self.assertEqual(
@@ -349,6 +354,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self._publish(github, retire_leftovers=True)
 
         self.assertEqual(github.statuses, [])
+        self.assertEqual(github.revoked_delivery_tokens, ["feedback-token"])
 
     def test_stale_leftover_signals_are_retired_once(self) -> None:
         github = _GitHub(labels=())

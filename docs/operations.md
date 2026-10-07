@@ -4089,6 +4089,16 @@ may run; this PR grants none. Promotion-status polling checks configuration and
 tracked inventory without minting a write token; the actual operation verifies
 the accepted grants when it mints its token.
 
+Service callers use `launchplane_github_token` as an operation context. It
+revokes that exact token on return, provider failure, or Python interruption;
+cached release-evidence reads close every repository's lease, and companion
+reads own separate tokens. Cleanup failures log only the exception type and do
+not change saved decisions, successful writes, or dispatch reconciliation state.
+Validated expiry remains the backstop when revocation fails or the process is
+terminated without Python cleanup. Repository evidence inside a merge-train
+operation borrows the train's existing token through an explicit context; the
+train retains its lifetime ownership. Readiness checks still mint no token.
+
 The Advisory Checks App remains separately configured with
 `LAUNCHPLANE_ADVISORY_GITHUB_APP_ID` and its managed private key. Both publisher
 and train resolve this non-secret selector from the same global/context runtime
