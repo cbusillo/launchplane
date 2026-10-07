@@ -309,11 +309,11 @@ Comparing a reconstructed candidate to the previous candidate would hide
 rejected authority when their trees are identical; train updates therefore
 recover the base independently of the push's before SHA.
 Missing history, no shared base, a same-head base, other zero-SHA comparisons,
-and unmapped events fail closed. Train-namespace pushes with missing target
+and unmapped events fail closed. Train branch pushes with missing target
 metadata or an unsupported ref also refuse, rather than falling back to an
 ordinary push comparison. Unsupported train refs and branch/tag creation outside
-that default-branch train path use pull_request or merge_group verification, or the CLI with an
-explicit pair/full-audit. Changed symlink paths
+that default-branch train path use pull_request or merge_group verification,
+or the CLI with an explicit pair/full-audit. Changed symlink paths
 resolve only within the committed tree and are classified under the link path;
 links outside that tree or through submodules fail closed. Link hops are bounded,
 and a broken base-side link supplies no preexisting finding exemption, so a PR
