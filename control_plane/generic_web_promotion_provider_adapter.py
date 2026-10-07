@@ -199,6 +199,10 @@ class GenericWebProdPromotionProviderMutationAdapter:
         except StarletteHTTPException as error:
             raise ProviderMutationRejectedError(error) from error
         except (FileNotFoundError, ValueError, click.ClickException) as error:
+            from control_plane.lane_movement import LaneMovementRefused
+
+            if isinstance(error, LaneMovementRefused) and error.code == "source_order_unavailable":
+                raise ProviderMutationRejectedError(error) from error
             if provider_effect_attempted:
                 raise ProviderMutationUnknownError(str(error)) from error
             if self._settle_pre_effect_failure:

@@ -102,6 +102,7 @@ def execute_generic_web_rollback(
         post_deploy_executor=post_deploy_executor,
         # The plan took this artifact from Launchplane's own deployment record.
         recorded_artifact=True,
+        rollback=True,
     )
     rollback_status: Literal["pass", "fail"] = (
         "pass"

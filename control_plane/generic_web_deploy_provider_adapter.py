@@ -499,6 +499,10 @@ class GenericWebDeployProviderMutationAdapter:
         except (FileNotFoundError, ValueError) as error:
             raise ProviderMutationRejectedError(error)
         except click.ClickException as error:
+            from control_plane.lane_movement import LaneMovementRefused
+
+            if isinstance(error, LaneMovementRefused) and error.code == "source_order_unavailable":
+                raise ProviderMutationRejectedError(error) from error
             raise ProviderMutationUnknownError(str(error)) from error
         provider_effect_attempted = result.pop("provider_effect_attempted", False) is True
         if _string_field(result, "deploy_status") == "fail" and provider_effect_attempted:

@@ -7,6 +7,7 @@ are never evidence. See docs/artifact-provenance.md.
 """
 
 import io
+from http.client import HTTPException
 import json
 import zipfile
 from collections.abc import Iterator
@@ -66,12 +67,12 @@ class GitHubBuildProvenanceTransport:
                 raise BuildProvenanceError(
                     f"GitHub read failed for {path}: {redirect}"
                 ) from redirect
-        except (URLError, OSError) as error:
+        except (URLError, OSError, HTTPException) as error:
             raise BuildProvenanceError(f"GitHub read failed for {path}: {error}") from error
         try:
             with urlopen(Request(url=location), timeout=self._timeout_seconds) as response:
                 return _bounded_read(response, path)
-        except (HTTPError, URLError, OSError) as error:
+        except (HTTPError, URLError, OSError, HTTPException) as error:
             raise BuildProvenanceError(f"GitHub read failed for {path}: {error}") from error
 
     def _api_request(self, path: str) -> Request:
@@ -88,7 +89,7 @@ class GitHubBuildProvenanceTransport:
         try:
             with urlopen(request, timeout=self._timeout_seconds) as response:
                 return bytes(response.read())
-        except (HTTPError, URLError, OSError) as error:
+        except (HTTPError, URLError, OSError, HTTPException) as error:
             raise BuildProvenanceError(
                 f"GitHub read failed for {request.full_url}: {error}"
             ) from error
@@ -173,6 +174,7 @@ class GenericWebBuildImage(BaseModel):
 
     repository: str = Field(min_length=1)
     digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    tags: tuple[str, ...] = ()
 
 
 class GenericWebBuildManifest(BaseModel):
@@ -207,11 +209,14 @@ def verify_generic_web_build(
     purpose: BuildPurpose,
     image_repository: str,
     pull_request_number: int | None = None,
+    recorded_image_reference: str = "",
 ) -> VerifiedGenericWebBuild:
     """Return the image GitHub's build run proves for this commit, or raise.
 
     The run checks are the Odoo build's; only the manifest differs. Nothing is
     recorded: a generic-web lane's runtime identity is its record of what it runs.
+    A recorded image may verify a historical PR build after its head moved;
+    it must match the manifest exactly and never selects a new desired build.
     """
     commit = commit.strip().lower()
     source_build, manifest_payload = _verified_build_run(
@@ -221,6 +226,7 @@ def verify_generic_web_build(
         commit=commit,
         purpose=purpose,
         pull_request_number=pull_request_number,
+        check_current_head=not recorded_image_reference,
     )
     try:
         manifest = GenericWebBuildManifest.model_validate(manifest_payload)
@@ -232,6 +238,13 @@ def verify_generic_web_build(
         raise BuildProvenanceError("The build manifest names a different source commit.")
     if manifest.image.repository.rstrip("/") != image_repository.strip().rstrip("/"):
         raise BuildProvenanceError("The build manifest names a different image repository.")
+    if (
+        recorded_image_reference
+        and recorded_image_reference != f"{manifest.image.repository}@{manifest.image.digest}"
+    ):
+        raise BuildProvenanceError(
+            "The historical build does not match the recorded running image."
+        )
     return VerifiedGenericWebBuild(manifest=manifest, source_build=source_build)
 
 
@@ -243,6 +256,7 @@ def _verified_build_run(
     commit: str,
     purpose: BuildPurpose,
     pull_request_number: int | None,
+    check_current_head: bool = True,
 ) -> tuple[ArtifactSourceBuild, dict[str, object]]:
     """The build run that proves this commit, and its uploaded manifest, unvalidated."""
     repository_path = _repository_path(repository)
@@ -271,7 +285,7 @@ def _verified_build_run(
             default_branch=default_branch,
             commit=commit,
         )
-    else:
+    elif check_current_head:
         pull_request = _object(
             transport.get_json(f"/repos/{repository_path}/pulls/{pull_request_number}"),
             "pull request",
@@ -396,22 +410,31 @@ def _require_first_parent(
 
 
 def first_parent_history(
-    *, transport: BuildProvenanceTransport, repository: str, default_branch: str
+    *,
+    transport: BuildProvenanceTransport,
+    repository: str,
+    default_branch: str,
+    max_pages: int = FIRST_PARENT_PAGE_LIMIT,
 ) -> Iterator[str]:
     """Yield the default branch's first-parent commits from the tip, newest first, bounded."""
     return _first_parent_history(
         transport=transport,
         repository_path=_repository_path(repository),
         default_branch=default_branch,
+        max_pages=max_pages,
     )
 
 
 def _first_parent_history(
-    *, transport: BuildProvenanceTransport, repository_path: str, default_branch: str
+    *,
+    transport: BuildProvenanceTransport,
+    repository_path: str,
+    default_branch: str,
+    max_pages: int = FIRST_PARENT_PAGE_LIMIT,
 ) -> Iterator[str]:
     parents: dict[str, str] = {}
     cursor = ""
-    for page in range(1, FIRST_PARENT_PAGE_LIMIT + 1):
+    for page in range(1, max_pages + 1):
         query = urlencode({"sha": default_branch, "per_page": "100", "page": str(page)})
         commits = _list(transport.get_json(f"/repos/{repository_path}/commits?{query}"))
         for item in commits:

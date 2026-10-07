@@ -9,6 +9,7 @@ import logging
 from typing import Protocol, cast
 
 import click
+from control_plane.lane_movement import LaneMovementRefused
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.production_backup_authority import (
@@ -167,6 +168,15 @@ def require_production_promotion_backup(
     for promotion in store.list_promotion_records(context_name=context, to_instance_name=instance):
         if promotion.record_id == active_promotion_record_id:
             continue
+        if (
+            promotion.deploy.status == "fail"
+            and promotion.failure is not None
+            and promotion.failure.code == "lane_movement.source_order_unavailable"
+            and promotion.backup_gate.evidence.get("provider_effects_status") == "not_started"
+        ):
+            # The guard recorded a temporary read refusal before its first
+            # provider checkpoint. This capture has protected no write yet.
+            continue
         if backup_record_id in (
             promotion.backup_gate.evidence.get("backup_record_id"),
             promotion.backup_gate.evidence.get("infrastructure_backup_record_id"),
@@ -270,12 +280,18 @@ def production_promotion_backup_guard(
                 checkpoint, protection_evidence, mark_effect_started
             )
             require_lock()
-        except Exception:
+        except Exception as error:
             protection_evidence["provider_effects_status"] = (
                 "unknown_after_failure" if effects_started else "not_started"
             )
             failed = pending_promotion.model_copy(deep=True)
             failed.deploy.status = "fail"
+            if (
+                isinstance(error, LaneMovementRefused)
+                and error.code == "source_order_unavailable"
+                and not effects_started
+            ):
+                failed.failure = error.record_failure()
             failed.backup_gate.evidence.update(protection_evidence)
             record_store.write_promotion_record(failed)
             raise

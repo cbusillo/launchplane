@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import click
+from control_plane.lane_movement import LaneMovementRefused
 
 from control_plane.contracts.idempotency_record import (
     build_launchplane_mutation_reservation_id,
@@ -201,6 +202,38 @@ class OdooPreviewProviderMutationAdapter:
                 provider_lease_check=lease.assert_current,
                 deployment_record_id=self._deployment_record_id,
                 runtime_identity=self._runtime_identity,
+            )
+        except LaneMovementRefused as error:
+            from control_plane.lane_movement import LaneBuild, record_preview_refusal
+
+            manifest = self._apply_request.apply.manifest
+            record_preview_refusal(
+                record_store=self._record_store,
+                profile=self._profile,
+                preview_slug=self._issued_plan.preview_slug,
+                desired=LaneBuild(
+                    manifest.artifact_id if manifest else self._apply_request.apply.image_reference,
+                    manifest.source_commit
+                    if manifest
+                    else self._issued_plan.plan_request.source_git_ref,
+                    self._apply_request.apply.image_reference,
+                ),
+                error=error,
+                target_type="compose",
+            )
+            return ProviderMutationOutcome(
+                response_status_code=409,
+                response_payload=provider_operation_response_payload(
+                    trace_id=self._trace_id,
+                    records={},
+                    result={
+                        "status": "blocked",
+                        "error_code": f"lane_movement.{error.code}",
+                        "error_message": error.record_failure().description,
+                    },
+                ),
+                durable=error.code != "source_order_unavailable",
+                provider_effect_performed=False,
             )
         except (
             OdooPreviewApplyConfigError,

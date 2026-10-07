@@ -549,6 +549,32 @@ class ProductionPromotionBackupTests(unittest.TestCase):
         self.assertEqual(recorded.deploy.status, "fail")
         self.assertEqual(recorded.backup_gate.evidence["provider_effects_status"], "not_started")
 
+    def test_only_a_source_read_refusal_before_effects_leaves_backup_available(self) -> None:
+        from control_plane.lane_movement import LaneMovementRefused
+
+        for effects_started in (False, True):
+            with self.subTest(effects_started=effects_started):
+                store = self.capture()
+                pending = self.pending(store)
+                with self.assertRaises(LaneMovementRefused):
+                    with production_promotion_backup_guard(
+                        record_store=store,
+                        product="example-product",
+                        context="example-product",
+                        instance="prod",
+                        promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
+                        backup_record_id="backup-example",
+                        pending_promotion=pending,
+                    ) as guard:
+                        if effects_started:
+                            guard("target_update")
+                        raise LaneMovementRefused("source_order_unavailable")
+                if effects_started:
+                    with self.assertRaisesRegex(click.ClickException, "already used"):
+                        self.require(store)
+                else:
+                    self.assertEqual(self.require(store).status, "pass")
+
     def test_generic_web_cannot_opt_out(self) -> None:
         with self.assertRaises(ValidationError):
             GenericWebProdPromotionRequest.model_validate(

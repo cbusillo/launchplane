@@ -248,6 +248,10 @@ def execute_odoo_prod_promotion(
             error_message=replacement_result.error_message,
         )
     except click.ClickException as error:
+        from control_plane.lane_movement import LaneMovementRefused
+
+        if isinstance(error, LaneMovementRefused) and error.code == "source_order_unavailable":
+            raise
         if infrastructure_backup is not None and backup_checkpoint is not None:
             infrastructure_backup.evidence.update(backup_checkpoint.evidence)
         failed_record = _build_promotion_record(

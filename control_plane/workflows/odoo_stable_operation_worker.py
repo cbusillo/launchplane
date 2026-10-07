@@ -10,6 +10,7 @@ import time
 from typing import Any, Callable, Protocol, cast
 
 from pydantic import BaseModel
+from control_plane.lane_movement import LaneMovementRefused
 
 from control_plane.contracts.odoo_stable_bootstrap import OdooStableBootstrapResult
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -1567,7 +1568,13 @@ def _run_release_operation(
         logging.exception(
             "%s operation %s failed before producing a result.", label, operation.operation_id
         )
-        if odoo_release_wrote_production(read_current()):
+        if (
+            isinstance(error, LaneMovementRefused)
+            and error.code == "source_order_unavailable"
+            and not odoo_release_wrote_production(read_current())
+        ):
+            terminal_operation = _retry_source_order_read(read_current())
+        elif odoo_release_wrote_production(read_current()):
             terminal_operation = read_current().model_copy(
                 update={
                     "status": "reconciliation_required",
@@ -2057,21 +2064,25 @@ def _execute_target_replacement_operation(
             "Odoo stable target replacement operation %s failed before producing a result.",
             operation.operation_id,
         )
-        terminal_operation = operation.model_copy(
-            update={
-                "status": "fail",
-                "phase": "failed",
-                "updated_at": _utc_now_timestamp(),
-                "finished_at": _utc_now_timestamp(),
-                "lease_owner": lease_owner,
-                "error_code": _unexpected_error_code(error),
-                "error_message": str(error),
-                "error_detail_keys": (
-                    safe_error_detail_keys(error.detail_keys)
-                    if isinstance(error, OdooTargetReplacementStageError)
-                    else ()
-                ),
-            }
+        terminal_operation = (
+            _retry_source_order_read(operation)
+            if isinstance(error, LaneMovementRefused) and error.code == "source_order_unavailable"
+            else operation.model_copy(
+                update={
+                    "status": "fail",
+                    "phase": "failed",
+                    "updated_at": _utc_now_timestamp(),
+                    "finished_at": _utc_now_timestamp(),
+                    "lease_owner": lease_owner,
+                    "error_code": _unexpected_error_code(error),
+                    "error_message": str(error),
+                    "error_detail_keys": (
+                        safe_error_detail_keys(error.detail_keys)
+                        if isinstance(error, OdooTargetReplacementStageError)
+                        else ()
+                    ),
+                }
+            )
         )
     else:
         terminal_operation = _target_replacement_terminal_operation(
@@ -2095,6 +2106,24 @@ def _execute_target_replacement_operation(
 
 class _StaffTestingHoldError(Exception):
     """A reconcile deploy reached a testing lane that site staff hold; nothing ran."""
+
+
+def _retry_source_order_read(operation: Any) -> Any:
+    """Keep a no-effect source read refusal durable and available to the worker."""
+    return operation.model_copy(
+        update={
+            "status": "pending",
+            "phase": operation.phase if getattr(operation, "checkpoints", ()) else "created",
+            "updated_at": _utc_now_timestamp(),
+            "finished_at": "",
+            "lease_owner": "",
+            "lease_expires_at": "",
+            "heartbeat_at": "",
+            "error_code": "lane_movement.source_order_unavailable",
+            "error_message": "Source history could not be read; retry before any provider write.",
+            "result": None,
+        }
+    )
 
 
 def _reconcile_deploy_is_held(
