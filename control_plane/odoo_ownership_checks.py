@@ -177,7 +177,7 @@ _RULES: tuple[_Rule, ...] = (
         ),
         families=("devkit", "retired"),
         allowed_path_globs=("tests/**", "docs/**", "**/README.md"),
-        allowed_line_patterns=(re.compile(r"^\s*#"),),
+        allowed_line_patterns=(re.compile(r"^\s*#(?:\s|$)"),),
     ),
     _Rule(
         rule_id="launchplane-record-derivation",

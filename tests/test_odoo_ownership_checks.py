@@ -184,6 +184,8 @@ jobs:
             "production promote",
             'subprocess.run(["production", "restore"])',
             'subprocess.run(["shared", "deploy", "#label"])',
+            '#restore = () => execa("odoo", ["production", "restore"])',
+            "#!/usr/bin/env -S devkit production deploy",
         )
         for policy in (
             OdooOwnershipRepoPolicy("repo", "devkit"),
@@ -195,7 +197,7 @@ jobs:
                     TemporaryDirectory() as workspace,
                 ):
                     workspace_root = Path(workspace)
-                    script = workspace_root / "repo" / "scripts" / "mutate.sh"
+                    script = workspace_root / "repo" / "scripts" / "mutate.mjs"
                     script.parent.mkdir(parents=True)
                     script.write_text(
                         f"# non-production restore description\n{command} # explanatory comment\n",
@@ -207,11 +209,11 @@ jobs:
                         repo_policies=(policy,),
                     )
 
-                self.assertEqual(result.status, "fail")
-                self.assertEqual(
-                    [(finding.rule_id, finding.line) for finding in result.findings],
-                    [("non-launchplane-shared-prod-mutation", 2)],
-                )
+                    self.assertEqual(result.status, "fail")
+                    self.assertEqual(
+                        [(finding.rule_id, finding.line) for finding in result.findings],
+                        [("non-launchplane-shared-prod-mutation", 2)],
+                    )
 
     def test_cli_returns_nonzero_for_findings(self) -> None:
         with TemporaryDirectory() as workspace:

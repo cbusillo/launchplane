@@ -385,9 +385,10 @@ It blocks the patterns that previously caused ownership drift:
   tuple IDs, deployment IDs, promotion IDs, or backup-gate IDs outside approved
   thin workflow response handling
 
-The shared/prod mutation rule ignores full-line `#` comments, including
-descriptions of non-production restores. Commands with trailing comments or
-quoted `#` characters remain subject to the rule.
+The shared/prod mutation rule ignores full-line comments whose `#` is followed
+by whitespace or end-of-line, including descriptions of non-production
+restores. Commands with trailing comments or quoted `#` characters, shebangs,
+and JavaScript private members remain subject to the rule.
 
 When a product repo genuinely needs new source-adjacent facts, add a typed
 Launchplane driver input or shared connector path before expanding the allowlist.
