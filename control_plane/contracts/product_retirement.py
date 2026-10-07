@@ -26,14 +26,6 @@ def product_retirement_secret_authority(record: SecretRecord) -> dict[str, objec
     return record.model_dump(mode="json", exclude={"status", "updated_at", "updated_by"})
 
 
-def product_retirement_secret_disable_matches(
-    current: SecretRecord, expected: SecretRecord
-) -> bool:
-    return current.status in {expected.status, "disabled"} and product_retirement_secret_authority(
-        current
-    ) == product_retirement_secret_authority(expected)
-
-
 def canonical_sha256(value: object) -> str:
     canonical = json.dumps(
         value,

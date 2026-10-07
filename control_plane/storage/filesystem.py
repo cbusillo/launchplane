@@ -182,7 +182,7 @@ from control_plane.contracts.detached_application_retirement import (
 )
 from control_plane.contracts.product_retirement import (
     ProductRetirementRecord,
-    product_retirement_secret_disable_matches,
+    product_retirement_secret_authority,
 )
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
@@ -3771,10 +3771,14 @@ class FilesystemRecordStore:
     ) -> bool:
         with self._product_authority_bundle_lock():
             try:
-                current = self.read_secret_record(expected_record.secret_id)
+                current = self._read_model_locked(
+                    SecretRecord, "launchplane_secrets", expected_record.secret_id
+                )
             except FileNotFoundError:
                 return False
-            if not product_retirement_secret_disable_matches(current, expected_record):
+            if product_retirement_secret_authority(current) != product_retirement_secret_authority(
+                expected_record
+            ):
                 return False
             if current.status != "disabled":
                 self._write_model_locked(

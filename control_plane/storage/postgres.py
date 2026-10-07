@@ -447,7 +447,7 @@ from control_plane.contracts.production_backup_authority import (
 )
 from control_plane.contracts.product_retirement import (
     ProductRetirementRecord,
-    product_retirement_secret_disable_matches,
+    product_retirement_secret_authority,
 )
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.product_reconcile import (
@@ -37729,7 +37729,9 @@ class PostgresRecordStore(HumanSessionStore):
             if row is None:
                 return False
             current = SecretRecord.model_validate(row.payload)
-            if not product_retirement_secret_disable_matches(current, expected_record):
+            if product_retirement_secret_authority(current) != product_retirement_secret_authority(
+                expected_record
+            ):
                 return False
             if current.status != "disabled":
                 session.merge(

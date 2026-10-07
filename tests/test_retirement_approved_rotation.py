@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
+import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +15,7 @@ from control_plane.contracts.secret_record import SecretBinding, SecretRecord, S
 from control_plane.http_app import idempotency_scope
 from control_plane.privileged_operation_worker import execute_approved_privileged_operations_once
 from control_plane.service_auth import LocalOperatorIdentity, LocalOperatorPolicyRule
+from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.support.http import request
 from tests.test_http_app_product_retirement import (
     NOW,
@@ -25,6 +28,60 @@ from tests import test_http_app_product_retirement as retirement_http
 from tests import test_privileged_operation_http as privileged_http
 from tests.test_privileged_operation_http import _policy, _policy_record
 from tests.test_privileged_operation_worker import _fernet_key
+
+
+def _exercise_filesystem_retirement_disable(root: str) -> None:
+    store = FilesystemRecordStore(Path(root))
+    original = SecretRecord(
+        secret_id="local-secret",
+        scope="global",
+        integration="fixture",
+        name="fixture",
+        current_version_id="v1",
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    store.write_secret_record(original)
+    assert store.disable_product_retirement_secret(
+        expected_record=original, updated_at=NOW, updated_by="retirement"
+    )
+    disabled = store.read_secret_record(original.secret_id)
+    assert disabled.status == "disabled"
+    later = (datetime.fromisoformat(NOW.replace("Z", "+00:00")) + timedelta(seconds=1)).isoformat()
+    assert store.disable_product_retirement_secret(
+        expected_record=original, updated_at=later, updated_by="retry"
+    )
+    assert store.read_secret_record(original.secret_id) == disabled
+    changed = disabled.model_copy(update={"current_version_id": "v2"})
+    store.write_secret_record(changed)
+    assert not store.disable_product_retirement_secret(
+        expected_record=original, updated_at=later, updated_by="stale-retirement"
+    )
+    assert store.read_secret_record(original.secret_id) == changed
+    assert not store.disable_product_retirement_secret(
+        expected_record=original.model_copy(update={"secret_id": "missing"}),
+        updated_at=later,
+        updated_by="retirement",
+    )
+
+
+class FilesystemRetirementDisableTests(unittest.TestCase):
+    def test_disable_preserves_authority_and_matching_replay_without_nested_lock(self) -> None:
+        with TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; from tests.test_retirement_approved_rotation import "
+                    "_exercise_filesystem_retirement_disable; "
+                    "_exercise_filesystem_retirement_disable(sys.argv[1])",
+                    directory,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class RetirementApprovedRotationTests(unittest.IsolatedAsyncioTestCase):
@@ -148,6 +205,7 @@ class RetirementApprovedRotationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(approved.status_code, 200, approved.text)
                 self.assertEqual(approved.json()["record"]["status"], "approved")
                 entered, released = Event(), Event()
+                bindings_before = store.list_secret_bindings(integration="fixture")
                 paused = False
                 original_write = store.disable_product_retirement_secret
 
@@ -211,6 +269,7 @@ class RetirementApprovedRotationTests(unittest.IsolatedAsyncioTestCase):
                     delete.assert_not_called()
                 after = store.read_secret_record(secret.secret_id)
                 self.assertEqual(after, rotated)
+                self.assertEqual(store.list_secret_bindings(integration="fixture"), bindings_before)
                 self.assertEqual(response.status_code, 409, response.text)
                 self.assertEqual(
                     response.json()["error"]["code"], "mutation_reconciliation_required"
