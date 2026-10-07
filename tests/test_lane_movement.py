@@ -12,10 +12,93 @@ from tests.test_product_reconcile import (
 
 
 class LaneMovementTests(unittest.TestCase):
+    def test_unique_abbreviated_recorded_source_can_move_forward(self) -> None:
+        self.github.add_run(10, OLDER)
+        self.github.add_run(20, DEPLOYABLE)
+        original = self.github.get_json
+
+        def read(path: str) -> object:
+            if path.endswith(f"/commits/{OLDER[:7]}"):
+                return {"sha": OLDER}
+            return original(path)
+
+        with patch.object(self.github, "get_json", side_effect=read):
+            require_forward_build(
+                record_store=self.store,
+                profile=self.profile,
+                current=LaneBuild(
+                    "old", OLDER[:7], f"{self.profile.image.repository}@{_digest(OLDER)}"
+                ),
+                desired=self.current,
+                transport=self.github,
+            )
+
+    def test_wrapped_token_outage_retries_but_invalid_key_does_not(self) -> None:
+        from urllib.error import HTTPError
+        from email.message import Message
+        from control_plane.github_app_identity import GitHubAppIdentityError
+        from control_plane.product_reconcile import ProductReconcileError
+
+        for root, code in (
+            (
+                HTTPError("https://api.example.test", 503, "failed", Message(), None),
+                "source_order_unavailable",
+            ),
+            (ValueError("invalid private key"), "source_authority_unavailable"),
+        ):
+            wrapped = GitHubAppIdentityError("token mint failed")
+            wrapped.__cause__ = root
+            error = ProductReconcileError("source token unavailable")
+            error.__cause__ = wrapped
+            with (
+                self.subTest(code=code),
+                patch(
+                    "control_plane.product_reconcile.resolve_build_provenance_transport",
+                    side_effect=error,
+                ),
+                self.assertRaises(LaneMovementRefused) as caught,
+            ):
+                require_forward_build(
+                    record_store=self.store,
+                    profile=self.profile,
+                    current=self.current,
+                    desired=LaneBuild("next", "e" * 40),
+                )
+            self.assertEqual(caught.exception.code, code)
+
+    def test_missing_commit_is_terminal_and_source_outage_can_retry(self) -> None:
+        from urllib.error import HTTPError
+        from email.message import Message
+
+        for status, expected in (
+            (404, "source_order_unverified"),
+            (503, "source_order_unavailable"),
+        ):
+            with (
+                self.subTest(status=status),
+                patch.object(
+                    self.github,
+                    "get_json",
+                    side_effect=HTTPError(
+                        "https://api.example.test", status, "failed", Message(), None
+                    ),
+                ),
+                self.assertRaises(LaneMovementRefused) as caught,
+            ):
+                require_forward_build(
+                    record_store=self.store,
+                    profile=self.profile,
+                    current=self.current,
+                    desired=LaneBuild("next", "e" * 40),
+                    transport=self.github,
+                )
+            self.assertEqual(caught.exception.code, expected)
+
     def setUp(self) -> None:
         self.profile = _generic_web_profile()
         self.store = Mock()
         self.store.read_artifact_manifest.side_effect = FileNotFoundError
+        self.store.list_deployment_records.return_value = ()
         self.github = FakeGenericWebGitHub()
         self.current = LaneBuild(
             "current", DEPLOYABLE, f"{self.profile.image.repository}@{_digest(DEPLOYABLE)}"

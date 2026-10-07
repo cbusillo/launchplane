@@ -310,6 +310,18 @@ uses the existing rollback operation and its own authority. Refusals remain in
 the reconcile plan or failed deployment/operation record. Stable-lane profile
 repair edits routing metadata and does not deploy an image.
 
+Generic-web deploy records retain verified build provenance with the exact
+image/source pair, so later promotion or a release drill does not depend on
+the uploaded manifest still being available on GitHub. Rollbacks carry that
+proof forward. For older builds without provenance, the earliest successful
+deployment of the same image/source is the observation bound; a rollback's
+new timestamp does not make that old artifact younger. A legacy lane with no
+usable bound still requires a newly built verified artifact. Native VeriReel
+preview refreshes, including the driver extension, enforce the preview guard
+inside refresh serialization. Existing previews need their configured product
+profile to resolve source authority; product onboarding/profile records supply
+that supported configuration path.
+
 Testing searches up to 20 pages of successful build runs and first-parent
 history to find its running build. An omitted running run or commit still
 holds selection with the observed counts. If the running build is beyond
@@ -320,7 +332,9 @@ effects. A source read outage before effects retains refusal evidence and
 allows another attempt, without consuming the testing failure budget or
 stopping an accepted Client release. Odoo operations wait before retrying,
 with exponential delays from 30 seconds to 30 minutes, so a source outage
-does not starve other lanes or rollbacks. Missing configured read authority
+does not starve work on other lanes, including their rollbacks. Operations on
+the same lane remain serialized; an authorized pending-operation cancellation
+is the existing way to free that lane. Missing configured read authority
 is a terminal refusal. Direct preview source-read failures can retry with the
 same idempotency key; each refusal still gets a failed deployment record.
 Preview refusals retain the serving generation and remain visible in the

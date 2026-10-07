@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+import json
 import re
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 from urllib.parse import quote
@@ -59,6 +60,7 @@ class LaneBuild:
     pull_request_number: int | None = None
     deploy_reference: str = ""
     context: str = ""
+    deploy_tags: tuple[str, ...] = ()
 
 
 class LaneMovementStore(Protocol):
@@ -69,6 +71,81 @@ class LaneMovementStore(Protocol):
     def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest: ...
 
     def list_product_profile_records(self) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
+
+    def list_deployment_records(
+        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+    ) -> tuple[object, ...]: ...
+
+
+def _recorded_generic_build(
+    record_store: object, profile: LaunchplaneProductProfileRecord, desired: LaneBuild
+) -> LaneBuild | None:
+    list_records = getattr(record_store, "list_deployment_records", None)
+    if not callable(list_records):
+        return None
+    contexts = {lane.context for lane in profile.lanes} | {profile.preview.context}
+    for context in sorted(contexts - {""}):
+        for record in list_records(context_name=context):
+            payload = getattr(record, "runtime_source", {}).get("verified_lane_build", "")
+            if not payload:
+                continue
+            try:
+                proof = json.loads(payload)
+                source_build = ArtifactSourceBuild.model_validate(proof["source_build"])
+                tags = tuple(proof.get("deploy_tags", ()))
+            except (ValueError, KeyError, TypeError):
+                continue
+            if (
+                proof.get("image") == desired.image
+                and proof.get("source_commit") == desired.commit
+                and source_build.repository == profile.repository
+                and source_build.pull_request_number == desired.pull_request_number
+            ):
+                return replace(desired, source_build=source_build, deploy_tags=tags)
+    return None
+
+
+def lane_build_proof(build: LaneBuild) -> dict[str, str]:
+    if build.source_build is None:
+        return {}
+    return {
+        "verified_lane_build": json.dumps(
+            {
+                "image": build.image,
+                "source_commit": build.commit,
+                "source_build": build.source_build.model_dump(mode="json"),
+                "deploy_tags": build.deploy_tags,
+            },
+            sort_keys=True,
+        )
+    }
+
+
+def _source_read_refusal(
+    error: BaseException, *, unverified: str = "build_identity_unverified"
+) -> LaneMovementRefused:
+    from urllib.error import HTTPError
+
+    cause = error.__cause__ if isinstance(error, BuildProvenanceError) else error
+    if isinstance(cause, HTTPError):
+        if (
+            cause.code >= 500
+            or cause.code == 429
+            or (
+                cause.code == 403
+                and (
+                    cause.headers.get("Retry-After")
+                    or cause.headers.get("X-RateLimit-Remaining") == "0"
+                )
+            )
+        ):
+            return LaneMovementRefused("source_order_unavailable")
+        return LaneMovementRefused(
+            "source_authority_unavailable" if cause.code in {401, 403} else unverified
+        )
+    if isinstance(cause, OSError):
+        return LaneMovementRefused("source_order_unavailable")
+    return LaneMovementRefused(unverified)
 
 
 class SourceReadRetryRecord(Protocol):
@@ -100,6 +177,12 @@ def _source_transport(
         # Missing policy/App/key is configuration, not a transient provider read.
         from control_plane.merge_train_policy_source import MergeTrainPolicyStoreMissingError
         from control_plane.product_repository_identity import ProductRepositoryIdentityRefusal
+
+        cause: BaseException = error
+        while cause.__cause__ is not None:
+            cause = cause.__cause__
+        if isinstance(cause, OSError) and not isinstance(cause, FileNotFoundError):
+            raise _source_read_refusal(cause, unverified="source_authority_unavailable") from error
 
         code = (
             "source_authority_unavailable"
@@ -136,11 +219,29 @@ def current_lane_build(record_store: object, *, context: str, instance: str) -> 
     image = identity.image_reference if identity else ""
     if re.fullmatch(r".+@sha256:[0-9a-f]{64}", artifact_id):
         image = artifact_id
+    observed_at = inventory.updated_at
+    list_records = getattr(record_store, "list_deployment_records", None)
+    if callable(list_records):
+        # A rollback records a new deploy time for an old build. Retain the
+        # earliest proved observation of that exact image/source as its bound.
+        for record in list_records(context_name=context, instance_name=instance):
+            if (
+                record.artifact_identity
+                and record.artifact_identity.artifact_id == artifact_id
+                and record.source_git_ref
+                == (identity.source_git_ref if identity else inventory.source_git_ref)
+                and record.deploy.status == "pass"
+                and record.deploy.started_at
+            ):
+                observed_at = min(
+                    (observed_at, record.deploy.started_at),
+                    key=lambda stamp: datetime.fromisoformat(stamp.replace("Z", "+00:00")),
+                )
     return LaneBuild(
         artifact_id=artifact_id,
         commit=identity.source_git_ref if identity else inventory.source_git_ref,
         image=image,
-        observed_at=inventory.updated_at,
+        observed_at=observed_at,
         context=inventory.context,
     )
 
@@ -152,7 +253,7 @@ def require_forward_build(
     current: LaneBuild,
     desired: LaneBuild,
     transport: BuildProvenanceTransport | None = None,
-) -> None:
+) -> LaneBuild:
     store = cast(LaneMovementStore, record_store)
     try:
         desired_manifest = store.read_artifact_manifest(desired.artifact_id)
@@ -187,19 +288,39 @@ def require_forward_build(
             if manifest.source_commit.lower().startswith(current.commit.lower()):
                 current = replace(current, commit=manifest.source_commit)
     if not current.artifact_id and not current.commit:
-        return
+        return desired
     if current.commit.lower() == desired.commit.lower() and (
         (current.artifact_id and current.artifact_id == desired.artifact_id)
         or (current.image and current.image == desired.image)
     ):
-        return
+        return desired
+    if re.fullmatch(r"[0-9a-fA-F]{4,39}", current.commit):
+        try:
+            transport = transport or _source_transport(record_store, profile)
+            resolved = transport.get_json(f"/repos/{profile.repository}/commits/{current.commit}")
+            full_sha = resolved.get("sha", "") if isinstance(resolved, dict) else ""
+            if (
+                not isinstance(full_sha, str)
+                or not re.fullmatch(r"[0-9a-fA-F]{40}", full_sha)
+                or not full_sha.lower().startswith(current.commit.lower())
+            ):
+                raise LaneMovementRefused("source_order_unverified")
+            current = replace(current, commit=full_sha)
+        except LaneMovementRefused:
+            raise
+        except (OSError, click.ClickException, ValueError) as error:
+            raise _source_read_refusal(error, unverified="source_order_unverified") from error
     if not all(re.fullmatch(r"[0-9a-fA-F]{40}", sha) for sha in (current.commit, desired.commit)):
         raise LaneMovementRefused("source_order_unverified")
     if current.commit.lower() == desired.commit.lower():
         # A same-commit rebuild can change shared inputs. Never guess its age from
         # an artifact name, digest, or the time it was first recorded locally.
+        if profile.driver_id != "odoo" and desired.image:
+            desired = _proved_generic_build(
+                record_store, profile, desired, transport, current.pull_request_number
+            )
         _require_newer_artifact(record_store, profile, current, desired, transport)
-        return
+        return desired
     try:
         if transport is None:
             # Keep the existing App/read-token resolver as the one authority.
@@ -219,8 +340,12 @@ def require_forward_build(
         if comparison.get("status") == "diverged":
             # Following an open PR also admits rebases. Its freshly verified
             # artifact must be newer than the serving generation's build.
+            if profile.driver_id != "odoo" and desired.image:
+                desired = _proved_generic_build(
+                    record_store, profile, desired, transport, current.pull_request_number
+                )
             _require_newer_artifact(record_store, profile, current, desired, transport)
-            return
+            return desired
         if (
             comparison.get("status") != "ahead"
             or not isinstance(merge_base, dict)
@@ -256,10 +381,11 @@ def require_forward_build(
             )
         elif profile.driver_id != "odoo" and desired.image:
             _require_newer_artifact(record_store, profile, current, desired, transport)
+        return desired
     except LaneMovementRefused:
         raise
     except (BuildProvenanceError, click.ClickException, OSError, ValueError) as error:
-        raise LaneMovementRefused("source_order_unavailable") from error
+        raise _source_read_refusal(error, unverified="source_order_unverified") from error
 
 
 def _proved_generic_build(
@@ -275,12 +401,37 @@ def _proved_generic_build(
         return desired
     from control_plane.build_provenance import verify_generic_web_build
 
+    desired = replace(desired, pull_request_number=pull_request_number)
+    saved = _recorded_generic_build(record_store, profile, desired)
+    if saved is not None:
+        canonical_tag = f"{profile.image.repository}:sha-{desired.commit}"
+        if (
+            desired.deploy_reference
+            and desired.deploy_reference != canonical_tag
+            and desired.deploy_reference not in saved.deploy_tags
+        ):
+            raise LaneMovementRefused("build_identity_unverified")
+        if pull_request_number and not recorded:
+            transport = transport or _source_transport(record_store, profile)
+            try:
+                pull = transport.get_json(
+                    f"/repos/{profile.repository}/pulls/{pull_request_number}"
+                )
+            except OSError as error:
+                raise _source_read_refusal(error) from error
+            if (
+                not isinstance(pull, dict)
+                or not isinstance(pull.get("head"), dict)
+                or pull["head"].get("sha") != desired.commit
+            ):
+                raise LaneMovementRefused("build_identity_unverified")
+        return saved
     transport = transport or _source_transport(record_store, profile)
     repository = "/".join(quote(part, safe="") for part in profile.repository.split("/"))
     try:
         identity = transport.get_json(f"/repos/{repository}")
     except OSError as error:
-        raise LaneMovementRefused("source_order_unavailable") from error
+        raise _source_read_refusal(error) from error
     if not isinstance(identity, dict) or not identity.get("id"):
         raise LaneMovementRefused("build_identity_unverified")
     try:
@@ -295,12 +446,7 @@ def _proved_generic_build(
             recorded_image_reference=desired.image if recorded else "",
         )
     except BuildProvenanceError as error:
-        from urllib.error import HTTPError
-
-        cause = error.__cause__
-        if isinstance(cause, HTTPError) and (cause.code >= 500 or cause.code in {403, 429}):
-            raise LaneMovementRefused("source_order_unavailable") from error
-        raise LaneMovementRefused("build_identity_unverified") from error
+        raise _source_read_refusal(error) from error
     canonical_tag = f"{profile.image.repository}:sha-{desired.commit}"
     if verified.image_reference != desired.image and desired.image != canonical_tag:
         raise LaneMovementRefused("build_identity_unverified")
@@ -313,7 +459,18 @@ def _proved_generic_build(
         }
         if desired.deploy_reference not in allowed:
             raise LaneMovementRefused("build_identity_unverified")
-    return replace(desired, source_build=verified.source_build, image=verified.image_reference)
+    tags = tuple(
+        tag
+        if tag.startswith(f"{profile.image.repository}:")
+        else f"{profile.image.repository}:{tag}"
+        for tag in verified.manifest.image.tags
+    )
+    return replace(
+        desired,
+        source_build=verified.source_build,
+        image=verified.image_reference,
+        deploy_tags=tags,
+    )
 
 
 def _proved_odoo_build(
@@ -331,7 +488,7 @@ def _proved_odoo_build(
     try:
         identity = transport.get_json(f"/repos/{repository}")
     except OSError as error:
-        raise LaneMovementRefused("source_order_unavailable") from error
+        raise _source_read_refusal(error) from error
     if not isinstance(identity, dict) or not identity.get("id"):
         raise LaneMovementRefused("build_identity_unverified")
     try:
@@ -346,12 +503,7 @@ def _proved_odoo_build(
             pull_request_number=pull_request_number,
         )
     except BuildProvenanceError as error:
-        from urllib.error import HTTPError
-
-        cause = error.__cause__
-        if isinstance(cause, HTTPError) and (cause.code >= 500 or cause.code in {403, 429}):
-            raise LaneMovementRefused("source_order_unavailable") from error
-        raise LaneMovementRefused("build_identity_unverified") from error
+        raise _source_read_refusal(error) from error
     image = f"{verified.manifest.image.repository}@{verified.manifest.image.digest}"
     if image != desired.image:
         raise LaneMovementRefused("build_identity_unverified")
@@ -442,7 +594,7 @@ def _require_newer_artifact(
     except LaneMovementRefused:
         raise
     except (BuildProvenanceError, click.ClickException, OSError) as error:
-        raise LaneMovementRefused("source_order_unavailable") from error
+        raise _source_read_refusal(error, unverified="build_order_unverified") from error
     except (ValueError, TypeError) as error:
         raise LaneMovementRefused("build_order_unverified") from error
 
@@ -454,8 +606,8 @@ def require_forward_lane_build(
     context: str,
     instance: str,
     desired: LaneBuild,
-) -> None:
-    require_forward_build(
+) -> LaneBuild:
+    return require_forward_build(
         record_store=record_store,
         profile=profile,
         current=current_lane_build(record_store, context=context, instance=instance),
@@ -494,11 +646,12 @@ class PreviewRefusalStore(Protocol):
 def record_preview_refusal(
     *,
     record_store: object,
-    profile: LaunchplaneProductProfileRecord,
+    profile: LaunchplaneProductProfileRecord | None,
     preview_slug: str,
     desired: LaneBuild,
     error: LaneMovementRefused,
     target_type: Literal["compose", "application"],
+    preview_context: str = "",
 ) -> None:
     from control_plane.contracts.deployment_record import DeploymentRecord
     from control_plane.contracts.promotion_record import (
@@ -509,14 +662,13 @@ def record_preview_refusal(
     from uuid import uuid4
 
     timestamp = utc_now_timestamp()
+    context = preview_context or (profile.preview.context if profile else "")
     record = DeploymentRecord(
         record_id=(
-            generate_deployment_record_id(
-                context_name=profile.preview.context, instance_name=preview_slug
-            )
+            generate_deployment_record_id(context_name=context, instance_name=preview_slug)
             + f"-refused-{uuid4().hex}"
         ),
-        context=profile.preview.context,
+        context=context,
         instance=preview_slug,
         source_git_ref=desired.commit,
         artifact_identity=ArtifactIdentityReference(artifact_id=desired.artifact_id),

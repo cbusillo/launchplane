@@ -1,4 +1,5 @@
 from dataclasses import fields
+from contextlib import nullcontext
 from pathlib import Path
 import unittest
 from typing import Literal, cast
@@ -25,6 +26,109 @@ from tests.test_product_reconcile import (
 
 
 class LaneMovementExecutionTests(unittest.TestCase):
+    def test_native_and_driver_preview_refusals_do_not_provision_or_advance_a_generation(
+        self,
+    ) -> None:
+        from urllib.error import HTTPError
+        from email.message import Message
+        from control_plane.lane_movement import LaneBuild
+        from control_plane.verireel_read_http import (
+            VeriReelPreviewRefreshEnvelope,
+            apply_verireel_preview_refresh_result,
+            should_store_verireel_result_idempotency,
+        )
+        from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshRequest
+        from control_plane.generic_web_preview_http import (
+            apply_generic_web_preview_refresh_result,
+            should_store_generic_web_preview_idempotency,
+        )
+        from control_plane.drivers.generic_web_preview_dispatch import (
+            GenericWebPreviewRefreshEnvelope,
+        )
+        from control_plane.workflows.generic_web_preview import GenericWebPreviewRefreshRequest
+        from tests.test_generic_web_preview_extensions import _driver_profile
+
+        profile = _driver_profile()
+        store = Mock()
+        store.serialize_preview_refresh.return_value = nullcontext()
+        store.list_preview_records.return_value = (Mock(state="active"),)
+        store.list_deployment_records.return_value = ()
+        store.read_product_profile_record.return_value = profile
+        store.read_artifact_manifest.side_effect = FileNotFoundError
+        desired_image = f"{profile.image.repository}@{_digest(OLDER)}"
+        transport = Mock()
+        with (
+            patch(
+                "control_plane.lane_movement.current_preview_builds",
+                return_value=(
+                    LaneBuild(
+                        "current",
+                        DEPLOYABLE,
+                        f"{profile.image.repository}@{_digest(DEPLOYABLE)}",
+                        pull_request_number=42,
+                    ),
+                ),
+            ),
+            patch("control_plane.lane_movement._source_transport", return_value=transport),
+            patch("control_plane.verireel_read_http.execute_verireel_preview_refresh") as provider,
+            patch(
+                "control_plane.verireel_read_http.resolve_next_launchplane_preview_generation_identity"
+            ) as generation,
+        ):
+            for outage in (False, True):
+                transport.get_json.side_effect = (
+                    HTTPError("https://api.example.test", 503, "failed", Message(), None)
+                    if outage
+                    else None
+                )
+                transport.get_json.return_value = {
+                    "status": "behind",
+                    "base_commit": {"sha": DEPLOYABLE},
+                }
+                for entry in ("native", "driver"):
+                    with self.subTest(entry=entry, outage=outage):
+                        if entry == "native":
+                            records, result = apply_verireel_preview_refresh_result(
+                                control_plane_root=Path("."),
+                                record_store=store,
+                                request=VeriReelPreviewRefreshEnvelope(
+                                    product=profile.product,
+                                    refresh=VeriReelPreviewRefreshRequest(
+                                        context=profile.preview.context,
+                                        anchor_repo="verireel",
+                                        anchor_pr_number=42,
+                                        anchor_pr_url="https://example.test/pr/42",
+                                        anchor_head_sha=OLDER,
+                                        preview_slug="pr-42",
+                                        image_reference=desired_image,
+                                    ),
+                                ),
+                            )
+                            cached = should_store_verireel_result_idempotency(result)
+                        else:
+                            records, result = apply_generic_web_preview_refresh_result(
+                                control_plane_root=Path("."),
+                                record_store=store,
+                                profile=profile,
+                                request=GenericWebPreviewRefreshEnvelope(
+                                    product=profile.product,
+                                    refresh=GenericWebPreviewRefreshRequest(
+                                        product=profile.product,
+                                        anchor_pr_number=42,
+                                        anchor_pr_url="https://example.test/pr/42",
+                                        anchor_head_sha=OLDER,
+                                        image_reference=desired_image,
+                                    ),
+                                ),
+                            )
+                            cached = should_store_generic_web_preview_idempotency(result)
+                        self.assertEqual(records, {})
+                        self.assertEqual(result["refresh_status"], "blocked")
+                        self.assertEqual(cached, not outage)
+            provider.assert_not_called()
+            generation.assert_not_called()
+        self.assertEqual(store.write_deployment_record.call_count, 4)
+
     def test_native_and_ship_ancestor_refusals_precede_all_provider_effects(self) -> None:
         profile = _generic_web_profile()
         github = FakeGenericWebGitHub()
@@ -48,6 +152,7 @@ class LaneMovementExecutionTests(unittest.TestCase):
                         verify_health=False,
                     )
                     store = Mock()
+                    store.list_deployment_records.return_value = ()
                     store.read_environment_inventory.return_value = EnvironmentInventory(
                         context=lane.context,
                         instance=lane.instance,

@@ -15,6 +15,7 @@ from control_plane.lane_movement import (
     LANE_MOVEMENT_REFUSALS,
     LaneBuild,
     LaneMovementRefused,
+    current_lane_build,
     current_preview_builds,
     require_forward_build,
 )
@@ -1237,6 +1238,9 @@ def _plan_testing_target(
                     current_artifact_id,
                     current_commit,
                     f"{profile.image.repository}@{current_digest}",
+                    observed_at=current_lane_build(
+                        record_store, context=lane.context, instance=lane.instance
+                    ).observed_at,
                 ),
                 desired=LaneBuild(
                     desired_artifact_id,

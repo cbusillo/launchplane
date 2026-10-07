@@ -16,6 +16,7 @@ class LaneBuildGitHub:
         self.commits = list(digests)
         self.runs = {index + 1: commit for index, commit in enumerate(self.commits)}
         self.repository_id = 1
+        self.run_started_at: dict[int, str] = {}
 
     def _run(self, run_id: int) -> dict[str, object]:
         return {
@@ -60,6 +61,9 @@ class LaneBuildGitHub:
         if "/artifacts?" in path:
             run_id = int(path.split("/actions/runs/")[1].split("/")[0])
             return {"artifacts": [{"id": run_id, "name": "artifact-manifest-1", "expired": False}]}
+        if "/actions/runs/" in path and "/attempts/" in path:
+            run_id = int(path.split("/actions/runs/")[1].split("/")[0])
+            return {**self._run(run_id), "run_started_at": self.run_started_at[run_id]}
         raise AssertionError(f"Unexpected source read: {path}")
 
     def get_bytes(self, path: str) -> bytes:
