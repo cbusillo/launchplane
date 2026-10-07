@@ -97,7 +97,7 @@ jobs:
             repository="$(printf '%s' "${GITHUB_REPOSITORY:-}" | tr '[:upper:]' '[:lower:]')"
             train_prefix="refs/heads/launchplane/train/${repository}/${default_branch//\//-}/"
           fi
-          if [[ "$EVENT_NAME" = push && ( "$BASE_SHA" = 0000000000000000000000000000000000000000 || ( -n "$default_branch" && -n "$repository" && "$event_ref" = "$train_prefix"* ) ) ]]; then
+          if [[ "$EVENT_NAME" = push && ( "$BASE_SHA" = 0000000000000000000000000000000000000000 || "$event_ref" = refs/heads/launchplane/train/* ) ]]; then
             if [[ -z "$default_branch" || -z "$repository" || "$event_ref" != "$train_prefix"* || "$event_ref" = "$train_prefix" || ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ || "$HEAD_SHA" =~ ^0+$ ]]; then
               echo "Train comparison requires a default-branch train candidate and a nonzero head SHA." >&2
               exit 1

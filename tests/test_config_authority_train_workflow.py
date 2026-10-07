@@ -232,6 +232,20 @@ class ConfigAuthorityTrainWorkflowTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(capture.exists())
 
+    def test_train_updates_refuse_unsupported_or_missing_target_metadata(self) -> None:
+        for overrides in (
+            {"DEFAULT_BRANCH": ""},
+            {"GITHUB_REPOSITORY": ""},
+            {"EVENT_REF": "refs/heads/launchplane/train/example/product/release/fixture-batch"},
+            {"EVENT_REF": "refs/heads/launchplane/train/ordinary/fixture"},
+        ):
+            with self.subTest(overrides=overrides), TemporaryDirectory() as directory:
+                result, capture, _, _ = self._exercise(
+                    Path(directory), reconstructed=True, rejected=True, overrides=overrides
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(capture.exists())
+
     def test_target_advancement_or_landing_does_not_hide_candidate_changes(self) -> None:
         for movement in ("advanced", "landed"):
             with self.subTest(movement=movement), TemporaryDirectory() as directory:

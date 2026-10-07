@@ -300,8 +300,8 @@ The reusable gate maps PR, merge-group and ordinary push events to their explici
 commit pairs and fetches a missing named commit from the checked-out repository.
 A default-branch train ref uses its original candidate base on both creation
 (zero before SHA) and update. The gate fetches the repository's event-supplied
-default branch and selects the
-first shared commit in the candidate and target branch's first-parent histories.
+default branch and selects the first shared commit in the candidate and target
+branch's first-parent histories.
 This recovers the train's original base across all batch entries, including when
 the target advances or merges the candidate while the job is queued. The
 comparison covers every batch entry and stays bound to committed snapshots.
@@ -309,8 +309,10 @@ Comparing a reconstructed candidate to the previous candidate would hide
 rejected authority when their trees are identical; train updates therefore
 recover the base independently of the push's before SHA.
 Missing history, no shared base, a same-head base, other zero-SHA comparisons,
-and unmapped events fail closed. Branch/tag creation outside that default-branch
-train path uses pull_request or merge_group verification, or the CLI with an
+and unmapped events fail closed. Train-namespace pushes with missing target
+metadata or an unsupported ref also refuse, rather than falling back to an
+ordinary push comparison. Unsupported train refs and branch/tag creation outside
+that default-branch train path use pull_request or merge_group verification, or the CLI with an
 explicit pair/full-audit. Changed symlink paths
 resolve only within the committed tree and are classified under the link path;
 links outside that tree or through submodules fail closed. Link hops are bounded,
