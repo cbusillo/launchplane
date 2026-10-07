@@ -362,7 +362,8 @@ while open do not consume it. Further read failures retain that budget until the
 feedback is delivered or the PR is observed open again. An unreadable history skips
 only that product's supplemental recovery, leaving other sweep targets eligible.
 Successful delivery leaves the recovery set; a new event can retry an exhausted
-target. Open PRs waiting for a build retain normal sweep coverage. Failed feedback
+target with a fresh budget bound to its persisted delivery ID; duplicate deliveries
+do not refill it. Open PRs waiting for a build retain normal sweep coverage. Failed feedback
 and legacy entries without a status remain visible for supported observation rather
 than being assumed pending. Destroyed and teardown-pending preview records do not
 hide stale pending feedback; their reconciliation remains a no-op. Previews still

@@ -49,6 +49,7 @@ from control_plane.contracts.product_profile_record import (
     ProductPreviewProfile,
 )
 from control_plane.contracts.product_reconcile import (
+    GitHubAppWebhookDeliveryRecord,
     ProductReconcileLeaseLostError,
     ProductReconcileRequestRecord,
     ProductReconcileTarget,
@@ -2898,6 +2899,40 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.assertGreater(recoveries, 0)
         self.assertIn("feedback_recovery_stop_reason", failed.last_plan)
         self.assertIn("Waiting for:", self.comment_body())
+
+    def test_close_webhook_rearms_exhausted_open_read_recovery_once(self) -> None:
+        self.reconcile_preview()
+        with patch.object(self.github, "get_json", side_effect=OSError("GitHub unavailable")):
+            for _ in range(PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS):
+                self.request("preview", 5)
+                self.run_once()
+        self.assertFalse(self.sweep_preview())
+        self.github.pull_request["state"] = "closed"
+        target = ProductReconcileTarget(
+            product="site", target_kind="preview", pull_request_number=5
+        )
+        delivery = GitHubAppWebhookDeliveryRecord(
+            delivery_id="close-during-outage",
+            event="pull_request",
+            action="closed",
+            repository_id=REPOSITORY_ID,
+            received_at="2026-09-30T12:00:00Z",
+            target_keys=(target.target_key,),
+        )
+        self.store.record_github_app_webhook_delivery(delivery, (target,), delivery.received_at)
+        with patch.object(self.github, "get_json", side_effect=OSError("GitHub unavailable")):
+            self.run_swept_preview()
+        self.assertEqual(
+            self.store.record_github_app_webhook_delivery(
+                delivery, (target,), delivery.received_at
+            ),
+            "duplicate",
+        )
+        self.assertTrue(self.sweep_preview())
+        recovered = self.run_swept_preview()
+        self.assertEqual(recovered.last_plan["action"], "none")
+        self.assertEqual(self.comments.on(5), [])
+        self.assertEqual(self.provider.applied, [])
 
     def test_closing_before_a_preview_build_clears_pending_feedback(self) -> None:
         self.assertEqual(self.reconcile_preview()["action"], "wait")

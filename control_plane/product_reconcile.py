@@ -1949,10 +1949,14 @@ def run_product_reconcile_once(
             closed = not outcome.error and plan.get("reason") == "pull_request_not_open"
             previously_closed = request.last_plan.get("feedback_recovery_closed_observed") is True
             attempts = _feedback_recovery_failed_attempts(request.last_plan)
-            if closed and not previously_closed:
+            new_delivery = bool(request.last_delivery_id) and request.last_delivery_id != (
+                request.last_plan.get("feedback_recovery_delivery_id")
+            )
+            if new_delivery or (closed and not previously_closed):
                 # Reads failing while open must not spend the later close's cleanup
                 # budget. Once closed is observed, read failures keep that same budget.
                 attempts = 0
+            plan["feedback_recovery_delivery_id"] = request.last_delivery_id
             if closed or previously_closed:
                 plan["feedback_recovery_closed_observed"] = True
             plan["feedback_recovery_failed_attempts"] = attempts + 1
