@@ -5,7 +5,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -52,7 +52,7 @@ from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
-from sqlalchemy.orm import DeclarativeBase, Mapped, aliased, mapped_column, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, aliased, mapped_column, sessionmaker
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
@@ -5793,6 +5793,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
         self._session_factory = sessionmaker(self._engine, expire_on_commit=False)
         self._provider_evidence_context = local()
+        self._release_review_publication_context = local()
 
     @property
     def backend_name(self) -> str:
@@ -19834,9 +19835,26 @@ class PostgresRecordStore(HumanSessionStore):
             ):
                 yield
             return
-        with self._session_factory() as session, session.begin():
-            self._lock_landing_authority(session, f"release-review-publication:{record_id}")
-            yield
+        try:
+            with self._session_factory() as session, session.begin():
+                session.execute(text("SET LOCAL lock_timeout = '5s'"))
+                self._lock_landing_authority(session, f"release-review-publication:{record_id}")
+                previous = getattr(self._release_review_publication_context, "publication", None)
+                self._release_review_publication_context.publication = (record_id, session)
+                try:
+                    yield
+                finally:
+                    self._release_review_publication_context.publication = previous
+        except SQLAlchemyError as error:
+            raise ValueError(
+                "Release decision publication is unavailable; retry the saved decision."
+            ) from error
+
+    def _release_review_publication_session(self, record_id: str) -> Session | None:
+        publication = getattr(self._release_review_publication_context, "publication", None)
+        if publication is not None and publication[0] == record_id:
+            return cast(Session, publication[1])
+        return None
 
     def record_release_review_decision_publication(
         self, *, record_id: str, release_issue_url: str
@@ -19844,7 +19862,12 @@ class PostgresRecordStore(HumanSessionStore):
         """Publish an existing decision once, preserving its audit and any stored URL."""
         if not release_issue_url.strip():
             raise ValueError("Release decision publication requires an issue URL.")
-        with self._session_factory() as session:
+        publication_session = self._release_review_publication_session(record_id)
+        with (
+            nullcontext(publication_session)
+            if publication_session is not None
+            else self._session_factory() as session
+        ):
             self._begin_serialized_write(session)
             statement = select(LaunchplaneReleaseReviewDecisionRow).where(
                 LaunchplaneReleaseReviewDecisionRow.record_id == record_id
@@ -19859,7 +19882,10 @@ class PostgresRecordStore(HumanSessionStore):
                 return stored
             published = stored.model_copy(update={"release_issue_url": release_issue_url})
             row.payload = self._payload_dict(published)
-            session.commit()
+            if publication_session is None:
+                session.commit()
+            else:
+                session.flush()
             return published
 
     def list_release_review_decision_records(
@@ -19879,6 +19905,17 @@ class PostgresRecordStore(HumanSessionStore):
     def read_release_review_decision_record(
         self, *, product: str, record_id: str
     ) -> ReleaseReviewDecisionRecord:
+        session = self._release_review_publication_session(record_id)
+        if session is not None:
+            row = session.scalar(
+                select(LaunchplaneReleaseReviewDecisionRow).where(
+                    LaunchplaneReleaseReviewDecisionRow.product == product,
+                    LaunchplaneReleaseReviewDecisionRow.record_id == record_id,
+                )
+            )
+            if row is None:
+                raise FileNotFoundError(record_id)
+            return ReleaseReviewDecisionRecord.model_validate(row.payload)
         return self._read_model(
             model_type=ReleaseReviewDecisionRecord,
             orm_model=LaunchplaneReleaseReviewDecisionRow,

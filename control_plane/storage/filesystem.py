@@ -7038,6 +7038,16 @@ class FilesystemRecordStore:
         records.sort(key=lambda record: (record.decided_at, record.record_id), reverse=True)
         return tuple(records if limit is None else records[:limit])
 
+    def read_release_review_decision_record(
+        self, *, product: str, record_id: str
+    ) -> ReleaseReviewDecisionRecord:
+        record = self._read_model(
+            ReleaseReviewDecisionRecord, "launchplane_release_review_decisions", record_id
+        )
+        if record.product != product:
+            raise FileNotFoundError(record_id)
+        return record
+
     @contextmanager
     def product_review_lock(
         self,
