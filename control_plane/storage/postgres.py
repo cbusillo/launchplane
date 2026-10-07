@@ -20375,7 +20375,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def list_product_reconcile_requests(
-        self, *, state: str = "", product: str = "", limit: int = 100
+        self, *, state: str = "", product: str = "", limit: int | None = 100
     ) -> tuple[ProductReconcileRequestRecord, ...]:
         filters: list[object] = []
         if product:

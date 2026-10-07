@@ -2720,6 +2720,123 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         (comment,) = self.comments.on(5)
         return cast(str, comment["body"])
 
+    def sweep_preview(self) -> bool:
+        targets = request_product_reconcile_sweep(
+            self.store, "2026-09-30T12:00:00Z", lambda _store, _profile: self.github
+        )
+        return "site:preview:5" in targets
+
+    def run_swept_preview(self) -> ProductReconcileRequestRecord:
+        # Use the real worker even when the testing target is claimed first.
+        completed = self.run_once()
+        return completed if completed.target_kind == "preview" else self.run_once()
+
+    def test_sweep_recovers_a_closed_absent_preview_after_a_failed_pr_read(self) -> None:
+        self.reconcile_preview()
+        self.github.pull_request["state"] = "closed"
+        self.request("preview", 5)
+        with patch.object(self.github, "get_json", side_effect=ProductReconcileError("refused")):
+            failed = self.run_once()
+        self.assertEqual(failed.state, "failed")
+        self.assertIn("Waiting for:", self.comment_body())
+        self.assertEqual(self.store.list_preview_records(), ())
+
+        self.assertTrue(self.sweep_preview())
+        recovered = self.run_swept_preview()
+
+        feedback = cast(dict[str, object], recovered.last_plan["pr_feedback"])
+        self.assertEqual(
+            (feedback["status"], feedback["delivery_status"]), ("cleared", "delivered")
+        )
+        self.assertEqual(self.comments.on(5), [])
+        self.assertEqual(self.provider.applied, [])
+        self.assertFalse(self.sweep_preview())
+
+    def test_sweep_recovers_failed_clear_delivery_without_another_close_event(self) -> None:
+        self.reconcile_preview()
+        self.github.pull_request["state"] = "closed"
+        self.comments.fail_writes = True
+        self.reconcile_preview()
+        self.assertIn("Waiting for:", self.comment_body())
+        self.comments.fail_writes = False
+
+        self.assertTrue(self.sweep_preview())
+        recovered = self.run_swept_preview()
+
+        self.assertEqual(
+            cast(dict[str, object], recovered.last_plan["pr_feedback"])["delivery_status"],
+            "delivered",
+        )
+        self.assertEqual(self.comments.on(5), [])
+        self.assertFalse(self.sweep_preview())
+
+    def test_unreadable_closed_pr_stops_recovery_and_a_new_event_can_resume(self) -> None:
+        self.reconcile_preview()
+        self.github.pull_request["state"] = "closed"
+        self.request("preview", 5)
+        with patch.object(self.github, "get_json", side_effect=ProductReconcileError("denied")):
+            self.run_once()
+            recoveries = 0
+            while self.sweep_preview():
+                self.run_swept_preview()
+                recoveries += 1
+                self.assertLess(recoveries, 10, "unbounded feedback recovery")
+        self.assertIn("Waiting for:", self.comment_body())
+        self.assertEqual(self.provider.applied, [])
+        self.assertGreater(recoveries, 0)
+        self.assertFalse(self.sweep_preview())
+
+        self.reconcile_preview()
+
+        self.assertEqual(self.comments.on(5), [])
+
+    def test_sweep_does_not_guess_failed_or_legacy_feedback_is_pending(self) -> None:
+        self.github.pull_request["state"] = "closed"
+        for feedback in (
+            {"status": "failed", "delivery_status": "failed"},
+            {"delivery_status": "failed"},
+        ):
+            with self.subTest(feedback=feedback):
+                self.request("preview", 5)
+                request = self.store.claim_next_product_reconcile_request("seed", 600)
+                assert request is not None
+                self.store.complete_product_reconcile_request(
+                    request.target_key, "seed", "failed", {"pr_feedback": feedback}, "real failure"
+                )
+                self.assertFalse(self.sweep_preview())
+
+    def test_recovery_discovers_feedback_beyond_the_default_history_limit(self) -> None:
+        for number in range(10, 120):
+            self.store.request_product_reconcile(
+                ProductReconcileTarget(
+                    product="site", target_kind="preview", pull_request_number=number
+                ),
+                "2026-09-28T12:00:00Z",
+            )
+            request = self.store.claim_next_product_reconcile_request("seed", 600)
+            assert request is not None
+            self.store.complete_product_reconcile_request(request.target_key, "seed", "done", {})
+        self.reconcile_preview()
+        self.github.pull_request["state"] = "closed"
+        targets = request_product_reconcile_sweep(
+            self.store, "2026-09-30T12:00:00Z", lambda _store, _profile: self.github
+        )
+        self.assertIn("site:preview:5", targets)
+
+    def test_failed_clear_delivery_stops_without_erasing_the_pending_comment(self) -> None:
+        self.reconcile_preview()
+        self.github.pull_request["state"] = "closed"
+        self.comments.fail_writes = True
+        self.reconcile_preview()
+        recoveries = 0
+        while self.sweep_preview():
+            self.run_swept_preview()
+            recoveries += 1
+            self.assertLess(recoveries, 10, "unbounded failed deletion recovery")
+        self.assertGreater(recoveries, 0)
+        self.assertIn("Waiting for:", self.comment_body())
+        self.assertEqual(self.provider.applied, [])
+
     def test_closing_before_a_preview_build_clears_pending_feedback(self) -> None:
         self.assertEqual(self.reconcile_preview()["action"], "wait")
         self.assertIn("Waiting for: a verified build", self.comment_body())
