@@ -7,6 +7,7 @@ are never evidence. See docs/artifact-provenance.md.
 """
 
 import io
+from http.client import HTTPException
 import json
 import zipfile
 from collections.abc import Iterator
@@ -66,12 +67,12 @@ class GitHubBuildProvenanceTransport:
                 raise BuildProvenanceError(
                     f"GitHub read failed for {path}: {redirect}"
                 ) from redirect
-        except (URLError, OSError) as error:
+        except (URLError, OSError, HTTPException) as error:
             raise BuildProvenanceError(f"GitHub read failed for {path}: {error}") from error
         try:
             with urlopen(Request(url=location), timeout=self._timeout_seconds) as response:
                 return _bounded_read(response, path)
-        except (HTTPError, URLError, OSError) as error:
+        except (HTTPError, URLError, OSError, HTTPException) as error:
             raise BuildProvenanceError(f"GitHub read failed for {path}: {error}") from error
 
     def _api_request(self, path: str) -> Request:
@@ -88,7 +89,7 @@ class GitHubBuildProvenanceTransport:
         try:
             with urlopen(request, timeout=self._timeout_seconds) as response:
                 return bytes(response.read())
-        except (HTTPError, URLError, OSError) as error:
+        except (HTTPError, URLError, OSError, HTTPException) as error:
             raise BuildProvenanceError(
                 f"GitHub read failed for {request.full_url}: {error}"
             ) from error

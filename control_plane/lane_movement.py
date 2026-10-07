@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 import json
+from http.client import HTTPException
 import re
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 from urllib.parse import quote
@@ -143,7 +144,7 @@ def _source_read_refusal(
         return LaneMovementRefused(
             "source_authority_unavailable" if cause.code in {401, 403} else unverified
         )
-    if isinstance(cause, OSError):
+    if isinstance(cause, (OSError, HTTPException)):
         return LaneMovementRefused("source_order_unavailable")
     return LaneMovementRefused(unverified)
 
@@ -173,6 +174,8 @@ def _source_transport(
 
     try:
         return resolve_build_provenance_transport(record_store, profile)
+    except HTTPException as error:
+        raise LaneMovementRefused("source_order_unavailable") from error
     except ProductReconcileError as error:
         # Missing policy/App/key is configuration, not a transient provider read.
         from control_plane.merge_train_policy_source import MergeTrainPolicyStoreMissingError
@@ -181,7 +184,7 @@ def _source_transport(
         cause: BaseException = error
         while cause.__cause__ is not None:
             cause = cause.__cause__
-        if isinstance(cause, OSError) and not isinstance(cause, FileNotFoundError):
+        if isinstance(cause, (OSError, HTTPException)) and not isinstance(cause, FileNotFoundError):
             raise _source_read_refusal(cause, unverified="source_authority_unavailable") from error
 
         code = (

@@ -2,7 +2,7 @@ import io
 import json
 import unittest
 import zipfile
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock, patch
 
 from control_plane.build_provenance import (
     BUILD_WORKFLOW_PATH,
@@ -111,6 +111,27 @@ def _verify(
 
 
 class BuildProvenanceTests(unittest.TestCase):
+    def test_json_and_manifest_body_connection_drops_are_wrapped(self) -> None:
+        from http.client import IncompleteRead
+        from control_plane.build_provenance import GitHubBuildProvenanceTransport
+
+        transport = GitHubBuildProvenanceTransport(token="test-token")
+        for archive in (False, True):
+            with self.subTest(archive=archive):
+                connection = MagicMock()
+                connection.__enter__.return_value.read.side_effect = IncompleteRead(b"{", 10)
+                with (
+                    patch("control_plane.build_provenance.urlopen", return_value=connection),
+                    patch("control_plane.build_provenance.build_opener") as opener,
+                    self.assertRaises(BuildProvenanceError) as caught,
+                ):
+                    opener.return_value.open.return_value = connection
+                    if archive:
+                        transport.get_bytes("/repos/example/site/actions/artifacts/1/zip")
+                    else:
+                        transport.get_json("/repos/example/site")
+                self.assertIsInstance(caught.exception.__cause__, IncompleteRead)
+
     def test_accepts_main_push_build_under_launchplane_key(self) -> None:
         manifest = _verify(FakeGitHub(runs=[_run()])).manifest
 

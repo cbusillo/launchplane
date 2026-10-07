@@ -13,6 +13,7 @@ from tests.test_product_reconcile import (
 
 class LaneMovementTests(unittest.TestCase):
     def test_real_transport_outage_is_mapped_before_preview_or_deploy_effects(self) -> None:
+        from http.client import IncompleteRead
         from email.message import Message
         from urllib.error import HTTPError
         from control_plane.build_provenance import GitHubBuildProvenanceTransport
@@ -39,42 +40,46 @@ class LaneMovementTests(unittest.TestCase):
             ),
             (LaneBuild("short", OLDER[:7]), self.current),
         )
-        with patch(
-            "control_plane.build_provenance.urlopen",
-            side_effect=HTTPError("https://api.example.test", 503, "unavailable", Message(), None),
+        for network_error in (
+            HTTPError("https://api.example.test", 503, "unavailable", Message(), None),
+            IncompleteRead(b"{", 10),
         ):
-            for current, desired in candidates:
+            with patch(
+                "control_plane.build_provenance.urlopen",
+                side_effect=network_error,
+            ):
+                for current, desired in candidates:
+                    with (
+                        self.subTest(desired=desired.artifact_id),
+                        self.assertRaises(LaneMovementRefused) as caught,
+                    ):
+                        require_forward_build(
+                            record_store=self.store,
+                            profile=self.profile,
+                            current=current,
+                            desired=desired,
+                            transport=transport,
+                        )
+                    self.assertEqual(caught.exception.code, "source_order_unavailable")
+                profile = LaunchplaneProductProfileRecord.model_validate(_profile())
                 with (
-                    self.subTest(desired=desired.artifact_id),
+                    patch(
+                        "control_plane.lane_movement.current_preview_builds",
+                        return_value=(self.current,),
+                    ),
                     self.assertRaises(LaneMovementRefused) as caught,
                 ):
-                    require_forward_build(
+                    require_forward_preview_build(
                         record_store=self.store,
-                        profile=self.profile,
-                        current=current,
-                        desired=desired,
+                        profile=profile,
+                        preview_slug="pr-5",
+                        pull_request_number=5,
+                        desired=LaneBuild(
+                            "preview", "e" * 40, profile.image.repository + "@sha256:" + "e" * 64
+                        ),
                         transport=transport,
                     )
                 self.assertEqual(caught.exception.code, "source_order_unavailable")
-            profile = LaunchplaneProductProfileRecord.model_validate(_profile())
-            with (
-                patch(
-                    "control_plane.lane_movement.current_preview_builds",
-                    return_value=(self.current,),
-                ),
-                self.assertRaises(LaneMovementRefused) as caught,
-            ):
-                require_forward_preview_build(
-                    record_store=self.store,
-                    profile=profile,
-                    preview_slug="pr-5",
-                    pull_request_number=5,
-                    desired=LaneBuild(
-                        "preview", "e" * 40, profile.image.repository + "@sha256:" + "e" * 64
-                    ),
-                    transport=transport,
-                )
-            self.assertEqual(caught.exception.code, "source_order_unavailable")
 
     def test_unique_abbreviated_recorded_source_can_move_forward(self) -> None:
         self.github.add_run(10, OLDER)
