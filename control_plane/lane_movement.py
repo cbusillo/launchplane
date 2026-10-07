@@ -277,8 +277,8 @@ def require_forward_build(
                 transport,
                 current.pull_request_number,
             )
-    # Older inventory records may abbreviate the ref; only its own immutable
-    # manifest can supply the full commit, never a guessed GitHub abbreviation.
+    # Prefer the full source in the artifact's own immutable manifest. Otherwise
+    # GitHub must resolve an abbreviated hexadecimal ref uniquely; never guess.
     if current.commit and not re.fullmatch(r"[0-9a-fA-F]{40}", current.commit):
         try:
             manifest = store.read_artifact_manifest(current.artifact_id)
@@ -308,7 +308,7 @@ def require_forward_build(
             current = replace(current, commit=full_sha)
         except LaneMovementRefused:
             raise
-        except (OSError, click.ClickException, ValueError) as error:
+        except (OSError, BuildProvenanceError, click.ClickException, ValueError) as error:
             raise _source_read_refusal(error, unverified="source_order_unverified") from error
     if not all(re.fullmatch(r"[0-9a-fA-F]{40}", sha) for sha in (current.commit, desired.commit)):
         raise LaneMovementRefused("source_order_unverified")
@@ -417,7 +417,7 @@ def _proved_generic_build(
                 pull = transport.get_json(
                     f"/repos/{profile.repository}/pulls/{pull_request_number}"
                 )
-            except OSError as error:
+            except (OSError, BuildProvenanceError, ValueError) as error:
                 raise _source_read_refusal(error) from error
             if (
                 not isinstance(pull, dict)
@@ -430,7 +430,7 @@ def _proved_generic_build(
     repository = "/".join(quote(part, safe="") for part in profile.repository.split("/"))
     try:
         identity = transport.get_json(f"/repos/{repository}")
-    except OSError as error:
+    except (OSError, BuildProvenanceError, ValueError) as error:
         raise _source_read_refusal(error) from error
     if not isinstance(identity, dict) or not identity.get("id"):
         raise LaneMovementRefused("build_identity_unverified")
@@ -487,7 +487,7 @@ def _proved_odoo_build(
     repository = "/".join(quote(part, safe="") for part in profile.repository.split("/"))
     try:
         identity = transport.get_json(f"/repos/{repository}")
-    except OSError as error:
+    except (OSError, BuildProvenanceError, ValueError) as error:
         raise _source_read_refusal(error) from error
     if not isinstance(identity, dict) or not identity.get("id"):
         raise LaneMovementRefused("build_identity_unverified")
