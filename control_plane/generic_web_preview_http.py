@@ -277,7 +277,9 @@ def apply_generic_web_preview_destroy_result(
 
 def should_store_generic_web_preview_idempotency(result: dict[str, object]) -> bool:
     if str(result.get("error_message", "")).startswith("lane_movement."):
-        return True
+        return not str(result.get("error_message", "")).startswith(
+            "lane_movement.source_order_unavailable:"
+        )
     return not _result_contains_status(result, "blocked") and not _result_contains_status(
         result, "fail"
     )

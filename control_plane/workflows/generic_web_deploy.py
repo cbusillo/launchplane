@@ -551,7 +551,8 @@ def execute_generic_web_deploy(
                 desired=LaneBuild(
                     request.artifact_id,
                     request.source_git_ref,
-                    request.deploy_reference or request.artifact_id,
+                    request.artifact_id,
+                    deploy_reference=request.deploy_reference,
                 ),
             )
         untitled_deployment_observation = resolved_deploy_provider.execute_artifact_deploy(

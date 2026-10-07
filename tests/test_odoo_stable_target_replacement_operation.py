@@ -60,6 +60,51 @@ def _lane_reservation_path(
 
 
 class OdooStableTargetReplacementOperationRecordTests(unittest.TestCase):
+    def test_source_read_backoff_skips_a_lane_and_later_retries_it(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            stores = (
+                FilesystemRecordStore(state_dir=root / "files"),
+                PostgresRecordStore(database_url=f"sqlite:///{root / 'state.sqlite3'}"),
+            )
+            stores[1].ensure_schema()
+            self.addCleanup(stores[1].close)
+            for store in stores:
+                with self.subTest(store=type(store).__name__):
+                    cooling = OdooStableTargetReplacementOperationRecord.model_validate(
+                        {
+                            **_operation_payload("cooling"),
+                            "attempt": 1,
+                            "error_code": "lane_movement.source_order_unavailable",
+                        }
+                    )
+                    other = OdooStableTargetReplacementOperationRecord.model_validate(
+                        {
+                            **_operation_payload("other"),
+                            "context": "another-context",
+                            "created_at": "2026-05-17T00:00:01Z",
+                        }
+                    )
+                    store.write_odoo_stable_target_replacement_operation_record(cooling)
+                    store.write_odoo_stable_target_replacement_operation_record(other)
+
+                    def claim(at: str) -> OdooStableTargetReplacementOperationRecord | None:
+                        return store.claim_next_odoo_stable_target_replacement_operation_record(
+                            lease_owner="worker",
+                            lease_expires_at="2026-05-17T00:10:00Z",
+                            claimed_at=at,
+                        )
+
+                    ready = claim("2026-05-17T00:00:02Z")
+                    self.assertIsNotNone(ready)
+                    assert ready is not None
+                    self.assertEqual(ready.operation_id, other.operation_id)
+                    self.assertIsNone(claim("2026-05-17T00:00:29Z"))
+                    retry = claim("2026-05-17T00:00:30Z")
+                    assert retry is not None
+                    self.assertEqual(retry.operation_id, cooling.operation_id)
+                    self.assertGreater(retry.attempt, cooling.attempt)
+
     def test_operation_record_round_trips(self) -> None:
         record = OdooStableTargetReplacementOperationRecord.model_validate(_operation_payload())
 

@@ -477,9 +477,15 @@ class ClientReleaseTests(unittest.TestCase):
         with patch(
             "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_prod_promotion_run",
             side_effect=LaneMovementRefused("source_order_unavailable"),
-        ):
-            for _ in range(4):
-                self.run_release_worker()
+        ) as execute:
+            self.run_release_worker()
+            for _ in range(3):
+                result = run_odoo_stable_operation_worker_once(
+                    record_store=self.store,
+                    control_plane_root_path=self.root,
+                    lease_owner="release-worker",
+                )
+                self.assertEqual(result.status, "idle")
                 operation = self.store.read_odoo_prod_promotion_operation_record(
                     source.operation_id
                 )
@@ -493,6 +499,7 @@ class ClientReleaseTests(unittest.TestCase):
                 assert run is not None
                 self.assertNotEqual(run.state, "stopped")
                 self.assertEqual(self.store.list_odoo_prod_rollback_operation_records(), ())
+            execute.assert_called_once()
 
     def promotion_providers(
         self, *, failure: str = "post_deploy", after_write: Callable[[], None] | None = None

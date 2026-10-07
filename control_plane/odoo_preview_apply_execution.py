@@ -204,6 +204,23 @@ class OdooPreviewProviderMutationAdapter:
                 runtime_identity=self._runtime_identity,
             )
         except LaneMovementRefused as error:
+            from control_plane.lane_movement import LaneBuild, record_preview_refusal
+
+            manifest = self._apply_request.apply.manifest
+            record_preview_refusal(
+                record_store=self._record_store,
+                profile=self._profile,
+                preview_slug=self._issued_plan.preview_slug,
+                desired=LaneBuild(
+                    manifest.artifact_id if manifest else self._apply_request.apply.image_reference,
+                    manifest.source_commit
+                    if manifest
+                    else self._issued_plan.plan_request.source_git_ref,
+                    self._apply_request.apply.image_reference,
+                ),
+                error=error,
+                target_type="compose",
+            )
             return ProviderMutationOutcome(
                 response_status_code=409,
                 response_payload=provider_operation_response_payload(
@@ -215,7 +232,7 @@ class OdooPreviewProviderMutationAdapter:
                         "error_message": error.record_failure().description,
                     },
                 ),
-                durable=True,
+                durable=error.code != "source_order_unavailable",
                 provider_effect_performed=False,
             )
         except (

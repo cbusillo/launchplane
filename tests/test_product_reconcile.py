@@ -2747,8 +2747,8 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
 
         restored = self.reconcile()
 
-        self.assertEqual((restored["action"], restored["preview_result_status"]), ("apply", "pass"))
-        self.assertEqual(self.driver.changes, [("refresh", 5)] * 3)
+        self.assertEqual((restored["action"], restored["reason"]), ("wait", "ancestor_build"))
+        self.assertEqual(self.driver.changes, [("refresh", 5)] * 2)
 
     def test_a_refresh_longer_than_the_lease_keeps_it(self) -> None:
         self.github.add_run(50, PR_HEAD, event="pull_request")

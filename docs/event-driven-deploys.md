@@ -285,20 +285,27 @@ needs no workflow to report previews or testing deploys.
 
 ## Forward build changes
 
-Testing and preview selection, stable deploys (including Client promotions and
-generic-web recovery retries), and preview applies check the requested build
-against the lane's current recorded build before provider effects. A different
-stable-lane commit must be a proven descendant. Previews may also follow a
-rebased PR head when verified build provenance proves its artifact is newer.
+Testing and preview selection, stable deploys (including Client promotions,
+native VeriReel deploys and generic-web recovery retries), the ship executor,
+and preview applies check the requested build against the lane's current
+recorded build before provider effects. A different commit must be a proven
+descendant, or diverged history with verified provenance proving a newer
+artifact. This permits an explicit deploy after a history rewrite and a
+preview following a rebased PR head.
 An ancestor is always refused. Changing an image at the same commit requires
 newer build provenance; legacy preview records can use a verified build that
-started after the serving generation was recorded. Missing ordering evidence is a refusal, not permission
+started after the serving generation was requested. Historical preview build
+verification must match the exact recorded image; desired preview builds
+still have to match the current PR head. Missing ordering evidence is a refusal, not permission
 to replace the lane. Existing explicit rollback operations, including pinned
 failed-release recovery and the release drill, retain their rollback authority.
 Requests cannot supply a rollback exception to a deploy or preview apply.
 
 The supported forward path is a verified descendant build, or a same-commit
-rebuild whose provenance proves it is newer. An intentional backward change
+or diverged-history build whose provenance proves it is newer. Generic-web
+requests must bind their source to the verified uploaded image. A provider
+tag must be the full source-SHA tag or a tag declared in that build's manifest;
+the immutable image digest remains the artifact identity. An intentional backward change
 uses the existing rollback operation and its own authority. Refusals remain in
 the reconcile plan or failed deployment/operation record. Stable-lane profile
 repair edits routing metadata and does not deploy an image.
@@ -306,12 +313,19 @@ repair edits routing metadata and does not deploy an image.
 Testing searches up to 20 pages of successful build runs and first-parent
 history to find its running build. An omitted running run or commit still
 holds selection with the observed counts. If the running build is beyond
-those bounds, the supported service deploy/target-replacement operation can
-request an exact verified forward build; it still checks source order before
+those bounds, or its history was rewritten, the supported service
+deploy/target-replacement operation can request an exact verified newer build;
+it still checks source and artifact order before
 effects. A source read outage before effects retains refusal evidence and
 allows another attempt, without consuming the testing failure budget or
-stopping an accepted Client release. Preview refusals retain the serving
-generation and are stored in the operation response or reconcile plan.
+stopping an accepted Client release. Odoo operations wait before retrying,
+with exponential delays from 30 seconds to 30 minutes, so a source outage
+does not starve other lanes or rollbacks. Missing configured read authority
+is a terminal refusal. Direct preview source-read failures can retry with the
+same idempotency key; each refusal still gets a failed deployment record.
+Preview refusals retain the serving generation and remain visible in the
+operation response or reconcile plan. Generic-web preview checks include a
+failed active generation because it may already have changed a provider app.
 
 This guards code order, not database reversibility. An Odoo rollback preserves
 the existing database and runs post-deploy module work; it does not undo schema

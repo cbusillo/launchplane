@@ -26,6 +26,7 @@ from typing import (
 )
 
 from pydantic import BaseModel, JsonValue, TypeAdapter
+from control_plane.lane_movement import source_read_retry_ready
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -9606,6 +9607,8 @@ class PostgresRecordStore(HumanSessionStore):
                     model_type=OdooStableTargetReplacementOperationRecord,
                     payload=row.payload,
                 )
+                if not source_read_retry_ready(record, claimed_at):
+                    continue
                 if not self.database_url.startswith("sqlite"):
                     self._lock_odoo_stable_lane(
                         session,
@@ -10478,6 +10481,8 @@ class PostgresRecordStore(HumanSessionStore):
                 self._lock_odoo_stable_lane(session, product="", context="", instance="")
             for row in cast(list[Any], session.scalars(statement).all()):
                 record = self._read_payload(model_type=model_type, payload=row.payload)
+                if not source_read_retry_ready(record, claimed_at):
+                    continue
                 if not self.database_url.startswith("sqlite"):
                     self._lock_odoo_stable_lane(
                         session,

@@ -5337,7 +5337,11 @@ class FilesystemRecordStore:
                     current_record = self.read_odoo_stable_target_replacement_operation_record(
                         record.operation_id
                     )
-                    if current_record.status != "pending":
+                    from control_plane.lane_movement import source_read_retry_ready
+
+                    if current_record.status != "pending" or not source_read_retry_ready(
+                        current_record, claimed_at
+                    ):
                         continue
                     claimed_record = current_record.model_copy(
                         update={

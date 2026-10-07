@@ -1420,6 +1420,7 @@ def execute_generic_web_preview_refresh(
             desired=LaneBuild(
                 request.image_reference, request.anchor_head_sha, request.image_reference
             ),
+            pull_request_number=request.anchor_pr_number,
         )
         host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
         target_definition, template_application, target_error = _read_template_payload(
@@ -1521,6 +1522,19 @@ def execute_generic_web_preview_refresh(
         message = str(exc)
         if rollback_errors:
             message = f"{message}\n" + "\n".join(rollback_errors)
+        if isinstance(exc, LaneMovementRefused):
+            from control_plane.lane_movement import record_preview_refusal
+
+            record_preview_refusal(
+                record_store=record_store,
+                profile=resolved_profile,
+                preview_slug=request.preview_slug,
+                desired=LaneBuild(
+                    request.image_reference, request.anchor_head_sha, request.image_reference
+                ),
+                error=exc,
+                target_type="application",
+            )
         return GenericWebPreviewRefreshResult(
             refresh_status="blocked" if isinstance(exc, LaneMovementRefused) else "fail",
             refresh_started_at=started_at,

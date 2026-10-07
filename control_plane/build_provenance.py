@@ -173,6 +173,7 @@ class GenericWebBuildImage(BaseModel):
 
     repository: str = Field(min_length=1)
     digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    tags: tuple[str, ...] = ()
 
 
 class GenericWebBuildManifest(BaseModel):
@@ -207,11 +208,14 @@ def verify_generic_web_build(
     purpose: BuildPurpose,
     image_repository: str,
     pull_request_number: int | None = None,
+    recorded_image_reference: str = "",
 ) -> VerifiedGenericWebBuild:
     """Return the image GitHub's build run proves for this commit, or raise.
 
     The run checks are the Odoo build's; only the manifest differs. Nothing is
     recorded: a generic-web lane's runtime identity is its record of what it runs.
+    A recorded image may verify a historical PR build after its head moved;
+    it must match the manifest exactly and never selects a new desired build.
     """
     commit = commit.strip().lower()
     source_build, manifest_payload = _verified_build_run(
@@ -221,6 +225,7 @@ def verify_generic_web_build(
         commit=commit,
         purpose=purpose,
         pull_request_number=pull_request_number,
+        check_current_head=not recorded_image_reference,
     )
     try:
         manifest = GenericWebBuildManifest.model_validate(manifest_payload)
@@ -232,6 +237,13 @@ def verify_generic_web_build(
         raise BuildProvenanceError("The build manifest names a different source commit.")
     if manifest.image.repository.rstrip("/") != image_repository.strip().rstrip("/"):
         raise BuildProvenanceError("The build manifest names a different image repository.")
+    if (
+        recorded_image_reference
+        and recorded_image_reference != f"{manifest.image.repository}@{manifest.image.digest}"
+    ):
+        raise BuildProvenanceError(
+            "The historical build does not match the recorded running image."
+        )
     return VerifiedGenericWebBuild(manifest=manifest, source_build=source_build)
 
 
@@ -243,6 +255,7 @@ def _verified_build_run(
     commit: str,
     purpose: BuildPurpose,
     pull_request_number: int | None,
+    check_current_head: bool = True,
 ) -> tuple[ArtifactSourceBuild, dict[str, object]]:
     """The build run that proves this commit, and its uploaded manifest, unvalidated."""
     repository_path = _repository_path(repository)
@@ -271,7 +284,7 @@ def _verified_build_run(
             default_branch=default_branch,
             commit=commit,
         )
-    else:
+    elif check_current_head:
         pull_request = _object(
             transport.get_json(f"/repos/{repository_path}/pulls/{pull_request_number}"),
             "pull request",

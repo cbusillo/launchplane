@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import click
 
@@ -146,12 +146,13 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         self.enterContext(patch.object(self.provider, "resolve_deploy_target", side_effect=resolve))
         self.fail_health = False
         self.raw_read = github_read
-        transport = Mock()
-        transport.get_json.return_value = {
-            "status": "ahead",
-            "base_commit": {"sha": BASE},
-            "merge_base_commit": {"sha": BASE},
-        }
+        from tests.support.lane_builds import LaneBuildGitHub
+
+        transport = LaneBuildGitHub(
+            self.profile.repository,
+            self.profile.image.repository,
+            {BASE: "sha256:" + "f" * 64, HEAD: "sha256:" + "b" * 64},
+        )
         self.enterContext(
             patch(
                 "control_plane.product_reconcile.resolve_build_provenance_transport",

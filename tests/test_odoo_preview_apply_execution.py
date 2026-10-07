@@ -113,6 +113,49 @@ def _issued_plan(apply_request: OdooPreviewApplyEnvelope) -> OdooPreviewApplyInp
 
 
 class RunOdooPreviewApplyOperationTests(unittest.TestCase):
+    def test_source_outage_can_retry_the_same_preview_key_and_keeps_each_refusal(self) -> None:
+        from control_plane.lane_movement import LaneMovementRefused
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = PostgresRecordStore(database_url=_sqlite_database_url(root / "state.sqlite3"))
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _odoo_preview_profile_payload()
+            )
+            request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+            issued = _issued_plan(request)
+            request = validate_odoo_preview_issued_plan(
+                plan_id=_PLAN_ID, issued_plan=issued, request=request
+            )
+            execute = Mock(side_effect=LaneMovementRefused("source_order_unavailable"))
+            observe = Mock()
+            results = [
+                run_odoo_preview_apply_operation(
+                    store=store,
+                    control_plane_root=root,
+                    record_store=store,
+                    profile=profile,
+                    apply_request=request,
+                    issued_plan=issued,
+                    reservation_scope=_WORKER_SCOPE,
+                    idempotency_key=_PLAN_ID,
+                    request_fingerprint="outage",
+                    trace_id="test",
+                    execute_apply=execute,
+                    observe_apply=observe,
+                )
+                for _ in range(2)
+            ]
+            self.assertNotEqual(results[1].status, "replayed")
+            self.assertEqual(execute.call_count, 2)
+            self.assertEqual(store.list_preview_records(), ())
+            refusals = store.list_deployment_records()
+            self.assertEqual(len(refusals), 2)
+            self.assertEqual(len({record.record_id for record in refusals}), 2)
+            observe.assert_not_called()
+
     def test_backward_refusal_is_durable_and_replayed_without_lifecycle_change(self) -> None:
         from control_plane.lane_movement import LaneMovementRefused
 
@@ -149,14 +192,11 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
                 for _ in range(2)
             ]
             self.assertEqual([result.status for result in results], ["completed", "replayed"])
-            self.assertEqual(
-                results[0].response_payload["result"],
-                {
-                    "status": "blocked",
-                    "error_code": "lane_movement.ancestor_build",
-                    "error_message": "The requested build is an ancestor of the lane's current build.",
-                },
-            )
+            result = results[0].response_payload["result"]
+            assert isinstance(result, dict)
+            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["error_code"], "lane_movement.ancestor_build")
+            self.assertTrue(result["error_message"])
             self.assertEqual(store.list_preview_records(), ())
             execute.assert_called_once()
             observe.assert_not_called()

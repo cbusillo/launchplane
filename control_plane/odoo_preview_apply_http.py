@@ -416,6 +416,7 @@ def execute_odoo_preview_apply_result(
             record_store=record_store,
             profile=profile,
             preview_slug=current_request.apply.dry_run_plan.preview_slug,
+            pull_request_number=issued_plan.plan_request.pr_number,
             desired=LaneBuild(
                 manifest.artifact_id,
                 manifest.source_commit,

@@ -15,6 +15,7 @@ from control_plane.lane_movement import (
     LANE_MOVEMENT_REFUSALS,
     LaneBuild,
     LaneMovementRefused,
+    current_preview_builds,
     require_forward_build,
 )
 
@@ -1451,38 +1452,24 @@ def _plan_preview_target(
     if live and desired_digest == current["current_image_digest"]:
         plan.update(action="none", reason="already_serving", held=False)
     else:
-        movement, _ = _current_preview(
-            record_store=record_store,
-            profile=profile,
-            preview_context=preview_context,
-            pull_request_number=pull_request_number,
-            for_movement=True,
-        )
         try:
-            require_forward_build(
-                record_store=record_store,
-                profile=profile,
-                transport=transport,
-                current=LaneBuild(
-                    artifact_id=str(movement.get("current_artifact_id", "")),
-                    commit=str(movement["current_head_sha"]),
-                    image=f"{profile.image.repository}@{movement['current_image_digest']}"
-                    if movement["current_image_digest"]
-                    else "",
-                    observed_at=str(movement.get("current_observed_at", "")),
-                    pull_request_number=pull_request_number,
-                ),
-                desired=LaneBuild(
-                    verified.manifest.artifact_id
-                    if isinstance(verified, VerifiedBuildArtifact)
-                    else verified.image_reference,
-                    manifest.source_commit,
-                    f"{profile.image.repository}@{desired_digest}",
-                    verified.manifest.source_build
-                    if isinstance(verified, VerifiedBuildArtifact)
-                    else verified.source_build,
-                ),
-            )
+            for movement in current_preview_builds(record_store, profile, pull_request_number):
+                require_forward_build(
+                    record_store=record_store,
+                    profile=profile,
+                    transport=transport,
+                    current=movement,
+                    desired=LaneBuild(
+                        verified.manifest.artifact_id
+                        if isinstance(verified, VerifiedBuildArtifact)
+                        else verified.image_reference,
+                        manifest.source_commit,
+                        f"{profile.image.repository}@{desired_digest}",
+                        verified.manifest.source_build
+                        if isinstance(verified, VerifiedBuildArtifact)
+                        else verified.source_build,
+                    ),
+                )
         except LaneMovementRefused as error:
             plan.update(action="wait", reason=error.code, held=True)
             return _PreviewDecision(plan=plan, lifecycle_token=lifecycle_token, observed=observed)
@@ -1524,9 +1511,6 @@ def _run_preview_operation(
         f"{RECONCILE_SOURCE}:{profile.product}:pr-{pull_request_number}:{build_token}:"
         f"{hashlib.sha256(decision.lifecycle_token.encode()).hexdigest()[:16]}"
     )
-    if previous_plan.get("preview_result_error_code") == "lane_movement.source_order_unavailable":
-        previous_key = str(previous_plan.get("preview_operation_key", ""))
-        operation_key += f":retry-{hashlib.sha256(previous_key.encode()).hexdigest()[:16]}"
     reservation_scope = reconcile_reservation_scope(profile.product)
     plan_id = build_odoo_preview_plan_id(scope=reservation_scope, idempotency_key=operation_key)
     plan.update(preview_operation_key=operation_key, preview_plan_id=plan_id)
@@ -2415,6 +2399,7 @@ def _current_preview(
     preview_context: str,
     pull_request_number: int,
     for_movement: bool = False,
+    serving_only: bool = False,
 ) -> tuple[dict[str, object], str]:
     """The live preview, and a token that changes with every lifecycle step of its record."""
     current: dict[str, object] = {
@@ -2447,7 +2432,7 @@ def _current_preview(
     # latest generation is what runs, whatever an earlier one served.
     generation_id = (
         preview.active_generation_id or preview.serving_generation_id
-        if generic_web and not for_movement
+        if generic_web and not serving_only
         else preview.serving_generation_id or preview.active_generation_id
     )
     if not generation_id:
@@ -2456,7 +2441,7 @@ def _current_preview(
         generation = record_store.read_preview_generation_record(generation_id)
     except FileNotFoundError:
         return current, lifecycle_token
-    if generic_web and generation.state != "ready":
+    if generic_web and generation.state != "ready" and not for_movement:
         # Its verification is not recorded (the refresh failed, or the worker stopped
         # before recording it), so it serves nothing, though it names its image.
         return current, lifecycle_token
@@ -2464,12 +2449,14 @@ def _current_preview(
     if generation.runtime_identity is not None:
         digest = _image_reference_digest(generation.runtime_identity.image_reference)
     if not digest and generation.artifact_id:
-        digest = _artifact_digest(record_store, generation.artifact_id)
+        digest = _image_reference_digest(generation.artifact_id) or _artifact_digest(
+            record_store, generation.artifact_id
+        )
     current.update(
         current_head_sha=generation.anchor_summary.head_sha.lower(),
         current_image_digest=digest.lower(),
         current_artifact_id=generation.artifact_id,
-        current_observed_at=generation.ready_at or generation.requested_at,
+        current_observed_at=generation.requested_at,
     )
     return current, lifecycle_token
 

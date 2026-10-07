@@ -263,10 +263,10 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
                 patch(
                     "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_stable_target_replacement_apply",
                     side_effect=LaneMovementRefused("source_order_unavailable"),
-                ),
+                ) as execute,
                 self.assertLogs(level=logging.ERROR),
             ):
-                for _ in range(4):
+                for attempt in range(4):
                     result = run_odoo_stable_operation_worker_once(
                         record_store=store,
                         control_plane_root_path=root,
@@ -274,7 +274,7 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
                         lease_seconds=300,
                         heartbeat_seconds=60,
                     )
-                    self.assertTrue(result.terminal_write_committed)
+                    self.assertEqual(result.status, "worked" if attempt == 0 else "idle")
                     operation = store.read_odoo_stable_target_replacement_operation_record(
                         "operation-cm-testing"
                     )
@@ -282,6 +282,7 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
                     self.assertEqual(operation.error_code, "lane_movement.source_order_unavailable")
                     self.assertFalse(operation.finished_at)
                     self.assertFalse(operation.lease_owner)
+                execute.assert_called_once()
 
     def test_client_release_wait_does_not_block_odoo_operation_poll(self) -> None:
         started = Event()

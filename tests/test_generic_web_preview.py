@@ -13,6 +13,7 @@ from control_plane import runtime_environments as control_plane_runtime_environm
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
@@ -53,6 +54,9 @@ from control_plane.workflows.preview_desired_state import render_preview_slug
 
 
 class _GenericWebPreviewStore:
+    def write_deployment_record(self, record: DeploymentRecord) -> None:
+        self.refusals.append(record)
+
     def list_preview_records(self, **_: object) -> tuple[PreviewRecord, ...]:
         return ()
 
@@ -65,6 +69,7 @@ class _GenericWebPreviewStore:
         secret_bindings: tuple[SecretBinding, ...] = (),
     ) -> None:
         self.profile = profile
+        self.refusals: list[DeploymentRecord] = []
         self.runtime_key_safety_policies = runtime_key_safety_policies
         self.runtime_environment_records = runtime_environment_records
         self.secret_bindings = secret_bindings
@@ -290,7 +295,7 @@ class GenericWebPreviewTests(unittest.TestCase):
             patch(
                 "control_plane.lane_movement.require_forward_preview_build",
                 side_effect=LaneMovementRefused("ancestor_build"),
-            ),
+            ) as guard,
             patch(
                 "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request"
             ) as provider,
@@ -308,6 +313,19 @@ class GenericWebPreviewTests(unittest.TestCase):
                     str(result["error_message"]).startswith("lane_movement.ancestor_build:")
                 )
                 self.assertTrue(should_store_generic_web_preview_idempotency(result))
+            guard.side_effect = LaneMovementRefused("source_order_unavailable")
+            for _ in range(2):
+                records, result = apply_generic_web_preview_refresh_result(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    request=request,
+                    profile=profile,
+                )
+                self.assertEqual(records, {})
+                self.assertEqual(result["refresh_status"], "blocked")
+                self.assertFalse(should_store_generic_web_preview_idempotency(result))
+            self.assertEqual(len(store.refusals), 4)
+            self.assertEqual(len({record.record_id for record in store.refusals}), 4)
         provider.assert_not_called()
 
     def test_resolve_generic_web_preview_profile_accepts_based_driver(self) -> None:
