@@ -1,14 +1,26 @@
 """GitHub adapter for the actual commits in a release, independent of milestones."""
 
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import parse_qs, quote, urlsplit
 
 from control_plane.contracts.release_review import ReleaseReviewItem
+from control_plane.contracts.preview_record import PreviewRecord
 
 
 GitHubRead = Callable[[str], object]
+
+
+def recorded_preview_hosts(records: Iterable[PreviewRecord], *, repository: str) -> tuple[str, ...]:
+    """A bare anchor name alone does not identify a product across owners/contexts."""
+    return tuple(
+        host
+        for record in records
+        if record.anchor_pr_url.rstrip("/")
+        == f"https://github.com/{repository}/pull/{record.anchor_pr_number}"
+        if (host := urlsplit(record.canonical_url).hostname)
+    )
 
 
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")

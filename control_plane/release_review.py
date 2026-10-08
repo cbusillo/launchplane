@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote
 
 import click
 
@@ -28,6 +28,7 @@ from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.release_review_github import (
     GitHubRead,
     pull_requests_missing_owner_test_notes,
+    recorded_preview_hosts,
     read_release_changes,
 )
 from control_plane.release_review_shared import read_shared_source_changes, repository_key
@@ -196,13 +197,15 @@ def build_release_review(
     try:
         # Preview drivers write bare repository anchors; readers accept both
         # bare and owner/repo. Keep both within the product's preview context.
-        preview_hosts = tuple(
-            host
-            for anchor in (profile.repository, profile.repository.rsplit("/", 1)[-1])
-            for record in store.list_preview_records(
-                context_name=profile.preview.context, anchor_repo=anchor
-            )
-            if (host := urlsplit(record.canonical_url).hostname)
+        preview_hosts = recorded_preview_hosts(
+            (
+                record
+                for anchor in (profile.repository, profile.repository.rsplit("/", 1)[-1])
+                for record in store.list_preview_records(
+                    context_name=profile.preview.context, anchor_repo=anchor
+                )
+            ),
+            repository=profile.repository,
         )
         items, untracked = read_release_changes(
             repository=profile.repository,

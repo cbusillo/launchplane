@@ -105,12 +105,36 @@ class RecordedPreviewNotesTests(unittest.TestCase):
             if isinstance(result, list):
                 result[0]["body"] = (
                     "## Client test notes\nOpen https://review-42.example.net/contactus"
+                    "\n[Design](https://other-42.example.net/page)"
                 )
             return result
 
-        review = build_release_review(
-            store=cast(ReleaseReviewStore, self.store), profile=profile(), read=read
+        own_record = self.store.list_preview_records()[0]
+        self.store.write_preview_record(
+            own_record.model_copy(
+                update={
+                    "preview_id": "other-product",
+                    "context": "other-product",
+                    "anchor_pr_url": "https://github.com/other/site/pull/42",
+                    "canonical_url": "https://other-42.example.net",
+                }
+            )
         )
+        configured = profile().model_copy(
+            update={
+                "preview": profile().preview.model_copy(update={"context": "example-site"}),
+            }
+        )
+        for product_profile in (profile(), configured):
+            review = build_release_review(
+                store=cast(ReleaseReviewStore, self.store), profile=product_profile, read=read
+            )
+            assert review.checklist is not None
+            self.assertTrue(review.checklist.items[0].preview_era_notes)
+            self.assertIn(
+                "[Design](https://other-42.example.net/page)",
+                review.checklist.items[0].owner_test_notes,
+            )
         assert review.checklist is not None
         item = review.checklist.items[0]
         self.assertTrue(item.preview_era_notes)
@@ -120,7 +144,8 @@ class RecordedPreviewNotesTests(unittest.TestCase):
                 "items": (
                     item.model_copy(
                         update={
-                            "owner_test_notes": "Open https://review-42.example.net/contactus",
+                            "owner_test_notes": "Open https://review-42.example.net/contactus"
+                            "\n[Design](https://other-42.example.net/page)",
                             "preview_era_notes": False,
                         }
                     ),
