@@ -226,6 +226,44 @@ class ImportOverrideHttpTests(unittest.IsolatedAsyncioTestCase):
             all(item.value.value is None for item in after.config_parameters if item.key in KEYS)
         )
 
+    async def test_already_reconciled_apply_is_inert_even_after_context_becomes_shared(
+        self,
+    ) -> None:
+        _plan, bundle = plan_import_override_reconciliation(
+            record_store=self.store, profile=self.profile, record=override_record(), keys=KEYS
+        )
+        self.store.write_product_authority_bundle(bundle)
+        peer_lane = self.profile.lanes[0].model_copy(update={"instance": "peer-testing"})
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"product": "peer-fixture", "lanes": (peer_lane,)})
+        )
+        before = self.store.read_odoo_instance_override_record(
+            context_name="cm", instance_name="testing"
+        )
+        review = (await self.submit({"keys": KEYS})).json()["result"]
+        with patch.object(
+            self.store,
+            "write_product_authority_bundle",
+            side_effect=AssertionError("no-op apply wrote records"),
+        ):
+            response = await self.submit(
+                {
+                    "mode": "apply",
+                    "keys": KEYS,
+                    "review_digest": review["review_digest"],
+                    "confirmation": "APPLY odoo-tenant-cm/testing",
+                }
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()["result"]["applied"])
+        self.assertFalse(response.json()["result"]["live_sync_required"])
+        self.assertEqual(
+            self.store.read_odoo_instance_override_record(
+                context_name="cm", instance_name="testing"
+            ),
+            before,
+        )
+
     async def test_local_operator_apply_refuses_context_shared_by_another_product(self) -> None:
         plan = (await self.submit({"keys": KEYS})).json()["result"]
         peer_lane = self.profile.lanes[0].model_copy(update={"instance": "peer-testing"})

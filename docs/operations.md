@@ -2660,7 +2660,9 @@ context only, and `context_instance` has both context and instance.
   Apply changes only selected override sources, preserving unrelated settings,
   secret references, application phases, source choice and allowances. It does
   not synchronize the target or apply database parameters: the response says
-  `live_sync_required`. Production is outside this capability. Client-system
+  `live_sync_required`. If all selected entries are already referenced, apply
+  writes nothing and returns `applied: false` and `live_sync_required: false`.
+  Production is outside this capability. Client-system
   approval and activation follow [DIRECTION.md](../DIRECTION.md) and the
   [overall stop boundaries](https://github.com/cbusillo/direction/blob/main/DIRECTION.md).
   Deployed review/apply must wait until both the API and workers support

@@ -139,14 +139,15 @@ def register_import_override_reconcile_routes(
                     raise ValueError("Exact testing-lane apply confirmation is required")
                 if request.review_digest != plan.review_digest:
                     raise OdooInstanceOverrideConflictError("Review no longer matches authority")
-                if isinstance(identity, LocalOperatorIdentity):
-                    bundle = bundle.model_copy(
-                        update={"required_context_owner": (profile.product, lane.context)}
+                if bundle.requires_write():
+                    if isinstance(identity, LocalOperatorIdentity):
+                        bundle = bundle.model_copy(
+                            update={"required_context_owner": (profile.product, lane.context)}
+                        )
+                    cast(ProductAuthorityBundleStore, record_store).write_product_authority_bundle(
+                        bundle
                     )
-                cast(ProductAuthorityBundleStore, record_store).write_product_authority_bundle(
-                    bundle
-                )
-                plan = plan.model_copy(update={"applied": True, "live_sync_required": True})
+                    plan = plan.model_copy(update={"applied": True, "live_sync_required": True})
         except ProductContextOwnershipError as error:
             raise dependencies.http_error(
                 status_code=403,

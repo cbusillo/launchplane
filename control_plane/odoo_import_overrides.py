@@ -194,7 +194,9 @@ def plan_import_override_reconciliation(
         required_product_config_target=(profile.product, record.context, record.instance),
         runtime_environment_read_sets=(expectation,),
         odoo_instance_override_writes=(
-            OdooInstanceOverrideWrite(record=replacement, expected_record=record),
+            (OdooInstanceOverrideWrite(record=replacement, expected_record=record),)
+            if changed
+            else ()
         ),
     )
     return plan, bundle
