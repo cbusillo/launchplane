@@ -39,6 +39,7 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import (
     OdooInstanceOverrideConflictError,
+    ProductProfileConflictError,
     RuntimeEnvironmentConflictError,
 )
 from tests.http_app_test_support import (
@@ -613,9 +614,9 @@ class ImportOverrideStorageTests(unittest.TestCase):
                     completion,
                 )
 
-    def test_commit_checks_runtime_and_override_snapshots_in_both_stores(self) -> None:
+    def test_commit_checks_profile_runtime_and_override_snapshots_in_both_stores(self) -> None:
         for backend in ("sqlite", "filesystem"):
-            for change in ("runtime", "override"):
+            for change in ("profile", "runtime", "override"):
                 with (
                     self.subTest(backend=backend, change=change),
                     TemporaryDirectory() as temporary,
@@ -639,11 +640,17 @@ class ImportOverrideStorageTests(unittest.TestCase):
                     _plan, bundle = plan_import_override_reconciliation(
                         record_store=store, profile=profile, record=override_record(), keys=KEYS
                     )
-                    if change == "runtime":
+                    error: type[ValueError]
+                    if change == "profile":
+                        store.write_product_profile_record(
+                            profile.model_copy(update={"updated_at": "changed"})
+                        )
+                        error = ProductProfileConflictError
+                    elif change == "runtime":
                         store.write_runtime_environment_record(
                             runtime_record().model_copy(update={"updated_at": "changed"})
                         )
-                        error: type[ValueError] = RuntimeEnvironmentConflictError
+                        error = RuntimeEnvironmentConflictError
                     else:
                         store.write_odoo_instance_override_record(
                             override_record().model_copy(update={"source_label": "changed"})

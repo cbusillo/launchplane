@@ -2662,6 +2662,9 @@ context only, and `context_instance` has both context and instance.
   not synchronize the target or apply database parameters: the response says
   `live_sync_required`. If all selected entries are already referenced, apply
   writes nothing and returns `applied: false` and `live_sync_required: false`.
+  These flags describe this request's record changes, not current Odoo or
+  provider state. Runtime sync and post-deploy verification remain separate;
+  a no-op response does not prove delivery or clear an outstanding sync.
   Production is outside this capability. Client-system
   approval and activation follow [DIRECTION.md](../DIRECTION.md) and the
   [overall stop boundaries](https://github.com/cbusillo/direction/blob/main/DIRECTION.md).

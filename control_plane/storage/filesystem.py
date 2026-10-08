@@ -249,6 +249,7 @@ from control_plane.storage.product_authority_bundle import (
     SecretRecordConflictError,
     require_bundle_context_owner,
     ProductAuthorityBundle,
+    ProductProfileConflictError,
     ProviderTargetWrite,
     RuntimeEnvironmentConflictError,
     OdooInstanceOverrideConflictError,
@@ -487,7 +488,12 @@ class FilesystemRecordStore:
         if not bundle.requires_write():
             return
         with self._product_authority_bundle_lock():
-            require_bundle_context_owner(bundle, self._list_product_profile_records_locked())
+            profiles = self._list_product_profile_records_locked()
+            require_bundle_context_owner(bundle, profiles)
+            current_profiles = {profile.product: profile for profile in profiles}
+            for expected_profile in bundle.expected_product_profiles:
+                if current_profiles.get(expected_profile.product) != expected_profile:
+                    raise ProductProfileConflictError("Product profile changed before commit.")
             for expected_source in bundle.secret_copy_sources:
                 try:
                     current_record = self._read_model_locked(
