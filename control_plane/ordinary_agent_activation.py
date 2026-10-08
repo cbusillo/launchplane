@@ -141,19 +141,13 @@ def _read_policy_operation(record_store: object, operation_id: str) -> Privilege
 
 def _require_admissible_policy_operation(
     record: PrivilegedOperationRecord,
-    *,
-    observed_at: datetime,
 ) -> tuple[ManagedAuthzPolicySetProposalInput, ManagedAuthzPolicySetHumanEvidence]:
     if record.descriptor_id != "managed-authz-policy-set":
         raise OrdinaryAgentDeliveryActivationPlanningError(
             "Activation setup requires a managed authz policy operation."
         )
     try:
-        require_authz_policy_source_status(
-            status=record.status,
-            expires_at=record.expires_at,
-            observed_at=observed_at,
-        )
+        require_authz_policy_source_status(status=record.status)
     except AuthzPolicySchemaV3TransitionDeniedError as error:
         raise OrdinaryAgentDeliveryActivationPlanningError(
             "Referenced policy operation status is not admissible for activation setup."
@@ -333,10 +327,7 @@ def resolve_ordinary_agent_delivery_activation_setup_source(
     observed_at: datetime | None = None,
 ) -> ResolvedOrdinaryAgentDeliveryActivationSetupSource:
     operation = _read_policy_operation(record_store, policy_operation_id)
-    request, evidence = _require_admissible_policy_operation(
-        operation,
-        observed_at=(observed_at or datetime.now(timezone.utc)).astimezone(timezone.utc),
-    )
+    request, evidence = _require_admissible_policy_operation(operation)
     scope = _activation_scope(request)
     inventory, inventory_recorded_at = _resolve_inventory(
         record_store,
@@ -945,7 +936,7 @@ def list_ordinary_agent_delivery_activation_options(
                 if isinstance(operation, PrivilegedOperationRecord)
                 else PrivilegedOperationRecord.model_validate(operation)
             )
-            request, _ = _require_admissible_policy_operation(typed_operation, observed_at=now)
+            request, _ = _require_admissible_policy_operation(typed_operation)
             scope = _activation_scope(request)
             inventories = tuple(
                 inventory_reader(

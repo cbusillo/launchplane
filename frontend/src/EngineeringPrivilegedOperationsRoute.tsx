@@ -994,12 +994,12 @@ function PrivilegedOperationPlanCard({
 
       <dl className="privileged-operation-details">
         <div>
-          <dt>Approve by</dt>
-          <dd>{formatTime(review.lifecycle.expires_at)}</dd>
-        </div>
-        <div>
-          <dt>Expiry state</dt>
-          <dd>{review.lifecycle.expiry_state.replaceAll("_", " ")}</dd>
+          <dt>Review validity</dt>
+          <dd>
+            {review.lifecycle.status === "expired"
+              ? "Expired historical review."
+              : "No time limit. A policy change, withdrawal, or execution ends validity."}
+          </dd>
         </div>
         <div>
           <dt>Scope</dt>

@@ -12890,23 +12890,19 @@ class PostgresRecordStore(HumanSessionStore):
             )
             issued_at = self._owner_control_shadow_timestamp(session)
             issued_at_value = datetime.fromisoformat(issued_at)
-            operation_expires_at = datetime.fromisoformat(operation.expires_at).astimezone(
-                timezone.utc
-            )
             session_expires_at = datetime.fromisoformat(
                 session_record.channel_binding().session_expires_at
             ).astimezone(timezone.utc)
             expires_at_value = min(
                 issued_at_value + timedelta(seconds=issue_request.expires_in_seconds),
-                operation_expires_at,
                 session_expires_at,
             ).replace(microsecond=0)
             expires_at = expires_at_value.isoformat()
             if session_record.status != "enrolled":
                 raise OwnerControlShadowVerifierConflictError("Channel session is not enrolled.")
-            if operation.status != "planned" or operation_expires_at <= issued_at_value:
+            if operation.status != "planned":
                 raise OwnerControlShadowVerifierConflictError(
-                    "Owner-control challenges require an unexpired planned operation."
+                    "Owner-control challenges require a planned operation."
                 )
             if expires_at_value <= issued_at_value:
                 raise OwnerControlShadowVerifierConflictError(
@@ -34850,8 +34846,6 @@ class PostgresRecordStore(HumanSessionStore):
         try:
             require_authz_policy_source_status(
                 status=policy_operation.status,
-                expires_at=policy_operation.expires_at,
-                observed_at=db_now,
             )
         except AuthzPolicySchemaV3TransitionDeniedError:
             raise

@@ -102,7 +102,7 @@ Before first use, the Director prepares **agent proposal access** in the Access
 policy tab and approves that separate managed authorization plan. See
 [the proposer grant](authorization-authority.md#preparing-agent-proposal-access).
 Code landing does not install it. Removing proposer access does not cancel
-already pending plans; those still need separate Director approval before expiry.
+already pending plans; those still need separate Director approval.
 After the first `local_operator` requester record is persisted, rollback must
 retain a reader that supports that requester type. Older records remain readable.
 Stage 2 scheduler activation remains a separate
@@ -198,9 +198,8 @@ Human planning and transition routes use a named GitHub-human browser dependency
 Plan lists, full records, semantic reviews, and delivery-activation options also
 accept `local-operator` identities with the descriptor's explicit managed
 read grant. These callers must pass both runtime-policy authorization and a
-fresh active-policy read. Their full-record reads do not reconcile expiry or
-write operation events. Browser-human detail reads retain their existing expiry
-reconciliation; list and semantic-review projections remain non-mutating.
+fresh active-policy read. Full-record, list and semantic-review reads do not
+write operation events.
 The terminal-agent summary remains a separate, restricted projection. Reading
 a record grants no planning, approval, revocation, cancellation, or execution
 authority, and returns no plaintext secret values.
@@ -355,20 +354,30 @@ states are:
 planned ──► approved ──► executing ──► executed
   │            │              └─────► execution_failed
   │            └─────► revoked
-  └─────► expired
+  └─────► cancelled
 ```
 
 Terminal records cannot reopen. Approval binds descriptor/version, normalized
 request and evidence digests, plan and pre-state digests, the exact active
 policy record/revision/SHA/source, managed rule IDs, immutable approver ID,
-expiry, reason, and rollback class. Every transition is replay-safe by source
+reason, and rollback class. Every transition is replay-safe by source
 event ID; PostgreSQL locks the operation row and atomically appends the event
 and updates the current projection.
 
-Reads reconcile overdue `planned` and `approved` records to `expired` with a system-authored
-terminal event before returning them. This is bounded lifecycle maintenance,
-not caller-authorized execution: it cannot touch managed secrets or create an
-approval, and concurrent reconciliation is replay-safe.
+Reviews have no time deadline. They remain usable while their bound policy and
+pre-state are unchanged, until withdrawn (cancelled before approval or revoked
+after approval) or executed. Approval and execution keep the existing policy
+checks and compare-and-swap refusal for stale revisions. Changing a policy
+requires preparing the remaining change for fresh review; elapsed time alone
+does not. Reads do not reconcile time-based expiry or append events.
+
+New records and approvals store an empty `expires_at`. Legacy timestamps and
+terminal `expired` records remain readable with their original digests; pending
+legacy records ignore the former deadline, and terminal records never reopen.
+The legacy `expires_in_seconds` planning input remains accepted and validated
+for caller compatibility but has no effect on review validity. Activation
+lifetimes, owner-control challenges and execution leases have their own deadlines
+and are unaffected.
 
 Filesystem storage exists for local/test/rehearsal parity. Shared runtime truth
 is PostgreSQL-backed.
@@ -427,15 +436,11 @@ class, request/evidence variant, requester variant, or registered descriptor
 metadata no longer matches the compiled registry. Unknown or drifted data
 returns an unsupported semantic-review error instead of generic approval text.
 Admin-authored request reasons and principal names remain in the authorized
-raw detail only; list cards use closed server-authored operation titles. A
-planned or approved record whose stored expiry has passed is projected as
-`past_expiry_unreconciled`, blocked from approval/revocation in the UI, and left
-unchanged until an existing authoritative lifecycle path reconciles it.
-Projection list and detail reads call the direct store
-`read_privileged_operation_record`, `list_privileged_operation_records`, and
-`list_privileged_operation_event_records` methods. They do not call the
-expiry-reconciling `read_privileged_operation` or `list_privileged_operations`
-helpers and therefore perform no read-time writes.
+raw detail only; list cards use closed server-authored operation titles.
+Pending reviews are projected with an active lifetime and no time deadline,
+including records with legacy expiry timestamps. Historical terminal expiry
+remains terminal. Projection list and detail reads call the direct store record
+and event methods and perform no read-time writes.
 
 The existing authorized raw detail response remains available at the plan detail
 GET route for exact human evidence review. The semantic projection is available

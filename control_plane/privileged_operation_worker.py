@@ -82,7 +82,6 @@ from control_plane.durable_operation_authorization import (
 from control_plane.privileged_operation_registry import read_privileged_operation_descriptor
 from control_plane.privileged_operation_service import (
     PrivilegedOperationStore,
-    expire_privileged_operation_if_due,
     require_privileged_operation_store,
 )
 from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity
@@ -1510,11 +1509,7 @@ def execute_approved_privileged_operations_once(
 
     store = require_privileged_operation_execution_store(record_store)
     completed = list(reconcile_stale_privileged_operations(record_store=store, now=now))
-    for candidate in store.list_privileged_operation_records(status="approved", limit=limit):
-        record = expire_privileged_operation_if_due(record_store=store, record=candidate, now=now)
-        if record.status != "approved":
-            completed.append(record)
-            continue
+    for record in store.list_privileged_operation_records(status="approved", limit=limit):
         fingerprint = privileged_operation_execution_fingerprint(record)
         reservation_result = store.reserve_mutation(
             scope=PRIVILEGED_OPERATION_EXECUTION_SCOPE,

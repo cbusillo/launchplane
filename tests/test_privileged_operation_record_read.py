@@ -70,7 +70,7 @@ class PrivilegedOperationRecordReadTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(response.status_code, 200, response.text)
 
-    async def test_operator_reads_expired_record_without_writes_or_transition_authority(
+    async def test_operator_reads_old_record_without_writes_or_transition_authority(
         self,
     ) -> None:
         with (
@@ -104,7 +104,7 @@ class PrivilegedOperationRecordReadTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(review.status_code, 200, review.text)
                 self.assertEqual(
                     review.json()["review"]["lifecycle"]["expiry_state"],
-                    "past_expiry_unreconciled",
+                    "active",
                 )
                 for transition in ("approve", "cancel", "revoke"):
                     with self.subTest(transition=transition):

@@ -69,9 +69,7 @@ def _review_payload(
             key="policy_revision", label="Policy revision", value=str(policy_record.revision)
         ),
         ReviewItem(key="policy_digest", label="Policy digest", value=policy_record.policy_sha256),
-        ReviewItem(
-            key="operation_expires_at", label="Operation expires", value=operation.expires_at
-        ),
+        ReviewItem(key="operation_validity", label="Review time limit", value="No time limit"),
         ReviewItem(
             key="planning_result",
             label="Planning result",

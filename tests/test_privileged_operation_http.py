@@ -2837,7 +2837,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list_response.status_code, 200, list_response.text)
         self.assertEqual(list_response.json()["total"], 1)
 
-    async def test_human_projection_reads_do_not_reconcile_expiry_or_write_events(self) -> None:
+    async def test_human_reads_remain_active_after_legacy_deadline_without_writes(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory,
             patch.dict(
@@ -2899,11 +2899,11 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("expired", {event.action for event in after_events})
         self.assertEqual(
             list_response.json()["reviews"][0]["lifecycle"]["expiry_state"],
-            "past_expiry_unreconciled",
+            "active",
         )
-        self.assertFalse(list_response.json()["reviews"][0]["can_approve"])
+        self.assertTrue(list_response.json()["reviews"][0]["can_approve"])
         self.assertFalse(review_response.json()["review"]["persists_state"])
-        self.assertIn("expired", {event.action for event in after_detail_events})
+        self.assertEqual(after_detail_events, before_events)
 
     async def test_postgres_projection_reads_leave_operation_and_event_rows_unchanged(
         self,
