@@ -313,6 +313,14 @@ export type ChangeImpactCoverage = {
     unmatched_path_samples: Array<string>;
 };
 
+export type ClientReleaseFailureView = {
+    code: string;
+    reason: string;
+    record_id: string;
+    recorded_at: string;
+    trace_id: string;
+};
+
 export type ClientReleaseRunView = {
     blocked_reason: string;
     decision_record_id: string;
@@ -322,6 +330,7 @@ export type ClientReleaseRunView = {
 };
 
 export type ClientReleaseStepView = {
+    failure: ClientReleaseFailureView | null;
     kind: 'backup' | 'promote' | 'rollback' | 'recovery';
     operation_id: string;
     status: 'not_started' | 'pending' | 'running' | 'reconciliation_required' | 'pass' | 'fail' | 'cancelled';

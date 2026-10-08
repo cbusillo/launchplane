@@ -338,6 +338,11 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
         assert run is not None
         self.assertEqual(run.state, "stopped")
+        failure = run.steps[1].failure
+        assert failure is not None
+        self.assertTrue(failure.trace_id)
+        self.assertIn("health", failure.reason.lower())
+        self.assertNotEqual(failure.record_id, "")
         self.assertEqual(self.advance(), ())
 
     def test_standing_acceptance_records_and_publishes_exact_candidate(self) -> None:

@@ -13,9 +13,9 @@ test("Failed releases distinguish automatic recovery from the rollback drill", a
     decision_record_id: "fixture-release-decision", rollback_drill: true, state: "stopped",
     blocked_reason: "",
     steps: [
-      { step: "promote-1", kind: "promote", status: "fail", operation_id: "failed-promotion" },
-      { step: "failure-recovery-1", kind: "recovery", status: "pass", operation_id: "verified-recovery" },
-      { step: "rollback-drill", kind: "rollback", status: "not_started", operation_id: "" },
+      { step: "promote-1", kind: "promote", status: "fail", operation_id: "failed-promotion", failure: null },
+      { step: "failure-recovery-1", kind: "recovery", status: "pass", operation_id: "verified-recovery", failure: null },
+      { step: "rollback-drill", kind: "rollback", status: "not_started", operation_id: "", failure: null },
     ],
   };
   await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
@@ -139,4 +139,31 @@ test("A saved decision exposes publication failure and allows retry", async ({ p
   await page.getByRole("button", { name: "Accept release", exact: true }).click();
   await expect(page.getByRole("status")).toBeVisible();
   await expect(latest.getByRole("alert")).toHaveCount(0);
+});
+
+test("A failed release step shows the reason and its record and trace", async ({ page }, testInfo) => {
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", async route => {
+    const response = await page.evaluate(async () => {
+      const modulePath = "/ui/src/dev-fixtures.ts";
+      const fixtures = await import(modulePath);
+      return fixtures.releaseReviewForFixture("products");
+    });
+    response.release_run = {
+      decision_record_id: "decision-failed-release", rollback_drill: true, state: "stopped", blocked_reason: "",
+      steps: [{step: "rollback-1", kind: "rollback", status: "fail", operation_id: "operation-rollback",
+        failure: {code: "rollback_fail", reason: "Website sender verification failed.", record_id: "deployment-failed", trace_id: "client-release-trace", recorded_at: "2026-10-08T18:46:46Z"}}],
+    };
+    await route.fulfill({ json: response });
+  });
+  await page.goto("/ui/owner-review?product=example-site");
+  const progress = page.getByRole("region", { name: "Release progress" });
+  await expect(progress).toContainText("Website sender verification failed.");
+  await expect(progress).toContainText("rollback_fail");
+  await progress.getByText("Failure details", { exact: true }).click();
+  for (const id of ["deployment-failed", "operation-rollback", "client-release-trace"]) {
+    await expect(progress.locator("code", { hasText: id })).toBeVisible();
+  }
+  await progress.screenshot({path: testInfo.outputPath("failed-release-step.png")});
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });

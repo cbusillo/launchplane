@@ -31,6 +31,9 @@ from typing import Literal, cast
 import click
 from pydantic import BaseModel, ConfigDict
 
+from control_plane.child_process_errors import redact_untrusted_text
+from control_plane.operation_status_read import safe_operation_error_code
+
 from control_plane.contracts.deployment_record import deployment_record_passed
 from control_plane.contracts.idempotency_record import build_launchplane_mutation_reservation_id
 from control_plane.contracts.durable_operation_authorization import (
@@ -134,6 +137,18 @@ _DRILL_STEPS = (
 )
 
 
+class ClientReleaseFailureView(BaseModel):
+    """Bounded failure evidence from the operation that stopped the release."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    reason: str
+    record_id: str
+    trace_id: str = ""
+    recorded_at: str
+
+
 class ClientReleaseStepView(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -141,6 +156,7 @@ class ClientReleaseStepView(BaseModel):
     kind: ClientReleaseStepKind
     status: ClientReleaseStepStatus
     operation_id: str
+    failure: ClientReleaseFailureView | None = None
 
 
 class ClientReleaseRunView(BaseModel):
@@ -382,6 +398,62 @@ def _step_status(
     return cast(ClientReleaseStepStatus, getattr(operation, "status")), operation
 
 
+def _release_step_failure(
+    operation: object | None, status: ClientReleaseStepStatus
+) -> ClientReleaseFailureView | None:
+    if operation is None or status not in _STOPPED_STATUSES:
+        return None
+    result = getattr(operation, "result", None)
+    record_id = next(
+        (
+            str(value)
+            for name in ("deployment_record_id", "backup_record_id", "promotion_record_id")
+            if (value := getattr(result, name, ""))
+        ),
+        str(getattr(operation, "operation_id", getattr(operation, "record_id", ""))),
+    )
+    message = str(getattr(operation, "error_message", "") or getattr(result, "error_message", ""))
+    code = str(getattr(operation, "error_code", ""))
+    trace_id = str(
+        getattr(operation, "runner_trace_id", "") or getattr(operation, "response_trace_id", "")
+    )
+    payload = getattr(operation, "response_payload", {})
+    if isinstance(payload, dict) and payload:
+        error = payload.get("error", {})
+        if isinstance(error, dict):
+            message = message or str(error.get("message", ""))
+            code = code or str(error.get("code", ""))
+        outcome = payload.get("result", {})
+        if isinstance(outcome, dict):
+            record_id = str(outcome.get("deployment_record_id") or record_id)
+            message = message or str(outcome.get("error_message", ""))
+            failure = outcome.get("failure", {})
+            if isinstance(failure, dict):
+                code = code or str(failure.get("code", ""))
+                message = message or str(failure.get("description", ""))
+        trace_id = str(payload.get("original_trace_id") or payload.get("trace_id") or trace_id)
+    if status == "cancelled":
+        message = message or "The release step was cancelled."
+    elif status == "reconciliation_required":
+        message = (
+            message
+            or "The provider outcome needs admin reconciliation before this release can continue."
+        )
+    return ClientReleaseFailureView(
+        code=safe_operation_error_code(code) or status,
+        reason=redact_untrusted_text(
+            message,
+            fallback="No failure reason was recorded for this release step.",
+            maximum_length=220,
+        ),
+        record_id=record_id,
+        trace_id=trace_id,
+        recorded_at=str(
+            getattr(operation, "finished_at", "") or getattr(operation, "updated_at", "")
+        ),
+    )
+
+
 def read_client_release_run(
     *,
     store: object,
@@ -402,6 +474,7 @@ def read_client_release_run(
                 operation_id=client_release_step_operation_id(
                     profile=profile, decision=decision, step=step
                 ),
+                failure=_release_step_failure(operation, status),
             )
         )
         if isinstance(operation, OdooProdPromotionOperationRecord):
@@ -413,6 +486,7 @@ def read_client_release_run(
                         kind="recovery",
                         status=recovery.status,
                         operation_id=recovery.operation_id,
+                        failure=_release_step_failure(recovery, recovery.status),
                     )
                 )
     statuses = [view.status for view in views]
@@ -804,6 +878,7 @@ def _queue_backup(
                 authorized_at=authorized_at,
             ),
             operation_key=f"{CLIENT_RELEASE_IDEMPOTENCY_SCOPE}|{_step_key(decision, step)}",
+            runner_trace_id=f"client-release-{decision.record_id}",
         )
     except (FileNotFoundError, ValueError) as error:
         raise ClientReleaseNotReady("backup_not_ready") from error
@@ -871,6 +946,7 @@ def _queue_promotion(
         ),
         created_at=authorized_at,
         updated_at=authorized_at,
+        runner_trace_id=f"client-release-{decision.record_id}",
     )
     persisted, _created = store.create_odoo_prod_promotion_operation_record_if_no_active_lane(
         operation
@@ -945,6 +1021,7 @@ def _queue_rollback(
         ),
         created_at=authorized_at,
         updated_at=authorized_at,
+        runner_trace_id=f"client-release-{decision.record_id}",
     )
     persisted, _created = store.create_odoo_prod_rollback_operation_record_if_no_active_lane(
         operation

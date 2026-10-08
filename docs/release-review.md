@@ -395,7 +395,14 @@ this worker, and record fresh acceptance if such a release was stopped.
 
 The review page says before the Accept button whether accepting puts the
 version on the live site, naming it, or whether releases are held. After
-acceptance it shows each step's status. `GET /v1/release-review` returns
+acceptance it shows each step's status. A stopped step also shows its bounded,
+redacted recorded reason and code. Expand **Failure details** for the failure
+record, operation and original trace IDs; older operations without a saved trace
+say **Not recorded**. New Client release operations persist a trace when queued.
+The activity read derives stopped-step events from those same operations, with
+the reason in `summary` and record, operation, decision and available trace IDs
+in `records`. Reading this evidence never retries a stopped release.
+`GET /v1/release-review` returns
 `release_on_acceptance` (what the next acceptance would do), `live_site_url`,
 and `release_run`, derived from the step operations, whose ids come from the
 decision.

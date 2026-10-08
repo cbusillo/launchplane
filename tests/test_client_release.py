@@ -17,6 +17,7 @@ from control_plane.client_release import (
     read_client_release_run,
     release_start_for_acceptance,
 )
+from control_plane.contracts.product_environment_read_model import build_product_activity_read_model
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     DeploymentEvidence,
@@ -385,6 +386,78 @@ class ClientReleaseTests(unittest.TestCase):
         )
         assert run is not None
         self.assertEqual(run.state, "stopped")
+
+    def test_failed_backup_reason_and_trace_reach_release_and_activity_reads(self) -> None:
+        self.switch("promote")
+        accepted = self.accept()
+        (operation_id,) = self.advance()
+        self.finish(operation_id, "fail")
+        operation = self.store.read_verireel_prod_backup_gate_operation_record(operation_id)
+        self.store.write_verireel_prod_backup_gate_operation_record(
+            operation.model_copy(
+                update={
+                    "error_code": "backup_failed",
+                    "error_message": "Backup capture failed. password=do-not-publish https://private.invalid/log",
+                }
+            )
+        )
+        profile = self.store.read_product_profile_record(PRODUCT)
+        run = read_client_release_run(store=self.store, profile=profile, decision=accepted)
+        assert run is not None and run.steps[0].failure is not None
+        failure = run.steps[0].failure
+        self.assertEqual(failure.code, "backup_failed")
+        self.assertIn("Backup capture failed.", failure.reason)
+        self.assertEqual(failure.record_id, operation.backup_record_id)
+        self.assertEqual(failure.trace_id, operation.runner_trace_id)
+        self.assertTrue(failure.trace_id)
+        self.assertNotIn("do-not-publish", run.model_dump_json())
+        self.assertNotIn("private.invalid", run.model_dump_json())
+        activity = build_product_activity_read_model(record_store=self.store, product=PRODUCT)
+        event = next(
+            event for event in activity.events if event.event_type == "client_release_step"
+        )
+        self.assertIn(failure.reason, event.summary)
+        self.assertIn(failure.code, event.summary)
+        ids = {link.record_id for link in event.records}
+        self.assertTrue({operation_id, failure.record_id, failure.trace_id} <= ids)
+        self.assertEqual(self.advance(), (), "reporting a failure never resumes the release")
+
+    def test_rollback_failure_names_failed_deployment_and_legacy_missing_trace(self) -> None:
+        self.switch("promote_with_rollback_drill")
+        accepted = self.accept()
+        (backup_id,) = self.advance()
+        self.finish(backup_id)
+        (promotion_id,) = self.advance()
+        self.finish(promotion_id)
+        self.set_prod("artifact-testing")
+        (rollback_id,) = self.advance()
+        self.finish(rollback_id, "fail")
+        operation = self.store.read_odoo_prod_rollback_operation_record(rollback_id)
+        self.assertTrue(operation.runner_trace_id)
+        assert operation.result is not None
+        reason = "Odoo post-deploy did not prove the requested website company sender was saved."
+        self.store.write_odoo_prod_rollback_operation_record(
+            operation.model_copy(
+                update={
+                    "runner_trace_id": "",
+                    "error_code": "rollback_fail",
+                    "error_message": reason,
+                    "result": operation.result.model_copy(
+                        update={"deployment_record_id": "failed-deployment"}
+                    ),
+                }
+            )
+        )
+        run = read_client_release_run(
+            store=self.store,
+            profile=self.store.read_product_profile_record(PRODUCT),
+            decision=accepted,
+        )
+        assert run is not None and run.steps[2].failure is not None
+        self.assertEqual(run.steps[2].failure.reason, reason)
+        self.assertEqual(run.steps[2].failure.record_id, "failed-deployment")
+        self.assertEqual(run.steps[2].failure.trace_id, "")
+        self.assertEqual(run.steps[3].status, "not_started")
 
     def test_the_worker_recheck_follows_the_decision_client_and_hold(self) -> None:
         self.switch("promote")

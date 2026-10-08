@@ -3420,6 +3420,41 @@
         "title": "ChangeImpactCoverage",
         "type": "object"
       },
+      "ClientReleaseFailureView": {
+        "additionalProperties": false,
+        "description": "Bounded failure evidence from the operation that stopped the release.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "recorded_at": {
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "trace_id": {
+            "default": "",
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "reason",
+          "record_id",
+          "recorded_at"
+        ],
+        "title": "ClientReleaseFailureView",
+        "type": "object"
+      },
       "ClientReleaseRunView": {
         "additionalProperties": false,
         "description": "What a Client's accepted release has done so far, derived from its operations.",
@@ -3467,6 +3502,16 @@
       "ClientReleaseStepView": {
         "additionalProperties": false,
         "properties": {
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ClientReleaseFailureView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "kind": {
             "enum": [
               "backup",

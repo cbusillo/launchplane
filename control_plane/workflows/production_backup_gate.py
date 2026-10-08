@@ -91,6 +91,7 @@ def enqueue_production_backup_gate(
     request: ProductionBackupGateRequest,
     authorization: DurableOperationAuthorization,
     operation_key: str,
+    runner_trace_id: str = "",
 ) -> VeriReelProdBackupGateOperationRecord:
     fingerprint = hashlib.sha256(request.model_dump_json().encode()).hexdigest()
     operation_id = production_backup_gate_operation_id(operation_key)
@@ -117,6 +118,7 @@ def enqueue_production_backup_gate(
         authorization=authorization,
         created_at=recorded_at,
         updated_at=recorded_at,
+        runner_trace_id=runner_trace_id,
     )
     persisted, _created = (
         record_store.create_verireel_prod_backup_gate_operation_record_if_no_active_record(
