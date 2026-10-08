@@ -20,11 +20,13 @@ from control_plane.runtime_key_safety import runtime_key_safety_environment_clas
 from control_plane.service_auth import (
     AuthorizationTarget,
     LaunchplaneIdentity,
+    LocalOperatorIdentity,
     TerminalAgentIdentity,
 )
 from control_plane.storage.product_authority_bundle import (
     OdooInstanceOverrideConflictError,
     ProductAuthorityBundleStore,
+    ProductContextOwnershipError,
     ProductProfileConflictError,
     RuntimeEnvironmentConflictError,
 )
@@ -137,10 +139,21 @@ def register_import_override_reconcile_routes(
                     raise ValueError("Exact testing-lane apply confirmation is required")
                 if request.review_digest != plan.review_digest:
                     raise OdooInstanceOverrideConflictError("Review no longer matches authority")
+                if isinstance(identity, LocalOperatorIdentity):
+                    bundle = bundle.model_copy(
+                        update={"required_context_owner": (profile.product, lane.context)}
+                    )
                 cast(ProductAuthorityBundleStore, record_store).write_product_authority_bundle(
                     bundle
                 )
                 plan = plan.model_copy(update={"applied": True, "live_sync_required": True})
+        except ProductContextOwnershipError as error:
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="local_operator_lane_scope_required",
+                message="The context must belong to the named product only.",
+            ) from error
         except FileNotFoundError as error:
             raise dependencies.http_error(
                 status_code=404,

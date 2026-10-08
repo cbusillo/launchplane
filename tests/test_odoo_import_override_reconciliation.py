@@ -226,6 +226,31 @@ class ImportOverrideHttpTests(unittest.IsolatedAsyncioTestCase):
             all(item.value.value is None for item in after.config_parameters if item.key in KEYS)
         )
 
+    async def test_local_operator_apply_refuses_context_shared_by_another_product(self) -> None:
+        plan = (await self.submit({"keys": KEYS})).json()["result"]
+        peer_lane = self.profile.lanes[0].model_copy(update={"instance": "peer-testing"})
+        peer = self.profile.model_copy(update={"product": "peer-fixture", "lanes": (peer_lane,)})
+        self.store.write_product_profile_record(peer)
+        before = self.store.read_odoo_instance_override_record(
+            context_name="cm", instance_name="testing"
+        )
+        response = await self.submit(
+            {
+                "mode": "apply",
+                "keys": KEYS,
+                "review_digest": plan["review_digest"],
+                "confirmation": "APPLY odoo-tenant-cm/testing",
+            }
+        )
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json()["error"]["code"], "local_operator_lane_scope_required")
+        self.assertEqual(
+            self.store.read_odoo_instance_override_record(
+                context_name="cm", instance_name="testing"
+            ),
+            before,
+        )
+
     async def test_target_overlay_refuses_planning_and_later_rendering(self) -> None:
         before = override_record()
         _plan, bundle = plan_import_override_reconciliation(
