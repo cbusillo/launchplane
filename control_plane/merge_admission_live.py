@@ -263,6 +263,7 @@ class LiveMergeAdmissionEvaluator:
             live_queue = build_merge_train_dry_run_result(
                 policy=policy_record.policy,
                 snapshot=snapshot,
+                batch_landing=candidate_record.ordinary_job_binding is None,
             )
             policy_record.policy.find_repository_policy(
                 repository=landing_plan.repository,

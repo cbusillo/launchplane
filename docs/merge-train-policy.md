@@ -8,6 +8,26 @@ eligible entry, and applies at most one worker transition per service call. The
 controller runs the batch-validating train and is the preferred entrypoint; see
 `POST /v1/work-graph/merge-train/controller/run-once` below.
 
+Changes owned by the base revision's CODEOWNERS land individually on their
+original pull request. Queue planning stops the current batch before an owned
+change; when that change is first, it selects only that PR. GitHub checks its
+existing code-owner approval and protected requirements on the original PR.
+When the base CODEOWNERS file includes assignments, changes to that file also land
+individually. The GitHub adapter reads the
+base revision's ownership file in GitHub's directory precedence, including
+rename origins in the changed-file evidence and confirming the original head
+again after reading its files. Unreadable ownership stops planning; incomplete
+file evidence routes only that PR individually. Provider request failures stop
+the read without changing the planned candidate. Admission checks this same
+batch boundary, including for plans created before this routing was deployed. Matching is conservative: unusual patterns and overridden
+ownership may cause extra individual landings, never approval transfer to a
+generated batch. No assigned identities or owned paths are copied into train
+policy.
+Stacks containing an owned change are not collapsed: the root lands first,
+leaving its children open. After a child's base dependency lands, its original
+PR must target the train's base branch before it can enter that queue; an agent
+can retarget that original PR after its dependency lands.
+
 The merge train is provider-neutral and batch-validating. Source-control-specific
 reads and effects belong behind an adapter; the steps below describe the current
 GitHub adapter:
@@ -366,12 +386,31 @@ the blocking pull request with `blocked_label` before stopping.
 higher throughput over strict ordering. A worker must still mark the failed pull
 request with `blocked_label` before considering later entries.
 
+These ordering rules apply to the single-transition worker. The service batch
+controller holds a failing queue PR independently, as described below.
+
+The service controller applies a queue block as one leased transition in mutate
+mode and reports `block_result`, including the selected PR and permission to
+continue the service train past that held PR (`train_should_continue=true`)
+under either failure policy. The driver continues for other PRs but still fails
+its own blocked PR. Dry-run reports the intent without applying it.
+For service batches, a PR carrying `blocked_label` is excluded from subsequent
+queue selection,
+including label-free dependency updates, so the next controller pass can select
+other eligible work. Remove the block label after resolving the failure to admit
+that PR again. Applied-block PR feedback explains the failure and how to rejoin.
+The GitHub adapter creates a missing policy label when label
+application is refused because it does not exist; other provider errors remain
+fail-closed.
+
 For the reconciled pilot, ordinary missing acceptance or check evidence holds the
 affected change rather than pausing unrelated eligible work. A broader pause is
 valid only for a proven dependency edge, a shared-state/integration fence, or an
-unknown effect that makes later mutation unsafe. Existing active policies retain
-their current behavior until a reviewed DB-backed policy replacement is
-activated; this target paragraph does not change live scheduling.
+unknown effect that makes later mutation unsafe. The single-transition worker
+retains the selected policy's ordering behavior.
+The service batch controller applies independent queue holds without changing
+policy records. A policy replacement still requires its reviewed DB-backed
+activation.
 
 ## Batch Train Target
 
@@ -924,8 +963,8 @@ excludes draft, closed, unlabeled, or unauthorized entries and fails closed when
 the snapshot repository/base branch has no explicit policy.
 
 When the selected pull request is blocked by failed checks or conflicts, the
-first live mutation is idempotent application of `blocked_label`. Repositories
-using `pause_train` stop after that label action; repositories using
+first live mutation is idempotent application of `blocked_label`. Single-transition workers
+using `pause_train` stop after that label action; workers using
 `continue_after_blocking_pr` may continue to the next eligible pull request once
 the blocked pull request has been labeled.
 

@@ -119,6 +119,7 @@ class MergeTrainPullRequestSnapshot(BaseModel):
     base_ref: str = ""
     base_repository: str = ""
     mergeable: MergeTrainMergeableState = "unknown"
+    requires_individual_landing: bool = Field(default=False, exclude_if=lambda value: not value)
     owner_review_required: bool = Field(default=False, exclude_if=lambda value: not value)
     required_checks_status: MergeTrainCheckStatus = "unknown"
     branch_update_required: bool = False
@@ -183,6 +184,7 @@ class MergeTrainQueueEntry(BaseModel):
     labels: tuple[str, ...]
     actor_role: str
     mergeable: MergeTrainMergeableState
+    requires_individual_landing: bool = Field(default=False, exclude_if=lambda value: not value)
     owner_review_required: bool = Field(default=False, exclude_if=lambda value: not value)
     required_checks_status: MergeTrainCheckStatus
     branch_update_required: bool
@@ -307,19 +309,29 @@ def build_merge_train_dry_run_result(
         if _targets_merge_train_base(pull_request=pull_request, base_branch=snapshot.base_branch)
     )
     queue = tuple(
-        _build_queue_entry(repository_policy, pull_request)
+        _build_queue_entry(repository_policy, pull_request, skip_blocked=batch_landing)
         for pull_request in sorted(
             base_pull_requests, key=lambda item: (item.created_at, item.number)
         )
     )
-    selected_pr = next((entry for entry in queue if entry.eligible), None)
+    eligible_entries = tuple(entry for entry in queue if entry.eligible)
+    if batch_landing:
+        batch_entries: list[MergeTrainQueueEntry] = []
+        for entry in eligible_entries:
+            if entry.requires_individual_landing:
+                if not batch_entries:
+                    batch_entries.append(entry)
+                break
+            batch_entries.append(entry)
+        eligible_entries = tuple(batch_entries)
+    selected_pr = next(iter(eligible_entries), None)
     intended_next_action, next_action_detail = _next_action_for_selected_pr(
         repository_policy,
         selected_pr,
         skip_branch_update=(
             batch_landing
             and repository_policy.merge_method == "merge"
-            and sum(entry.eligible for entry in queue) > 1
+            and len(eligible_entries) > 1
         ),
     )
     if batch_landing and intended_next_action == "merge":
@@ -328,10 +340,8 @@ def build_merge_train_dry_run_result(
         waiting_review = next(
             (
                 entry
-                for entry in queue
-                if entry.eligible
-                and entry.owner_review_required
-                and entry.required_checks_status != "pass"
+                for entry in eligible_entries
+                if entry.owner_review_required and entry.required_checks_status != "pass"
             ),
             None,
         )
@@ -348,7 +358,7 @@ def build_merge_train_dry_run_result(
         failure_policy=repository_policy.failure_policy,
         enqueue_label=repository_policy.enqueue_label,
         blocked_label=repository_policy.blocked_label,
-        queue_order=tuple(entry.number for entry in queue if entry.eligible),
+        queue_order=tuple(entry.number for entry in eligible_entries),
         queue=queue,
         selected_pr=selected_pr,
         intended_next_action=intended_next_action,
@@ -428,6 +438,10 @@ def discover_merge_train_stack(
         seen_numbers.add(child.number)
         current_head_ref = child.head_ref
 
+    if any(pr.requires_individual_landing for pr in chain):
+        # Land the original root first. Its children remain open on their own
+        # PRs; after their base dependency lands they can target the train base.
+        chain = [root_pull_request]
     if len(chain) == 1:
         return MergeTrainStackDiscoveryResult(
             status="not_stacked",
@@ -462,7 +476,10 @@ def apply_merge_train_block_intent(
             detail="Dry-run result does not require a block label.",
         )
     train_should_continue = dry_run_result.failure_policy == "continue_after_blocking_pr"
-    if dry_run_result.blocked_label in dry_run_result.selected_pr.labels:
+    if any(
+        label.casefold() == dry_run_result.blocked_label.casefold()
+        for label in dry_run_result.selected_pr.labels
+    ):
         return MergeTrainBlockResult(
             status="blocked",
             repository=dry_run_result.repository,
@@ -618,6 +635,8 @@ def apply_merge_train_merge_intent(
 def _build_queue_entry(
     repository_policy: MergeTrainRepositoryPolicy,
     pull_request: MergeTrainPullRequestSnapshot,
+    *,
+    skip_blocked: bool = False,
 ) -> MergeTrainQueueEntry:
     ineligible_reasons: list[str] = []
     is_trusted_automation = (
@@ -629,6 +648,11 @@ def _build_queue_entry(
         ineligible_reasons.append("pull request is not open")
     if pull_request.is_draft:
         ineligible_reasons.append("draft pull request")
+    if skip_blocked and any(
+        label.casefold() == repository_policy.blocked_label.casefold()
+        for label in pull_request.labels
+    ):
+        ineligible_reasons.append(f"held by {repository_policy.blocked_label} label")
     is_dependency_update = (
         pull_request.actor_id is not None
         and pull_request.actor_id in repository_policy.enqueue.dependency_update_github_user_ids
@@ -655,6 +679,7 @@ def _build_queue_entry(
         labels=pull_request.labels,
         actor_role=actor_role,
         mergeable=pull_request.mergeable,
+        requires_individual_landing=pull_request.requires_individual_landing,
         owner_review_required=pull_request.owner_review_required,
         required_checks_status=pull_request.required_checks_status,
         branch_update_required=pull_request.branch_update_required,
