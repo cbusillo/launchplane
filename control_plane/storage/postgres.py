@@ -78,7 +78,7 @@ from control_plane.contracts.authz_denial_record import AuthzDenialRecord
 from control_plane.authz_candidate_preparation import (
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID,
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
-    ordinary_agent_delivery_administration_github_id,
+    ordinary_agent_delivery_administration_removed,
     ordinary_agent_delivery_administration_state,
 )
 from control_plane.contracts.authz_policy_record import (
@@ -34917,41 +34917,20 @@ class PostgresRecordStore(HumanSessionStore):
             confirmation_consumption=confirmation_consumption,
         )
 
-        administration_github_id = ordinary_agent_delivery_administration_github_id(
-            current_record.policy
-        )
         removes_delivery_administration = (
-            administration_github_id > 0
-            and replacement_record is not None
-            and ordinary_agent_delivery_administration_state(
-                replacement_record.policy,
-                github_id=administration_github_id,
+            replacement_record is not None
+            and ordinary_agent_delivery_administration_removed(
+                current_record.policy, replacement_record.policy
             )
-            != "active"
         )
-        if removes_delivery_administration:
-            activation_statement = (
-                select(LaunchplaneOrdinaryAgentDeliveryActivationRow)
-                .where(
-                    LaunchplaneOrdinaryAgentDeliveryActivationRow.revoked_at.is_(None),
-                    LaunchplaneOrdinaryAgentDeliveryActivationRow.superseded_at.is_(None),
-                )
-                .limit(1)
+        if removes_delivery_administration and self._has_unexpired_delivery_activation(session):
+            if reservation_row is not None:
+                session.delete(reservation_row)
+                session.commit()
+            return AuthzPolicyCompareWriteResult(
+                status="authz_policy_delivery_activation_active",
+                current_record=current_record,
             )
-            if not self.database_url.startswith("sqlite"):
-                activation_statement = activation_statement.with_for_update()
-            activation_row = session.scalar(activation_statement)
-            if activation_row is not None:
-                activation = self._ordinary_agent_delivery_activation_from_row(activation_row)
-                if activation.revoked_at or activation.superseded_by_activation_id:
-                    raise ValueError("Current activation projection is inconsistent.")
-                if reservation_row is not None:
-                    session.delete(reservation_row)
-                    session.commit()
-                return AuthzPolicyCompareWriteResult(
-                    status="reconciliation_required",
-                    current_record=current_record,
-                )
 
         if confirmation_consumption is not None:
             if replacement_record is None:
@@ -35042,6 +35021,28 @@ class PostgresRecordStore(HumanSessionStore):
             current_record=result_record,
             idempotency_record=stored_completion,
         )
+
+    def _has_unexpired_delivery_activation(self, session: Any, *, lock_rows: bool = True) -> bool:
+        statement = select(LaunchplaneOrdinaryAgentDeliveryActivationRow).where(
+            LaunchplaneOrdinaryAgentDeliveryActivationRow.revoked_at.is_(None),
+            LaunchplaneOrdinaryAgentDeliveryActivationRow.superseded_at.is_(None),
+        )
+        if lock_rows and not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        rows = tuple(session.scalars(statement).all())
+        observed_at = datetime.fromisoformat(self._database_mutation_timestamp(session))
+        for row in rows:
+            activation = self._ordinary_agent_delivery_activation_from_row(row)
+            if activation.revoked_at or activation.superseded_by_activation_id:
+                raise ValueError("Current activation projection is inconsistent.")
+            if observed_at < datetime.fromisoformat(activation.activation_expires_at):
+                return True
+        return False
+
+    def has_unexpired_delivery_activation(self) -> bool:
+        """Read the retirement prerequisite using the same DB clock as the locked write."""
+        with self._session_factory() as session:
+            return self._has_unexpired_delivery_activation(session, lock_rows=False)
 
     def list_authz_policy_records(
         self,
