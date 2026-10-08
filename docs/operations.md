@@ -2650,8 +2650,8 @@ context only, and `context_instance` has both context and instance.
   Apply is a separate POST with the same keys, `mode: "apply"`, the current
   digest and `confirmation: "APPLY {product}/{environment}"`. It checks fresh
   `product_config.apply` authority for the exact lane and commits the override
-  replacement under the existing authority-bundle transaction. Local operators
-  follow the existing [context ownership boundary](authorization-authority.md).
+  replacement under the existing authority-bundle transaction. `local_operator`
+  applies follow the existing [context ownership boundary](authorization-authority.md).
   Changed runtime,
   profile or override evidence requires another review. Reads use
   `product_environment.read`; dry runs use `product_config.plan`.
