@@ -509,6 +509,9 @@ from control_plane.verireel_prod_http import (
     apply_verireel_prod_rollback_result,
     should_store_verireel_prod_result_idempotency,
 )
+from control_plane.http_routes.odoo_import_overrides import (
+    register_import_override_reconcile_routes,
+)
 from control_plane.http_routes.odoo_runtime import (
     OdooRuntimeReadDependencies,
     register_odoo_runtime_read_routes,
@@ -28047,6 +28050,10 @@ def create_launchplane_fastapi_app(
     register_odoo_runtime_read_routes(
         app,
         dependencies=odoo_runtime_read_dependencies,
+    )
+
+    register_import_override_reconcile_routes(
+        app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
     )
 
     def read_operator_ui(path: str = "") -> Response:

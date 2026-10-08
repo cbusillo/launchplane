@@ -248,6 +248,7 @@ from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProviderTargetWrite,
     RuntimeEnvironmentConflictError,
+    OdooInstanceOverrideConflictError,
     RuntimeEnvironmentDelete,
     RuntimeEnvironmentWrite,
     runtime_environment_records_match,
@@ -588,6 +589,21 @@ class FilesystemRecordStore:
         stage_dir: Path,
         entries: list[_AuthorityBundleStageEntry],
     ) -> None:
+        for write in bundle.odoo_instance_override_writes:
+            record_id = f"{write.record.context}-{write.record.instance}"
+            current = self._read_model_locked(
+                OdooInstanceOverrideRecord, "odoo_instance_overrides", record_id
+            )
+            if current != write.expected_record:
+                raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type="odoo_instance_overrides",
+                record_id=record_id,
+                model=write.record,
+                step_name="write_odoo_instance_override",
+            )
         for delete_item in bundle.delete_runtime_environments:
             self._stage_product_authority_bundle_delete(
                 entries=entries,

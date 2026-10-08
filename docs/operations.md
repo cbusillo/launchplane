@@ -2638,6 +2638,29 @@ context only, and `context_instance` has both context and instance.
   Service-written `web.base.url` records are always marked for `deploy` and
   `promotion` application so Odoo post-deploy and stable-bootstrap drivers can
   apply the canonical URL before verification.
+- To reconcile duplicated non-secret Odoo import overrides on a testing lane,
+  use GET and POST on
+  `/v1/products/{product}/environments/{environment}/odoo-import-overrides/reconcile`.
+  GET reviews all supported entries present in the lane record. POST with
+  `{"mode":"dry-run","keys":["cm_data.db.user","repairshopr.sync_db.user","repairshopr.sync_db.host"]}`
+  reviews exactly those entries. Both return only parameter/runtime key names,
+  stale-literal flags and a `review_digest`; neither writes records or calls a
+  provider. The values must already exist in the lane's runtime authority;
+  missing, retired, secret-bound or credential-looking settings are refused.
+  Apply is a separate POST with the same keys, `mode: "apply"`, the current
+  digest and `confirmation: "APPLY {product}/{environment}"`. It checks fresh
+  `product_config.apply` authority for the exact lane and commits the override
+  replacement under the existing authority-bundle transaction. Changed runtime,
+  profile or override evidence requires another review. Reads use
+  `product_environment.read`; dry runs use `product_config.plan`.
+  The record stores `source: "runtime_environment"` without duplicating a value;
+  post-deploy renders the current runtime value into the existing v1 payload.
+  Apply changes only selected override sources, preserving unrelated settings,
+  secret references, application phases, source choice and allowances. It does
+  not synchronize the target or apply database parameters: the response says
+  `live_sync_required`. Production is outside this capability. Client-system
+  approval and activation follow [DIRECTION.md](../DIRECTION.md) and the
+  [overall stop boundaries](https://github.com/cbusillo/direction/blob/main/DIRECTION.md).
 - For shared/live Shopify addon settings, use
   `POST /v1/product-config/odoo-addon-settings/apply` (contract operation
   `apply_odoo_addon_settings`) through the Launchplane helper or service API.

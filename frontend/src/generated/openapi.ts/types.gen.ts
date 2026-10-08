@@ -1556,7 +1556,7 @@ export type OdooOverrideApplyResult = {
 
 export type OdooOverrideValue = {
     secret_binding_id: string;
-    source: 'literal' | 'secret_binding';
+    source: 'literal' | 'secret_binding' | 'runtime_environment';
     value: string | number | number | boolean | null;
 };
 

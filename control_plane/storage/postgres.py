@@ -675,6 +675,7 @@ from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProviderTargetWrite,
     RuntimeEnvironmentConflictError,
+    OdooInstanceOverrideConflictError,
     RuntimeEnvironmentWrite,
     runtime_environment_records_match,
 )
@@ -6213,6 +6214,31 @@ class PostgresRecordStore(HumanSessionStore):
                     raise RuntimeEnvironmentConflictError(
                         "Runtime selectors changed before commit."
                     )
+            for write in bundle.odoo_instance_override_writes:
+                current = session.scalar(
+                    select(LaunchplaneOdooInstanceOverrideRow)
+                    .where(
+                        LaunchplaneOdooInstanceOverrideRow.context == write.record.context,
+                        LaunchplaneOdooInstanceOverrideRow.instance == write.record.instance,
+                    )
+                    .with_for_update()
+                )
+                if (
+                    current is None
+                    or OdooInstanceOverrideRecord.model_validate(current.payload)
+                    != write.expected_record
+                ):
+                    raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
+                self._merge_authority_row(
+                    session,
+                    LaunchplaneOdooInstanceOverrideRow(
+                        context=write.record.context,
+                        instance=write.record.instance,
+                        updated_at=write.record.updated_at,
+                        payload=self._payload_dict(write.record),
+                    ),
+                    step_name="write_odoo_instance_override",
+                )
             for secret_id in bundle.absent_secret_ids:
                 if (
                     session.scalar(

@@ -1352,6 +1352,7 @@ def build_odoo_stable_target_replacement_plan(
             if override_record is not None and "deploy" in override_record.apply_on:
                 override = control_plane_odoo_instance_overrides.build_post_deploy_environment(
                     override_record,
+                    record_store=record_store,
                     protected_shopify_store_keys=target_record.policies.shopify.protected_store_keys,
                 )
                 driver_owned_keys.update(override.payload.required_container_environment_keys)
@@ -1758,6 +1759,7 @@ def execute_odoo_stable_target_replacement_apply(
     if normalized_override_record is not None and "deploy" in normalized_override_record.apply_on:
         runtime_override = control_plane_odoo_instance_overrides.build_post_deploy_environment(
             normalized_override_record,
+            record_store=record_store,
             workflow_intent="deploy",
             protected_shopify_store_keys=target_record.policies.shopify.protected_store_keys,
         )
