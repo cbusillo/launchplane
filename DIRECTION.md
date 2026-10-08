@@ -11,7 +11,8 @@ Launchplane is the small control layer that lets agents build, preview,
 deploy, promote, back up, restore, and merge every product, and record a
 Client's accept-or-reject decision. A live site is the production lane of a
 product recorded as live. A product is recorded as live when its Client uses
-production for real business.
+production for real business; a missing or wrong record does not override
+the overall direction's stop on Client business systems.
 
 Judge every change by one question: can a product be maintained without
 anyone touching Launchplane? Work that adds upkeep to Launchplane itself needs
@@ -33,8 +34,8 @@ plan, or operate within ordinary engineering). Source says what each action
 does and which product it touches; standing grants never list actions one by
 one. Every read and plan authorizes against each product it returns or
 touches. A one-product grant cannot read or plan another product or
-Launchplane-wide records. A plan may save its own evidence,
-but anything that takes a lease, uses a provider credential, queues work, or
+Launchplane-wide records. A plan may save its own evidence, but anything that
+takes a lease, uses a provider credential, queues work, or
 changes desired state is a write. This does not replace the Director's
 approval at a stop boundary, a Client's release acceptance, or a backup gate.
 
@@ -60,12 +61,10 @@ acceptance. Admin is a permission, not a role; the Director normally holds it.
 
 An agent asks the Director before:
 
-- deploying to, promoting, or changing a real live site (currently
-  SellYourOutboard, VeriReel, and the CM website once it launches), or a
-  testing or preview lane that shares production data, credentials, or
-  outside integrations, except a release the
-  product's Client accepted, which Launchplane promotes itself through the
-  gated path
+- deploying to, promoting, or changing a real live site, or a testing or
+  preview lane that shares production data, credentials, or outside
+  integrations, except a release the product's Client accepted, which
+  Launchplane promotes itself through the gated path
 - restoring or deleting data, or weakening a backup gate
 - creating credentials, granting access, or changing who can merge
 - spending money or creating paid resources
