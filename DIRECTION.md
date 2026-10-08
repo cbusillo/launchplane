@@ -62,8 +62,8 @@ acceptance. Admin is a permission, not a role; the Director normally holds it.
 An agent asks the Director before:
 
 - deploying to, promoting, or changing a real live site, or a testing or
-  preview lane that shares production data, credentials, or outside
-  integrations, except a release the product's Client accepted, which
+  preview lane excluded from ordinary engineering by the overall direction,
+  except a release the product's Client accepted, which
   Launchplane promotes itself through the gated path
 - restoring or deleting data, or weakening a backup gate
 - creating credentials, granting access, or changing who can merge
