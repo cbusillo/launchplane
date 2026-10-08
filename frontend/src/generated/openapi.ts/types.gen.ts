@@ -3921,6 +3921,7 @@ export type ReleaseReviewItem = {
     head_sha: string;
     merge_commit: string;
     owner_test_notes: string;
+    preview_era_notes?: boolean;
     pull_request_number: number;
     title: string;
     url: string;

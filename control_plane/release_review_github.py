@@ -3,7 +3,7 @@
 import re
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 
 from control_plane.contracts.release_review import ReleaseReviewItem
 
@@ -35,6 +35,41 @@ def _markdown_lines(body: str) -> Iterator[tuple[str, re.Match[str] | None, str]
 
 
 TEST_NOTES_HEADINGS = frozenset({"client test notes", "owner test notes"})
+
+_NOTE_LINK = re.compile(
+    r"!?\[[^\]\n]*\]\((?P<markdown>https?://[^\s)]+|/ui/owner-review\?[^\s)]+)\)"
+    r"|<(?P<autolink>https?://[^\s<>]+)>"
+    r"|(?P<bare>https?://[^\s<>\"'`\])]+|/ui/owner-review\?[^\s<>\"'`\])]+)",
+    re.IGNORECASE,
+)
+
+
+def release_test_notes(notes: str, *, preview_hosts: tuple[str, ...] = ()) -> tuple[str, bool]:
+    """Replace preview/revision-review links without changing the source PR body."""
+    recorded_hosts = {host.casefold().rstrip(".") for host in preview_hosts if host}
+    changed = False
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal changed
+        url = next(value for value in match.groupdict().values() if value is not None)
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").casefold().rstrip(".")
+        preview = host in recorded_hosts or any(
+            label == "preview" or label.endswith("-preview") for label in host.split(".")
+        )
+        query = parse_qs(parsed.query)
+        per_pr_review = (
+            parsed.path.rstrip("/") == "/ui/owner-review"
+            and bool(query.get("repository"))
+            and any(value.isdecimal() and int(value) > 0 for value in query.get("pull_request", ()))
+        )
+        if not preview and not per_pr_review:
+            return match[0]
+        changed = True
+        return "\nCheck this on the testing site.\n"
+
+    displayed = _NOTE_LINK.sub(replace, notes).strip()
+    return displayed, changed
 
 
 def owner_test_notes(body: str) -> str:
@@ -94,7 +129,12 @@ def nest_owner_test_notes(notes: str, *, min_heading_level: int) -> str:
 
 
 def read_release_changes(
-    *, repository: str, production_commit: str, candidate_commit: str, read: GitHubRead
+    *,
+    repository: str,
+    production_commit: str,
+    candidate_commit: str,
+    read: GitHubRead,
+    preview_hosts: tuple[str, ...] = (),
 ) -> tuple[tuple[ReleaseReviewItem, ...], tuple[str, ...]]:
     repository_path = quote(repository)
     commits: list[str] = []
@@ -172,13 +212,17 @@ def read_release_changes(
                     or not title
                 ):
                     raise ValueError("GitHub pull request number or title is unavailable.")
+                notes, preview_era_notes = release_test_notes(
+                    owner_test_notes(pull.get("body") or ""), preview_hosts=preview_hosts
+                )
                 item = ReleaseReviewItem(
                     pull_request_number=number,
                     title=title,
                     url=f"https://github.com/{repository}/pull/{number}",
                     head_sha=head.get("sha", ""),
                     merge_commit=pull["merge_commit_sha"],
-                    owner_test_notes=owner_test_notes(pull.get("body") or ""),
+                    owner_test_notes=notes,
+                    preview_era_notes=preview_era_notes,
                 )
                 if item.pull_request_number in items and items[item.pull_request_number] != item:
                     raise ValueError("Client test notes changed while compiling the release.")

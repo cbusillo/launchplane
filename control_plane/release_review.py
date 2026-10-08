@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 import click
 
@@ -15,6 +15,7 @@ from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
+from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.release_review import (
     ReleaseChecklist,
     ReleaseEvidenceReason,
@@ -34,6 +35,15 @@ from control_plane.workflows.launchplane import github_api_request, resolve_laun
 
 
 class ReleaseReviewStore(Protocol):
+    def list_preview_records(
+        self,
+        *,
+        context_name: str = "",
+        anchor_repo: str = "",
+        anchor_pr_number: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[PreviewRecord, ...]: ...
+
     def release_review_publication_lock(
         self, *, record_id: str
     ) -> AbstractContextManager[None]: ...
@@ -183,12 +193,18 @@ def build_release_review(
     lane = next(lane for lane in profile.lanes if lane.instance == "testing")
     shared_sources: tuple[SharedSourceReview, ...] = ()
     additional_changes: tuple[str, ...] = ()
+    preview_hosts = tuple(
+        host
+        for record in store.list_preview_records(anchor_repo=profile.repository)
+        if (host := urlsplit(record.canonical_url).hostname)
+    )
     try:
         items, untracked = read_release_changes(
             repository=profile.repository,
             production_commit=production.source_commit,
             candidate_commit=candidate.source_commit,
             read=read,
+            preview_hosts=preview_hosts,
         )
         if production.shared_addons_digest != candidate.shared_addons_digest:
             shared_sources, additional_changes = read_shared_source_changes(
@@ -196,6 +212,7 @@ def build_release_review(
                 candidate=store.read_artifact_manifest(candidate.artifact_id),
                 repository=profile.repository,
                 read=read,
+                preview_hosts=preview_hosts,
             )
     except ReleaseEvidenceUnavailable:
         raise
