@@ -506,6 +506,7 @@ AuthzManagedPolicySafetyBlockerCode: TypeAlias = Literal[
     "authz_policy_applying_admin_removed",
     "authz_policy_strict_human_admin_unreachable",
     "authz_policy_administrator_quorum_unsatisfied",
+    "authz_policy_delivery_activation_active",
 ]
 
 
@@ -570,6 +571,10 @@ def _managed_policy_safety_blocker(
         "authz_policy_administrator_quorum_unsatisfied": (
             "Managed authz policy reconciliation must retain enough distinct strict "
             "GitHub-human admins to satisfy administrator_quorum."
+        ),
+        "authz_policy_delivery_activation_active": (
+            "Revoke the unexpired delivery activation before removing its administration "
+            "and stop controls. Expired activation history does not block removal."
         ),
     }
     return AuthzManagedPolicySafetyBlocker(code=code, message=messages[code])
@@ -2074,6 +2079,19 @@ def plan_managed_authz_policy_reconcile(
         policy_safety_blockers += (
             _managed_policy_safety_blocker("authz_policy_administrator_quorum_unsatisfied"),
         )
+    # The candidate compiler imports this module through privileged-operation contracts.
+    from control_plane.authz_candidate_preparation import (
+        ordinary_agent_delivery_administration_removed,
+    )
+
+    if ordinary_agent_delivery_administration_removed(current_policy, updated_policy):
+        activation_guard = getattr(record_store, "has_unexpired_delivery_activation", None)
+        if not callable(activation_guard):
+            raise TypeError("Delivery administration removal requires activation storage.")
+        if activation_guard():
+            policy_safety_blockers += (
+                _managed_policy_safety_blocker("authz_policy_delivery_activation_active"),
+            )
     desired_policy_sha256 = authz_policy_sha256(updated_policy)
     changed = current_record.policy_sha256 != desired_policy_sha256
     desired_set_payload = _desired_managed_set_payload(request.desired_policy)
@@ -2318,6 +2336,7 @@ def execute_managed_authz_policy_reconcile(
             "authz_policy_applying_admin_removed",
             "authz_policy_strict_human_admin_unreachable",
             "authz_policy_administrator_quorum_unsatisfied",
+            "authz_policy_delivery_activation_active",
         ):
             blocker = blockers_by_code.get(code)
             if blocker is not None:
