@@ -157,6 +157,64 @@ jobs:
         self.assertEqual(result.status, "fail")
         self.assertEqual(result.findings[0].rule_id, "non-launchplane-shared-prod-mutation")
 
+    def test_allows_descriptive_shared_prod_mutation_comments(self) -> None:
+        with TemporaryDirectory() as workspace:
+            workspace_root = Path(workspace)
+            script = workspace_root / "devkit" / "scripts" / "restore.py"
+            script.parent.mkdir(parents=True)
+            script.write_text(
+                "# Integrations whose restored settings a non-production restore keeps, comma-separated\n"
+                "    # Shared production restore settings are documented here.\n",
+                encoding="utf-8",
+            )
+
+            result = scan_odoo_ownership_boundaries(
+                workspace_root=workspace_root,
+                repo_policies=(OdooOwnershipRepoPolicy("devkit", "devkit"),),
+            )
+
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.findings, ())
+
+    def test_rejects_executable_shared_prod_mutations_beside_comments(self) -> None:
+        commands = (
+            "production restore",
+            "prod deploy",
+            "shared rollback",
+            "production promote",
+            'subprocess.run(["production", "restore"])',
+            'subprocess.run(["shared", "deploy", "#label"])',
+            '#restore = () => execa("odoo", ["production", "restore"])',
+            "#!/usr/bin/env -S devkit production deploy",
+        )
+        for policy in (
+            OdooOwnershipRepoPolicy("repo", "devkit"),
+            OdooOwnershipRepoPolicy("repo", "retired"),
+        ):
+            for command in commands:
+                with (
+                    self.subTest(family=policy.family, command=command),
+                    TemporaryDirectory() as workspace,
+                ):
+                    workspace_root = Path(workspace)
+                    script = workspace_root / "repo" / "scripts" / "mutate.mjs"
+                    script.parent.mkdir(parents=True)
+                    script.write_text(
+                        f"# non-production restore description\n{command} # explanatory comment\n",
+                        encoding="utf-8",
+                    )
+
+                    result = scan_odoo_ownership_boundaries(
+                        workspace_root=workspace_root,
+                        repo_policies=(policy,),
+                    )
+
+                    self.assertEqual(result.status, "fail")
+                    self.assertEqual(
+                        [(finding.rule_id, finding.line) for finding in result.findings],
+                        [("non-launchplane-shared-prod-mutation", 2)],
+                    )
+
     def test_cli_returns_nonzero_for_findings(self) -> None:
         with TemporaryDirectory() as workspace:
             workspace_root = Path(workspace)
