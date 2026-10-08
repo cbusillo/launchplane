@@ -52,6 +52,7 @@ from control_plane.github_payload import required_string_text
 from control_plane.github_response_headers import GitHubResponseHeadersObserver
 from control_plane.github_response_headers import notify_github_quota_response_headers
 from control_plane.github_request_timing import timed_github_request
+from control_plane.merge_train_codeowners import individual_landing_snapshots
 from control_plane.merge_train_dependency_updates import DependencyUpdateClass
 from control_plane.merge_train_dependency_updates import classify_dependency_update
 from control_plane.source_control_change import change_fingerprint
@@ -2256,6 +2257,12 @@ class GitHubMergeTrainSnapshotReader:
                 )
                 for pull_request in relevant_pull_requests
             ),
+        )
+        pull_requests = individual_landing_snapshots(
+            transport=self.transport,
+            repository_path=repository_path,
+            base_sha=base_sha,
+            pull_requests=pull_requests,
         )
         return MergeTrainDryRunSnapshot(
             repository=repository,

@@ -2502,12 +2502,14 @@ def _reflow_stale_candidate_record(
     if candidate_record.ordinary_job_binding is None and any(
         pr.owner_review_required and pr.required_checks_status != "pass"
         for pr in dry_run_result.queue
-        if pr.eligible
+        if pr.number in dry_run_result.queue_order
     ):
         waiting_pr = next(
             pr
             for pr in dry_run_result.queue
-            if pr.eligible and pr.owner_review_required and pr.required_checks_status != "pass"
+            if pr.number in dry_run_result.queue_order
+            and pr.owner_review_required
+            and pr.required_checks_status != "pass"
         )
         dry_run_result = dry_run_result.model_copy(
             update={
@@ -3219,6 +3221,19 @@ def _advance_planned_stack_collapse_record(
         repository=request.repository,
         base_branch=request.base_branch,
     )
+    collapse_members = {
+        planned_collapse_record.plan.root_pull_request_number,
+        *(
+            mutation.child_pull_request_number
+            for mutation in planned_collapse_record.plan.mutations
+        ),
+    }
+    if any(
+        pr.number in collapse_members and pr.requires_individual_landing
+        for pr in snapshot.pull_requests
+    ):
+        retire("code_owned_changes_require_original_pull_requests")
+        return None
     root_pull_request = next(
         (
             pull_request
@@ -4219,7 +4234,8 @@ def _conflict_probe_queue(
     dry_run_result: MergeTrainDryRunResult,
 ) -> tuple[MergeTrainQueueEntry, ...]:
     """Return the queue a candidate would batch, when it needs a conflict probe."""
-    queue = tuple(entry for entry in dry_run_result.queue if entry.eligible)
+    queue_by_number = {entry.number: entry for entry in dry_run_result.queue}
+    queue = tuple(queue_by_number[number] for number in dry_run_result.queue_order)
     return queue if len(queue) > 1 else ()
 
 
