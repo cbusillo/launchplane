@@ -37,7 +37,7 @@ def _markdown_lines(body: str) -> Iterator[tuple[str, re.Match[str] | None, str]
 TEST_NOTES_HEADINGS = frozenset({"client test notes", "owner test notes"})
 
 _NOTE_LINK = re.compile(
-    r"!?\[[^\]\n]*\]\((?P<markdown>https?://[^\s)]+|/ui/owner-review\?[^\s)]+)\)"
+    r"!?\[[^]\n]*]\((?P<markdown>https?://[^\s)]+|/ui/owner-review\?[^\s)]+)\)"
     r"|<(?P<autolink>https?://[^\s<>]+)>"
     r"|(?P<bare>https?://[^\s<>\"'`\])]+|/ui/owner-review\?[^\s<>\"'`\])]+)",
     re.IGNORECASE,
@@ -54,8 +54,11 @@ def release_test_notes(notes: str, *, preview_hosts: tuple[str, ...] = ()) -> tu
         url = next(value for value in match.groupdict().values() if value is not None)
         parsed = urlsplit(url)
         host = (parsed.hostname or "").casefold().rstrip(".")
-        preview = host in recorded_hosts or any(
-            label == "preview" or label.endswith("-preview") for label in host.split(".")
+        labels = host.split(".")
+        preview = (
+            host in recorded_hosts
+            or any(label.endswith("-preview") for label in labels)
+            or (bool(re.fullmatch(r"pr-\d+", labels[0])) and "preview" in labels)
         )
         query = parse_qs(parsed.query)
         per_pr_review = (

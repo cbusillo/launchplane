@@ -193,12 +193,17 @@ def build_release_review(
     lane = next(lane for lane in profile.lanes if lane.instance == "testing")
     shared_sources: tuple[SharedSourceReview, ...] = ()
     additional_changes: tuple[str, ...] = ()
-    preview_hosts = tuple(
-        host
-        for record in store.list_preview_records(anchor_repo=profile.repository)
-        if (host := urlsplit(record.canonical_url).hostname)
-    )
     try:
+        # Preview drivers write bare repository anchors; readers accept both
+        # bare and owner/repo. Keep both within the product's preview context.
+        preview_hosts = tuple(
+            host
+            for anchor in (profile.repository, profile.repository.rsplit("/", 1)[-1])
+            for record in store.list_preview_records(
+                context_name=profile.preview.context, anchor_repo=anchor
+            )
+            if (host := urlsplit(record.canonical_url).hostname)
+        )
         items, untracked = read_release_changes(
             repository=profile.repository,
             production_commit=production.source_commit,

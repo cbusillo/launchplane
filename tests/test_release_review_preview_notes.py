@@ -5,11 +5,13 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from typing import cast
 
 from control_plane.contracts.preview_record import PreviewRecord
-from control_plane.release_review import build_release_review, checklist_digest
+from control_plane.release_review import ReleaseReviewStore, build_release_review, checklist_digest
 from control_plane.release_review_github import read_release_changes, release_test_notes
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.odoo_preview_apply_http import _odoo_preview_anchor_repo
 from tests.test_release_review import BASE, HEAD, github_read, profile, seed
 
 
@@ -69,6 +71,7 @@ class PreviewNotesTests(unittest.TestCase):
             "[Testing](https://testing.example.net/contactus)\n"
             "[Guide](https://github.com/example/site/blob/main/README.md)\n"
             "https://control.example.net/ui/owner-review?product=example-site"
+            "\n[Design](https://preview.design.example.net/mockup)"
         )
         self.assertEqual(release_test_notes(notes), (notes, False))
 
@@ -85,7 +88,7 @@ class RecordedPreviewNotesTests(unittest.TestCase):
             PreviewRecord(
                 preview_id="old-preview",
                 context="example-site",
-                anchor_repo="example/site",
+                anchor_repo=_odoo_preview_anchor_repo(profile().repository),
                 anchor_pr_number=42,
                 anchor_pr_url="https://github.com/example/site/pull/42",
                 preview_label="historical",
@@ -105,7 +108,9 @@ class RecordedPreviewNotesTests(unittest.TestCase):
                 )
             return result
 
-        review = build_release_review(store=self.store, profile=profile(), read=read)
+        review = build_release_review(
+            store=cast(ReleaseReviewStore, self.store), profile=profile(), read=read
+        )
         assert review.checklist is not None
         item = review.checklist.items[0]
         self.assertTrue(item.preview_era_notes)
@@ -137,7 +142,9 @@ class RecordedPreviewNotesTests(unittest.TestCase):
         self.assertEqual(checklist_digest(annotation), review.checklist_digest)
 
     def test_unaffected_item_keeps_historical_serialization_and_digest(self) -> None:
-        review = build_release_review(store=self.store, profile=profile(), read=github_read)
+        review = build_release_review(
+            store=cast(ReleaseReviewStore, self.store), profile=profile(), read=github_read
+        )
         assert review.checklist is not None
         historical = review.checklist.model_dump(mode="json")
         self.assertNotIn("preview_era_notes", historical["items"][0])
