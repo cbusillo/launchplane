@@ -972,9 +972,7 @@ function PrivilegedOperationPlanCard({
           <span>
             {review.blockers.state === "error"
               ? "The persisted evidence reports an error state."
-              : review.lifecycle.expiry_state === "past_expiry_unreconciled"
-                ? "The persisted plan is past expiry. This read remains non-mutating, so approval is unavailable until the lifecycle is reconciled."
-                : "The persisted evidence reports blocker state."}
+              : "The persisted evidence reports blocker state."}
           </span>
         </div>
       ) : null}
@@ -998,7 +996,9 @@ function PrivilegedOperationPlanCard({
           <dd>
             {review.lifecycle.status === "expired"
               ? "Expired historical review."
-              : "No time limit. A policy change, withdrawal, or execution ends validity."}
+              : review.lifecycle.status === "planned" || review.lifecycle.status === "approved"
+                ? "No time limit. Policy and pre-state checks still apply; withdrawal or execution ends validity."
+                : "This review has ended and cannot be reused."}
           </dd>
         </div>
         <div>

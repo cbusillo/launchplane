@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Callable
+from datetime import datetime, timedelta
 import json
 import os
 from pathlib import Path
@@ -3020,7 +3021,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(revoked.json()["record"]["status"], "revoked")
         self.assertEqual(revocation_replay.json()["write_status"], "replayed")
 
-    async def test_managed_authz_approval_rejects_stale_and_accepts_current_exact_plan(
+    async def test_old_managed_authz_approval_rejects_stale_and_accepts_current_exact_plan(
         self,
     ) -> None:
         with TemporaryDirectory() as directory:
@@ -3039,10 +3040,16 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             try:
                 async with lifespan_client(app) as client:
-                    planned = await client.post(
-                        "/v1/privileged-operations/plans",
-                        json=_managed_authz_plan_payload("managed-policy-plan-1"),
+                    planned_at = datetime.fromisoformat(current_record.updated_at) - timedelta(
+                        days=3650
                     )
+                    with patch("control_plane.privileged_operation_service.datetime") as clock:
+                        clock.now.return_value = planned_at
+                        clock.fromisoformat.side_effect = datetime.fromisoformat
+                        planned = await client.post(
+                            "/v1/privileged-operations/plans",
+                            json=_managed_authz_plan_payload("managed-policy-plan-1"),
+                        )
                     self.assertEqual(planned.status_code, 200, planned.text)
                     operation_id = planned.json()["record"]["operation_id"]
                     revised_policy = policy.model_copy(update={"administrator_quorum": 2})
