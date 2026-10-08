@@ -52,6 +52,7 @@ class DokployTargetDefinition(BaseModel):
     healthcheck_timeout_seconds: int | None = Field(default=None, ge=1)
     env: dict[str, str] = Field(default_factory=dict)
     domains: tuple[str, ...] = ()
+    public_hosts: tuple[str, ...] = ()
     policies: DokployTargetPolicies = Field(default_factory=DokployTargetPolicies)
 
     @model_validator(mode="after")
@@ -267,6 +268,7 @@ def build_dokploy_target_record_from_definition(
         healthcheck_timeout_seconds=definition.healthcheck_timeout_seconds,
         env=dict(definition.env),
         domains=definition.domains,
+        public_hosts=definition.public_hosts,
         policies=definition.policies,
         updated_at=updated_at,
         source_label=source_label,
@@ -328,6 +330,7 @@ def build_dokploy_source_of_truth_from_records(
                 "healthcheck_timeout_seconds": record.healthcheck_timeout_seconds,
                 "env": dict(record.env),
                 "domains": list(record.domains),
+                "public_hosts": list(record.public_hosts),
                 "policies": record.policies.model_dump(mode="python"),
             }
         )

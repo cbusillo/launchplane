@@ -15547,7 +15547,8 @@ def create_launchplane_fastapi_app(
         public_hosts_plan: product_public_hosts.PublicHostsPlan | None = None
         try:
             if product_config_request.public_hosts is not None:
-                public_hosts_plan = product_public_hosts.plan_public_hosts(
+                public_hosts_plan = await asyncio.to_thread(
+                    product_public_hosts.plan_public_hosts,
                     record_store=database_store,
                     control_plane_root=resolved_control_plane_root,
                     context=product_config_request.context,
@@ -15742,7 +15743,8 @@ def create_launchplane_fastapi_app(
                 if public_hosts_plan is None:
                     database_store.write_product_authority_bundle(completed_bundle)
                 else:
-                    database_store.write_product_public_hosts_bundle(
+                    await asyncio.to_thread(
+                        database_store.write_product_public_hosts_bundle,
                         completed_bundle,
                         expected_target=public_hosts_plan.target,
                         expected_target_id=public_hosts_plan.target_id,

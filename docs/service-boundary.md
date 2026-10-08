@@ -2148,7 +2148,7 @@ of public DNS hostnames for an exact owned `prod` compose lane. For example,
 "instance":"prod","public_hosts":["example.com","www.example.com"]}`.
 Omitting the field preserves it; `[]` removes only names previously managed by
 this field. The tracked target's `public_hosts` is the single configuration
-source; its `domains` also retains the internal and other unmanaged names.
+source; its separate `domains` retains origin health and ingress authority.
 Existing internal domains cannot be adopted into the managed public set.
 
 Use the supported `product-config-dry-run` and `product-config-apply` write-action
@@ -2167,7 +2167,9 @@ and idempotent success receipt. `verified: true` and `read_back_hosts` prove
 provider Host-route configuration for the reported web port, not an HTTP probe
 or public reachability. Partial provider failure returns
 `public_hosts_provider_outcome_unknown` and commits no successful config receipt;
-inspect with a new dry-run before retrying. Provider operations are idempotent,
+some routes may already exist. Rerun dry-run with the same requested host list
+and finish reconciliation before dropping names, so partial additions become
+managed and can later be removed explicitly. Provider operations are idempotent,
 and internal/unmanaged routes are checked for preservation. The local file CLI
 refuses this field; use the service path for dry-run and apply.
 

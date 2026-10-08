@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 import hashlib
 import json
 
@@ -93,7 +94,8 @@ class PublicHostsPlan:
         except Exception as error:
             raise PublicHostsProviderError(
                 "Public-host provider outcome needs inspection; no successful config receipt "
-                "was committed. Rerun dry-run to read current routes before retrying."
+                "was committed. Routes may already exist. Rerun dry-run with the same host "
+                "list and complete reconciliation before dropping names."
             ) from error
 
 
@@ -126,9 +128,14 @@ def plan_public_hosts(
             )
         ):
             raise ValueError("Public hosts require the owned prod compose binding.")
-        protected = set(target.domains) - set(target.public_hosts)
+        protected = set(target.domains)
         if protected & set(hosts):
             raise ValueError("Public hosts cannot take ownership of an existing internal domain.")
+        for other in record_store.list_dokploy_target_records():
+            if (other.context, other.instance) != (context, instance) and set(hosts).intersection(
+                (*other.domains, *other.public_hosts)
+            ):
+                raise ValueError("A public host is already owned by another target.")
         host, token = source.read_dokploy_config(control_plane_root=control_plane_root)
         routes = fetch_dokploy_compose_domains_for_target_setup(
             host=host, token=token, compose_id=target_id.target_id
@@ -163,7 +170,12 @@ def plan_public_hosts(
             ):
                 raise ValueError("Public-host route conflicts with another service or path.")
             if public_host not in after:
-                if selected and not _route_matches(selected[0], target_id.target_id, port):
+                if selected and (
+                    type(selected[0].get("port")) is not int
+                    or not _route_matches(
+                        selected[0], target_id.target_id, cast(int, selected[0]["port"])
+                    )
+                ):
                     raise ValueError(
                         "Refusing to remove a public-host route with changed ownership."
                     )
@@ -174,16 +186,12 @@ def plan_public_hosts(
             else:
                 updated.append(public_host)
         removed = sorted(before - after)
-        domains = tuple(
-            dict.fromkeys((*(name for name in target.domains if name not in removed), *hosts))
-        )
         replacement = (
             target
-            if hosts == target.public_hosts and domains == target.domains
+            if hosts == target.public_hosts
             else target.model_copy(
                 update={
                     "public_hosts": hosts,
-                    "domains": domains,
                     "updated_at": utc_now_timestamp(),
                     "source_label": "service:product-config:public-hosts",
                 }

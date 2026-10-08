@@ -6149,6 +6149,17 @@ class PostgresRecordStore(HumanSessionStore):
         """Check ownership/binding before effects; commit only after provider read-back."""
 
         def guard(session: Any) -> None:
+            requested_hosts = set(bundle.dokploy_targets[0].public_hosts)
+            for row in session.scalars(select(LaunchplaneDokployTargetRow)).all():
+                if (row.context, row.instance) != (
+                    expected_target.context,
+                    expected_target.instance,
+                ):
+                    other = DokployTargetRecord.model_validate(row.payload)
+                    if requested_hosts.intersection((*other.domains, *other.public_hosts)):
+                        raise DokployTargetRecordChanged(
+                            "A public host is already owned by another target."
+                        )
             for orm_type, model_type, expected in (
                 (LaunchplaneDokployTargetRow, DokployTargetRecord, expected_target),
                 (LaunchplaneDokployTargetIdRow, DokployTargetIdRecord, expected_target_id),

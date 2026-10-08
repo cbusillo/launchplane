@@ -14,6 +14,7 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.dokploy import api
+from control_plane.dokploy import source
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
@@ -188,7 +189,7 @@ class ProductPublicHostsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["verified"])
         self.assertEqual(result["read_back_hosts"], HOSTS)
         self.assertEqual(self.recorded().public_hosts, tuple(HOSTS))
-        self.assertEqual(set(self.recorded().domains), {"cm-website-prod", *HOSTS})
+        self.assertEqual(self.recorded().domains, self.target.domains)
         self.assertEqual(self.provider.routes[0]["domainId"], "internal")
         for route in self.provider.routes[1:]:
             self.assertEqual(
@@ -290,6 +291,43 @@ class ProductPublicHostsTests(unittest.IsolatedAsyncioTestCase):
         response = await self.config(mode="apply", key="shared")
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(self.provider.writes, [])
+
+    async def test_another_products_hostname_cannot_be_claimed(self) -> None:
+        self.store.write_dokploy_target_record(
+            self.target.model_copy(update={"context": "other", "domains": (HOSTS[0],)})
+        )
+        response = await self.config()
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.provider.writes, [])
+
+    async def test_record_definition_roundtrip_keeps_public_config_and_origin_health(self) -> None:
+        await self.config()
+        await self.config(mode="apply", key="roundtrip")
+        definition = source.build_dokploy_source_of_truth_from_records(
+            (self.recorded(),), (self.target_id,)
+        ).targets[0]
+        rebuilt = source.build_dokploy_target_record_from_definition(
+            definition,
+            updated_at=self.recorded().updated_at,
+        )
+        self.assertEqual(rebuilt.public_hosts, tuple(HOSTS))
+        self.assertEqual(
+            source.resolve_healthcheck_base_urls(
+                target_definition=definition,
+                environment_values={},
+            ),
+            ("https://cm-website-prod",),
+        )
+
+    async def test_removing_managed_host_after_origin_port_change(self) -> None:
+        await self.config()
+        await self.config(mode="apply", key="before-port-change")
+        self.provider.routes[0]["port"] = 8080
+        dry = await self.config([])
+        self.assertEqual(dry.status_code, 202, dry.text)
+        response = await self.config([], mode="apply", key="after-port-change")
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual([route["host"] for route in self.provider.routes], ["cm-website-prod"])
 
     async def test_scope_validation_and_unreviewed_apply_never_write(self) -> None:
         for overrides in ({"instance": "testing"}, {"context": "foreign"}, {"context": ""}):
