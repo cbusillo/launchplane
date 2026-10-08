@@ -565,7 +565,9 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
                         )
                 else:
                     with self.assertRaises(dokploy_post_deploy.OdooPostDeployReadbackFailure):
-                        dokploy_post_deploy.require_odoo_company_email_readback_evidence(evidence)
+                        dokploy_post_deploy.require_odoo_company_email_readback_evidence(
+                            evidence, allow_historical_contract=True
+                        )
         for unreadable_source in ("", "def broken(", "def unrelated():\n    pass\n", None):
             with self.subTest(unrecognized=unreadable_source):
                 if unreadable_source is None:
@@ -573,11 +575,24 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
                 else:
                     bootstrap.write_text(unreadable_source)
                 run = self._run(script)
-                self.assertNotEqual(run.returncode, 0)
+                self.assertEqual(run.returncode, 0)
                 evidence = dokploy_post_deploy.extract_odoo_post_deploy_readback_markers(
                     {"logs": run.stdout}
                 )
                 self.assertNotIn(dokploy_post_deploy.ODOO_COMPANY_EMAIL_CONTRACT_MARKER, evidence)
+                evidence["log_available"] = "true"
+                with self.assertRaises(dokploy_post_deploy.OdooPostDeployReadbackFailure):
+                    dokploy_post_deploy.require_odoo_company_email_readback_evidence(
+                        evidence, allow_historical_contract=True
+                    )
+                proved_run = self._run(script, FAKE_WORKFLOW_OUTPUT=f"{marker}=true")
+                proved_evidence = dokploy_post_deploy.extract_odoo_post_deploy_readback_markers(
+                    {"logs": proved_run.stdout}
+                )
+                self.assertEqual(proved_run.returncode, 0)
+                dokploy_post_deploy.require_odoo_company_email_readback_evidence(
+                    proved_evidence, allow_historical_contract=True
+                )
 
     def test_restore_runner_keeps_only_real_account_allowances(self) -> None:
         policies = DokployTargetPolicies(

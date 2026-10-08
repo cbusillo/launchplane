@@ -63,7 +63,9 @@ re-deploys retain this compatibility without rebuilding the pinned artifact.
 Current bootstrap scripts still require the sender-match marker, including on
 rollback. New forward artifacts always require the marker, regardless of the
 bootstrap script's contents. An exact re-deploy must match the existing runtime
-identity's product, lane, artifact, source commit and immutable image reference.
+identity's product, lane, artifact, source commit and immutable image reference,
+and the passing inventory's artifact and source commit. Identity written by a
+failed forward attempt does not qualify its retry as a historical re-deploy.
 Missing capability evidence, an unreadable or unrecognized
 script, incomplete bootstrap proof, or an explicit sender mismatch never earns
 the historical exception. Other post-deploy, integration and health gates remain

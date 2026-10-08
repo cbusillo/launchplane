@@ -5,7 +5,7 @@ import unittest
 from collections.abc import Callable
 from tempfile import TemporaryDirectory
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 from unittest.mock import Mock, patch
 
 import click
@@ -2174,11 +2174,23 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
     def test_same_artifact_redeploy_keeps_the_historical_sender_contract(self) -> None:
         self._apply_stored_artifact(replay=True)
 
+    def test_failed_forward_identity_does_not_relax_sender_check_on_retry(self) -> None:
+        self._apply_stored_artifact(replay=True, failed_forward_retry=True)
+
     def _apply_stored_artifact(
-        self, *, backwards: bool = False, rollback: bool = False, replay: bool = False
+        self,
+        *,
+        backwards: bool = False,
+        rollback: bool = False,
+        replay: bool = False,
+        failed_forward_retry: bool = False,
     ) -> None:
         current_commit = ("b" if backwards else "a") * 40
-        desired_commit = current_commit if replay else ("a" if backwards else "b") * 40
+        desired_commit = (
+            current_commit
+            if replay and not failed_forward_retry
+            else ("a" if backwards else "b") * 40
+        )
         fresh_manifest = _artifact_manifest(
             artifact_id="artifact-cm-fresh",
             source_commit=desired_commit,
@@ -2211,7 +2223,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 update={
                     "source_git_ref": current_commit,
                     "artifact_identity": ArtifactIdentityReference(
-                        artifact_id=fresh_manifest.artifact_id if replay else "artifact-cm-testing"
+                        artifact_id=fresh_manifest.artifact_id
+                        if replay and not failed_forward_retry
+                        else "artifact-cm-testing"
                     ),
                 }
             ),
@@ -2253,6 +2267,38 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         def _update_env(*, env_text: str, **_: object) -> None:
             nonlocal persisted_env
             persisted_env = env_text
+
+        def post_deploy_outcome(**kwargs: object) -> OdooPostDeployResult:
+            status: Literal["pass", "fail"] = "pass"
+            error = ""
+            if failed_forward_retry:
+                from control_plane.dokploy import post_deploy as post_deploy_adapter
+
+                evidence = {
+                    "log_available": "true",
+                    **dict.fromkeys(
+                        post_deploy_adapter.ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS, "true"
+                    ),
+                    **dict.fromkeys(
+                        post_deploy_adapter.ODOO_WEBSITE_BOOTSTRAP_REQUIRED_READBACK_MARKERS, "true"
+                    ),
+                    post_deploy_adapter.ODOO_COMPANY_EMAIL_CONTRACT_MARKER: "false",
+                }
+                try:
+                    post_deploy_adapter.require_odoo_company_email_readback_evidence(
+                        evidence,
+                        allow_historical_contract=bool(kwargs["allow_historical_sender_contract"]),
+                    )
+                except post_deploy_adapter.OdooPostDeployReadbackFailure as refusal:
+                    status = "fail"
+                    error = str(refusal)
+            return OdooPostDeployResult(
+                context="cm",
+                instance="testing",
+                phase="deploy",
+                post_deploy_status=status,
+                error_message=error,
+            )
 
         transport = Mock()
         transport.get_json.return_value = {
@@ -2308,12 +2354,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.execute_odoo_post_deploy",
-                return_value=OdooPostDeployResult(
-                    context="cm",
-                    instance="testing",
-                    phase="deploy",
-                    post_deploy_status="pass",
-                ),
+                side_effect=post_deploy_outcome,
             ) as post_deploy,
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.verify_odoo_stable_readiness",
@@ -2345,9 +2386,15 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             assert failure is not None
             self.assertEqual(failure.code, result.error_code)
             return
-        self.assertEqual(result.deploy_status, "pass")
+        if failed_forward_retry:
+            self.assertEqual(result.deploy_status, "fail")
+            self.assertIn("company sender", result.error_message)
+            self.assertEqual(store.environment_inventories, [])
+            return
+        self.assertEqual(result.deploy_status, "pass", result.error_message)
         self.assertEqual(
-            post_deploy.call_args.kwargs["allow_historical_sender_contract"], rollback or replay
+            post_deploy.call_args.kwargs["allow_historical_sender_contract"],
+            rollback or (replay and not failed_forward_retry),
         )
         self.assertEqual(result.artifact_id, "artifact-cm-fresh")
         self.assertEqual(

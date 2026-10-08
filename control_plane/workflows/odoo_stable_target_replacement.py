@@ -1887,16 +1887,32 @@ def execute_odoo_stable_target_replacement_apply(
         )
         current_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
         current_identity = _runtime_identity_map(current_env_map)
-        allow_historical_sender_contract = rollback or all(
-            current_identity.get(key) == value
-            for key, value in {
-                "product": profile.product,
-                "context": plan.context,
-                "instance": plan.instance,
-                "artifact_id": artifact_id,
-                "source_git_ref": source_git_ref,
-                "image_reference": image_reference,
-            }.items()
+        try:
+            inventory = record_store.read_environment_inventory(
+                context_name=plan.context, instance_name=plan.instance
+            )
+        except FileNotFoundError:
+            inventory = None
+        # Provider identity is written before post-deploy succeeds. A failed
+        # forward attempt must not grant its own retry a historical exception.
+        allow_historical_sender_contract = rollback or (
+            inventory is not None
+            and inventory.deploy.status == "pass"
+            and inventory.post_deploy_update.status != "fail"
+            and inventory.artifact_identity is not None
+            and inventory.artifact_identity.artifact_id == artifact_id
+            and inventory.source_git_ref == source_git_ref
+            and all(
+                current_identity.get(key) == value
+                for key, value in {
+                    "product": profile.product,
+                    "context": plan.context,
+                    "instance": plan.instance,
+                    "artifact_id": artifact_id,
+                    "source_git_ref": source_git_ref,
+                    "image_reference": image_reference,
+                }.items()
+            )
         )
         if (
             ODOO_VERSION_ENV_KEY in current_env_map

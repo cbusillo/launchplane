@@ -2157,7 +2157,10 @@ def require_odoo_company_email_readback_evidence(
         # The old artifact never managed this setting. Keep its own bootstrap
         # proof and explicitly record that sender persistence was not verified.
         require_odoo_module_update_readback_evidence(evidence)
-        require_odoo_website_bootstrap_readback_evidence(evidence)
+        try:
+            require_odoo_website_bootstrap_readback_evidence(evidence)
+        except click.ClickException as error:
+            raise OdooPostDeployReadbackFailure(str(error), evidence=evidence) from None
         evidence["website_bootstrap_company_email_skip_reason"] = ODOO_COMPANY_EMAIL_SKIP_REASON
         return
     raise OdooPostDeployReadbackFailure(
@@ -2699,7 +2702,9 @@ echo "odoo_module_update_completed=true"
 workflow_completed=1
 
 if [ "{int(probe_company_email_contract)}" = "1" ]; then
-    docker exec -i "${{script_runner_container_id}}" python3 - /volumes/scripts/odoo_website_bootstrap.py <<'PY'
+    # A probe failure supplies no exception evidence. Native sender proof can
+    # still pass; without it the caller's strict readback check fails closed.
+    docker exec -i "${{script_runner_container_id}}" python3 - /volumes/scripts/odoo_website_bootstrap.py <<'PY' || true
 {ODOO_COMPANY_EMAIL_CONTRACT_PROGRAM}PY
 fi
 

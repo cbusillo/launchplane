@@ -455,6 +455,7 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                             record_store=store,
                             request=OdooPostDeployRequest(context="cm_website", instance="prod"),
                             allow_historical_sender_contract=replay,
+                            hold_uncertain_effects=True,
                         )
                     self.assertEqual(result.post_deploy_status, expected_status)
                     evidence = post_deploy_evidence_from_odoo_result(result)
