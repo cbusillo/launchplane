@@ -264,6 +264,14 @@ def execute_odoo_post_deploy(
         dokploy_post_deploy.require_odoo_module_update_readback_evidence(
             post_deploy_readback_markers
         )
+        if (
+            override_payload
+            and override_payload.website_bootstrap
+            and (override_payload.website_bootstrap.company_email)
+        ):
+            dokploy_post_deploy.require_odoo_company_email_readback_evidence(
+                post_deploy_readback_markers
+            )
     except (click.ClickException, OSError) as error:
         determinate_failure = isinstance(
             error,

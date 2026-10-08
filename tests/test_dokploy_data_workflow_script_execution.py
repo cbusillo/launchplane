@@ -27,6 +27,7 @@ from control_plane.dokploy.compose import render_odoo_raw_compose_file
 from control_plane.integration_readback import (
     INTEGRATION_FAMILIES,
     INTEGRATION_READBACK_PASSED_PATH,
+    integration_readback_policy,
 )
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetIntegrationAllowance,
@@ -167,6 +168,8 @@ def main(argv):
         environment["PYTHONPATH"] = str(state_dir / "modules")
         # Docker attaches the caller's stdin only with -i.
         stdin = None if interactive else subprocess.DEVNULL
+        if program[2:] == ["/volumes/scripts/odoo_website_bootstrap.py"]:
+            program = [*program[:2], str(state_dir / "bootstrap.py")]
         return subprocess.run(
             [sys.executable, *program[1:]], stdin=stdin, env=environment
         ).returncode
@@ -506,6 +509,73 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         )
         docker_log = tuple(log_path.read_text().splitlines()) if log_path.exists() else ()
         return ScriptRun(completed.returncode, completed.stdout, completed.stderr, docker_log)
+
+    def test_sender_contract_is_probed_from_the_running_artifact(self) -> None:
+        script = dokploy_post_deploy._build_dokploy_data_workflow_script(
+            compose_app_name="example-prod-app",
+            database_name="example",
+            filestore_path="/volumes/data/filestore",
+            clear_stale_lock=False,
+            data_workflow_lock_path="/volumes/data/.workflow-lock",
+            required_update_modules="base,website",
+            readback_policy=integration_readback_policy(
+                instance_name="prod", policies=_policies(), workflow_mode="maintenance"
+            ),
+            hold_web_until_integration_readback=False,
+            probe_company_email_contract=True,
+        )
+        marker = dokploy_post_deploy.ODOO_COMPANY_EMAIL_MATCH_MARKER
+        bootstrap = self.root / "bootstrap.py"
+        for source, sender, expected_status in (
+            ("def apply_website_bootstrap(env, payload):\n    pass\n", "", "pass"),
+            (
+                f'def apply_website_bootstrap(env, payload):\n    print("{marker}=true")\n',
+                "",
+                "fail",
+            ),
+            (
+                f'def apply_website_bootstrap(env, payload):\n    print("{marker}=true")\n',
+                f"{marker}=true\n",
+                "pass",
+            ),
+        ):
+            with self.subTest(source=source, sender=sender):
+                bootstrap.write_text(source)
+                run = self._run(
+                    script,
+                    FAKE_WORKFLOW_OUTPUT=sender
+                    + "\n".join(
+                        f"{key}=true"
+                        for key in dokploy_post_deploy.ODOO_WEBSITE_BOOTSTRAP_REQUIRED_READBACK_MARKERS
+                    ),
+                )
+                self.assertEqual(run.returncode, 0, run.stderr)
+                evidence = dokploy_post_deploy.extract_odoo_post_deploy_readback_markers(
+                    {"logs": run.stdout}
+                )
+                evidence["log_available"] = "true"
+                if expected_status == "pass":
+                    dokploy_post_deploy.require_odoo_company_email_readback_evidence(evidence)
+                    if not sender:
+                        self.assertEqual(
+                            evidence["website_bootstrap_company_email_skip_reason"],
+                            dokploy_post_deploy.ODOO_COMPANY_EMAIL_SKIP_REASON,
+                        )
+                else:
+                    with self.assertRaises(dokploy_post_deploy.OdooPostDeployReadbackFailure):
+                        dokploy_post_deploy.require_odoo_company_email_readback_evidence(evidence)
+        for unreadable_source in ("", "def broken(", "def unrelated():\n    pass\n", None):
+            with self.subTest(unrecognized=unreadable_source):
+                if unreadable_source is None:
+                    bootstrap.unlink(missing_ok=True)
+                else:
+                    bootstrap.write_text(unreadable_source)
+                run = self._run(script)
+                self.assertNotEqual(run.returncode, 0)
+                evidence = dokploy_post_deploy.extract_odoo_post_deploy_readback_markers(
+                    {"logs": run.stdout}
+                )
+                self.assertNotIn(dokploy_post_deploy.ODOO_COMPANY_EMAIL_CONTRACT_MARKER, evidence)
 
     def test_restore_runner_keeps_only_real_account_allowances(self) -> None:
         policies = DokployTargetPolicies(

@@ -90,6 +90,26 @@ DEFAULT_DATA_WORKFLOW_LOCK_PATH = "/volumes/data/.data_workflow_in_progress"
 # budget stays bounded and larger than an ordinary deploy timeout.
 DEFAULT_ODOO_UPSTREAM_RESTORE_EXECUTION_TIMEOUT_SECONDS = 2 * 60 * 60
 DEFAULT_ODOO_BACKUP_ROOT = "/volumes/data/backups/launchplane"
+ODOO_COMPANY_EMAIL_MATCH_MARKER = "website_bootstrap_company_email_matches"
+ODOO_COMPANY_EMAIL_CONTRACT_MARKER = "website_bootstrap_company_email_contract_supported"
+ODOO_COMPANY_EMAIL_SKIP_REASON = "artifact_bootstrap_predates_company_email_readback"
+# Read the script in the deployed image, rather than inferring capability from
+# missing logs or comparing mutable devkit revisions. Unreadable, malformed or
+# unrecognized scripts cannot establish the historical contract exception.
+ODOO_COMPANY_EMAIL_CONTRACT_PROGRAM = f'''import ast
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+tree = ast.parse(source)
+if not any(isinstance(node, ast.FunctionDef) and node.name == "apply_website_bootstrap"
+           for node in tree.body):
+    raise SystemExit("Unrecognized website bootstrap contract.")
+supported = any(isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and "{ODOO_COMPANY_EMAIL_MATCH_MARKER}=" in node.value
+                for node in ast.walk(tree))
+print("{ODOO_COMPANY_EMAIL_CONTRACT_MARKER}=" + str(supported).lower())
+'''
 ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
     {
         "log_available",
@@ -106,7 +126,8 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         "website_bootstrap_primary_page_xmlid_found",
         "website_bootstrap_homepage_matches_page",
         "website_bootstrap_logo_present",
-        "website_bootstrap_company_email_matches",
+        ODOO_COMPANY_EMAIL_MATCH_MARKER,
+        ODOO_COMPANY_EMAIL_CONTRACT_MARKER,
         "website_bootstrap_applied",
         "odoo_restore_completed",
         "odoo_restore_failure_logged",
@@ -287,6 +308,8 @@ class OdooPostDeployReadbackFailure(click.ClickException):
 
 
 def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
+    if key == "website_bootstrap_company_email_skip_reason":
+        return value == ODOO_COMPANY_EMAIL_SKIP_REASON
     if key in ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS:
         return value in {"true", "false"}
     if integration_readback_marker_is_safe(key, value):
@@ -612,6 +635,7 @@ def run_compose_post_deploy_update(
             target_definition.instance
         ),
         bootstrap_missing_database=bootstrap_missing_database and not run_destructive_restore,
+        probe_company_email_contract=require_company_email,
     )
     schedule_payload: api.JsonObject = {
         "name": schedule_name,
@@ -680,11 +704,7 @@ def run_compose_post_deploy_update(
     if require_company_email or readback_policy.required:
         require_odoo_module_update_readback_evidence(evidence)
     if require_company_email:
-        if evidence.get("website_bootstrap_company_email_matches") != "true":
-            raise OdooPostDeployReadbackFailure(
-                "Odoo post-deploy did not prove the requested website company sender was saved.",
-                evidence=evidence,
-            )
+        require_odoo_company_email_readback_evidence(evidence)
     require_integration_readback_evidence(evidence, readback_policy)
     return evidence
 
@@ -2121,6 +2141,25 @@ def require_odoo_module_update_readback_evidence(evidence: Mapping[str, str]) ->
         )
 
 
+def require_odoo_company_email_readback_evidence(evidence: dict[str, str]) -> None:
+    if evidence.get(ODOO_COMPANY_EMAIL_MATCH_MARKER) == "true":
+        return
+    if (
+        evidence.get(ODOO_COMPANY_EMAIL_CONTRACT_MARKER) == "false"
+        and ODOO_COMPANY_EMAIL_MATCH_MARKER not in evidence
+    ):
+        # The old artifact never managed this setting. Keep its own bootstrap
+        # proof and explicitly record that sender persistence was not verified.
+        require_odoo_module_update_readback_evidence(evidence)
+        require_odoo_website_bootstrap_readback_evidence(evidence)
+        evidence["website_bootstrap_company_email_skip_reason"] = ODOO_COMPANY_EMAIL_SKIP_REASON
+        return
+    raise OdooPostDeployReadbackFailure(
+        "Odoo post-deploy did not prove the requested website company sender was saved.",
+        evidence=evidence,
+    )
+
+
 def require_odoo_restore_readback_evidence(evidence: Mapping[str, str]) -> None:
     """Refuse to record an upstream restore as passed without the script's success marker."""
     if evidence.get("odoo_restore_failure_logged") == "true":
@@ -2280,6 +2319,7 @@ def _build_dokploy_data_workflow_script(
     readback_policy: IntegrationReadbackPolicy,
     hold_web_until_integration_readback: bool,
     bootstrap_missing_database: bool = False,
+    probe_company_email_contract: bool = False,
 ) -> str:
     """The schedule's bash script.
 
@@ -2651,6 +2691,11 @@ echo "odoo_module_update_image_match=true"
 echo "odoo_module_update_modules_configured=true"
 echo "odoo_module_update_completed=true"
 workflow_completed=1
+
+if [ "{int(probe_company_email_contract)}" = "1" ]; then
+    docker exec -i "${{script_runner_container_id}}" python3 - /volumes/scripts/odoo_website_bootstrap.py <<'PY'
+{ODOO_COMPANY_EMAIL_CONTRACT_PROGRAM}PY
+fi
 
 if ! enforce_integration_readback; then
     web_restart_blocked=1

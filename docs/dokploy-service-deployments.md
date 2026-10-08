@@ -51,6 +51,20 @@ Production callers import the canonical owning module. The
 and new code patch dependencies at the canonical module so the compatibility
 surface does not become a second implementation authority.
 
+Odoo post-deploy sender verification follows the deployed image's bootstrap
+contract. When a company email is requested, the maintenance schedule reads and
+parses that image's `odoo_website_bootstrap.py` after the module update. A
+recognized historical bootstrap without the company-email readback marker may
+pass on its existing module-update and website-bootstrap proof; evidence records
+`website_bootstrap_company_email_skip_reason=artifact_bootstrap_predates_company_email_readback`.
+This means the sender was **not verified**, not that it matched. Rollbacks and
+re-deploys retain this compatibility without rebuilding the pinned artifact.
+Current bootstrap scripts still require the sender-match marker, including on
+forward deploys. Missing capability evidence, an unreadable or unrecognized
+script, incomplete bootstrap proof, or an explicit sender mismatch never earns
+the historical exception. Other post-deploy, integration and health gates remain
+in force.
+
 ## Managed Application Schedules
 
 Dokploy application schedules are provider-owned commands that run in the
