@@ -341,6 +341,8 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         failure = run.steps[1].failure
         assert failure is not None
         self.assertTrue(failure.trace_id)
+        assert promotion.failure is not None
+        self.assertEqual(failure.code, promotion.failure.code)
         self.assertIn("health", failure.reason.lower())
         self.assertNotEqual(failure.record_id, "")
         self.assertEqual(self.advance(), ())

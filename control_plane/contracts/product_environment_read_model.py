@@ -1085,7 +1085,7 @@ def build_product_activity_read_model(
 def _client_release_failure_activity_events(
     record_store: object, profile: LaunchplaneProductProfileRecord, source_limit: int
 ) -> tuple[ProductActivityEvent, ...]:
-    from control_plane.client_release import read_client_release_run
+    from control_plane.client_release import read_client_release_step_views
     from control_plane.storage.postgres import PostgresRecordStore
 
     if not isinstance(record_store, PostgresRecordStore):
@@ -1097,10 +1097,9 @@ def _client_release_failure_activity_events(
     for decision in record_store.list_release_review_decision_records(
         product=profile.product, limit=source_limit
     ):
-        run = read_client_release_run(store=record_store, profile=profile, decision=decision)
-        if run is None:
-            continue
-        for step in run.steps:
+        for step in read_client_release_step_views(
+            store=record_store, profile=profile, decision=decision
+        ):
             failure = step.failure
             if failure is None:
                 continue

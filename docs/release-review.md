@@ -397,8 +397,11 @@ The review page says before the Accept button whether accepting puts the
 version on the live site, naming it, or whether releases are held. After
 acceptance it shows each step's status. A stopped step also shows its bounded,
 redacted recorded reason and code. Expand **Failure details** for the failure
-record, operation and original trace IDs; older operations without a saved trace
-say **Not recorded**. New Client release operations persist a trace when queued.
+record, operation and original trace IDs. A missing saved trace says **Not
+recorded**: this includes older queued operations and generic-web reservations
+stopped before a response was saved. New queued backup and Odoo release
+operations persist a trace; generic-web reservations expose their saved response
+trace after settling.
 The activity read derives stopped-step events from those same operations, with
 the reason in `summary` and record, operation, decision and available trace IDs
 in `records`. Reading this evidence never retries a stopped release.

@@ -62,6 +62,9 @@ from control_plane.contracts.production_backup_gate import (
     ProductionBackupGateRequest,
 )
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord, ReleaseStart
+from control_plane.contracts.verireel_prod_backup_gate_operation import (
+    VeriReelProdBackupGateOperationRecord,
+)
 from control_plane.odoo_release_recovery import (
     pin_odoo_release_recovery_target,
     read_odoo_release_recovery,
@@ -399,19 +402,23 @@ def _step_status(
 
 
 def _release_step_failure(
-    operation: object | None, status: ClientReleaseStepStatus
+    store: PostgresRecordStore, operation: object | None, status: ClientReleaseStepStatus
 ) -> ClientReleaseFailureView | None:
     if operation is None or status not in _STOPPED_STATUSES:
         return None
     result = getattr(operation, "result", None)
-    record_id = next(
-        (
-            str(value)
-            for name in ("deployment_record_id", "backup_record_id", "promotion_record_id")
-            if (value := getattr(result, name, ""))
-        ),
-        str(getattr(operation, "operation_id", getattr(operation, "record_id", ""))),
+    # A release's source promotion and verified backup may have passed. They
+    # are inputs, not fallback failure records when its redeploy never started.
+    record_id = str(getattr(operation, "operation_id", getattr(operation, "record_id", "")))
+    result_record_id = getattr(
+        result,
+        "backup_record_id"
+        if isinstance(operation, VeriReelProdBackupGateOperationRecord)
+        else "deployment_record_id",
+        "",
     )
+    if result_record_id:
+        record_id = str(result_record_id)
     message = str(getattr(operation, "error_message", "") or getattr(result, "error_message", ""))
     code = str(getattr(operation, "error_code", ""))
     trace_id = str(
@@ -431,6 +438,18 @@ def _release_step_failure(
             if isinstance(failure, dict):
                 code = code or str(failure.get("code", ""))
                 message = message or str(failure.get("description", ""))
+            promotion_id = outcome.get("promotion_record_id")
+            if isinstance(promotion_id, str) and promotion_id:
+                try:
+                    promotion = store.read_promotion_record(promotion_id)
+                except FileNotFoundError:
+                    pass
+                else:
+                    if promotion.failure is not None:
+                        code = code or promotion.failure.code
+                        message = message or promotion.failure.description
+                        if not outcome.get("deployment_record_id"):
+                            record_id = promotion.record_id
         trace_id = str(payload.get("original_trace_id") or payload.get("trace_id") or trace_id)
     if status == "cancelled":
         message = message or "The release step was cancelled."
@@ -454,15 +473,15 @@ def _release_step_failure(
     )
 
 
-def read_client_release_run(
+def read_client_release_step_views(
     *,
-    store: object,
+    store: PostgresRecordStore,
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
-) -> ClientReleaseRunView | None:
+) -> tuple[ClientReleaseStepView, ...]:
+    """Read recorded steps without checking whether an unstarted run can start."""
+
     steps = client_release_steps(decision.release_start)
-    if not steps or not isinstance(store, PostgresRecordStore):
-        return None
     views = []
     for step in steps:
         status, operation = _step_status(store, profile, decision, step)
@@ -474,7 +493,7 @@ def read_client_release_run(
                 operation_id=client_release_step_operation_id(
                     profile=profile, decision=decision, step=step
                 ),
-                failure=_release_step_failure(operation, status),
+                failure=_release_step_failure(store, operation, status),
             )
         )
         if isinstance(operation, OdooProdPromotionOperationRecord):
@@ -486,9 +505,23 @@ def read_client_release_run(
                         kind="recovery",
                         status=recovery.status,
                         operation_id=recovery.operation_id,
-                        failure=_release_step_failure(recovery, recovery.status),
+                        failure=_release_step_failure(store, recovery, recovery.status),
                     )
                 )
+    return tuple(views)
+
+
+def read_client_release_run(
+    *,
+    store: object,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+) -> ClientReleaseRunView | None:
+    if not client_release_steps(decision.release_start) or not isinstance(
+        store, PostgresRecordStore
+    ):
+        return None
+    views = read_client_release_step_views(store=store, profile=profile, decision=decision)
     statuses = [view.status for view in views]
     state: ClientReleaseRunState
     if any(status in _STOPPED_STATUSES for status in statuses):

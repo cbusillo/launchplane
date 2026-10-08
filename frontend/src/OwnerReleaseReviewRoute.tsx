@@ -33,7 +33,7 @@ function ReleaseRunProgress({ run }: { run: ClientReleaseRunView }) {
     {run.blocked_reason ? <p role="status">{run.blocked_reason}</p> : null}
     <ol>{run.steps.map(step => <li key={step.step}>
       {RELEASE_STEP_LABELS[step.kind]}: {RELEASE_STEP_STATUS[step.status]}
-      {step.failure ? <div role="status">
+      {step.failure ? <div>
         <p>{step.failure.reason} (<code>{step.failure.code}</code>)</p>
         <details><summary>Failure details</summary>
           <p>Record: <code>{step.failure.record_id}</code></p>

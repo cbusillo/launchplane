@@ -458,6 +458,71 @@ class ClientReleaseTests(unittest.TestCase):
         self.assertEqual(run.steps[2].failure.record_id, "failed-deployment")
         self.assertEqual(run.steps[2].failure.trace_id, "")
         self.assertEqual(run.steps[3].status, "not_started")
+        # A failed redeploy that never made a deployment must not name the
+        # passing promotion that supplied the rollback target as its failure.
+        self.store.write_odoo_prod_rollback_operation_record(
+            self.store.read_odoo_prod_rollback_operation_record(rollback_id).model_copy(
+                update={
+                    "result": operation.result.model_copy(update={"deployment_record_id": ""}),
+                }
+            )
+        )
+        run = read_client_release_run(
+            store=self.store,
+            profile=self.store.read_product_profile_record(PRODUCT),
+            decision=accepted,
+        )
+        assert run is not None and run.steps[2].failure is not None
+        self.assertEqual(run.steps[2].failure.record_id, rollback_id)
+
+    def test_failed_promotion_does_not_name_its_passing_backup_as_failure(self) -> None:
+        self.switch("promote")
+        accepted = self.accept()
+        (backup_id,) = self.advance()
+        self.finish(backup_id)
+        (promotion_id,) = self.advance()
+        self.finish(promotion_id, "fail")
+        operation = self.store.read_odoo_prod_promotion_operation_record(promotion_id)
+        assert operation.result is not None
+        self.store.write_odoo_prod_promotion_operation_record(
+            operation.model_copy(
+                update={
+                    "result": operation.result.model_copy(
+                        update={
+                            "backup_record_id": "passing-backup",
+                            "promotion_record_id": "passing-promotion",
+                        }
+                    ),
+                }
+            )
+        )
+        run = read_client_release_run(
+            store=self.store,
+            profile=self.store.read_product_profile_record(PRODUCT),
+            decision=accepted,
+        )
+        assert run is not None and run.steps[1].failure is not None
+        self.assertEqual(run.steps[1].failure.record_id, promotion_id)
+
+    def test_activity_history_does_not_run_unstarted_release_readiness_checks(self) -> None:
+        self.switch("promote_with_rollback_drill")
+        accepted = self.accept()
+        for index in range(3):
+            self.store.write_release_review_decision_record(
+                accepted.model_copy(
+                    update={
+                        "record_id": f"historical-unstarted-release-{index}",
+                    }
+                )
+            )
+        with patch(
+            "control_plane.client_release.pin_odoo_release_recovery_target",
+            side_effect=AssertionError("Activity must not scan recovery candidates"),
+        ):
+            activity = build_product_activity_read_model(record_store=self.store, product=PRODUCT)
+        self.assertFalse(
+            any(event.event_type == "client_release_step" for event in activity.events)
+        )
 
     def test_the_worker_recheck_follows_the_decision_client_and_hold(self) -> None:
         self.switch("promote")
