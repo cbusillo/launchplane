@@ -9,7 +9,7 @@ import yaml
 
 
 class LaunchplaneDeployWaitTests(unittest.TestCase):
-    def test_wait_includes_serial_drains_and_configured_deploy_health_budgets(self) -> None:
+    def test_wait_includes_longest_parallel_drain_and_deploy_health_budgets(self) -> None:
         script = Path(__file__).resolve().parents[1] / "scripts/deploy/resolve-wait-timeout.py"
         with TemporaryDirectory() as directory:
             compose = Path(directory) / "compose.yml"
@@ -38,7 +38,7 @@ class LaunchplaneDeployWaitTests(unittest.TestCase):
                         check=False,
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(int(result.stdout), 2 * 60 + 13 + 5 + deploy + health)
+                    self.assertEqual(int(result.stdout), 2 * 60 + 13 + deploy + health)
 
     def test_unreadable_or_invalid_grace_never_returns_a_shorter_budget(self) -> None:
         script = Path(__file__).resolve().parents[1] / "scripts/deploy/resolve-wait-timeout.py"

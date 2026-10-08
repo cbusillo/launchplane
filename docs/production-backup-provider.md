@@ -68,7 +68,7 @@ automatically retried because its effect may be unknown.
 The shared backup worker drains its admitted capture on SIGTERM, keeps renewing
 its lease, commits the result, and claims no next capture. Compose allows 125
 minutes for that drain, covering the request's two-hour maximum and completion.
-Self-deploy and self-rollback observation add the Compose stop windows to the
+Self-deploy and self-rollback observation add the longest Compose worker stop window to the
 configured deployment and health budgets, so a normal drain does not trigger an
 early rollback. Resolve that budget before submitting the deployment; all waits
 in each forward or rollback observation consume one shared deadline. Roll out
@@ -78,6 +78,10 @@ stop timeout until replaced. A forced kill or host loss still produces
 stopped and the capture is not automatically retried. This does not resume an
 already stopped release; the Client's fresh explicit Accept starts a new gated
 run as described in [release review](release-review.md).
+The window must cover an admitted capture even when a control-plane request is
+unavailable during replacement. It also lengthens the worst-case wait for a
+broken Launchplane image; provider progress or a durable deployment gate would
+be needed to shorten that wait without mistaking a drain for a failed deploy.
 
 A database advisory lock covers capture and retention for the configured host,
 guest kind and guest ID, across backup record IDs and worker replicas. A second
