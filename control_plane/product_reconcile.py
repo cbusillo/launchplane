@@ -663,6 +663,7 @@ def _deploy_generic_web_testing(
         product=profile.product,
         image_reference=desired.image_reference,
         source_commit=desired.manifest.source_commit,
+        deploy_reference=f"{desired.manifest.image.repository}:sha-{desired.manifest.source_commit}",
     )
     # The deployment testing ran when this deploy was decided is part of its key:
     # every deploy and rollback records a new one, so a lane changed since gets the
