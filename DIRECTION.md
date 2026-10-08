@@ -28,9 +28,9 @@ between them.
 Launchplane needs no caller grant for the work it starts from source-control
 events (verifying a build and deploying it to that site's previews and testing
 lane) or from a Client's recorded release acceptance (the gated promotion).
-Requests from people and agents still need grants. Agent access is scoped
-by product. This does not replace the Director's approval at a stop boundary,
-a Client's release acceptance, or a backup gate.
+Requests from people and agents still need grants. This does not replace
+the Director's approval at a stop boundary, a Client's release acceptance, or
+a backup gate.
 
 Code and tests are upkeep. A change that deletes code or tests without losing
 a behavior needs no other reason. A test earns its place by catching a real
@@ -55,8 +55,8 @@ acceptance. Admin is a permission, not a role; the Director normally holds it.
 An agent asks the Director before:
 
 - deploying to, promoting, or changing a real live site, except a release
-  the product's Client accepted, which
-  Launchplane promotes itself through the gated path
+  the product's Client accepted, which Launchplane promotes itself through
+  the gated path
 - restoring or deleting data, or weakening a backup gate
 - creating credentials, granting access, or changing who can merge
 - spending money or creating paid resources
