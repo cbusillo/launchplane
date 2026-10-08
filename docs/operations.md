@@ -2668,7 +2668,10 @@ context only, and `context_instance` has both context and instance.
   intact. The existing `web.base.url` writer cannot convert these import keys
   back to literals. Late post-deploy completions update only apply metadata;
   automatic canonical-URL and service setting writes refuse stale record
-  snapshots instead of restoring old import literals.
+  snapshots instead of restoring old import literals. Conflicting tracked-target
+  env overlays refuse planning and later rendering, so the runtime record remains
+  the single source for reconciled import values. Changed records identify the
+  reconciliation writer; stale setting writes return HTTP 409 for a fresh review.
 - For shared/live Shopify addon settings, use
   `POST /v1/product-config/odoo-addon-settings/apply` (contract operation
   `apply_odoo_addon_settings`) through the Launchplane helper or service API.

@@ -829,6 +829,7 @@ from control_plane.service_human_auth import (
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.factory import storage_backend_name
 from control_plane.storage.product_authority_bundle import (
+    OdooInstanceOverrideConflictError,
     SecretCopySourceConflictError,
     SecretRecordConflictError,
     ProductAuthorityBundle,
@@ -7388,6 +7389,13 @@ def create_launchplane_fastapi_app(
                 record_store=cast(OdooInstanceOverrideStore, record_store),
                 request=override_request,
             )
+        except OdooInstanceOverrideConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="stale",
+                message="Odoo overrides changed. Refresh and retry the setting write.",
+            ) from error
         except FileNotFoundError as error:
             raise _launchplane_http_error(
                 status_code=404,
@@ -7518,6 +7526,13 @@ def create_launchplane_fastapi_app(
                 record_store=cast(OdooInstanceOverrideStore, record_store),
                 request=override_request,
             )
+        except OdooInstanceOverrideConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="stale",
+                message="Odoo overrides changed. Refresh and retry the setting write.",
+            ) from error
         except FileNotFoundError as error:
             raise _launchplane_http_error(
                 status_code=404,
@@ -7705,6 +7720,13 @@ def create_launchplane_fastapi_app(
                     settings_request.instance,
                 ),
             )
+        except OdooInstanceOverrideConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="stale",
+                message="Odoo overrides changed. Refresh and run a new dry-run.",
+            ) from error
         except ProductProfileConflictError as error:
             raise _launchplane_http_error(
                 status_code=409,

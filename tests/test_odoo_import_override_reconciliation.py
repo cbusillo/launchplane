@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from httpx2 import Response
 
 from control_plane.contracts.odoo_import_parameters import import_parameter_runtime_key
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.odoo_instance_override_record import (
     OdooAddonSettingOverride,
     OdooConfigParameterOverride,
@@ -197,7 +198,7 @@ class ImportOverrideHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after.website_bootstrap, before.website_bootstrap)
         self.assertEqual(after.apply_on, before.apply_on)
         self.assertEqual(after.last_apply, before.last_apply)
-        self.assertEqual(after.source_label, before.source_label)
+        self.assertNotEqual(after.source_label, before.source_label)
         self.assertEqual(
             after.config_parameters[len(KEYS) :], before.config_parameters[len(KEYS) :]
         )
@@ -224,6 +225,33 @@ class ImportOverrideHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             all(item.value.value is None for item in after.config_parameters if item.key in KEYS)
         )
+
+    async def test_target_overlay_refuses_planning_and_later_rendering(self) -> None:
+        before = override_record()
+        _plan, bundle = plan_import_override_reconciliation(
+            record_store=self.store, profile=self.profile, record=before, keys=KEYS
+        )
+        self.store.write_dokploy_target_record(
+            DokployTargetRecord(
+                context="cm",
+                instance="testing",
+                env={import_parameter_runtime_key(KEYS[0]): "target-fixture-value"},
+                updated_at="fixture",
+            )
+        )
+        response = await self.submit({"keys": KEYS})
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(
+            self.store.read_odoo_instance_override_record(
+                context_name="cm", instance_name="testing"
+            ),
+            before,
+        )
+        # An overlay added after record reconciliation still refuses delivery.
+        with self.assertRaises(click.ClickException):
+            build_post_deploy_environment(
+                bundle.odoo_instance_override_writes[0].record, record_store=self.store
+            )
 
     async def test_changed_authority_and_changed_override_refuse_stale_review(self) -> None:
         for changed in ("runtime", "override", "profile"):

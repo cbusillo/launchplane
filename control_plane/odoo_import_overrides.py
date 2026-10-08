@@ -8,6 +8,7 @@ from typing import Protocol, cast
 from pydantic import BaseModel, ConfigDict
 
 from control_plane.contracts.odoo_import_parameters import import_parameter_runtime_key
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.odoo_instance_override_record import (
     OdooInstanceOverrideRecord,
     OdooOverrideValue,
@@ -25,6 +26,10 @@ from control_plane.storage.product_authority_bundle import (
 
 
 class ImportRuntimeStore(Protocol):
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord: ...
+
     def list_runtime_environment_records(
         self, *, context_name: str = "", instance_name: str = ""
     ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
@@ -90,8 +95,22 @@ def import_runtime_authority(
         )
         if binding.context == context and binding.instance in {"", instance}
     }
+    try:
+        target_keys = set(
+            record_store.read_dokploy_target_record(
+                context_name=context, instance_name=instance
+            ).env
+        )
+    except FileNotFoundError:
+        target_keys = set()
+    # A target overlay outranks runtime records during delivery. A runtime
+    # reference must refuse that second authority, including at later render.
     return (
-        {key: value for key, value in values.items() if key not in retired | bound_keys},
+        {
+            key: value
+            for key, value in values.items()
+            if key not in retired | bound_keys | target_keys
+        },
         expectation.model_copy(update={"records": records}),
     )
 
@@ -157,7 +176,10 @@ def plan_import_override_reconciliation(
             "config_parameters": tuple(
                 selected[override.key] for override in record.config_parameters
             ),
-            "updated_at": datetime.now(timezone.utc).isoformat() if changed else record.updated_at,
+            "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            if changed
+            else record.updated_at,
+            "source_label": "odoo-import-override-reconcile" if changed else record.source_label,
         }
     )
     plan = ImportOverridePlan(
