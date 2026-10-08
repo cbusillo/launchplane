@@ -307,7 +307,7 @@ def build_merge_train_dry_run_result(
         if _targets_merge_train_base(pull_request=pull_request, base_branch=snapshot.base_branch)
     )
     queue = tuple(
-        _build_queue_entry(repository_policy, pull_request)
+        _build_queue_entry(repository_policy, pull_request, skip_blocked=batch_landing)
         for pull_request in sorted(
             base_pull_requests, key=lambda item: (item.created_at, item.number)
         )
@@ -462,7 +462,10 @@ def apply_merge_train_block_intent(
             detail="Dry-run result does not require a block label.",
         )
     train_should_continue = dry_run_result.failure_policy == "continue_after_blocking_pr"
-    if dry_run_result.blocked_label in dry_run_result.selected_pr.labels:
+    if any(
+        label.casefold() == dry_run_result.blocked_label.casefold()
+        for label in dry_run_result.selected_pr.labels
+    ):
         return MergeTrainBlockResult(
             status="blocked",
             repository=dry_run_result.repository,
@@ -618,6 +621,8 @@ def apply_merge_train_merge_intent(
 def _build_queue_entry(
     repository_policy: MergeTrainRepositoryPolicy,
     pull_request: MergeTrainPullRequestSnapshot,
+    *,
+    skip_blocked: bool = False,
 ) -> MergeTrainQueueEntry:
     ineligible_reasons: list[str] = []
     is_trusted_automation = (
@@ -629,6 +634,11 @@ def _build_queue_entry(
         ineligible_reasons.append("pull request is not open")
     if pull_request.is_draft:
         ineligible_reasons.append("draft pull request")
+    if skip_blocked and any(
+        label.casefold() == repository_policy.blocked_label.casefold()
+        for label in pull_request.labels
+    ):
+        ineligible_reasons.append(f"held by {repository_policy.blocked_label} label")
     is_dependency_update = (
         pull_request.actor_id is not None
         and pull_request.actor_id in repository_policy.enqueue.dependency_update_github_user_ids

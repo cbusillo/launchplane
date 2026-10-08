@@ -63,6 +63,36 @@ class HoldLineageTests(unittest.TestCase):
                     build_feedback_payloads(response={"result": result, "records": {}}), []
                 )
 
+    def test_service_conflict_hold_survives_an_older_pr_block(self) -> None:
+        snapshot = _FakeExpandedMergeTrainSnapshotReader(
+            transport=object()
+        ).read_merge_train_snapshot(repository="cbusillo/sellyouroutboard", base_branch="main")
+        first, second = snapshot.pull_requests
+        blocked = first.model_copy(
+            update={
+                "number": 99,
+                "labels": ("ready-to-merge", "merge-blocked"),
+                "created_at": "2026-05-01T00:00:00Z",
+            }
+        )
+        snapshot = snapshot.model_copy(update={"pull_requests": (blocked, first, second)})
+        hold = MergeTrainBatchHeldOutEntry(
+            pull_request_number=second.number,
+            head_sha=second.head_sha,
+            probe_base_sha=snapshot.base_sha,
+            conflicts_with=(first.number,),
+            conflicts_with_head_shas=(first.head_sha,),
+        )
+        self.assertEqual(
+            _surviving_held_out_entries(
+                policy=build_test_merge_train_policy(),
+                snapshot=snapshot,
+                held_out=(hold,),
+                batch_landing=True,
+            ),
+            (hold,),
+        )
+
     def test_changed_preceding_head_membership_or_order_invalidates_hold(self) -> None:
         snapshot = _FakeExpandedMergeTrainSnapshotReader(
             transport=object()
