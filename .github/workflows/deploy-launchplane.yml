@@ -775,7 +775,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          wait_timeout_seconds=$((${LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS:-600} + ${LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS:-180}))
+          wait_timeout_seconds="$(uv run --extra dev python scripts/deploy/resolve-wait-timeout.py)"
           {
             echo "timeout_seconds=$wait_timeout_seconds"
             echo "timeout_ms=$((wait_timeout_seconds * 1000))"
@@ -1123,7 +1123,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          wait_timeout_seconds=$((${LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS:-600} + ${LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS:-180}))
+          wait_timeout_seconds="$(uv run --extra dev python scripts/deploy/resolve-wait-timeout.py)"
           {
             echo "timeout_seconds=$wait_timeout_seconds"
             echo "timeout_ms=$((wait_timeout_seconds * 1000))"

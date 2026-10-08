@@ -15,6 +15,8 @@ import click
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.production_backup_gate import ProductionBackupGateWorkerResult
+from control_plane.contracts.production_backup_failures import known_backup_failure_code
+from control_plane.http_routes.production_backup_gate import _response
 from control_plane.contracts.verireel_prod_backup_gate import VeriReelProdBackupGateRequest
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.production_backup_gate import (
@@ -24,6 +26,7 @@ from control_plane.workflows.production_backup_gate import (
 from control_plane.workflows.production_backup_provider import ProductionBackupProviderError
 from control_plane.workflows.verireel_prod_backup_gate import enqueue_verireel_prod_backup_gate
 from control_plane.workflows.verireel_prod_backup_gate_operation_worker import (
+    run_verireel_prod_backup_gate_operation_worker_loop,
     run_verireel_prod_backup_gate_operation_worker_once,
 )
 from tests.support.durable_operations import (
@@ -191,6 +194,9 @@ class ProductionBackupGateTests(unittest.TestCase):
         )
         self.assertEqual(recovered.status, "fail")
         self.assertEqual(recovered.error_code, "backup_effect_outcome_unknown")
+        response = _response(recovered, "expired-capture-read")
+        self.assertEqual(known_backup_failure_code(response.error_code), recovered.error_code)
+        self.assertTrue(response.error_description)
         evidence = self.store.read_backup_gate_record(operation.backup_record_id)
         self.assertEqual(evidence.source, "launchplane-production-backup-gate")
         self.assertEqual(evidence.evidence["snapshot_name"], "recorded-snapshot")
@@ -209,6 +215,59 @@ class ProductionBackupGateTests(unittest.TestCase):
                 authorization=self.authorization,
             )
         self.assertEqual(self.store.read_backup_gate_record(operation.backup_record_id), evidence)
+
+    def test_shutdown_finishes_admitted_capture_and_claims_no_next_capture(self) -> None:
+        operations = [
+            enqueue_production_backup_gate(
+                record_store=self.store,
+                request=self.binding.request.model_copy(update={"backup_record_id": name}),
+                authorization=self.authorization,
+                operation_key=f"caller|{name}",
+            )
+            for name in ("first-capture", "next-capture")
+        ]
+        stop = Event()
+
+        def finish_capture(_binding: object, **_kwargs: object) -> ProductionBackupGateWorkerResult:
+            stop.set()
+            return ProductionBackupGateWorkerResult(
+                status="pass",
+                started_at="2026-09-26T10:00:00Z",
+                finished_at="2026-09-26T10:01:00Z",
+                evidence={"capture_status": "verified"},
+            )
+
+        with (
+            patch(
+                "control_plane.workflows.production_backup_gate.control_plane_secrets.resolve_lane_worker_secret_values",
+                return_value={
+                    "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "private",
+                    "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": "hosts",
+                },
+            ),
+            patch(
+                "control_plane.workflows.production_backup_gate.execute_production_backup_provider",
+                side_effect=finish_capture,
+            ),
+        ):
+            result = run_verireel_prod_backup_gate_operation_worker_loop(
+                record_store=self.store,
+                control_plane_root_path=self.root,
+                lease_owner="draining-worker",
+                stop_event=stop,
+                max_iterations=2,
+            )
+        self.assertEqual(result.status, "stopped")
+        self.assertEqual(result.worked_count, 1)
+        persisted = [
+            self.store.read_verireel_prod_backup_gate_operation_record(operation.operation_id)
+            for operation in operations
+        ]
+        self.assertCountEqual([operation.status for operation in persisted], ["pass", "pending"])
+        completed = next(operation for operation in persisted if operation.status == "pass")
+        self.assertEqual(
+            self.store.read_backup_gate_record(completed.backup_record_id).status, "pass"
+        )
 
     def test_shared_operation_persists_complete_provider_evidence(self) -> None:
         operation = enqueue_production_backup_gate(

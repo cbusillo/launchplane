@@ -65,6 +65,17 @@ and the exact policy/target binding. Missing, stale, retired or changed authorit
 blocks execution. An expired operation that entered the provider phase is not
 automatically retried because its effect may be unknown.
 
+The shared backup worker drains its admitted capture on SIGTERM, keeps renewing
+its lease, commits the result, and claims no next capture. Compose allows 125
+minutes for that drain, covering the request's two-hour maximum and completion.
+Self-deploy and self-rollback observation add the Compose stop windows to the
+configured deployment and health budgets, so a normal drain does not trigger an
+early rollback. A forced kill or host loss still produces
+`backup_effect_outcome_unknown`; the status read explains that the release is
+stopped and the capture is not automatically retried. This does not resume an
+already stopped release; the Client's fresh explicit Accept starts a new gated
+run as described in [release review](release-review.md).
+
 A database advisory lock covers capture and retention for the configured host,
 guest kind and guest ID, across backup record IDs and worker replicas. A second
 capture fails with `backup_source_busy` before host effects. After the first
