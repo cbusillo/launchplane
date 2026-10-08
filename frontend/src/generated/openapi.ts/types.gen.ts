@@ -264,7 +264,7 @@ export type AuthzManagedPolicyDiff = {
 };
 
 export type AuthzManagedPolicySafetyBlocker = {
-    code: 'authz_policy_admin_unreachable' | 'authz_policy_applying_admin_removed' | 'authz_policy_strict_human_admin_unreachable' | 'authz_policy_administrator_quorum_unsatisfied';
+    code: 'authz_policy_admin_unreachable' | 'authz_policy_applying_admin_removed' | 'authz_policy_strict_human_admin_unreachable' | 'authz_policy_administrator_quorum_unsatisfied' | 'authz_policy_delivery_activation_active';
     message: string;
 };
 
@@ -2533,7 +2533,7 @@ export type PrivilegedOperationSemanticReviewBlastRadius = {
 };
 
 export type PrivilegedOperationSemanticReviewBlocker = {
-    codes: Array<'authz_policy_admin_unreachable' | 'authz_policy_applying_admin_removed' | 'authz_policy_strict_human_admin_unreachable' | 'authz_policy_administrator_quorum_unsatisfied' | 'repository_not_exact' | 'workflow_refs_not_singleton' | 'workflow_ref_not_exact' | 'job_workflow_refs_not_singleton' | 'job_workflow_ref_not_immutable' | 'actions_not_singleton' | 'action_not_exact' | 'products_not_singleton' | 'product_not_exact' | 'contexts_not_singleton' | 'context_not_exact' | 'instances_not_singleton' | 'instance_not_exact' | 'secret_unreadable' | 'operation_past_expiry' | 'operation_expired' | 'execution_failed' | 'reconciliation_required' | 'database_revision_incompatible' | 'activation_schema_incompatible' | 'activation_storage_unavailable' | 'activation_cas_unavailable' | 'activation_recovery_unavailable' | 'activation_rollback_reader_unavailable'>;
+    codes: Array<'authz_policy_admin_unreachable' | 'authz_policy_applying_admin_removed' | 'authz_policy_strict_human_admin_unreachable' | 'authz_policy_administrator_quorum_unsatisfied' | 'authz_policy_delivery_activation_active' | 'repository_not_exact' | 'workflow_refs_not_singleton' | 'workflow_ref_not_exact' | 'job_workflow_refs_not_singleton' | 'job_workflow_ref_not_immutable' | 'actions_not_singleton' | 'action_not_exact' | 'products_not_singleton' | 'product_not_exact' | 'contexts_not_singleton' | 'context_not_exact' | 'instances_not_singleton' | 'instance_not_exact' | 'secret_unreadable' | 'operation_past_expiry' | 'operation_expired' | 'execution_failed' | 'reconciliation_required' | 'database_revision_incompatible' | 'activation_schema_incompatible' | 'activation_storage_unavailable' | 'activation_cas_unavailable' | 'activation_recovery_unavailable' | 'activation_rollback_reader_unavailable'>;
     operational_readiness_blocker_count: number;
     policy_safety_blocker_count: number;
     state: 'clear' | 'blocked' | 'error';
