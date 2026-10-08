@@ -17,7 +17,11 @@ from control_plane.odoo_import_overrides import (
 from control_plane.odoo_post_deploy_http import OdooInstanceOverrideStore
 from control_plane.odoo_product_driver_http import resolve_odoo_product_route
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
-from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    LaunchplaneIdentity,
+    TerminalAgentIdentity,
+)
 from control_plane.storage.product_authority_bundle import (
     OdooInstanceOverrideConflictError,
     ProductAuthorityBundleStore,
@@ -60,6 +64,17 @@ def register_import_override_reconcile_routes(
         request: ImportOverrideReconcileRequest | None,
     ) -> ImportOverrideReconcileResponse:
         trace_id = dependencies.next_trace_id()
+        if (
+            request is not None
+            and request.mode == "apply"
+            and isinstance(identity, TerminalAgentIdentity)
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="terminal_agent_read_only",
+                message="Terminal-agent credentials cannot apply import override changes.",
+            )
         try:
             profile = resolve_odoo_product_route(
                 record_store=record_store, product=product, instance=environment

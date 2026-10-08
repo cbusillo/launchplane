@@ -51,6 +51,8 @@ from tests.support.http import request
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from tests.support.stores import _sqlite_database_url
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
+from control_plane.workflows.odoo_post_deploy import _write_odoo_instance_override_apply_result
+from control_plane.service_auth import TerminalAgentPolicyRule
 from tests.test_odoo_post_deploy import _module_update_evidence
 
 KEYS = ("cm_data.db.user", "repairshopr.sync_db.host", "repairshopr.sync_db.user")
@@ -329,6 +331,54 @@ class ImportOverrideHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(applied.status_code, 200, applied.text)
         self.assertTrue(applied.json()["result"]["applied"])
 
+    async def test_terminal_read_credential_cannot_apply_even_with_a_grant(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            record_store_factory=lambda: self.store,
+            bearer_identity_config=BearerIdentityConfig(
+                terminal_agent_token="fixture-terminal-token",
+                terminal_agent_subject="fixture-terminal",
+                terminal_agent_token_label="fixture-terminal-read",
+            ),
+            authz_policy=LaunchplaneAuthzPolicy(
+                terminal_agents=(
+                    TerminalAgentPolicyRule(
+                        subjects=("fixture-terminal",),
+                        token_labels=("fixture-terminal-read",),
+                        products=(self.profile.product,),
+                        contexts=("cm",),
+                        actions=(
+                            "product_environment.read",
+                            "product_config.plan",
+                            "product_config.apply",
+                        ),
+                    ),
+                )
+            ),
+        )
+        headers = {"Authorization": "Bearer fixture-terminal-token"}
+        review = await request(app, "POST", PATH, headers=headers, payload={"keys": KEYS})
+        self.assertEqual(review.status_code, 200, review.text)
+        denied = await request(
+            app,
+            "POST",
+            PATH,
+            headers=headers,
+            payload={
+                "mode": "apply",
+                "keys": KEYS,
+                "review_digest": review.json()["result"]["review_digest"],
+                "confirmation": "APPLY odoo-tenant-cm/testing",
+            },
+        )
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(
+            self.store.read_odoo_instance_override_record(
+                context_name="cm", instance_name="testing"
+            ),
+            override_record(),
+        )
+
     async def test_secret_overlay_is_refused_without_reading_a_secret_value(self) -> None:
         binding = SecretBinding(
             binding_id="fixture-binding",
@@ -420,6 +470,58 @@ class ImportOverrideHttpTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ImportOverrideStorageTests(unittest.TestCase):
+    def test_late_completion_preserves_reconciled_sources_and_stale_setting_write_is_refused(
+        self,
+    ) -> None:
+        for backend in ("sqlite", "filesystem"):
+            with self.subTest(backend=backend), TemporaryDirectory() as temporary:
+                store = (
+                    PostgresRecordStore(
+                        database_url=_sqlite_database_url(Path(temporary) / "records.sqlite3")
+                    )
+                    if backend == "sqlite"
+                    else FilesystemRecordStore(Path(temporary))
+                )
+                if isinstance(store, PostgresRecordStore):
+                    store.ensure_schema()
+                    self.addCleanup(store.close)
+                profile = LaunchplaneProductProfileRecord.model_validate(
+                    _odoo_profile_payload_with_prod_lane()
+                )
+                store.write_product_profile_record(profile)
+                before = override_record()
+                store.write_odoo_instance_override_record(before)
+                store.write_runtime_environment_record(runtime_record())
+                _plan, bundle = plan_import_override_reconciliation(
+                    record_store=store, profile=profile, record=before, keys=KEYS
+                )
+                store.write_product_authority_bundle(bundle)
+                completion = _write_odoo_instance_override_apply_result(
+                    record_store=store,
+                    record=before,
+                    status="pass",
+                    detail="late completion of an older payload",
+                )
+                self.assertEqual(completion.last_apply.status, "pass")
+                self.assertTrue(
+                    all(
+                        item.value.source == "runtime_environment"
+                        for item in completion.config_parameters
+                        if item.key in KEYS
+                    )
+                )
+                with self.assertRaises(OdooInstanceOverrideConflictError):
+                    store.write_odoo_instance_override_record(
+                        before.model_copy(update={"source_label": "late canonical writer"}),
+                        expected_record=before,
+                    )
+                self.assertEqual(
+                    store.read_odoo_instance_override_record(
+                        context_name="cm", instance_name="testing"
+                    ),
+                    completion,
+                )
+
     def test_commit_checks_runtime_and_override_snapshots_in_both_stores(self) -> None:
         for backend in ("sqlite", "filesystem"):
             for change in ("runtime", "override"):

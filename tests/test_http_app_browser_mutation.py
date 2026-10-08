@@ -1,8 +1,10 @@
 import unittest
 
 from fastapi import FastAPI
+from fastapi.routing import APIRoute
 
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.http_app import _AUTHZ_POLICY_MANAGED_RECONCILE_ROUTE
 from control_plane.service_human_auth import (
     HumanSessionManager,
     InMemoryHumanSessionStore,
@@ -24,6 +26,27 @@ from tests.support.work_graph import work_graph_snapshot_payload
 
 
 class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    def test_cookie_mutation_routes_do_not_use_plain_read_identity(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_github_human_work_graph_rank_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+        unguarded = set()
+        for route in app.routes:
+            if not isinstance(route, APIRoute) or "POST" not in (route.methods or ()):
+                continue
+            dependency_names = {
+                dependency.call.__name__
+                for dependency in route.dependant.dependencies
+                if dependency.call is not None
+            }
+            if dependency_names & {"read_identity", "read_work_graph_rank_identity"}:
+                unguarded.add(route.path)
+        # This mode-aware handler consumes browser mutation authority only in
+        # its apply arm; all other cookie-capable mutations use guarded dependencies.
+        self.assertEqual(unguarded, {_AUTHZ_POLICY_MANAGED_RECONCILE_ROUTE})
+
     @staticmethod
     def _human_app() -> tuple[FastAPI, HumanSessionManager, LaunchplaneHumanSession]:
         session_manager = HumanSessionManager(

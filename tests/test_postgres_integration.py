@@ -29,6 +29,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.odoo_import_overrides import plan_import_override_reconciliation
+from control_plane.workflows.odoo_post_deploy import _write_odoo_instance_override_apply_result
 from tests.test_odoo_import_override_reconciliation import (
     KEYS as IMPORT_KEYS,
     override_record as _import_override_record,
@@ -1376,6 +1377,12 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 keys=IMPORT_KEYS,
             )
             store.write_product_authority_bundle(fresh_bundle)
+            _write_odoo_instance_override_apply_result(
+                record_store=store,
+                record=_import_override_record(),
+                status="pass",
+                detail="Late completion of the pre-reconciliation payload",
+            )
             after = store.read_odoo_instance_override_record(
                 context_name="cm", instance_name="testing"
             )

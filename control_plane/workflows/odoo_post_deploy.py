@@ -32,6 +32,16 @@ class OdooPostDeployStore(Protocol):
 
     def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> object: ...
 
+    def update_odoo_instance_override_apply_result(
+        self,
+        *,
+        context_name: str,
+        instance_name: str,
+        last_apply: OdooOverrideApplyResult,
+        updated_at: str,
+        source_label: str,
+    ) -> OdooInstanceOverrideRecord: ...
+
 
 class OdooPostDeployRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -97,20 +107,18 @@ def _write_odoo_instance_override_apply_result(
     source_label: str = "odoo-post-deploy-driver",
 ) -> OdooInstanceOverrideRecord:
     now = utc_now_timestamp()
-    updated_record = record.model_copy(
-        update={
-            "last_apply": OdooOverrideApplyResult(
-                attempted=status in {"pending", "pass", "fail"},
-                status=status,
-                applied_at=now if status in {"pass", "fail"} else "",
-                detail=detail,
-            ),
-            "updated_at": now,
-            "source_label": source_label,
-        }
+    return record_store.update_odoo_instance_override_apply_result(
+        context_name=record.context,
+        instance_name=record.instance,
+        last_apply=OdooOverrideApplyResult(
+            attempted=status in {"pending", "pass", "fail"},
+            status=status,
+            applied_at=now if status in {"pass", "fail"} else "",
+            detail=detail,
+        ),
+        updated_at=now,
+        source_label=source_label,
     )
-    record_store.write_odoo_instance_override_record(updated_record)
-    return updated_record
 
 
 def _prefix_post_deploy_readback_evidence(markers: dict[str, str]) -> dict[str, str]:
@@ -120,7 +128,7 @@ def _prefix_post_deploy_readback_evidence(markers: dict[str, str]) -> dict[str, 
 def _require_record_store(record_store: object) -> OdooPostDeployStore:
     required_methods = (
         "read_odoo_instance_override_record",
-        "write_odoo_instance_override_record",
+        "update_odoo_instance_override_apply_result",
     )
     missing_methods = tuple(
         method_name

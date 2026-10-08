@@ -2661,6 +2661,14 @@ context only, and `context_instance` has both context and instance.
   `live_sync_required`. Production is outside this capability. Client-system
   approval and activation follow [DIRECTION.md](../DIRECTION.md) and the
   [overall stop boundaries](https://github.com/cbusillo/direction/blob/main/DIRECTION.md).
+  Deployed review/apply must wait until both the API and workers support
+  runtime references. Once a record uses that source, older Launchplane builds
+  cannot read it; qualify a compatible rollback build before any Client-system
+  apply. A compatible rollback or reviewed forward fix keeps runtime authority
+  intact. The existing `web.base.url` writer cannot convert these import keys
+  back to literals. Late post-deploy completions update only apply metadata;
+  automatic canonical-URL and service setting writes refuse stale record
+  snapshots instead of restoring old import literals.
 - For shared/live Shopify addon settings, use
   `POST /v1/product-config/odoo-addon-settings/apply` (contract operation
   `apply_odoo_addon_settings`) through the Launchplane helper or service API.

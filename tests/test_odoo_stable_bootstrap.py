@@ -205,7 +205,12 @@ class _Store:
                 return record
         raise FileNotFoundError(f"{context_name}/{instance_name}")
 
-    def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> None:
+    def write_odoo_instance_override_record(
+        self,
+        record: OdooInstanceOverrideRecord,
+        *,
+        expected_record: OdooInstanceOverrideRecord | None = None,
+    ) -> None:
         self.odoo_instance_override_records.append(record)
 
 

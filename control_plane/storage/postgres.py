@@ -326,7 +326,10 @@ from control_plane.contracts.merge_train_policy import (
 from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackRecord,
 )
-from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_instance_override_record import (
+    OdooInstanceOverrideRecord,
+    OdooOverrideApplyResult,
+)
 from control_plane.contracts.odoo_prod_promotion_operation import (
     ODOO_PROD_PROMOTION_OPERATION_PHASE_SEQUENCE,
     OdooProdPromotionCheckpoint,
@@ -37692,6 +37695,7 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         required_context_owner: tuple[str, str] | None = None,
         required_product_config_target: tuple[str, str, str] | None = None,
+        expected_record: OdooInstanceOverrideRecord | None = None,
     ) -> None:
         row = LaunchplaneOdooInstanceOverrideRow(
             context=record.context,
@@ -37699,12 +37703,30 @@ class PostgresRecordStore(HumanSessionStore):
             updated_at=record.updated_at,
             payload=self._payload_dict(record),
         )
-        if required_context_owner is None and required_product_config_target is None:
+        if (
+            required_context_owner is None
+            and required_product_config_target is None
+            and expected_record is None
+        ):
             self._write_row(row)
             return
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
+            if expected_record is not None:
+                current = session.scalar(
+                    select(LaunchplaneOdooInstanceOverrideRow)
+                    .where(
+                        LaunchplaneOdooInstanceOverrideRow.context == record.context,
+                        LaunchplaneOdooInstanceOverrideRow.instance == record.instance,
+                    )
+                    .with_for_update()
+                )
+                if (
+                    current is None
+                    or OdooInstanceOverrideRecord.model_validate(current.payload) != expected_record
+                ):
+                    raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
             require_bundle_context_owner(
                 ProductAuthorityBundle(
                     required_context_owner=required_context_owner,
@@ -37717,6 +37739,41 @@ class PostgresRecordStore(HumanSessionStore):
             )
             session.merge(row)
             session.commit()
+
+    def update_odoo_instance_override_apply_result(
+        self,
+        *,
+        context_name: str,
+        instance_name: str,
+        last_apply: OdooOverrideApplyResult,
+        updated_at: str,
+        source_label: str,
+    ) -> OdooInstanceOverrideRecord:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            row = session.scalar(
+                select(LaunchplaneOdooInstanceOverrideRow)
+                .where(
+                    LaunchplaneOdooInstanceOverrideRow.context == context_name,
+                    LaunchplaneOdooInstanceOverrideRow.instance == instance_name,
+                )
+                .with_for_update()
+            )
+            if row is None:
+                raise FileNotFoundError("Odoo override record no longer exists")
+            current = OdooInstanceOverrideRecord.model_validate(row.payload)
+            updated = current.model_copy(
+                update={
+                    "last_apply": last_apply,
+                    "updated_at": updated_at,
+                    "source_label": source_label,
+                }
+            )
+            row.payload = self._payload_dict(updated)
+            row.updated_at = updated_at
+            session.commit()
+            return updated
 
     def read_odoo_instance_override_record(
         self, *, context_name: str, instance_name: str

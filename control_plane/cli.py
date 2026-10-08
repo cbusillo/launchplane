@@ -2659,19 +2659,19 @@ def _write_odoo_instance_override_apply_result(
     postgres_store = PostgresRecordStore(database_url=database_url)
     postgres_store.ensure_schema()
     try:
-        updated_record = record.model_copy(
-            update={
-                "last_apply": OdooOverrideApplyResult(
-                    attempted=status in {"pending", "pass", "fail"},
-                    status=status,
-                    applied_at=utc_now_timestamp() if status in {"pass", "fail"} else "",
-                    detail=detail,
-                ),
-                "updated_at": utc_now_timestamp(),
-                "source_label": "odoo-post-deploy-driver",
-            }
+        now = utc_now_timestamp()
+        postgres_store.update_odoo_instance_override_apply_result(
+            context_name=record.context,
+            instance_name=record.instance,
+            last_apply=OdooOverrideApplyResult(
+                attempted=status in {"pending", "pass", "fail"},
+                status=status,
+                applied_at=now if status in {"pass", "fail"} else "",
+                detail=detail,
+            ),
+            updated_at=now,
+            source_label="odoo-post-deploy-driver",
         )
-        postgres_store.write_odoo_instance_override_record(updated_record)
     finally:
         postgres_store.close()
 
