@@ -2171,9 +2171,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
     def test_explicit_rollback_can_replace_a_newer_build(self) -> None:
         self._apply_stored_artifact(backwards=True, rollback=True)
 
-    def _apply_stored_artifact(self, *, backwards: bool = False, rollback: bool = False) -> None:
+    def test_same_artifact_redeploy_keeps_the_historical_sender_contract(self) -> None:
+        self._apply_stored_artifact(replay=True)
+
+    def _apply_stored_artifact(
+        self, *, backwards: bool = False, rollback: bool = False, replay: bool = False
+    ) -> None:
         current_commit = ("b" if backwards else "a") * 40
-        desired_commit = ("a" if backwards else "b") * 40
+        desired_commit = current_commit if replay else ("a" if backwards else "b") * 40
         fresh_manifest = _artifact_manifest(
             artifact_id="artifact-cm-fresh",
             source_commit=desired_commit,
@@ -2202,7 +2207,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             profile=profile,
             target_record=_target_record(),
             target_id_record=_target_id_record(),
-            inventory=_inventory().model_copy(update={"source_git_ref": current_commit}),
+            inventory=_inventory().model_copy(
+                update={
+                    "source_git_ref": current_commit,
+                    "artifact_identity": ArtifactIdentityReference(
+                        artifact_id=fresh_manifest.artifact_id if replay else "artifact-cm-testing"
+                    ),
+                }
+            ),
             artifact_manifests=(_artifact_manifest(source_commit=current_commit), fresh_manifest),
         )
         persisted_env = ""
@@ -2221,6 +2233,19 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                         "ODOO_DB_VOLUME=cm_testing_odoo_db",
                         "ODOO_INSTALL_MODULES=cm_website,legacy_theme",
+                        "LAUNCHPLANE_RUNTIME_IDENTITY_JSON="
+                        + json.dumps(
+                            {
+                                "product": profile.product,
+                                "context": "cm",
+                                "instance": "testing",
+                                "artifact_id": fresh_manifest.artifact_id,
+                                "source_git_ref": desired_commit,
+                                "image_reference": f"{fresh_manifest.image.repository}@{fresh_manifest.image.digest}",
+                            }
+                        )
+                        if replay
+                        else "",
                     )
                 ),
             }
@@ -2289,7 +2314,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     phase="deploy",
                     post_deploy_status="pass",
                 ),
-            ),
+            ) as post_deploy,
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.verify_odoo_stable_readiness",
                 return_value=_verification_result(),
@@ -2321,6 +2346,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             self.assertEqual(failure.code, result.error_code)
             return
         self.assertEqual(result.deploy_status, "pass")
+        self.assertEqual(
+            post_deploy.call_args.kwargs["allow_historical_sender_contract"], rollback or replay
+        )
         self.assertEqual(result.artifact_id, "artifact-cm-fresh")
         self.assertEqual(
             result.image_reference,

@@ -171,6 +171,7 @@ def execute_odoo_post_deploy(
     hold_uncertain_effects: bool = False,
     provider_operation_title: str = "",
     schedule_execution_timeout_seconds: int | None = None,
+    allow_historical_sender_contract: bool = False,
 ) -> OdooPostDeployResult:
     typed_record_store = _require_record_store(record_store)
     odoo_override_record = _read_odoo_instance_override_record(
@@ -258,6 +259,7 @@ def execute_odoo_post_deploy(
                 before_provider_mutation=before_provider_effect,
                 deployment_title=provider_operation_title,
                 schedule_execution_timeout_seconds=schedule_execution_timeout_seconds,
+                allow_historical_sender_contract=allow_historical_sender_contract,
             )
             or {}
         )
@@ -270,7 +272,8 @@ def execute_odoo_post_deploy(
             and (override_payload.website_bootstrap.company_email)
         ):
             dokploy_post_deploy.require_odoo_company_email_readback_evidence(
-                post_deploy_readback_markers
+                post_deploy_readback_markers,
+                allow_historical_contract=allow_historical_sender_contract,
             )
     except (click.ClickException, OSError) as error:
         determinate_failure = isinstance(

@@ -372,15 +372,18 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
         )
         environment = build_post_deploy_environment(override, workflow_intent="deploy")
         cases = (
-            ("false", None, True, "pass"),  # Pre-marker rollback / re-deploy.
-            ("true", None, True, "fail"),  # Current forward deploy lost its proof.
-            (None, None, True, "fail"),  # Missing logs never prove an old contract.
-            ("false", "false", True, "fail"),  # Explicit mismatch cannot be skipped.
-            ("false", None, False, "fail"),  # Old bootstrap must still complete.
-            ("true", "true", True, "pass"),
+            ("false", None, True, True, "pass"),  # Pre-marker rollback / re-deploy.
+            ("false", None, True, False, "fail"),  # Forward deploy stays strict.
+            ("true", None, True, False, "fail"),  # Current forward deploy lost its proof.
+            (None, None, True, True, "fail"),  # Missing logs never prove an old contract.
+            ("false", "false", True, True, "fail"),  # Explicit mismatch cannot be skipped.
+            ("false", None, False, True, "fail"),  # Old bootstrap must still complete.
+            ("true", "true", True, False, "pass"),
         )
-        for supported, sender, bootstrap_complete, expected_status in cases:
-            with self.subTest(supported=supported, sender=sender, bootstrap=bootstrap_complete):
+        for supported, sender, bootstrap_complete, replay, expected_status in cases:
+            with self.subTest(
+                supported=supported, sender=sender, bootstrap=bootstrap_complete, replay=replay
+            ):
                 logs = [f"{key}={value}" for key, value in _module_update_evidence().items()]
                 if bootstrap_complete:
                     logs.extend(
@@ -451,6 +454,7 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                             control_plane_root=root,
                             record_store=store,
                             request=OdooPostDeployRequest(context="cm_website", instance="prod"),
+                            allow_historical_sender_contract=replay,
                         )
                     self.assertEqual(result.post_deploy_status, expected_status)
                     evidence = post_deploy_evidence_from_odoo_result(result)

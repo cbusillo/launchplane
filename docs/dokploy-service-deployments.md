@@ -52,7 +52,8 @@ and new code patch dependencies at the canonical module so the compatibility
 surface does not become a second implementation authority.
 
 Odoo post-deploy sender verification follows the deployed image's bootstrap
-contract. When a company email is requested, the maintenance schedule reads and
+contract. On a rollback or exact artifact re-deploy, when a company email is
+requested, the maintenance schedule reads and
 parses that image's `odoo_website_bootstrap.py` after the module update. A
 recognized historical bootstrap without the company-email readback marker may
 pass on its existing module-update and website-bootstrap proof; evidence records
@@ -60,7 +61,10 @@ pass on its existing module-update and website-bootstrap proof; evidence records
 This means the sender was **not verified**, not that it matched. Rollbacks and
 re-deploys retain this compatibility without rebuilding the pinned artifact.
 Current bootstrap scripts still require the sender-match marker, including on
-forward deploys. Missing capability evidence, an unreadable or unrecognized
+rollback. New forward artifacts always require the marker, regardless of the
+bootstrap script's contents. An exact re-deploy must match the existing runtime
+identity's product, lane, artifact, source commit and immutable image reference.
+Missing capability evidence, an unreadable or unrecognized
 script, incomplete bootstrap proof, or an explicit sender mismatch never earns
 the historical exception. Other post-deploy, integration and health gates remain
 in force.

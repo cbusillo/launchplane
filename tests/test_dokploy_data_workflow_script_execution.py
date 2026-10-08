@@ -555,7 +555,9 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
                 )
                 evidence["log_available"] = "true"
                 if expected_status == "pass":
-                    dokploy_post_deploy.require_odoo_company_email_readback_evidence(evidence)
+                    dokploy_post_deploy.require_odoo_company_email_readback_evidence(
+                        evidence, allow_historical_contract=True
+                    )
                     if not sender:
                         self.assertEqual(
                             evidence["website_bootstrap_company_email_skip_reason"],

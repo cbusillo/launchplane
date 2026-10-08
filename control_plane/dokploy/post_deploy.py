@@ -411,6 +411,7 @@ def run_compose_post_deploy_update(
     before_provider_mutation: Callable[[str], None] | None = None,
     deployment_title: str = "",
     schedule_execution_timeout_seconds: int | None = None,
+    allow_historical_sender_contract: bool = False,
 ) -> dict[str, str]:
     compose_id = target_definition.target_id.strip()
     compose_name = (
@@ -635,7 +636,7 @@ def run_compose_post_deploy_update(
             target_definition.instance
         ),
         bootstrap_missing_database=bootstrap_missing_database and not run_destructive_restore,
-        probe_company_email_contract=require_company_email,
+        probe_company_email_contract=require_company_email and allow_historical_sender_contract,
     )
     schedule_payload: api.JsonObject = {
         "name": schedule_name,
@@ -704,7 +705,9 @@ def run_compose_post_deploy_update(
     if require_company_email or readback_policy.required:
         require_odoo_module_update_readback_evidence(evidence)
     if require_company_email:
-        require_odoo_company_email_readback_evidence(evidence)
+        require_odoo_company_email_readback_evidence(
+            evidence, allow_historical_contract=allow_historical_sender_contract
+        )
     require_integration_readback_evidence(evidence, readback_policy)
     return evidence
 
@@ -2141,11 +2144,14 @@ def require_odoo_module_update_readback_evidence(evidence: Mapping[str, str]) ->
         )
 
 
-def require_odoo_company_email_readback_evidence(evidence: dict[str, str]) -> None:
+def require_odoo_company_email_readback_evidence(
+    evidence: dict[str, str], *, allow_historical_contract: bool = False
+) -> None:
     if evidence.get(ODOO_COMPANY_EMAIL_MATCH_MARKER) == "true":
         return
     if (
-        evidence.get(ODOO_COMPANY_EMAIL_CONTRACT_MARKER) == "false"
+        allow_historical_contract
+        and evidence.get(ODOO_COMPANY_EMAIL_CONTRACT_MARKER) == "false"
         and ODOO_COMPANY_EMAIL_MATCH_MARKER not in evidence
     ):
         # The old artifact never managed this setting. Keep its own bootstrap
