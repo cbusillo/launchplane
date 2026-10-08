@@ -1133,6 +1133,20 @@ def _store_with_production(
 class GenericWebProdPromotionRollbackTests(unittest.TestCase):
     def setUp(self) -> None:
         stub_verified_promotion_backup(self, "control_plane.workflows.generic_web_promotion")
+        from tests.support.lane_builds import LaneBuildGitHub
+
+        profile = _profile()
+        transport = LaneBuildGitHub(
+            profile.repository,
+            profile.image.repository,
+            {"1" * 40: "sha256:" + "f" * 64, "2" * 40: "sha256:" + "b" * 64},
+        )
+        self.enterContext(
+            patch(
+                "control_plane.product_reconcile.resolve_build_provenance_transport",
+                return_value=transport,
+            )
+        )
         self.enterContext(
             patch(
                 "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
@@ -1149,6 +1163,19 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
         deployment_record_id: str = "deployment-promotion-syo-prod",
         provider_effect_checkpoint: Callable[[str], None] | None = None,
     ) -> GenericWebProdPromotionResult:
+        inventory = store.inventories[("sellyouroutboard-testing", "prod")]
+        store.inventories[("sellyouroutboard-testing", "prod")] = inventory.model_copy(
+            update={"source_git_ref": "1" * 40}
+        )
+        testing = store.inventories[("sellyouroutboard-testing", "testing")]
+        store.inventories[("sellyouroutboard-testing", "testing")] = testing.model_copy(
+            update={
+                "source_git_ref": "2" * 40,
+                "artifact_identity": ArtifactIdentityReference(
+                    artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:" + "b" * 64
+                ),
+            }
+        )
         with patch(
             "control_plane.workflows.generic_web_promotion.wait_for_runtime_identity_healthcheck_with_retry",
             side_effect=provider.healthcheck,
@@ -1156,7 +1183,10 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
             return execute_generic_web_prod_promotion(
                 control_plane_root=Path("."),
                 record_store=store,
-                request=_request(),
+                request=_request(
+                    source_git_ref="2" * 40,
+                    artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:" + "b" * 64,
+                ),
                 deploy_provider=provider,
                 provider_operation_title=provider_operation_title,
                 deployment_record_id=deployment_record_id,
@@ -1169,10 +1199,15 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
         checkpoint = Mock()
 
         result = self._promote(store, provider, provider_effect_checkpoint=checkpoint)
+        candidate = store.inventories[("sellyouroutboard-testing", "testing")].artifact_identity
+        assert candidate is not None
 
         self.assertEqual(
             provider.deployed_artifacts,
-            ["ghcr.io/cbusillo/sellyouroutboard@sha256:abc123", _PREVIOUS_ARTIFACT],
+            [
+                candidate.artifact_id,
+                _PREVIOUS_ARTIFACT,
+            ],
         )
         assert provider.running is not None
         self.assertEqual(provider.running.artifact_id, _PREVIOUS_ARTIFACT)
@@ -1207,7 +1242,7 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
     ) -> None:
         store = _store_with_production()
         provider = _ProductionProvider(
-            fail_artifact="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123"
+            fail_artifact="ghcr.io/cbusillo/sellyouroutboard@sha256:" + "b" * 64
         )
 
         result = self._promote(store, provider)
@@ -1246,7 +1281,11 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
             execute_generic_web_prod_promotion(
                 control_plane_root=Path("."),
                 record_store=store,
-                request=_request(dry_run=True),
+                request=_request(
+                    dry_run=True,
+                    source_git_ref="2" * 40,
+                    artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:" + "b" * 64,
+                ),
             )
 
         self.assertEqual(provider.deployed_artifacts, [])

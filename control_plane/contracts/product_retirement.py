@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.secret_record import SecretRecord
+
 
 ProductRetirementMode = Literal["plan", "apply"]
 ProductRetirementOutcome = Literal[
@@ -18,6 +20,10 @@ ProductRetirementOutcome = Literal[
     "failed",
 ]
 MAX_PRODUCT_RETIREMENT_ERROR_MESSAGE_LENGTH = 1000
+
+
+def product_retirement_secret_authority(record: SecretRecord) -> dict[str, object]:
+    return record.model_dump(mode="json", exclude={"status", "updated_at", "updated_by"})
 
 
 def canonical_sha256(value: object) -> str:

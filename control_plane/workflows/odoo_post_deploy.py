@@ -16,7 +16,11 @@ from control_plane.contracts.odoo_instance_override_record import (
 )
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployWorkflowIntent
+from control_plane.contracts.odoo_target_replacement_failures import (
+    OdooProviderEffectUncertainError,
+)
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
 
@@ -164,6 +168,7 @@ def execute_odoo_post_deploy(
     env_file: Path | None = None,
     run_destructive_restore: bool = False,
     provider_effect_checkpoint: Callable[[str], None] | None = None,
+    hold_uncertain_effects: bool = False,
     provider_operation_title: str = "",
     schedule_execution_timeout_seconds: int | None = None,
 ) -> OdooPostDeployResult:
@@ -231,6 +236,14 @@ def execute_odoo_post_deploy(
                 error_message=str(error),
             )
 
+    provider_effect_started = False
+
+    def before_provider_effect(effect_name: str) -> None:
+        nonlocal provider_effect_started
+        if provider_effect_checkpoint is not None:
+            provider_effect_checkpoint(effect_name)
+        provider_effect_started = True
+
     try:
         host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
         post_deploy_readback_markers = (
@@ -242,7 +255,7 @@ def execute_odoo_post_deploy(
                 workflow_environment_overrides=workflow_environment_overrides,
                 required_workflow_environment_keys=required_workflow_environment_keys,
                 run_destructive_restore=run_destructive_restore,
-                before_provider_mutation=provider_effect_checkpoint,
+                before_provider_mutation=before_provider_effect,
                 deployment_title=provider_operation_title,
                 schedule_execution_timeout_seconds=schedule_execution_timeout_seconds,
             )
@@ -251,7 +264,20 @@ def execute_odoo_post_deploy(
         dokploy_post_deploy.require_odoo_module_update_readback_evidence(
             post_deploy_readback_markers
         )
-    except click.ClickException as error:
+    except (click.ClickException, OSError) as error:
+        determinate_failure = isinstance(
+            error,
+            (
+                dokploy_api.DokployDeploymentFailed,
+                dokploy_post_deploy.OdooPostDeployReadbackFailure,
+            ),
+        ) or (
+            isinstance(error, dokploy_api.DokployScheduleExecutionFailed)
+            and error.cause in {"remote_command_exit", "trigger_rejected"}
+        )
+        uncertain = hold_uncertain_effects and provider_effect_started and not determinate_failure
+        if isinstance(error, OSError) and not uncertain:
+            raise
         if isinstance(error, dokploy_post_deploy.OdooPostDeployReadbackFailure):
             post_deploy_readback_markers = error.evidence
         if odoo_override_record is not None and override_should_apply:
@@ -261,6 +287,10 @@ def execute_odoo_post_deploy(
                 status="fail",
                 detail=str(error),
             )
+        if uncertain:
+            raise OdooProviderEffectUncertainError(
+                "Odoo post-deploy provider effect requires reconciliation."
+            ) from error
         return OdooPostDeployResult(
             context=request.context,
             instance=request.instance,

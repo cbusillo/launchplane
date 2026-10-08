@@ -301,8 +301,22 @@ def _postgres_root_database_url() -> str:
 
 def _alembic_config(database_url: str) -> AlembicConfig:
     config = AlembicConfig("alembic.ini")
-    config.set_main_option("sqlalchemy.url", database_url)
+    # Alembic uses ConfigParser interpolation; keep URL escapes literal on read-back.
+    config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
     return config
+
+
+class AlembicFixtureConfigTests(unittest.TestCase):
+    def test_database_url_round_trip(self) -> None:
+        for database_url in (
+            "postgresql+psycopg://fixture@localhost/fixture",
+            "postgresql+psycopg://fixture@localhost/fixture?options=-cstatement_timeout%3D10000",
+            "postgresql+psycopg://fixture:p%25ss%40word@localhost/fixture"
+            "?application_name=fixture%20migration&options=-cstatement_timeout%3D10000",
+        ):
+            with self.subTest(database_url=database_url):
+                restored_url = _alembic_config(database_url).get_main_option("sqlalchemy.url")
+                self.assertEqual(restored_url, database_url)
 
 
 def _create_postgres_database(root_database_url: str, *, template: str = "") -> str:
@@ -928,6 +942,12 @@ def _owner_acceptance_system_event(
 
 
 class RealPostgresTrackedRetirementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_approved_rotation_survives_stale_retirement(self) -> None:
+        from tests.test_retirement_approved_rotation import RetirementApprovedRotationTests
+
+        with _head_postgres_database() as url:
+            await RetirementApprovedRotationTests().assert_approved_rotation_survives(url)
+
     async def test_checkpoint_insert_race_recovers_through_http(self) -> None:
         for profile_failure, secret_drift in ((True, False), (False, False), (False, True)):
             with (
@@ -967,6 +987,21 @@ class RealPostgresTrackedRetirementTests(unittest.IsolatedAsyncioTestCase):
                     audit_drift=audit_drift,
                     late_audit_writer=True,
                 )
+
+    async def test_secret_late_writer_preserves_authority_and_recovery(self) -> None:
+        for write_kind in ("secret", "binding"):
+            for profile_failure in (True, False):
+                with (
+                    self.subTest(write_kind=write_kind, profile_failure=profile_failure),
+                    _head_postgres_database() as url,
+                ):
+                    fixture = retirement_tests.ProductRetirementHttpTests()
+                    await fixture._assert_tracked_checkpoint_insert_race(
+                        url,
+                        profile_failure=profile_failure,
+                        secret_audit_race=True,
+                        late_secret_write=write_kind,
+                    )
 
 
 class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
@@ -3320,6 +3355,145 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_source_scan_delivery_has_one_lease_and_recovers_without_stale_publication(
+        self,
+    ) -> None:
+        from control_plane.contracts.product_reconcile import (
+            GitHubAppWebhookDeliveryRecord,
+            ProductReconcileLeaseLostError,
+        )
+        from control_plane.storage.postgres import (
+            LaunchplaneGitHubAppWebhookDeliveryRow,
+            CONFIG_AUTHORITY_QUEUE_INDEX,
+        )
+
+        with _head_postgres_database() as url:
+            stores = [PostgresRecordStore(database_url=url) for _ in range(2)]
+            try:
+                from control_plane.storage.migrations.versions import (
+                    f3021a0b1c2d_index_config_authority_delivery_queue as scan_migration,
+                )
+                from control_plane.storage.schema_migration import alembic_config
+
+                # Exercise the migration from its predecessor, rather than merely
+                # accepting the index a fresh baseline creates from current metadata.
+                alembic_command.downgrade(alembic_config(url), scan_migration.down_revision)
+                alembic_command.upgrade(alembic_config(url), scan_migration.revision)
+                realized_indexes = {
+                    entry["name"]
+                    for entry in inspect(stores[0]._engine).get_indexes(
+                        LaunchplaneGitHubAppWebhookDeliveryRow.__tablename__
+                    )
+                }
+                self.assertIn(CONFIG_AUTHORITY_QUEUE_INDEX.name, realized_indexes)
+                delivery = GitHubAppWebhookDeliveryRecord(
+                    delivery_id="source-scan",
+                    event="push",
+                    repository_id="42",
+                    received_at="2026-10-05T00:00:00Z",
+                    config_authority_state="pending",
+                )
+                stores[0].record_github_app_webhook_delivery(delivery, (), delivery.received_at)
+                followup = delivery.model_copy(update={"delivery_id": "source-scan-followup"})
+                stores[0].record_github_app_webhook_delivery(followup, (), followup.received_at)
+                with ThreadPoolExecutor(max_workers=2) as workers:
+                    futures = [
+                        workers.submit(
+                            store.claim_next_config_authority_delivery, "same-worker", 60
+                        )
+                        for store in stores
+                    ]
+                    claims = [future.result(timeout=10) for future in futures]
+                old = next(claim for claim in claims if claim is not None)
+                self.assertEqual(sum(claim is not None for claim in claims), 1)
+                with stores[0]._session_factory() as session:
+                    row = session.get(LaunchplaneGitHubAppWebhookDeliveryRow, delivery.delivery_id)
+                    assert row is not None
+                    row.payload = {
+                        **row.payload,
+                        "config_authority_lease_expires_at": "2000-01-01T00:00:00Z",
+                    }
+                    session.commit()
+                recovered = stores[1].claim_next_config_authority_delivery("same-worker", 60)
+                assert recovered is not None
+                publisher = Mock()
+                with self.assertRaises(ProductReconcileLeaseLostError):
+                    stores[0].complete_config_authority_delivery(
+                        old, {"status": "pass"}, publish=publisher
+                    )
+                publisher.assert_not_called()
+                publication_started, release_publication = threading.Event(), threading.Event()
+
+                def publish() -> None:
+                    publication_started.set()
+                    if not release_publication.wait(10):
+                        raise AssertionError("Publication test was not released.")
+
+                with ThreadPoolExecutor(max_workers=1) as worker:
+                    publication = worker.submit(
+                        stores[1].complete_config_authority_delivery,
+                        recovered,
+                        {"status": "fail"},
+                        publish,
+                    )
+                    try:
+                        self.assertTrue(publication_started.wait(10))
+                        # Even after this observer's clock crosses the lease, the
+                        # repository fence prevents another delivery's publication.
+                        after_expiry = (
+                            datetime.fromisoformat(
+                                recovered.config_authority_lease_expires_at.replace("Z", "+00:00")
+                            )
+                            + timedelta(seconds=1)
+                        ).isoformat()
+                        with patch.object(
+                            stores[0], "_database_mutation_timestamp", return_value=after_expiry
+                        ):
+                            self.assertIsNone(
+                                stores[0].claim_next_config_authority_delivery("another", 60)
+                            )
+                    finally:
+                        release_publication.set()
+                    publication.result(timeout=10)
+                self.assertEqual(
+                    stores[0]
+                    .read_github_app_webhook_delivery(delivery.delivery_id)
+                    .config_authority["status"],
+                    "fail",
+                )
+            finally:
+                for store in stores:
+                    store.close()
+
+    def test_release_publication_lock_recovers_after_worker_exit(self) -> None:
+        from tests.test_release_review_record import publication_lock_recovers_after_worker_exit
+
+        with _head_postgres_database() as database_url, TemporaryDirectory() as directory:
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                publication_lock_recovers_after_worker_exit(store, Path(directory))
+            finally:
+                store.close()
+
+    def test_release_decision_publishers_create_one_issue_across_connections(self) -> None:
+        from tests.test_release_review_record import concurrent_publication
+
+        with _head_postgres_database() as database_url, TemporaryDirectory() as directory:
+            stores = (
+                PostgresRecordStore(database_url=database_url),
+                PostgresRecordStore(database_url=database_url),
+            )
+            try:
+                urls, github = concurrent_publication(stores, Path(directory))
+                self.assertEqual(len(github.issues), 1)
+                self.assertEqual(urls[0], urls[1])
+                for store in stores:
+                    saved = store.list_release_review_decision_records(product="example-site")
+                    self.assertEqual(saved[0].release_issue_url, urls[0])
+            finally:
+                for store in stores:
+                    store.close()
+
     def test_standing_acceptance_creation_race_returns_one_immutable_decision(self) -> None:
         from tests.test_release_review_storage import standing_decision
 
@@ -8552,3 +8726,90 @@ class RealPostgresProviderDeliveryReadinessTests(unittest.TestCase):
                         capability_reason="provider_wait",
                     )
                 self.assertEqual(actions_used(), before + 1)
+
+
+class RealPostgresServiceTokenRetirementTests(unittest.TestCase):
+    def test_retirement_rechecks_consumers_and_selector_absence_after_waiting_for_lock(
+        self,
+    ) -> None:
+        from tests.test_service_github_delivery_controls import retirement_request, seed_metadata
+        from control_plane.service_github_delivery_controls import apply_service_token_retirement
+        from control_plane.storage.product_authority_bundle import SecretCopySourceConflictError
+
+        for drift in ("new-consumer", "new-global-selector"):
+            with self.subTest(drift=drift), _store_for_fresh_head_database() as store:
+                seed_metadata(store)
+                request = retirement_request()
+                preview = apply_service_token_retirement(
+                    store=store,
+                    request=request,
+                    actor="github:42",
+                    trace_id="preview",
+                    idempotency_key="",
+                )
+                apply = request.model_copy(
+                    update={
+                        "mode": "apply",
+                        "director_confirmed": True,
+                        "expected_plan_digest": preview.plan_digest,
+                    }
+                )
+                at_lock = threading.Event()
+                original_lock = store._lock_product_authority_bundle_write
+
+                def signal_lock(session: Any) -> None:
+                    at_lock.set()
+                    original_lock(session)
+
+                with store._session_factory() as competing:
+                    original_lock(competing)
+                    if drift == "new-consumer":
+                        binding = next(
+                            item
+                            for item in store.list_secret_bindings()
+                            if item.secret_id == "token-global"
+                        )
+                        competing.merge(
+                            store._secret_binding_row(
+                                binding.model_copy(update={"binding_id": "new-consumer"})
+                            )
+                        )
+                    else:
+                        competing.merge(
+                            store._runtime_environment_row(
+                                RuntimeEnvironmentRecord(
+                                    scope="global",
+                                    env={"LAUNCHPLANE_DELIVERY_GITHUB_APP_ID": "79"},
+                                    updated_at="2026-10-05T01:00:00Z",
+                                )
+                            )
+                        )
+                    competing.flush()
+                    with (
+                        patch.object(
+                            store, "_lock_product_authority_bundle_write", side_effect=signal_lock
+                        ),
+                        ThreadPoolExecutor(max_workers=1) as workers,
+                    ):
+                        future = workers.submit(
+                            apply_service_token_retirement,
+                            store=store,
+                            request=apply,
+                            actor="github:42",
+                            trace_id="retire",
+                            idempotency_key="retire-once",
+                        )
+                        try:
+                            self.assertTrue(at_lock.wait(10))
+                            with self.assertRaises(TimeoutError):
+                                future.result(timeout=0.1)
+                        finally:
+                            competing.commit()
+                        with self.assertRaises(
+                            SecretCopySourceConflictError
+                            if drift == "new-consumer"
+                            else RuntimeEnvironmentConflictError
+                        ):
+                            future.result(timeout=10)
+                self.assertEqual(store.read_secret_record("token-global").status, "configured")
+                self.assertEqual(store.list_secret_audit_events(secret_id="token-global"), ())

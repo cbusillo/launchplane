@@ -490,6 +490,42 @@ mutation_in_progress`; a completed effect replays; a different request
 
 ### Generic-web deploy recovery dry-run/apply
 
+For a held event-driven testing deploy, a scoped admin can first call
+`GET /v1/admin/generic-web/deploy-recovery/{product}/testing` under the existing
+`product_environment.read` authority. This database-only read returns one opaque
+`recovery_reference`, lane and reservation state/attempt. It requires one exact
+held reservation in the event reconciler's scope and an original deploy request
+whose retained request or saved reconcile inputs match the reservation fingerprint.
+New event reservations retain their exact request in the service-owned target snapshot;
+older reservations require fingerprint-matched saved reconcile inputs. If a newer
+build has overwritten those inputs, the reference read refuses: use the legacy
+explicit path only with separately proven original coordinates. Missing,
+ambiguous, cross-lane or changed evidence refuses; the original request, key and
+provider coordinates remain inside Launchplane.
+
+Submit `product`, `instance: "testing"`, `recovery_reference` and `reason` to the
+existing dry-run or provider-evidence POST route, without an `Idempotency-Key`
+header. Apply also requires `expected_recovery_digest` from the reviewed dry run.
+These reference requests require scoped admin identity. Dry-run requires both
+`product_environment.read` and `generic_web_deploy.execute`; provider-evidence
+requires `product_environment.read` plus its existing evidence-read or execute
+authority. Apply requires `generic_web_deploy.execute`. The service resolves the
+original coordinates and runs the same recovery inspector and atomic transition
+as the legacy path. The reference binds the reservation snapshot; changes during
+resolution or inspection refuse. Changed provider observations or reasons invalidate
+the reviewed digest. Reads never create a reservation or inspect a provider;
+dry-run never writes. Unknown outcomes remain held under the existing recovery
+rules. A settled reservation is no longer selectable by a held-event reference.
+After a lost apply response, read the testing lane's deployment and reconcile
+evidence through `GET /v1/products/{product}/environments/testing` and
+`GET /v1/product-profiles/{product}/reconcile-requests`. A missing held reference
+alone does not prove success or failure and never authorizes another provider effect.
+If those reads do not establish the outcome, keep it unconfirmed.
+
+Rollout compatibility: a service build predating the retained-request field
+cannot decode new event target snapshots. Rolling back to such a build leaves
+recovery unavailable and that build's monitor may omit those held fences.
+
 Legacy generic-web deploy recovery starts read-only. Admins call
 `POST /v1/admin/generic-web/deploy-recovery/dry-run` with the exact original
 `GenericWebDeployEnvelope` under `original_deploy`, the original
@@ -2082,7 +2118,7 @@ Current derived-state behavior:
   identity from generated testing runtime evidence, requires current
   testing/production evidence and the selected bump to match the accepted
   direct dry-run, resolves the repository/workflow from the DB-backed product
-  profile, and resolves the managed `GITHUB_TOKEN` from runtime records. The
+  profile, and uses the [GitHub delivery identity](#github-delivery-identity). The
   product workflow receives reviewed `artifact_id` and `source_git_ref` inputs
   and still owns release/tag creation and product-specific safeguards.
 - Promotion status requires digest-pinned testing and production artifacts,
@@ -3551,10 +3587,8 @@ resolve webhook URLs from managed secrets scoped to `launchplane` /
 `preview-feedback`, and attempt records live under
 `launchplane_preview_pr_feedback_notification_attempts` for DB-backed stores or
 `state/launchplane_preview_pr_feedback_notification_attempts/` for filesystem
-stores. Repair missing credentials by configuring the canonical product preview
-context's managed-secret-backed `GITHUB_TOKEN` in Launchplane runtime records;
-do not add repo-local defaults or service-host env fallbacks for product GitHub
-tokens.
+stores. Credential selection follows
+[GitHub delivery identity](#github-delivery-identity).
 
 ### Preview Feedback Remediation
 
@@ -3567,7 +3601,7 @@ confirmation phrase. Stop if the product profile, PR URL, token actor, marker
 author, or observation differs. An absent comment is reconciled as
 `already_absent` with `mutated=false`; it is not rewritten as a deletion.
 
-The route uses the context-scoped preview `GITHUB_TOKEN`, accepts only
+The route follows [GitHub delivery identity](#github-delivery-identity), accepts only
 `local_operator`/`local_admin` identities with `preview_pr_feedback_remediation.plan` or
 `.apply`, and never grants this mutation to preview workflow OIDC identities.
 Attach the remediation and companion feedback record ids to the governing issue.
@@ -3719,6 +3753,12 @@ and authority match. It then uses the current validated profile and managed-secr
 records, preserving a concurrent winner's completed state and disable timestamps.
 Refreshed secrets must still match the reviewed snapshot; rotation or addition
 during the insert race refuses cleanup of that changed authority.
+The final secret-disable write also compares the reviewed secret authority under
+the storage write lock. An approved rotation committed after the last snapshot
+keeps its new version pointer and audit event; retirement refuses the stale
+disable and retains reconciliation. An already-disabled matching secret is
+adopted without rewriting it. This behavior has fixture proof with opaque
+ciphertext, not live-provider or key-retirement proof.
 Unconfirmed checkpoint conflicts retain reconciliation
 evidence and the target fence.
 A same-key retry can resume after target records
@@ -3736,7 +3776,8 @@ managed-secret disable audit evidence through an insert-only path on PostgreSQL
 and SQLite. A stale absent read cannot overwrite a committed event, including
 its original timestamp. The filesystem store exposes the same insert-only create
 operation for local storage use; its concurrency proof covers that operation,
-not HTTP retirement or crash durability.
+not HTTP retirement. See [filesystem storage guarantees](records.md) for
+interruption recovery and durability limits.
 If overlapping attempts collide while inserting the deterministic disable event,
 the loser reads it back and accepts only matching secret, actor, event type,
 detail and reviewed-plan metadata; only the request timestamp may differ.
@@ -3985,7 +4026,11 @@ write-only `private_key` binding in that same context. This lets the existing ke
 stay in its managed-secret record: no new key, copied value or agent credential
 is needed. An integration name retained from an older store is only a key
 selector; it does not activate the retired ordinary-agent delivery machinery.
-Use the signed-in administrator's
+In the Launchplane UI, open **Engineering Ops > GitHub delivery > Select
+Delivery App**. Enter the non-secret App id, choose **Existing managed key**,
+and enter **Selection reason**. Click **Dry run**, review the id and binding,
+confirm that the Director approves, then click **Apply**. The page reads back
+the selection. The UI uses the signed-in administrator's
 `POST /v1/service/github-delivery/configuration` dry-run/apply path for these
 two non-secret runtime values. It requires existing `product_config.plan` /
 `product_config.apply` authority on the service context plus a human administrator
@@ -3997,6 +4042,33 @@ receipt atomically. It does not decrypt, copy, create or rotate a key, mint a
 token, or change grants. The
 service's runtime-settings GET reads them back. Do not put them in host env or
 checked-in config. No live settings change is part of the source PR.
+
+**Retire obsolete service tokens** on the same page is bounded to individually
+selected `launchplane_service` `GITHUB_TOKEN` records at global or context scope,
+with no instance or unrelated binding. Global records are shared across service
+contexts: disabling one affects all inheriting contexts. Enter the Advisory
+check, Delivery comment, and Delivery release-issue receipt URLs, the remaining-
+consumer check evidence, and a reason. These are Director attestations; the
+service does not automatically verify the linked GitHub receipts. **Dry run**
+shows the exact selected record ids and scope. The Director confirms the numeric
+App identities, current PR commit, remaining consumers, and disablement, then
+clicks **Apply**. The UI reads back disabled record status. A draft edit requires
+another dry-run; an uncertain Apply retains its exact request and operation key
+across reload for **Retry Apply**. Session storage must work before apply dispatch.
+
+The metadata-only `GET /v1/service/github-delivery` and
+`POST /v1/service/github-delivery/token-retirement` require a signed-in human
+administrator and the existing service-context `product_config.plan` / `.apply`
+authority; no new grant is introduced. Retirement requires configured Delivery
+and Advisory selectors, the existing Delivery key metadata, receipt links,
+consumer evidence, explicit Director confirmation, a reviewed digest, and an
+actor-bound idempotency key. The database transaction compares the reviewed
+records, all their bindings, key metadata and runtime selector layers (including
+absence), disables only selected records/bindings, and appends audit evidence and
+the replay receipt together. Encrypted versions remain untouched; no secret value
+is read, created or copied. This control neither revokes a GitHub PAT nor retires
+a product. A previously prepared re-encryption cannot re-enable a disabled
+record's metadata. A conflict or scope refusal is reported rather than bypassed.
 
 The operation requests only its needed permissions:
 
@@ -4041,6 +4113,6 @@ source tests are not live installation evidence. Apply the selector promptly
 after deployment and resend feedback for queued Client-labelled PRs through the
 existing product-review feedback retry route, so their current-head checks are
 republished. Only after these receipts and
-remaining-consumer checks should Chris delete the obsolete per-context
-`GITHUB_TOKEN` secrets and revoke the old PAT. Other-token migrations keep their
+remaining-consumer checks should Chris disable the confirmed obsolete service
+`GITHUB_TOKEN` records through the controls above and revoke the old PAT. Other-token migrations keep their
 separate issue scopes; the hold on the shared Odoo Docker token still applies.

@@ -122,19 +122,22 @@ class _PermissiveMergeAdmissionGuard:
     def record_landed(self, **kwargs: object) -> None:
         self.landed_calls.append(kwargs)
 
-    def record_provider_failure(self, **_: object) -> None:
+    @staticmethod
+    def record_provider_failure(**_: object) -> None:
         return None
 
     def record_reconcile_required(self, **kwargs: object) -> None:
         self.reconcile_required_calls.append(kwargs)
 
-    def reconcile_existing_landed(self, **_: object) -> None:
+    @staticmethod
+    def reconcile_existing_landed(**_: object) -> None:
         return None
 
     def reconcile_existing_no_effect(self, **_: object) -> None:
         self.no_effect_reconciliations += 1
 
-    def update_landing_plan(self, _: MergeTrainBatchLandingPlan) -> None:
+    @staticmethod
+    def update_landing_plan(_: MergeTrainBatchLandingPlan) -> None:
         return None
 
 
@@ -358,6 +361,35 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         )
 
         self.assertEqual(comment_url, "https://github.com/example/repo/pull/11#issuecomment-2")
+
+    def test_find_pull_request_comment_url_reads_later_pages(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                [{"body": "old discussion", "html_url": "https://example.test/old"}] * 30,
+                [{"body": "restored annotation", "html_url": "https://example.test/restored"}],
+            )
+        )
+        client = GitHubMergeTrainClient(transport=transport)
+        self.assertEqual(
+            client.find_pull_request_comment_url(
+                repository="example/repo",
+                pull_request_number=11,
+                body_contains="restored annotation",
+            ),
+            "https://example.test/restored",
+        )
+        self.assertIn("page=2", transport.requests[-1].path)
+
+    def test_find_pull_request_comment_url_fails_on_unreadable_later_page(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=([{"body": "old discussion"}] * 30, {"message": "unavailable"})
+        )
+        with self.assertRaises(MergeTrainGitHubError):
+            GitHubMergeTrainClient(transport=transport).find_pull_request_comment_url(
+                repository="example/repo",
+                pull_request_number=11,
+                body_contains="restored annotation",
+            )
 
     def test_pull_request_has_label_reads_pr_labels(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
@@ -2884,6 +2916,13 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
 
 class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # These adapter fixtures have no CODEOWNERS. Owned-file routing has its
+        # own provider-backed tests in test_merge_train_codeowners.
+        fixture = patch("control_plane.merge_train_codeowners._read_patterns", return_value=())
+        fixture.start()
+        self.addCleanup(fixture.stop)
+
     def test_client_review_requires_the_current_head_advisory_check_without_status_fallback(
         self,
     ) -> None:

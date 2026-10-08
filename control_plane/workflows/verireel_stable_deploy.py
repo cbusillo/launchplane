@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 import click
+from control_plane.lane_movement import LaneBuild, LaneMovementRefused, require_forward_ship_build
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
@@ -386,18 +387,30 @@ def execute_verireel_stable_deploy(
             control_plane_root=control_plane_root,
             request=request,
         )
+        require_forward_ship_build(
+            record_store=record_store,
+            context=request.context,
+            instance=request.instance,
+            desired=LaneBuild(
+                request.artifact_id,
+                request.source_git_ref,
+                request.artifact_id,
+                deploy_reference=request.deploy_reference,
+            ),
+        )
     except click.ClickException as exc:
         finished_at = utc_now_timestamp()
-        record_store.write_deployment_record(
-            build_deployment_record(
-                request=fallback_request,
-                record_id=record_id,
-                deployment_id="control-plane-dokploy",
-                deployment_status="fail",
-                started_at=started_at,
-                finished_at=finished_at,
-            )
+        failed_record = build_deployment_record(
+            request=fallback_request,
+            record_id=record_id,
+            deployment_id="control-plane-dokploy",
+            deployment_status="fail",
+            started_at=started_at,
+            finished_at=finished_at,
         )
+        if isinstance(exc, LaneMovementRefused):
+            failed_record = failed_record.model_copy(update={"failure": exc.record_failure()})
+        record_store.write_deployment_record(failed_record)
         return _build_result(
             deployment_record_id=record_id,
             deploy_status="fail",

@@ -10,7 +10,17 @@ the plan on its request.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from control_plane.event_testing_deploy import event_testing_deploy_request
+from control_plane.lane_movement import (
+    LANE_MOVEMENT_REFUSALS,
+    LaneBuild,
+    LaneMovementRefused,
+    current_lane_build,
+    current_preview_builds,
+    require_forward_build,
+)
+
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -78,7 +88,6 @@ from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.generic_web_deploy_http import (
     GENERIC_WEB_DEPLOY_ROUTE,
-    GenericWebDeployEnvelope,
     GenericWebDeployProductMismatchError,
     GenericWebDeployRouteDependencyError,
     resolve_generic_web_deploy_lane,
@@ -173,7 +182,6 @@ from control_plane.testing_lane_hold import (
     is_staff_testing_hold_cancellation,
     read_staff_testing_hold,
 )
-from control_plane.workflows.generic_web_deploy import GenericWebDeployRequest
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebDeployProvider,
     default_generic_web_deploy_provider,
@@ -205,6 +213,7 @@ GENERIC_WEB_PREVIEW_TIMEOUT_SECONDS = 300
 TESTING_BUILD_RUN_PAGE_SIZE = 50
 TESTING_VERIFY_LIMIT = 3
 _ENDED_PREVIEW_STATES = frozenset({"destroyed", "teardown_pending"})
+PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS = 3
 OPEN_PULL_REQUEST_SWEEP_PAGES = 5
 _LEASE_LOST = "This worker no longer holds the reconcile request's lease; nothing more was changed."
 _LOGGER = logging.getLogger(__name__)
@@ -219,6 +228,10 @@ class ProductReconcileError(Exception):
 
 
 class ProductReconcileStore(Protocol):
+    def list_product_reconcile_requests(
+        self, *, state: str = "", product: str = "", limit: int | None = 100
+    ) -> tuple[ProductReconcileRequestRecord, ...]: ...
+
     def read_idempotency_record(
         self, *, scope: str, route_path: str, idempotency_key: str
     ) -> LaunchplaneIdempotencyRecord | None: ...
@@ -646,14 +659,10 @@ def _deploy_generic_web_testing(
             hold_recorded_at=hold.recorded_at,
         )
         return ReconcileOutcome(plan)
-    envelope = GenericWebDeployEnvelope(
+    envelope = event_testing_deploy_request(
         product=profile.product,
-        deploy=GenericWebDeployRequest(
-            product=profile.product,
-            instance=TESTING_INSTANCE,
-            artifact_id=desired.image_reference,
-            source_git_ref=desired.manifest.source_commit,
-        ),
+        image_reference=desired.image_reference,
+        source_commit=desired.manifest.source_commit,
     )
     # The deployment testing ran when this deploy was decided is part of its key:
     # every deploy and rollback records a new one, so a lane changed since gets the
@@ -677,6 +686,7 @@ def _deploy_generic_web_testing(
             lane=lane,
             trace_id=trace_id,
             deploy_provider=testing_hooks.generic_web_deploy_provider(),
+            retain_event_request=True,
         )
         # The reconcile request's lane lease serializes these decisions. A new
         # authority key must not bypass an unresolved old attempt, even after a
@@ -1107,8 +1117,10 @@ def _testing_failure_reason(
             f"{PLAN_BLOCKER_DESCRIPTIONS.get(blocker_code, _UNKNOWN_PLAN_BLOCKER)}"
         )
     else:
-        description = deploy_failure_description(error_code) or TESTING_FAILURE_DESCRIPTIONS.get(
-            error_code, _UNKNOWN_TESTING_FAILURE
+        description = (
+            LANE_MOVEMENT_REFUSALS.get(error_code.removeprefix("lane_movement."))
+            or deploy_failure_description(error_code)
+            or TESTING_FAILURE_DESCRIPTIONS.get(error_code, _UNKNOWN_TESTING_FAILURE)
         )
     parts = [description]
     if operation.error_detail_keys:
@@ -1156,11 +1168,34 @@ def _plan_testing_target(
     lane = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
     if lane is None:
         raise ProductReconcileError(f"Product {profile.product} has no testing lane.")
-    desired, rejected, absent_reason = _desired_release(
-        transport=transport, profile=profile, repository_id=repository_id, lane=lane
-    )
     current_artifact_id, current_digest = _current_testing_release(
         record_store=record_store, profile=profile, lane=lane
+    )
+    current_commit = ""
+    current_run_id = 0
+    if current_artifact_id:
+        try:
+            current_manifest = record_store.read_artifact_manifest(current_artifact_id)
+            current_commit = current_manifest.source_commit
+            if current_manifest.source_build is not None:
+                current_run_id = current_manifest.source_build.run_id
+        except FileNotFoundError:
+            try:
+                inventory = record_store.read_environment_inventory(
+                    context_name=lane.context, instance_name="testing"
+                )
+                current_commit = inventory.source_git_ref
+            except FileNotFoundError:
+                pass
+    selection: dict[str, object] = {}
+    desired, rejected, absent_reason = _desired_release(
+        transport=transport,
+        profile=profile,
+        repository_id=repository_id,
+        lane=lane,
+        current_commit=current_commit,
+        current_run_id=current_run_id,
+        selection=selection,
     )
     plan: dict[str, object] = {
         "target": "testing",
@@ -1170,11 +1205,17 @@ def _plan_testing_target(
         "desired_image_digest": "",
         "current_artifact_id": current_artifact_id,
         "current_image_digest": current_digest,
+        "current_commit": current_commit,
+        **selection,
     }
     if rejected:
         plan["rejected_builds"] = rejected
     if desired is None:
-        plan.update(action="none", reason=absent_reason, held=False)
+        plan.update(
+            action="none",
+            reason=absent_reason,
+            held=absent_reason in {"incomplete_build_runs", "incomplete_commit_history"},
+        )
         return plan, None
     desired_artifact_id = (
         desired.image_reference
@@ -1190,6 +1231,34 @@ def _plan_testing_target(
     if desired_artifact_id == current_artifact_id or desired_digest == current_digest:
         plan.update(action="none", reason="already_deployed", held=False)
     else:
+        if current_artifact_id and not current_commit:
+            plan.update(action="none", reason="current_source_unverified", held=True)
+            return plan, None
+        try:
+            require_forward_build(
+                record_store=record_store,
+                profile=profile,
+                transport=transport,
+                current=LaneBuild(
+                    current_artifact_id,
+                    current_commit,
+                    f"{profile.image.repository}@{current_digest}",
+                    observed_at=current_lane_build(
+                        record_store, context=lane.context, instance=lane.instance
+                    ).observed_at,
+                ),
+                desired=LaneBuild(
+                    desired_artifact_id,
+                    desired.manifest.source_commit,
+                    f"{profile.image.repository}@{desired_digest}",
+                    desired.source_build
+                    if isinstance(desired, VerifiedGenericWebBuild)
+                    else desired.manifest.source_build,
+                ),
+            )
+        except LaneMovementRefused as error:
+            plan.update(action="none", reason=error.code, held=True)
+            return plan, None
         plan.update(action="deploy")
     return plan, desired
 
@@ -1392,6 +1461,27 @@ def _plan_preview_target(
     if live and desired_digest == current["current_image_digest"]:
         plan.update(action="none", reason="already_serving", held=False)
     else:
+        try:
+            for movement in current_preview_builds(record_store, profile, pull_request_number):
+                require_forward_build(
+                    record_store=record_store,
+                    profile=profile,
+                    transport=transport,
+                    current=movement,
+                    desired=LaneBuild(
+                        verified.manifest.artifact_id
+                        if isinstance(verified, VerifiedBuildArtifact)
+                        else verified.image_reference,
+                        manifest.source_commit,
+                        f"{profile.image.repository}@{desired_digest}",
+                        verified.manifest.source_build
+                        if isinstance(verified, VerifiedBuildArtifact)
+                        else verified.source_build,
+                    ),
+                )
+        except LaneMovementRefused as error:
+            plan.update(action="wait", reason=error.code, held=True)
+            return _PreviewDecision(plan=plan, lifecycle_token=lifecycle_token, observed=observed)
         plan.update(action="apply", held=False)
     return _PreviewDecision(
         plan=plan, verified=verified, lifecycle_token=lifecycle_token, observed=observed
@@ -1534,6 +1624,7 @@ def _run_preview_operation(
         driver_result = driver_result if isinstance(driver_result, dict) else {}
         result_status = str(driver_result.get("status") or "")
         plan["preview_result_status"] = result_status
+        plan["preview_result_error_code"] = str(driver_result.get("error_code") or "")
         if operation_result.status in {"conflict", "reconcile_required"} or result_status != "pass":
             if (
                 operation == "destroy"
@@ -1677,9 +1768,12 @@ def _run_generic_web_preview_operation(
     if isinstance(verified, VerifiedGenericWebBuild):
         build_run = f"run-{verified.source_build.run_id}-{verified.source_build.run_attempt}"
         plan["preview_build_run"] = build_run
-        if previous_plan.get("preview_build_run") == build_run and previous_plan.get(
-            "preview_result_status"
-        ) in {"fail", "blocked"}:
+        if (
+            previous_plan.get("preview_build_run") == build_run
+            and previous_plan.get("preview_result_status") in {"fail", "blocked"}
+            and previous_plan.get("preview_result_error_code")
+            != "lane_movement.source_order_unavailable"
+        ):
             # Every sweep would otherwise run the same failing refresh again.
             plan["preview_result_status"] = previous_plan["preview_result_status"]
             return _preview_failure(plan, "preview_build_failed")
@@ -1739,6 +1833,7 @@ def _run_generic_web_preview_operation(
         plan["preview_result_status"] = "refused"
         return _preview_failure(plan, "preview_apply_failed")
     plan["preview_result_status"] = status
+    plan["preview_result_error_code"] = str(result.get("error_message", "")).split(":", 1)[0]
     if status != "pass":
         _LOGGER.warning(
             "Generic-web preview %s of %s ended %s: %s",
@@ -1940,6 +2035,33 @@ def run_product_reconcile_once(
     )
     if feedback is not None:
         plan[PR_FEEDBACK_PLAN_KEY] = feedback
+    if request.target_kind == "preview" and _needs_absent_preview_feedback_recovery(plan):
+        # Only unresolved reads or terminal clear delivery consume this budget. Open
+        # PRs waiting for builds retain their ordinary event/sweep coverage.
+        if outcome.error or plan.get("reason") == "pull_request_not_open":
+            closed = not outcome.error and plan.get("reason") == "pull_request_not_open"
+            previously_closed = request.last_plan.get("feedback_recovery_closed_observed") is True
+            attempts = _feedback_recovery_failed_attempts(request.last_plan)
+            new_delivery = bool(request.last_delivery_id) and request.last_delivery_id != (
+                request.last_plan.get("feedback_recovery_delivery_id")
+            )
+            if new_delivery or (closed and not previously_closed):
+                # Reads failing while open must not spend the later close's cleanup
+                # budget. Once closed is observed, read failures keep that same budget.
+                attempts = 0
+            plan["feedback_recovery_delivery_id"] = request.last_delivery_id
+            if closed or previously_closed:
+                plan["feedback_recovery_closed_observed"] = True
+            plan["feedback_recovery_failed_attempts"] = attempts + 1
+            if (
+                _feedback_recovery_failed_attempts(plan)
+                >= PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS
+            ):
+                plan["feedback_recovery_stop_reason"] = (
+                    "Supplemental preview feedback recovery exhausted; open-PR sweeps and new "
+                    "events remain eligible. A closed target requires supported reconciliation "
+                    "or remediation; the failed read or delivery remains unresolved."
+                )
     if outcome.deferred:
         # Folding a request into our running one returns it to pending on completion.
         record_store.request_product_reconcile(
@@ -2077,9 +2199,10 @@ def request_product_reconcile_sweep(
                     product=profile.product, target_kind="preview", pull_request_number=number
                 )
             )
-        for preview in record_store.list_preview_records(
+        previews = record_store.list_preview_records(
             context_name=preview_context, anchor_repo=_preview_anchor_repo(profile)
-        ):
+        )
+        for preview in previews:
             if preview.state not in _ENDED_PREVIEW_STATES:
                 targets.append(
                     ProductReconcileTarget(
@@ -2088,10 +2211,54 @@ def request_product_reconcile_sweep(
                         pull_request_number=preview.anchor_pr_number,
                     )
                 )
+        preview_numbers = {
+            preview.anchor_pr_number
+            for preview in previews
+            if preview.state not in _ENDED_PREVIEW_STATES
+        }
+        if profile.preview.enabled:
+            try:
+                requests = record_store.list_product_reconcile_requests(
+                    product=profile.product, limit=None
+                )
+            except (OSError, ValueError, SQLAlchemyError) as error:
+                _LOGGER.warning(
+                    "Sweep could not read %s's preview feedback history: %s", profile.product, error
+                )
+                continue
+            for request in requests:
+                if (
+                    request.target_kind == "preview"
+                    and request.state in {"done", "failed"}
+                    and request.pull_request_number not in preview_numbers
+                    and _needs_absent_preview_feedback_recovery(request.last_plan)
+                    and _feedback_recovery_failed_attempts(request.last_plan)
+                    < PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS
+                ):
+                    targets.append(
+                        ProductReconcileTarget(
+                            product=profile.product,
+                            target_kind="preview",
+                            pull_request_number=request.pull_request_number,
+                        )
+                    )
     unique_targets = {target.target_key: target for target in targets}
     for target in unique_targets.values():
         record_store.request_product_reconcile(target, now)
     return tuple(unique_targets)
+
+
+def _feedback_recovery_failed_attempts(plan: Mapping[str, object]) -> int:
+    count = plan.get("feedback_recovery_failed_attempts", 0)
+    return max(0, count) if isinstance(count, int) and not isinstance(count, bool) else 0
+
+
+def _needs_absent_preview_feedback_recovery(plan: Mapping[str, object]) -> bool:
+    feedback = plan.get(PR_FEEDBACK_PLAN_KEY)
+    return isinstance(feedback, dict) and (
+        feedback.get("status") == "pending"
+        or (feedback.get("status") == "cleared" and feedback.get("delivery_status") != "delivered")
+    )
 
 
 def _open_pull_requests(
@@ -2143,6 +2310,9 @@ def _desired_release(
     profile: LaunchplaneProductProfileRecord,
     repository_id: str,
     lane: ProductLaneProfile,
+    current_commit: str = "",
+    current_run_id: int = 0,
+    selection: dict[str, object] | None = None,
 ) -> tuple[VerifiedBuildArtifact | VerifiedGenericWebBuild | None, list[dict[str, str]], str]:
     default_branch = profile.default_branch
     workflow_file = BUILD_WORKFLOW_PATH.rsplit("/", 1)[-1]
@@ -2180,24 +2350,69 @@ def _desired_release(
         ):
             raise
         return None, [], "build_workflow_missing"
+    runs = _list(payload.get("workflow_runs"))
+    # A held or explicitly rolled-back lane may be beyond the newest page.
+    # Search bounded history rather than making a busy repository stay held.
+    for page in range(2, 21):
+        if not current_commit or any(
+            isinstance(run, dict)
+            and str(run.get("head_sha", "")).lower() == current_commit
+            and (not current_run_id or run.get("id") == current_run_id)
+            for run in runs
+        ):
+            break
+        if len(runs) < (page - 1) * TESTING_BUILD_RUN_PAGE_SIZE:
+            break
+        more = _object(
+            transport.get_json(
+                f"/repos/{_repository_path(profile)}/actions/workflows/{workflow_file}/runs?{query}&page={page}"
+            ),
+            "workflow runs",
+        )
+        runs.extend(_list(more.get("workflow_runs")))
+    audit = selection if selection is not None else {}
+    audit.update(build_runs_seen=len(runs), build_runs_total=payload.get("total_count"))
     built_commits = {
         str(run.get("head_sha") or "").lower()
-        for run in (item for item in _list(payload.get("workflow_runs")) if isinstance(item, dict))
+        for run in (item for item in runs if isinstance(item, dict))
         if run.get("path") == BUILD_WORKFLOW_PATH
         and run.get("event") == "push"
         and run.get("head_branch") == default_branch
         and run.get("conclusion") == "success"
         and run.get("head_sha")
     }
+    if current_commit and (
+        current_commit not in built_commits
+        or (
+            current_run_id
+            and not any(isinstance(run, dict) and run.get("id") == current_run_id for run in runs)
+        )
+    ):
+        return None, [], "incomplete_build_runs"
     ordered: list[str] = []
+    history_seen = 0
+    current_seen = not current_commit
     if built_commits:
         for sha in first_parent_history(
-            transport=transport, repository=profile.repository, default_branch=default_branch
+            transport=transport,
+            repository=profile.repository,
+            default_branch=default_branch,
+            max_pages=20,
         ):
+            history_seen += 1
+            current_seen = current_seen or sha == current_commit
             if sha in built_commits:
                 ordered.append(sha)
                 if len(ordered) == len(built_commits):
                     break
+    audit.update(
+        commit_history_seen=history_seen,
+        current_commit_seen=current_seen,
+        built_commits_seen=len(built_commits),
+        ordered_built_commits=len(ordered),
+    )
+    if not current_seen:
+        return None, [], "incomplete_commit_history"
     rejected: list[dict[str, str]] = []
     generic_web = reconciles_as_generic_web(profile)
     for commit in ordered[:TESTING_VERIFY_LIMIT]:
@@ -2264,6 +2479,8 @@ def _current_preview(
     profile: LaunchplaneProductProfileRecord,
     preview_context: str,
     pull_request_number: int,
+    for_movement: bool = False,
+    serving_only: bool = False,
 ) -> tuple[dict[str, object], str]:
     """The live preview, and a token that changes with every lifecycle step of its record."""
     current: dict[str, object] = {
@@ -2296,7 +2513,7 @@ def _current_preview(
     # latest generation is what runs, whatever an earlier one served.
     generation_id = (
         preview.active_generation_id or preview.serving_generation_id
-        if generic_web
+        if generic_web and not serving_only
         else preview.serving_generation_id or preview.active_generation_id
     )
     if not generation_id:
@@ -2305,7 +2522,7 @@ def _current_preview(
         generation = record_store.read_preview_generation_record(generation_id)
     except FileNotFoundError:
         return current, lifecycle_token
-    if generic_web and generation.state != "ready":
+    if generic_web and generation.state != "ready" and not for_movement:
         # Its verification is not recorded (the refresh failed, or the worker stopped
         # before recording it), so it serves nothing, though it names its image.
         return current, lifecycle_token
@@ -2313,10 +2530,14 @@ def _current_preview(
     if generation.runtime_identity is not None:
         digest = _image_reference_digest(generation.runtime_identity.image_reference)
     if not digest and generation.artifact_id:
-        digest = _artifact_digest(record_store, generation.artifact_id)
+        digest = _image_reference_digest(generation.artifact_id) or _artifact_digest(
+            record_store, generation.artifact_id
+        )
     current.update(
         current_head_sha=generation.anchor_summary.head_sha.lower(),
         current_image_digest=digest.lower(),
+        current_artifact_id=generation.artifact_id,
+        current_observed_at=generation.requested_at,
     )
     return current, lifecycle_token
 

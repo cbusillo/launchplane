@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import click
+from control_plane.lane_movement import LaneMovementRefused
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
@@ -1410,6 +1411,17 @@ def execute_generic_web_preview_refresh(
     token = ""
     preview_runtime_identity: RuntimeIdentity | None = None
     try:
+        from control_plane.lane_movement import LaneBuild, require_forward_preview_build
+
+        require_forward_preview_build(
+            record_store=record_store,
+            profile=resolved_profile,
+            preview_slug=request.preview_slug,
+            desired=LaneBuild(
+                request.image_reference, request.anchor_head_sha, request.image_reference
+            ),
+            pull_request_number=request.anchor_pr_number,
+        )
         host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
         target_definition, template_application, target_error = _read_template_payload(
             control_plane_root=control_plane_root,
@@ -1510,8 +1522,21 @@ def execute_generic_web_preview_refresh(
         message = str(exc)
         if rollback_errors:
             message = f"{message}\n" + "\n".join(rollback_errors)
+        if isinstance(exc, LaneMovementRefused):
+            from control_plane.lane_movement import record_preview_refusal
+
+            record_preview_refusal(
+                record_store=record_store,
+                profile=resolved_profile,
+                preview_slug=request.preview_slug,
+                desired=LaneBuild(
+                    request.image_reference, request.anchor_head_sha, request.image_reference
+                ),
+                error=exc,
+                target_type="application",
+            )
         return GenericWebPreviewRefreshResult(
-            refresh_status="fail",
+            refresh_status="blocked" if isinstance(exc, LaneMovementRefused) else "fail",
             refresh_started_at=started_at,
             refresh_finished_at=finished_at,
             product=resolved_profile.product,
@@ -1522,7 +1547,11 @@ def execute_generic_web_preview_refresh(
             preview_url=preview_url,
             readiness=readiness,
             runtime_identity=preview_runtime_identity,
-            error_message=message,
+            error_message=(
+                f"lane_movement.{exc.code}: {exc.record_failure().description}"
+                if isinstance(exc, LaneMovementRefused)
+                else message
+            ),
         )
 
     finished_at = utc_now_timestamp()

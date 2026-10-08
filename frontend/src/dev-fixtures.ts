@@ -3211,7 +3211,7 @@ export function releaseReviewForFixture(mode: string): import("./generated/opena
     live_site_url: mode === "products" ? "https://www.example.invalid" : "",
     release_run: null,
     review: {
-      required: true, approved: false, checklist_digest: "a".repeat(64), latest_decision: null, unavailable_reason: null,
+      required: true, approved: false, checklist_complete: !additionalChanges.length && mode !== "denied", checklist_digest: "a".repeat(64), latest_decision: null, unavailable_reason: null,
       blockers: additionalChanges.length ? additionalChanges : ["Client approval of this release is required."],
       checklist: {
         product: "example-site", repository: "example/site", owner_github_id: "9001",
@@ -3220,6 +3220,10 @@ export function releaseReviewForFixture(mode: string): import("./generated/opena
         candidate: { artifact_id: "testing-image", source_commit: "b".repeat(40), shared_addons_digest: "" },
         untracked_commits: [],
         additional_changes: additionalChanges,
+        shared_sources: mode === "products" || mode === "denied" ? ["example/shared-addons", "example/disable-online"].map(repository => ({
+          repository, production_commit: "d".repeat(40), candidate_commit: "e".repeat(40), untracked_commits: [],
+          items: [{ pull_request_number: 42, title: "Preserve staff sign-in", url: `https://github.com/${repository}/pull/42`, head_sha: "e".repeat(40), merge_commit: "e".repeat(40), owner_test_notes: mode === "denied" ? "#52 has no Client test notes." : "Sign in as a staff user and confirm your usual pages open.", already_reviewed: false }],
+        })) : [],
         items: [{ pull_request_number: 42, title: "Make the repair options easier to find", url: "https://github.com/example/site/pull/42", head_sha: "c".repeat(40), merge_commit: "b".repeat(40), owner_test_notes: "Open Services and confirm each repair option has a clear price.\nOn a phone, confirm the booking button is visible.", already_reviewed: true },
           // role-words: legacy marker that product pull requests write.
           { pull_request_number: 44, title: "Bump the app-dependencies group", url: "https://github.com/example/site/pull/44", head_sha: "d".repeat(40), merge_commit: "b".repeat(40), owner_test_notes: "Nothing for the owner to test. Automated dependency update, covered by CI.", already_reviewed: false },
@@ -3248,7 +3252,7 @@ export function releaseDecisionForFixture(
   const steps = releaseStart === "promote_with_rollback_drill"
     ? (["backup", "promote", "rollback", "backup", "promote"] as const) : (["backup", "promote"] as const);
   return { ...response, release_run: releaseStart ? {
-    decision_record_id: "fixture-release-decision", rollback_drill: releaseStart === "promote_with_rollback_drill", state: "running",
+    decision_record_id: "fixture-release-decision", rollback_drill: releaseStart === "promote_with_rollback_drill", state: "running", blocked_reason: "",
     steps: steps.map((kind, index) => ({ step: `${kind}-${index}`, kind, status: index === 0 ? "running" : "not_started", operation_id: `fixture-operation-${index}` })),
   } : response.release_run, review: {
     ...response.review,

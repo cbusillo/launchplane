@@ -123,6 +123,7 @@ def execute_odoo_prod_promotion_run(
     request: OdooProdPromotionRunRequest,
     phase_checkpoint: Callable[[OdooProdPromotionOperationPhase], None] | None = None,
     provider_effect_checkpoint: Callable[[str], None] | None = None,
+    hold_uncertain_effects: bool = False,
 ) -> OdooProdPromotionRunResult:
     """Run one promotion; the durable worker passes checkpoints, the sync route does not.
 
@@ -196,6 +197,7 @@ def execute_odoo_prod_promotion_run(
             no_cache=request.no_cache,
         ),
         provider_effect_checkpoint=provider_effect_checkpoint,
+        hold_uncertain_effects=hold_uncertain_effects,
     )
     run_status: Literal["pass", "fail"] = (
         "pass"

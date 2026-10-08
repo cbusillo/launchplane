@@ -54,6 +54,7 @@ class GenericWebProviderReconciliationTarget(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
+    original_event_deploy: dict[str, object] | None = None
     product: str = ""
     context: str
     instance: str
@@ -98,10 +99,12 @@ def build_generic_web_provider_reconciliation_key(
     resolved_deploy_target: GenericWebResolvedDeployTarget,
     *,
     product: str = "",
+    original_event_deploy: dict[str, object] | None = None,
 ) -> str:
     ship_request = resolved_deploy_target.ship_request
     snapshot = GenericWebProviderReconciliationTarget(
         product=product.strip(),
+        original_event_deploy=original_event_deploy,
         context=ship_request.context,
         instance=ship_request.instance,
         provider_id=ship_request.provider_id,
@@ -114,7 +117,9 @@ def build_generic_web_provider_reconciliation_key(
         provider_deploy_mode=ship_request.provider_deploy_mode,
         deploy_timeout_seconds=resolved_deploy_target.deploy_timeout_seconds,
     )
-    encoded = base64.urlsafe_b64encode(snapshot.model_dump_json().encode()).decode("ascii")
+    encoded = base64.urlsafe_b64encode(snapshot.model_dump_json(exclude_none=True).encode()).decode(
+        "ascii"
+    )
     return f"{_GENERIC_WEB_RECONCILIATION_KEY_PREFIX}{encoded.rstrip('=')}"
 
 

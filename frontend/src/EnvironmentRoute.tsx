@@ -57,6 +57,7 @@ import {
   type EnvironmentView,
 } from "./router";
 import { safeExternalUrl } from "./url";
+import { useEvidenceRefresh } from "./use-evidence-refresh";
 
 import type {
   ProductEnvironmentConfigStatus,
@@ -86,6 +87,7 @@ export function ProductEnvironmentRoute({
   view: EnvironmentView;
 }) {
   const [retryToken, setRetryToken] = useState(0);
+  const [evidenceRefreshToken, setEvidenceRefreshToken] = useState(0);
   const [detailResource, setDetailResource] = useState<
     ResourceState<ProductEnvironmentDetail>
   >(emptyResource());
@@ -100,6 +102,8 @@ export function ProductEnvironmentRoute({
   const configLoadedKey = useRef("");
   const promotionLoadedKey = useRef("");
   const resourceKey = `${productKey}:${environmentKey}`;
+  useEvidenceRefresh(resourceKey, !fixtureMode, detailResource,
+    () => setEvidenceRefreshToken(value => value + 1));
   const needsConfig =
     view === "runtime-settings" ||
     view === "managed-secrets" ||
@@ -165,7 +169,7 @@ export function ProductEnvironmentRoute({
       active = false;
       controller.abort();
     };
-  }, [environmentKey, fixtureMode, productKey, refreshToken, retryToken, resourceKey]);
+  }, [environmentKey, fixtureMode, productKey, refreshToken, retryToken, resourceKey, evidenceRefreshToken]);
 
   useEffect(() => {
     if (!needsConfig) {
@@ -363,6 +367,7 @@ export function ProductEnvironmentRoute({
       fixtureMode={fixtureMode}
       onConfigApplied={() => setRetryToken((current) => current + 1)}
       promotionResource={promotionResource}
+      readinessRefreshToken={refreshToken + retryToken}
       view={view}
     />
   );
@@ -379,6 +384,7 @@ function EnvironmentPage({
   fixtureMode,
   onConfigApplied,
   promotionResource,
+  readinessRefreshToken,
   view,
 }: {
   configResource: ResourceState<ProductEnvironmentConfigStatus>;
@@ -391,6 +397,7 @@ function EnvironmentPage({
   fixtureMode: DevFixtureMode;
   onConfigApplied: () => void;
   promotionResource: ResourceState<ProductPromotionStatus>;
+  readinessRefreshToken: number;
   view: EnvironmentView;
 }) {
   const externalUrl = safeExternalUrl(detail.base_url);
@@ -477,6 +484,7 @@ function EnvironmentPage({
           fixtureMode={fixtureMode}
           onRefresh={onConfigApplied}
           promotionResource={promotionResource}
+          refreshToken={readinessRefreshToken}
         />
       ) : null}
       {view === "runtime-settings" ? (

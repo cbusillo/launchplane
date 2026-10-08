@@ -253,6 +253,21 @@ def _feedback_message(
     if event == "stale_policy":
         return "Launchplane stopped using this train record because its stored evidence is stale."
     if event == "blocked":
+        applied = _as_dict(result.get("block_result"))
+        if applied.get("status") == "blocked":
+            selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))
+            detail = (
+                "pull request has merge conflicts"
+                if selected.get("mergeable") == "conflicting"
+                else "current-head review or required checks failed"
+                if selected.get("owner_review_required") is True
+                else "required checks failed"
+            )
+            return (
+                f"Launchplane held this pull request out of the train: {detail}. "
+                "Other eligible pull requests can proceed. Resolve the failure and "
+                "remove the block label to rejoin the queue."
+            )
         detail = _blocking_detail(result)
         if (
             phase == "batch-candidate"
@@ -364,6 +379,7 @@ def _pull_request_numbers(
             phase == "batch-candidate"
             or "merge_train_batch_candidate_record_id" in result
             or selected.get("owner_review_required") is True
+            or _as_dict(result.get("block_result")).get("status") == "blocked"
         ) and (isinstance(number, int) and number > 0):
             return [number]
     containers = (

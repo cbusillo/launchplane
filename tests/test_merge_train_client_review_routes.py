@@ -85,6 +85,12 @@ CLIENT_REVIEW_CASES: tuple[tuple[str, tuple[dict[str, object], ...], str], ...] 
 
 
 class LegacyRunOnceClientReviewTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # This provider fixture has no CODEOWNERS; routing is exercised separately.
+        fixture = patch("control_plane.merge_train_codeowners._read_patterns", return_value=())
+        fixture.start()
+        self.addCleanup(fixture.stop)
+
     def test_run_once_reads_active_profile_before_choosing_an_action(self) -> None:
         for name, statuses, expected_action in CLIENT_REVIEW_CASES:
             with self.subTest(name):
@@ -155,6 +161,12 @@ class LegacyRunOnceClientReviewTests(unittest.TestCase):
 
 
 class StandaloneCandidatePlanningClientReviewTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # This provider fixture has no CODEOWNERS; routing is exercised separately.
+        fixture = patch("control_plane.merge_train_codeowners._read_patterns", return_value=())
+        fixture.start()
+        self.addCleanup(fixture.stop)
+
     def test_plan_mode_waits_for_review_on_a_later_batch_member(self) -> None:
         first = _github_pull_request(41)
         second = _github_pull_request(42)

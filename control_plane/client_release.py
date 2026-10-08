@@ -39,6 +39,7 @@ from control_plane.contracts.durable_operation_authorization import (
 )
 from control_plane.contracts.odoo_prod_promotion_operation import (
     ODOO_PROD_PROMOTION_RUN_ACTION,
+    OdooProdPromotionCheckpoint,
     OdooProdPromotionOperationRecord,
     OdooProdPromotionRunRequest,
     build_odoo_prod_promotion_operation_id,
@@ -58,9 +59,19 @@ from control_plane.contracts.production_backup_gate import (
     ProductionBackupGateRequest,
 )
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord, ReleaseStart
+from control_plane.odoo_release_recovery import (
+    pin_odoo_release_recovery_target,
+    read_odoo_release_recovery,
+)
 from control_plane.odoo_stable_lane import OdooStableLaneOperationConflictError
-from control_plane.release_review import current_release_review, release_version, checklist_blockers
+from control_plane.release_review import (
+    ReleaseReviewStore,
+    current_release_review,
+    release_version,
+    checklist_blockers,
+)
 from control_plane.release_review_record import publish_release_decision
+from control_plane.release_invitation import ReleaseInvitationBackoff, publish_release_invitation
 from control_plane.generic_web_promotion_http import (
     GENERIC_WEB_PROD_PROMOTION_ROUTE,
     GenericWebProdPromotionEnvelope,
@@ -90,7 +101,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 _LOGGER = logging.getLogger(__name__)
 
 CLIENT_RELEASE_IDEMPOTENCY_SCOPE = "client-release"
-ClientReleaseStepKind = Literal["backup", "promote", "rollback"]
+ClientReleaseStepKind = Literal["backup", "promote", "rollback", "recovery"]
 ClientReleaseStepStatus = Literal[
     "not_started", "pending", "running", "reconciliation_required", "pass", "fail", "cancelled"
 ]
@@ -140,6 +151,7 @@ class ClientReleaseRunView(BaseModel):
     decision_record_id: str
     rollback_drill: bool
     state: ClientReleaseRunState
+    blocked_reason: str = ""
     steps: tuple[ClientReleaseStepView, ...]
 
 
@@ -381,7 +393,7 @@ def read_client_release_run(
         return None
     views = []
     for step in steps:
-        status, _operation = _step_status(store, profile, decision, step)
+        status, operation = _step_status(store, profile, decision, step)
         views.append(
             ClientReleaseStepView(
                 step=step.name,
@@ -392,6 +404,17 @@ def read_client_release_run(
                 ),
             )
         )
+        if isinstance(operation, OdooProdPromotionOperationRecord):
+            recovery = read_odoo_release_recovery(store, operation)
+            if recovery is not None:
+                views.append(
+                    ClientReleaseStepView(
+                        step=f"failure-recovery-{step.attempt}",
+                        kind="recovery",
+                        status=recovery.status,
+                        operation_id=recovery.operation_id,
+                    )
+                )
     statuses = [view.status for view in views]
     state: ClientReleaseRunState
     if any(status in _STOPPED_STATUSES for status in statuses):
@@ -402,7 +425,14 @@ def read_client_release_run(
         state = "running"
     else:
         state = "waiting"
+    blocked_reason = ""
+    if profile.driver_id == "odoo" and state == "waiting":
+        try:
+            pin_odoo_release_recovery_target(store, decision, _prod_context(profile))
+        except ValueError:
+            blocked_reason = "No passing production deployment is available for recovery. An admin must reconcile the production record before this release can start."
     return ClientReleaseRunView(
+        blocked_reason=blocked_reason,
         decision_record_id=decision.record_id,
         rollback_drill=decision.release_start == "promote_with_rollback_drill",
         state=state,
@@ -513,7 +543,7 @@ def _record_standing_acceptance(
     # Use the existing publication/recovery path. An unpublished decision cannot
     # queue a backup or promotion, and a retry keeps the same decision id.
     issue_url = decision.release_issue_url or publish_release_decision(
-        control_plane_root=control_plane_root, profile=profile, decision=decision
+        store=store, control_plane_root=control_plane_root, profile=profile, decision=decision
     )
     if issue_url:
         store.record_release_review_decision_publication(
@@ -612,6 +642,7 @@ def advance_client_releases(
     control_plane_root: Path,
     stop_event: Event | None = None,
     standing_review_backoff: StandingReleaseReviewBackoff | None = None,
+    invitation_backoff: ReleaseInvitationBackoff | None = None,
 ) -> tuple[str, ...]:
     """Queue the next step of every Client release that is ready for one.
 
@@ -622,7 +653,8 @@ def advance_client_releases(
     if not isinstance(store, PostgresRecordStore):
         return ()
     queued: list[str] = []
-    for profile in store.list_product_profile_records():
+    profiles = store.list_product_profile_records()
+    for profile in profiles:
         if stop_event is not None and stop_event.is_set():
             break
         if profile.driver_id not in {"odoo", "generic-web"}:
@@ -653,6 +685,23 @@ def advance_client_releases(
             continue
         if operation_id:
             queued.append(operation_id)
+    # Queue accepted releases before potentially slow invitation lookups.
+    for profile in profiles:
+        if stop_event is not None and stop_event.is_set():
+            break
+        try:
+            publish_release_invitation(
+                store=cast(ReleaseReviewStore, store),
+                control_plane_root=control_plane_root,
+                profile=profile,
+                backoff=invitation_backoff,
+            )
+        except Exception as error:
+            _LOGGER.warning(
+                "release invitation unavailable product=%s error_type=%s",
+                profile.product,
+                type(error).__name__,
+            )
     return tuple(queued)
 
 
@@ -677,6 +726,11 @@ def _advance(
             return _queue_rollback(store, profile, decision, step, context, authorized_at)
         _require_current_release(store, control_plane_root, profile, decision)
         if step.kind == "backup":
+            if profile.driver_id == "odoo":
+                try:
+                    pin_odoo_release_recovery_target(store, decision, context)
+                except ValueError as error:
+                    raise ClientReleaseNotReady("recovery_target_missing") from error
             return _queue_backup(store, profile, decision, step, context, authorized_at)
         backup_record_id = str(getattr(previous, "backup_record_id", ""))
         return _queue_promotion(
@@ -787,6 +841,10 @@ def _queue_promotion(
         raise ClientReleaseNotReady("promotion_not_ready")
     if admission.inputs_result.artifact_id != decision.checklist.candidate.artifact_id:
         raise ClientReleaseNotReady("release_changed")
+    try:
+        recovery_pin = pin_odoo_release_recovery_target(store, decision, context)
+    except ValueError as error:
+        raise ClientReleaseNotReady("recovery_target_missing") from error
     operation = OdooProdPromotionOperationRecord(
         operation_id=client_release_step_operation_id(
             profile=profile, decision=decision, step=step
@@ -797,6 +855,13 @@ def _queue_promotion(
         idempotency_key=key,
         idempotency_scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
         request_fingerprint=odoo_prod_promotion_request_fingerprint(request),
+        checkpoints=(
+            OdooProdPromotionCheckpoint(
+                phase="created",
+                recorded_at=authorized_at,
+                evidence=recovery_pin,
+            ),
+        ),
         request=request,
         authorization=client_release_grant(
             decision=decision,

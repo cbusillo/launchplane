@@ -34,6 +34,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.production_promotion_backup import (
     ODOO_PROMOTION_BACKUP_ACTION,
+    ProductionPromotionBackupGuard,
     production_promotion_backup_guard,
     require_production_promotion_backup,
 )
@@ -129,6 +130,7 @@ def execute_odoo_prod_promotion(
     record_store: OdooProdPromotionStore,
     request: OdooProdPromotionRequest,
     provider_effect_checkpoint: Callable[[str], None] | None = None,
+    hold_uncertain_effects: bool = False,
 ) -> OdooProdPromotionResult:
     del state_dir, database_url
     product = _resolve_product_profile_key(product=request.product, context=request.context)
@@ -202,6 +204,7 @@ def execute_odoo_prod_promotion(
                     health_timeout_seconds=request.health_timeout_seconds,
                     no_cache=request.no_cache,
                 ),
+                hold_uncertain_effects=hold_uncertain_effects,
                 provider_effect_checkpoint=_checkpoint_chain(
                     provider_effect_checkpoint, backup_checkpoint
                 ),
@@ -245,6 +248,10 @@ def execute_odoo_prod_promotion(
             error_message=replacement_result.error_message,
         )
     except click.ClickException as error:
+        from control_plane.lane_movement import LaneMovementRefused
+
+        if isinstance(error, LaneMovementRefused) and error.code == "source_order_unavailable":
+            raise
         if infrastructure_backup is not None and backup_checkpoint is not None:
             infrastructure_backup.evidence.update(backup_checkpoint.evidence)
         failed_record = _build_promotion_record(
@@ -264,14 +271,13 @@ def execute_odoo_prod_promotion(
 
 
 def _checkpoint_chain(
-    first: Callable[[str], None] | None, second: Callable[[str], None]
+    first: Callable[[str], None] | None, second: ProductionPromotionBackupGuard
 ) -> Callable[[str], None]:
     if first is None:
         return second
 
     def checkpoint(phase: str) -> None:
-        first(phase)
-        second(phase)
+        second.before_provider_effect(phase, first)
 
     return checkpoint
 

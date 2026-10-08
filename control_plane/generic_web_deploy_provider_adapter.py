@@ -91,9 +91,11 @@ class GenericWebDeployProviderMutationAdapter:
         trace_id: str,
         deploy_provider: GenericWebDeployProvider | None = None,
         recorded_artifact: bool = False,
+        retain_event_request: bool = False,
     ) -> None:
         # Recovery replays a deploy Launchplane reserved; its artifact is a record.
         self._recorded_artifact = recorded_artifact
+        self._retain_event_request = retain_event_request
         self._control_plane_root = control_plane_root
         self._record_store = record_store
         self._deploy_request = deploy_request
@@ -139,6 +141,9 @@ class GenericWebDeployProviderMutationAdapter:
         return build_generic_web_provider_reconciliation_key(
             self._resolve_deploy_target(),
             product=self._profile.product,
+            original_event_deploy=self._deploy_request.model_dump(mode="json")
+            if self._retain_event_request
+            else None,
         )
 
     def target_key(self) -> str:
@@ -494,6 +499,10 @@ class GenericWebDeployProviderMutationAdapter:
         except (FileNotFoundError, ValueError) as error:
             raise ProviderMutationRejectedError(error)
         except click.ClickException as error:
+            from control_plane.lane_movement import LaneMovementRefused
+
+            if isinstance(error, LaneMovementRefused) and error.code == "source_order_unavailable":
+                raise ProviderMutationRejectedError(error) from error
             raise ProviderMutationUnknownError(str(error)) from error
         provider_effect_attempted = result.pop("provider_effect_attempted", False) is True
         if _string_field(result, "deploy_status") == "fail" and provider_effect_attempted:

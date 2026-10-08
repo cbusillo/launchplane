@@ -33,6 +33,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 )
 from control_plane.contracts.odoo_target_replacement_failures import (
     DEPLOY_FAILED_CODE,
+    OdooProviderEffectUncertainError,
     deploy_blocked_code,
     deploy_blocked_code_for_runtime_error,
     deploy_failure_description,
@@ -82,6 +83,12 @@ from control_plane.workflows.ship import (
     utc_now_timestamp,
 )
 from control_plane.dokploy import api as dokploy_api
+from control_plane.lane_movement import (
+    LaneBuild,
+    LaneMovementRefused,
+    require_forward_build,
+    require_forward_lane_build,
+)
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import compose as dokploy_compose
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
@@ -1039,7 +1046,7 @@ def _write_failed_deployment(
     record_store.write_deployment_record(record.model_copy(update={"failure": failure}))
 
 
-def _deploy_step_failure(error: click.ClickException) -> RecordFailure:
+def _deploy_step_failure(error: BaseException) -> RecordFailure:
     """The deploy step's failure as its code, fixed description and key names.
 
     A check before the provider env write raises its own code; anything else in
@@ -1047,6 +1054,8 @@ def _deploy_step_failure(error: click.ClickException) -> RecordFailure:
     """
     code = ""
     keys: tuple[str, ...] = ()
+    if isinstance(error, LaneMovementRefused):
+        return error.record_failure()
     if isinstance(error, OdooTargetReplacementStageError):
         code, keys = error.code, error.detail_keys
     elif isinstance(error, PlatformCredentialRefusedError):
@@ -1565,6 +1574,8 @@ def execute_odoo_stable_target_replacement_apply(
     request: OdooStableTargetReplacementApplyRequest,
     dokploy_request: DokployRequest = dokploy_api.dokploy_request,
     provider_effect_checkpoint: Callable[[str], None] | None = None,
+    hold_uncertain_effects: bool = False,
+    rollback: bool = False,
 ) -> OdooStableTargetReplacementApplyResult:
     with _failure_stage("plan_build_failed"):
         plan = build_odoo_stable_target_replacement_plan(
@@ -1773,6 +1784,7 @@ def execute_odoo_stable_target_replacement_apply(
     else:
         runtime_source["runtime_override_payload_rendered"] = "false"
 
+    production_write_started = False
     try:
         with _failure_stage(deploy_blocked_code("provider_target_unreadable")):
             host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
@@ -1979,8 +1991,36 @@ def execute_odoo_stable_target_replacement_apply(
                 ).items()
             }
         )
+        if not rollback:
+            desired_build = LaneBuild(artifact_id, source_git_ref, image_reference)
+            require_forward_lane_build(
+                record_store=record_store,
+                profile=profile,
+                context=plan.context,
+                instance=plan.instance,
+                desired=desired_build,
+            )
+            current_identity = _runtime_identity_map(current_env_map)
+            if current_identity:
+                if (
+                    current_identity.get("product", "") not in {"", profile.product}
+                    or current_identity.get("context") != plan.context
+                    or current_identity.get("instance") != plan.instance
+                ):
+                    raise LaneMovementRefused("source_order_unverified")
+                require_forward_build(
+                    record_store=record_store,
+                    profile=profile,
+                    current=LaneBuild(
+                        current_identity.get("artifact_id", ""),
+                        current_identity.get("source_git_ref", ""),
+                        current_identity.get("image_reference", ""),
+                    ),
+                    desired=desired_build,
+                )
         if provider_effect_checkpoint is not None:
             provider_effect_checkpoint(TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
+        production_write_started = True
         raw_compose_evidence = dokploy_compose.sync_dokploy_compose_raw_source(
             host=host,
             token=token,
@@ -2215,7 +2255,16 @@ def execute_odoo_stable_target_replacement_apply(
                 ).items()
             }
         )
-    except click.ClickException as error:
+    except (click.ClickException, OSError) as error:
+        uncertain = (
+            hold_uncertain_effects
+            and production_write_started
+            and not isinstance(error, dokploy_api.DokployDeploymentFailed)
+        )
+        if isinstance(error, OSError) and not uncertain:
+            raise
+        if uncertain:
+            runtime_source["provider_outcome"] = "uncertain"
         failure = _deploy_step_failure(error)
         _write_failed_deployment(
             record_store=record_store,
@@ -2228,6 +2277,12 @@ def execute_odoo_stable_target_replacement_apply(
             destination_health=HealthcheckEvidence(status="skipped"),
             failure=failure,
         )
+        if uncertain:
+            raise OdooProviderEffectUncertainError(
+                "Odoo provider effect requires reconciliation."
+            ) from error
+        if isinstance(error, LaneMovementRefused) and error.code == "source_order_unavailable":
+            raise
         return base_result.result(
             deploy_status="fail",
             runtime_identity_injected=False,
@@ -2240,21 +2295,39 @@ def execute_odoo_stable_target_replacement_apply(
     post_deploy_phase: OdooOverrideApplyPhase = (
         "restore" if plan.data_source_mode == "upstream_restore" else "deploy"
     )
-    with _failure_stage("post_deploy_setup_failed"):
-        post_deploy_result = execute_odoo_post_deploy(
-            control_plane_root=control_plane_root,
+    try:
+        with _failure_stage("post_deploy_setup_failed"):
+            post_deploy_result = execute_odoo_post_deploy(
+                control_plane_root=control_plane_root,
+                record_store=record_store,
+                request=OdooPostDeployRequest(
+                    context=plan.context,
+                    instance=plan.instance,
+                    phase=post_deploy_phase,
+                ),
+                run_destructive_restore=plan.data_source_mode == "upstream_restore",
+                provider_effect_checkpoint=provider_effect_checkpoint,
+                hold_uncertain_effects=hold_uncertain_effects,
+                schedule_execution_timeout_seconds=(
+                    request.timeout_seconds if plan.data_source_mode == "upstream_restore" else None
+                ),
+            )
+    except OdooProviderEffectUncertainError:
+        runtime_source["provider_outcome"] = "uncertain"
+        _write_failed_deployment(
             record_store=record_store,
-            request=OdooPostDeployRequest(
-                context=plan.context,
-                instance=plan.instance,
-                phase=post_deploy_phase,
+            ship_request=ship_request,
+            deployment_record_id=deployment_record_id,
+            started_at=started_at,
+            resolved_target=resolved_target,
+            runtime_source=runtime_source,
+            runtime_identity=runtime_identity,
+            post_deploy_update=PostDeployUpdateEvidence(
+                attempted=True, status="fail", detail="Post-deploy outcome requires reconciliation."
             ),
-            run_destructive_restore=plan.data_source_mode == "upstream_restore",
-            provider_effect_checkpoint=provider_effect_checkpoint,
-            schedule_execution_timeout_seconds=(
-                request.timeout_seconds if plan.data_source_mode == "upstream_restore" else None
-            ),
+            destination_health=HealthcheckEvidence(status="skipped"),
         )
+        raise
     post_deploy_evidence = PostDeployUpdateEvidence(
         attempted=True,
         status=post_deploy_result.post_deploy_status,

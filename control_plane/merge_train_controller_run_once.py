@@ -26,7 +26,12 @@ from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerStateRecord,
     build_merge_train_controller_state_record,
 )
-from control_plane.contracts.merge_train_effect import MergeTrainSemanticEffectExecutor
+from control_plane.contracts.merge_train_effect import (
+    MergeTrainEffectLineage,
+    MergeTrainSemanticEffectExecutor,
+    StackChildCommentEffect,
+    StackChildLabelEffect,
+)
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy, MergeTrainRepositoryPolicy
 from control_plane.contracts.merge_train_historical_completion import (
     MergeTrainHistoricalCompletionSelector,
@@ -45,6 +50,7 @@ from control_plane.contracts.merge_train_structural_provenance import (
 )
 from control_plane.merge_train import (
     apply_merge_train_branch_update_intent,
+    apply_merge_train_block_intent,
     MergeTrainDryRunResult,
     MergeTrainDryRunSnapshot,
     MergeTrainQueueEntry,
@@ -650,6 +656,7 @@ def _resume_merge_train_controller_state(
         "cleanup_candidate_ref",
         "reconcile_stack_children",
         "stack_children_reconciled",
+        "annotate_historical_stack_child",
     }:
         return None
     landing_record_id = str(lease.record.step_payload.get("landing_plan_record_id") or "")
@@ -1688,10 +1695,20 @@ def _finish_landed_merge_train_batch(
         return result
     if landed_record.ordinary_job_binding is not None:
         result["landing_progress"] = "complete"
+    elif not repository_policy.stack_child_disposition_label:
+        result["historical_stack_child_label_status"] = "not_configured"
     if not collapse_records:
         if lease.record.step_payload.get("stack_collapse_plan_record_id"):
             raise MergeTrainControllerRequestError(
                 "merge train stack collapse resume record is missing or incompatible"
+            )
+        if landed_record.ordinary_job_binding is None:
+            _annotate_historical_closed_stack_children(
+                landed_record=landed_record,
+                repository_policy=repository_policy,
+                github_client=github_client,
+                stack_collapse_store=stack_collapse_store,
+                lease=lease,
             )
         return result
     reconciled_records = []
@@ -1715,7 +1732,134 @@ def _finish_landed_merge_train_batch(
     )
     result["merge_train_stack_collapse_plan_record_id"] = newest_record.record_id
     result["stack_collapse_plan"] = newest_record.plan.model_dump(mode="json")
+    _annotate_historical_closed_stack_children(
+        landed_record=landed_record,
+        repository_policy=repository_policy,
+        github_client=github_client,
+        stack_collapse_store=stack_collapse_store,
+        lease=lease,
+    )
     return result
+
+
+def _annotate_historical_closed_stack_children(
+    *,
+    landed_record: MergeTrainBatchLandingPlanRecord,
+    repository_policy: MergeTrainRepositoryPolicy,
+    github_client: GitHubMergeTrainClient,
+    stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
+    lease: MergeTrainControllerLeaseContext,
+) -> None:
+    """Observe carried history after landing; never requalify or execute its plan."""
+    landing = landed_record.landing_plan
+    roots = {
+        entry.pull_request_number: entry for entry in landing.entries if entry.status == "merged"
+    }
+    records = stack_collapse_store.list_merge_train_stack_collapse_plan_records(
+        repository=landing.repository, base_branch=landing.base_branch
+    )
+    annotated = {
+        (child.pull_request_number, child.expected_head_sha)
+        for record in records
+        if record.plan.policy_sha256 == landing.policy_sha256
+        and record.plan.root_pull_request_number in roots
+        for child in record.plan.child_dispositions
+        if child.status == "closed"
+    }
+    for progress in _group_stack_collapse_records(records).values():
+        record = latest_merge_train_stack_collapse_progress_record(tuple(progress))
+        if record is None:
+            continue
+        plan = record.plan
+        root = roots.get(plan.root_pull_request_number)
+        if (
+            root is None
+            or record.ordinary_job_binding is not None
+            or plan.repository != landing.repository
+            or plan.base_branch != landing.base_branch
+            or plan.policy_key != landing.policy_key
+            or plan.policy_sha256 == landing.policy_sha256
+            or not github_client.branch_contains_commit(
+                repository=landing.repository,
+                branch_ref=root.expected_head_sha,
+                commit_sha=plan.root_initial_head_sha,
+            )
+        ):
+            continue
+        for child in plan.child_dispositions:
+            identity = (child.pull_request_number, child.expected_head_sha)
+            if child.status == "closed" or identity in annotated:
+                continue
+            try:
+                closed = github_client.pull_request_is_closed(
+                    repository=landing.repository,
+                    pull_request_number=child.pull_request_number,
+                    expected_head_sha=child.expected_head_sha,
+                )
+            except MergeTrainGitHubStaleHeadError:
+                continue  # Old expectations cannot dispose of a moved child.
+            if (
+                not closed
+                or not github_client.branch_contains_commit(
+                    repository=landing.repository,
+                    branch_ref=root.expected_head_sha,
+                    commit_sha=child.expected_head_sha,
+                )
+                or not github_client.branch_contains_commit(
+                    repository=landing.repository,
+                    branch_ref=root.merge_commit_sha,
+                    commit_sha=child.expected_head_sha,
+                )
+                or github_client.branch_contains_commit(
+                    repository=landing.repository,
+                    branch_ref=root.recorded_rolling_base_sha or root.expected_base_sha,
+                    commit_sha=child.expected_head_sha,
+                )
+            ):
+                continue
+            label = repository_policy.stack_child_disposition_label
+            body = (
+                f"Launchplane verified this already-closed stacked PR's head "
+                f"`{child.expected_head_sha}` in root PR #{root.pull_request_number}, "
+                f"landed by the merge train at `{root.merge_commit_sha}`.\n\n"
+                "This restores landing annotations from carried stack history; "
+                "it does not record a new child merge or historical admission."
+            )
+            lineage = MergeTrainEffectLineage(
+                repository=landing.repository,
+                base_branch=landing.base_branch,
+                collapse_id=plan.collapse_id,
+                batch_id=landing.batch_id,
+                landing_plan_id=landing.plan_id,
+            )
+            lease.checkpoint(
+                active_action="land_batch",
+                active_phase="annotate_historical_stack_child",
+                active_record_id=landed_record.record_id,
+                active_pull_request_number=child.pull_request_number,
+            )
+            if not github_client.find_pull_request_comment_url(
+                repository=landing.repository,
+                pull_request_number=child.pull_request_number,
+                body_contains=body,
+            ):
+                github_client.semantic_effect_executor.comment_stack_child(
+                    StackChildCommentEffect(
+                        lineage=lineage, pull_request_number=child.pull_request_number, body=body
+                    )
+                )
+            lease.checkpoint()
+            if label and not github_client.pull_request_has_label(
+                repository=landing.repository,
+                pull_request_number=child.pull_request_number,
+                label=label,
+            ):
+                github_client.semantic_effect_executor.label_stack_child(
+                    StackChildLabelEffect(
+                        lineage=lineage, pull_request_number=child.pull_request_number, label=label
+                    )
+                )
+            annotated.add(identity)
 
 
 def _reconcile_landed_stack_children(
@@ -2288,7 +2432,10 @@ def _reflow_stale_candidate_record(
     candidate_snapshot = _without_held_out_pull_requests(
         snapshot=snapshot,
         held_out=_surviving_held_out_entries(
-            policy=policy, snapshot=snapshot, held_out=candidate_record.candidate.held_out
+            policy=policy,
+            snapshot=snapshot,
+            held_out=candidate_record.candidate.held_out,
+            batch_landing=lease.record.ordinary_job_binding is None,
         ),
     )
     stack_collapse_root = candidate_record.candidate.stack_collapse_root
@@ -2355,12 +2502,14 @@ def _reflow_stale_candidate_record(
     if candidate_record.ordinary_job_binding is None and any(
         pr.owner_review_required and pr.required_checks_status != "pass"
         for pr in dry_run_result.queue
-        if pr.eligible
+        if pr.number in dry_run_result.queue_order
     ):
         waiting_pr = next(
             pr
             for pr in dry_run_result.queue
-            if pr.eligible and pr.owner_review_required and pr.required_checks_status != "pass"
+            if pr.number in dry_run_result.queue_order
+            and pr.owner_review_required
+            and pr.required_checks_status != "pass"
         )
         dry_run_result = dry_run_result.model_copy(
             update={
@@ -2816,7 +2965,10 @@ def _advance_without_candidate_record(
         queue_snapshot = _without_held_out_pull_requests(
             snapshot=snapshot,
             held_out=_surviving_held_out_entries(
-                policy=policy, snapshot=snapshot, held_out=held_out
+                policy=policy,
+                snapshot=snapshot,
+                held_out=held_out,
+                batch_landing=lease.record.ordinary_job_binding is None,
             ),
         )
         queue_result = build_merge_train_dry_run_result(
@@ -2827,13 +2979,12 @@ def _advance_without_candidate_record(
         # Pending saved checks must not hide the ordinary queue's blocking reason.
         if queue_result.intended_next_action == "block":
             return report_obsolete(
-                {
-                    "repository": request.repository,
-                    "base_branch": request.base_branch,
-                    "mode": "dry-run",
-                    "controller_action": "block",
-                    "dry_run_result": queue_result.model_dump(mode="json"),
-                }
+                _apply_queue_block(
+                    request=request,
+                    dry_run_result=queue_result,
+                    github_client=github_client,
+                    lease=lease,
+                )
             )
         return report_obsolete(pending_wait_result)
 
@@ -3070,6 +3221,19 @@ def _advance_planned_stack_collapse_record(
         repository=request.repository,
         base_branch=request.base_branch,
     )
+    collapse_members = {
+        planned_collapse_record.plan.root_pull_request_number,
+        *(
+            mutation.child_pull_request_number
+            for mutation in planned_collapse_record.plan.mutations
+        ),
+    }
+    if any(
+        pr.number in collapse_members and pr.requires_individual_landing
+        for pr in snapshot.pull_requests
+    ):
+        retire("code_owned_changes_require_original_pull_requests")
+        return None
     root_pull_request = next(
         (
             pull_request
@@ -3247,6 +3411,41 @@ def _advance_planned_stack_collapse_record(
     return result
 
 
+def _apply_queue_block(
+    *,
+    request: MergeTrainControllerRunOnceEnvelope,
+    dry_run_result: MergeTrainDryRunResult,
+    github_client: GitHubMergeTrainClient,
+    lease: MergeTrainControllerLeaseContext,
+) -> dict[str, object]:
+    result: dict[str, object] = {
+        "repository": request.repository,
+        "base_branch": request.base_branch,
+        "mode": (
+            "block" if request.mutate and lease.record.ordinary_job_binding is None else "dry-run"
+        ),
+        "controller_action": "block",
+        "dry_run_result": dry_run_result.model_dump(mode="json"),
+    }
+    if request.mutate and lease.record.ordinary_job_binding is None:
+        assert dry_run_result.selected_pr is not None
+        lease.checkpoint(
+            active_action=MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
+            active_phase="block_pull_request",
+            active_record_id="",
+            active_pull_request_number=dry_run_result.selected_pr.number,
+            step_payload={"blocked_label": dry_run_result.blocked_label},
+        )
+        block_result = apply_merge_train_block_intent(
+            dry_run_result=dry_run_result, label_client=github_client
+        )
+        # Service batches hold this PR independently rather than stopping the driver.
+        result["block_result"] = block_result.model_copy(
+            update={"train_should_continue": True}
+        ).model_dump(mode="json")
+    return result
+
+
 def _advance_from_live_snapshot(
     *,
     request: MergeTrainControllerRunOnceEnvelope,
@@ -3267,7 +3466,12 @@ def _advance_from_live_snapshot(
             repository=request.repository,
             base_branch=request.base_branch,
         )
-    held_out = _surviving_held_out_entries(policy=policy, snapshot=snapshot, held_out=held_out)
+    held_out = _surviving_held_out_entries(
+        policy=policy,
+        snapshot=snapshot,
+        held_out=held_out,
+        batch_landing=lease.record.ordinary_job_binding is None,
+    )
     snapshot = _without_held_out_pull_requests(snapshot=snapshot, held_out=held_out)
     dry_run_result = build_merge_train_dry_run_result(
         policy=policy, snapshot=snapshot, batch_landing=lease.record.ordinary_job_binding is None
@@ -3343,13 +3547,12 @@ def _advance_from_live_snapshot(
                 return restored_result
     if dry_run_result.intended_next_action == "block":
         # Report the queue's failure before rediscovering still-open carried children.
-        return {
-            "repository": request.repository,
-            "base_branch": request.base_branch,
-            "mode": "dry-run",
-            "controller_action": "block",
-            "dry_run_result": dry_run_result.model_dump(mode="json"),
-        }
+        return _apply_queue_block(
+            request=request,
+            dry_run_result=dry_run_result,
+            github_client=github_client,
+            lease=lease,
+        )
     if selected_pr is not None and merge_train_snapshot_has_stack_topology(
         snapshot=snapshot, dry_run_result=dry_run_result
     ):
@@ -3574,7 +3777,10 @@ def try_reflow_failed_merge_train_candidate(
         ),
     )
     held_out = _surviving_held_out_entries(
-        policy=policy, snapshot=snapshot, held_out=active_candidate_record.candidate.held_out
+        policy=policy,
+        snapshot=snapshot,
+        held_out=active_candidate_record.candidate.held_out,
+        batch_landing=active_candidate_record.ordinary_job_binding is None,
     )
     snapshot = _without_held_out_pull_requests(snapshot=snapshot, held_out=held_out)
     dry_run_result = build_merge_train_dry_run_result(
@@ -4028,7 +4234,8 @@ def _conflict_probe_queue(
     dry_run_result: MergeTrainDryRunResult,
 ) -> tuple[MergeTrainQueueEntry, ...]:
     """Return the queue a candidate would batch, when it needs a conflict probe."""
-    queue = tuple(entry for entry in dry_run_result.queue if entry.eligible)
+    queue_by_number = {entry.number: entry for entry in dry_run_result.queue}
+    queue = tuple(queue_by_number[number] for number in dry_run_result.queue_order)
     return queue if len(queue) > 1 else ()
 
 
@@ -4200,10 +4407,13 @@ def _surviving_held_out_entries(
     policy: MergeTrainPolicy,
     snapshot: MergeTrainDryRunSnapshot,
     held_out: tuple[MergeTrainBatchHeldOutEntry, ...],
+    batch_landing: bool = False,
 ) -> tuple[MergeTrainBatchHeldOutEntry, ...]:
     if not held_out:
         return ()
-    queue = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot).queue
+    queue = build_merge_train_dry_run_result(
+        policy=policy, snapshot=snapshot, batch_landing=batch_landing
+    ).queue
     holds = {entry.pull_request_number: entry for entry in held_out}
     preceding: list[tuple[int, str]] = []
     surviving: list[MergeTrainBatchHeldOutEntry] = []

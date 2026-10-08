@@ -245,6 +245,7 @@ from control_plane.http_routes.ordinary_agent import (
     OrdinaryAgentRouteDependencies,
     register_ordinary_agent_routes,
 )
+from control_plane.http_routes.event_deploy_recovery import register_event_deploy_recovery_routes
 from control_plane.http_routes.generic_web_promotion_recovery import (
     register_promotion_recovery_routes,
 )
@@ -417,8 +418,18 @@ from control_plane.generic_web_promotion_http import (
 from control_plane.product_review import require_product_review_store
 from control_plane.github_delivery_configuration import (
     DeliveryGitHubAppConfigurationRequest,
+    DeliveryGitHubAppConfigurationResponse,
     GITHUB_DELIVERY_CONFIGURATION_ROUTE,
     apply_delivery_github_configuration,
+)
+from control_plane.service_github_delivery_controls import (
+    SERVICE_GITHUB_DELIVERY_ROUTE,
+    SERVICE_TOKEN_RETIREMENT_ROUTE,
+    ServiceGitHubDeliveryStatus,
+    ServiceTokenRetirementRequest,
+    ServiceTokenRetirementResponse,
+    apply_service_token_retirement,
+    read_service_github_delivery,
 )
 from control_plane.launchplane_github_delivery import delivery_github_credentials_ready
 from control_plane.product_review_status import (
@@ -17177,6 +17188,18 @@ def create_launchplane_fastapi_app(
                         "changes. Generate a new dry run and review its plan before applying."
                     ),
                 ) from error
+            if isinstance(
+                error, control_plane_authz_grant_service.AuthzPolicyUnmanagedAdoptionConflictError
+            ):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="authz_policy_unmanaged_adoption_conflict",
+                    message=(
+                        "Requested changes would adopt an unmanaged rule, but unmanaged adoption "
+                        "was not enabled for this request."
+                    ),
+                ) from error
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
@@ -24549,10 +24572,101 @@ def create_launchplane_fastapi_app(
                 message="Delivery App configuration is unavailable, stale, or conflicts with its reviewed request.",
             ) from error
 
+    def require_service_delivery_admin(
+        identity: LaunchplaneIdentity, *, action: str, trace_id: str
+    ) -> GitHubHumanIdentity:
+        if (
+            not isinstance(identity, GitHubHumanIdentity)
+            or identity.role != "admin"
+            or not resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action=action,
+                product=_LAUNCHPLANE_SERVICE_CONTEXT,
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                target=AuthorizationTarget(scope="context"),
+            )
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="This service control requires an authorized signed-in administrator.",
+            )
+        return identity
+
+    def service_delivery_store(record_store: object, trace_id: str) -> PostgresRecordStore:
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Service GitHub delivery controls require shared database storage.",
+            )
+        return record_store
+
+    async def read_github_delivery_controls(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> ServiceGitHubDeliveryStatus:
+        trace_id = next_trace_id()
+        require_service_delivery_admin(identity, action="product_config.plan", trace_id=trace_id)
+        return await run_in_threadpool(
+            read_service_github_delivery,
+            store=service_delivery_store(record_store, trace_id),
+            trace_id=trace_id,
+        )
+
+    async def retire_service_github_tokens(
+        retirement: ServiceTokenRetirementRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> ServiceTokenRetirementResponse:
+        trace_id = next_trace_id()
+        admin_identity = require_service_delivery_admin(
+            identity,
+            action="product_config.apply" if retirement.mode == "apply" else "product_config.plan",
+            trace_id=trace_id,
+        )
+        try:
+            return await run_in_threadpool(
+                apply_service_token_retirement,
+                store=service_delivery_store(record_store, trace_id),
+                request=retirement,
+                actor=f"github:{admin_identity.github_id}",
+                trace_id=trace_id,
+                idempotency_key=idempotency_key.strip(),
+            )
+        except (ValueError, FileNotFoundError) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="service_token_retirement_conflict",
+                message="Service-token retirement is unavailable, stale, or conflicts with its reviewed request.",
+            ) from error
+
+    app.add_api_route(
+        SERVICE_GITHUB_DELIVERY_ROUTE,
+        read_github_delivery_controls,
+        methods=["GET"],
+        response_model=ServiceGitHubDeliveryStatus,
+        operation_id="read_service_github_delivery_controls",
+        summary="Read service GitHub delivery selectors and managed binding metadata",
+    )
+    app.add_api_route(
+        SERVICE_TOKEN_RETIREMENT_ROUTE,
+        retire_service_github_tokens,
+        methods=["POST"],
+        response_model=ServiceTokenRetirementResponse,
+        operation_id="retire_service_github_tokens",
+        summary="Disable individually selected obsolete service GITHUB_TOKEN records",
+    )
+
     app.add_api_route(
         GITHUB_DELIVERY_CONFIGURATION_ROUTE,
         configure_github_delivery,
         methods=["POST"],
+        response_model=DeliveryGitHubAppConfigurationResponse,
         operation_id="configure_launchplane_github_delivery",
         summary="Configure the existing service Delivery App",
     )
@@ -26455,7 +26569,8 @@ def create_launchplane_fastapi_app(
                 include_prelaunch=True,
                 trace_id=trace_id,
             ),
-            publish_decision=lambda profile, decision: publish_release_decision(
+            publish_decision=lambda store, profile, decision: publish_release_decision(
+                store=store,
                 control_plane_root=resolved_control_plane_root,
                 profile=profile,
                 decision=decision,
@@ -28200,6 +28315,9 @@ def create_launchplane_fastapi_app(
     register_product_path_check_read_routes(
         app,
         dependencies=product_read_route_dependencies,
+    )
+    register_event_deploy_recovery_routes(
+        app, dependencies=generic_web_write_route_dependencies, read_identity=read_identity
     )
     register_promotion_recovery_routes(
         app, dependencies=generic_web_write_route_dependencies, read_identity=read_identity

@@ -6,6 +6,7 @@ import subprocess
 from typing import Protocol
 
 import click
+from control_plane.lane_movement import LaneBuild, LaneMovementRefused, require_forward_ship_build
 
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import release_tuples as control_plane_release_tuples
@@ -176,6 +177,17 @@ def execute_ship(
 
     runtime_source_evidence: dict[str, str] = {}
     try:
+        require_forward_ship_build(
+            record_store=record_store,
+            context=resolved_request.context,
+            instance=resolved_request.instance,
+            desired=LaneBuild(
+                resolved_request.artifact_id,
+                artifact_manifest.source_commit,
+                f"{artifact_manifest.image.repository}@{artifact_manifest.image.digest}",
+                artifact_manifest.source_build,
+            ),
+        )
         runtime_source_evidence = callbacks.sync_artifact_image_reference_for_target(
             context_name=resolved_request.context,
             instance_name=resolved_request.instance,
@@ -187,7 +199,7 @@ def execute_ship(
             resolved_target=resolved_target,
             deploy_timeout_seconds=deploy_timeout_seconds,
         )
-    except (subprocess.CalledProcessError, click.ClickException):
+    except (subprocess.CalledProcessError, click.ClickException) as error:
         final_record = build_deployment_record(
             request=resolved_request,
             record_id=record_id,
@@ -198,6 +210,8 @@ def execute_ship(
             resolved_target=resolved_target,
             runtime_source=runtime_source_evidence,
         )
+        if isinstance(error, LaneMovementRefused):
+            final_record = final_record.model_copy(update={"failure": error.record_failure()})
         record_store.write_deployment_record(final_record)
         raise
 

@@ -204,7 +204,7 @@ export type AuthorizationCandidatePolicyProvenance = {
 };
 
 export type AuthorizationCandidatePrepareEnvelope = {
-    candidate_id: 'ordinary-agent-delivery-administration' | 'administrator-product-evidence-read' | 'ordinary-agent-enrollment-requester' | 'agent-product-setup';
+    candidate_id: 'agent-policy-proposer' | 'ordinary-agent-delivery-administration' | 'administrator-product-evidence-read' | 'ordinary-agent-enrollment-requester' | 'agent-product-setup';
     intent: 'add' | 'remove';
     products?: Array<string>;
     source_event_id: string;
@@ -314,6 +314,7 @@ export type ChangeImpactCoverage = {
 };
 
 export type ClientReleaseRunView = {
+    blocked_reason: string;
     decision_record_id: string;
     rollback_drill: boolean;
     state: 'waiting' | 'running' | 'passed' | 'stopped';
@@ -321,7 +322,7 @@ export type ClientReleaseRunView = {
 };
 
 export type ClientReleaseStepView = {
-    kind: 'backup' | 'promote' | 'rollback';
+    kind: 'backup' | 'promote' | 'rollback' | 'recovery';
     operation_id: string;
     status: 'not_started' | 'pending' | 'running' | 'reconciliation_required' | 'pass' | 'fail' | 'cancelled';
     step: string;
@@ -335,6 +336,28 @@ export type DataProvenance = {
     source_kind: 'record' | 'provider' | 'descriptor' | 'unsupported';
     source_record_id: string;
     stale_after: string;
+};
+
+export type DeliveryGitHubAppConfigurationRequest = {
+    app_id: number;
+    expected_plan_digest?: string;
+    integration: string;
+    mode?: 'dry-run' | 'apply';
+    reason: string;
+};
+
+export type DeliveryGitHubAppConfigurationResponse = {
+    actor: string;
+    app_id: number;
+    integration: string;
+    mode: 'dry-run' | 'apply';
+    plan_digest: string;
+    reason: string;
+    runtime_environment: {
+        [key: string]: unknown;
+    } | null;
+    status: 'ok';
+    trace_id: string;
 };
 
 export type DeployedTargetReference = {
@@ -624,6 +647,13 @@ export type EveryCodeWorkRequestSummary = {
     trigger_actor: string;
     trigger_label: string;
     updated_at: string;
+};
+
+export type ExistingDeliveryKey = {
+    binding_id: string;
+    context: string;
+    integration: string;
+    secret_id: string;
 };
 
 export type GenericWebProdPromotionRecords = {
@@ -1419,6 +1449,7 @@ export type MergeTrainReconciliationDiagnostic = {
 export type MergeTrainRepositoryPolicyOutput = {
     base_branch: string;
     blocked_label: string;
+    config_authority_events_enabled?: boolean;
     engineering_review_mode: 'advisory' | 'required';
     enqueue: MergeTrainEnqueuePolicyOutput;
     enqueue_label: string;
@@ -1482,6 +1513,14 @@ export type MergeTrainStructuralCandidateResult = {
     provenance_sha256: string;
     reason_codes: Array<'structural_single_entry_exact' | 'structural_batch_entry_exact' | 'structural_rolling_chain_recorded' | 'structural_stack_root_recorded' | 'structural_combined_owner_review_recorded' | 'structural_evidence_unavailable' | 'structural_record_superseded' | 'structural_candidate_incomplete' | 'structural_provenance_missing' | 'structural_landing_plan_missing' | 'structural_landing_plan_superseded' | 'structural_repository_mismatch' | 'structural_base_branch_mismatch' | 'structural_policy_mismatch' | 'structural_candidate_digest_mismatch' | 'structural_landing_plan_digest_mismatch' | 'structural_provenance_digest_mismatch' | 'structural_candidate_sha_mismatch' | 'structural_candidate_tree_mismatch' | 'structural_entry_absent' | 'structural_position_mismatch' | 'structural_head_sha_mismatch' | 'structural_head_tree_mismatch' | 'structural_queue_drift' | 'structural_base_sha_mismatch' | 'structural_base_tree_mismatch' | 'structural_rolling_chain_broken' | 'structural_prior_entry_not_landed' | 'structural_landing_evidence_unavailable' | 'structural_prior_entry_head_mismatch' | 'structural_prior_entry_tree_mismatch' | 'structural_impact_unknown' | 'structural_delta_drift' | 'structural_changed_path_overlap' | 'structural_impact_expanded' | 'structural_same_subject_combined_review_required' | 'structural_combined_owner_review_mismatch' | 'structural_stack_root_unproven'>;
     status: 'exact' | 'recorded_rolling' | 'mismatch' | 'unknown';
+};
+
+export type ObsoleteServiceToken = {
+    binding_ids: Array<string>;
+    context: string;
+    scope: 'global' | 'context';
+    secret_id: string;
+    status: 'configured' | 'disabled';
 };
 
 export type OdooAddonSettingOverride = {
@@ -2376,7 +2415,7 @@ export type PrivilegedOperationApprovalEnvelope = {
 
 export type PrivilegedOperationEventRecord = {
     action: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled';
-    actor: PrivilegedOperationActor | PrivilegedOperationAgentActor;
+    actor: PrivilegedOperationActor | PrivilegedOperationAgentActor | PrivilegedOperationLocalOperatorActor;
     event_id: string;
     occurred_at: string;
     operation_id: string;
@@ -2415,6 +2454,12 @@ export type PrivilegedOperationListResponse = {
     trace_id: string;
 };
 
+export type PrivilegedOperationLocalOperatorActor = {
+    identity_type: 'local_operator';
+    login: 'local-operator';
+    principal_sha256: string;
+};
+
 export type PrivilegedOperationRecord = {
     approval: PrivilegedOperationApproval | null;
     created_at: string;
@@ -2431,7 +2476,7 @@ export type PrivilegedOperationRecord = {
     operation_id: string;
     request: ManagedSecretReencryptionPlanInput | ManagedAuthzPolicySetProposalInputOutput | ManagedMergeTrainPolicyImportProposalInputOutput | OrdinaryAgentDeliveryActivationSetupRequest | OrdinaryAgentDeliveryActivationRevokeRequest;
     request_digest: string;
-    requested_by: PrivilegedOperationActor | PrivilegedOperationAgentActor;
+    requested_by: PrivilegedOperationActor | PrivilegedOperationAgentActor | PrivilegedOperationLocalOperatorActor;
     safety_class: 'secret_backed' | 'policy_admin';
     schema_version: number;
     source_event_id: string;
@@ -2463,7 +2508,7 @@ export type PrivilegedOperationSemanticReview = {
     operation_class: 'managed_secret_reencryption' | 'managed_authz_policy_set' | 'managed_merge_train_policy_import' | 'ordinary_agent_delivery_activation';
     operation_id: string;
     persists_state: false;
-    requested_by_kind: 'github_human' | 'terminal_agent';
+    requested_by_kind: 'github_human' | 'terminal_agent' | 'local_operator';
     rollback: PrivilegedOperationSemanticReviewRollback;
     safety_class: 'secret_backed' | 'policy_admin';
     schema_version: number;
@@ -2472,7 +2517,7 @@ export type PrivilegedOperationSemanticReview = {
 
 export type PrivilegedOperationSemanticReviewActivityEntry = {
     action: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled';
-    actor_type: 'github_human' | 'terminal_agent' | 'system';
+    actor_type: 'github_human' | 'terminal_agent' | 'local_operator' | 'system';
     event_id: string;
     occurred_at: string;
     reason_available: boolean;
@@ -3844,6 +3889,7 @@ export type ReleaseChecklist = {
     product: string;
     production: ReleaseVersion;
     repository: string;
+    shared_sources?: Array<SharedSourceReview>;
     testing_url: string;
     untracked_commits: Array<string>;
 };
@@ -3897,6 +3943,7 @@ export type ReleaseReviewStatus = {
     approved: boolean;
     blockers: Array<string>;
     checklist: ReleaseChecklist | null;
+    checklist_complete?: boolean | null;
     checklist_digest: string;
     latest_decision: ReleaseReviewDecisionRecord | null;
     required: boolean;
@@ -4050,6 +4097,48 @@ export type SecretSharingReason = {
     reason: string;
     recorded_at: string;
     recorded_by: string;
+};
+
+export type ServiceGitHubDeliveryStatus = {
+    advisory_app_id: string;
+    app_id: string;
+    existing_keys: Array<ExistingDeliveryKey>;
+    integration: string;
+    obsolete_tokens: Array<ObsoleteServiceToken>;
+    status: 'ok';
+    trace_id: string;
+};
+
+export type ServiceTokenRetirementRequest = {
+    advisory_check_url: string;
+    consumer_check_evidence: string;
+    delivery_comment_url: string;
+    delivery_release_issue_url: string;
+    director_confirmed?: boolean;
+    expected_plan_digest?: string;
+    mode?: 'dry-run' | 'apply';
+    reason: string;
+    secret_ids: Array<string>;
+};
+
+export type ServiceTokenRetirementResponse = {
+    actor: string;
+    advisory_app_id: string;
+    app_id: string;
+    mode: 'dry-run' | 'apply';
+    plan_digest: string;
+    reason: string;
+    status: 'ok';
+    tokens: Array<ObsoleteServiceToken>;
+    trace_id: string;
+};
+
+export type SharedSourceReview = {
+    candidate_commit: string;
+    items: Array<ReleaseReviewItem>;
+    production_commit: string;
+    repository: string;
+    untracked_commits: Array<string>;
 };
 
 export type StructuredHealthEvidence = {
@@ -5409,6 +5498,30 @@ export type ReadRepoProductMappingResponses = {
 
 export type ReadRepoProductMappingResponse = ReadRepoProductMappingResponses[keyof ReadRepoProductMappingResponses];
 
+export type ReadServiceGithubDeliveryControlsData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/service/github-delivery';
+};
+
+export type ReadServiceGithubDeliveryControlsErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadServiceGithubDeliveryControlsError = ReadServiceGithubDeliveryControlsErrors[keyof ReadServiceGithubDeliveryControlsErrors];
+
+export type ReadServiceGithubDeliveryControlsResponses = {
+    200: ServiceGitHubDeliveryStatus;
+};
+
+export type ReadServiceGithubDeliveryControlsResponse = ReadServiceGithubDeliveryControlsResponses[keyof ReadServiceGithubDeliveryControlsResponses];
+
 export type ReadWorkGraphIssueInboxData = {
     body?: never;
     headers?: {
@@ -6209,6 +6322,56 @@ export type WriteReleaseReviewDecisionResponses = {
 };
 
 export type WriteReleaseReviewDecisionResponse = WriteReleaseReviewDecisionResponses[keyof WriteReleaseReviewDecisionResponses];
+
+export type ConfigureLaunchplaneGithubDeliveryData = {
+    body: DeliveryGitHubAppConfigurationRequest;
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/service/github-delivery/configuration';
+};
+
+export type ConfigureLaunchplaneGithubDeliveryErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ConfigureLaunchplaneGithubDeliveryError = ConfigureLaunchplaneGithubDeliveryErrors[keyof ConfigureLaunchplaneGithubDeliveryErrors];
+
+export type ConfigureLaunchplaneGithubDeliveryResponses = {
+    200: DeliveryGitHubAppConfigurationResponse;
+};
+
+export type ConfigureLaunchplaneGithubDeliveryResponse = ConfigureLaunchplaneGithubDeliveryResponses[keyof ConfigureLaunchplaneGithubDeliveryResponses];
+
+export type RetireServiceGithubTokensData = {
+    body: ServiceTokenRetirementRequest;
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/service/github-delivery/token-retirement';
+};
+
+export type RetireServiceGithubTokensErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type RetireServiceGithubTokensError = RetireServiceGithubTokensErrors[keyof RetireServiceGithubTokensErrors];
+
+export type RetireServiceGithubTokensResponses = {
+    200: ServiceTokenRetirementResponse;
+};
+
+export type RetireServiceGithubTokensResponse = RetireServiceGithubTokensResponses[keyof RetireServiceGithubTokensResponses];
 
 export type RankWorkGraphSnapshotData = {
     body: WorkGraphRankEnvelope;

@@ -52,6 +52,7 @@ from control_plane.github_payload import required_string_text
 from control_plane.github_response_headers import GitHubResponseHeadersObserver
 from control_plane.github_response_headers import notify_github_quota_response_headers
 from control_plane.github_request_timing import timed_github_request
+from control_plane.merge_train_codeowners import individual_landing_snapshots
 from control_plane.merge_train_dependency_updates import DependencyUpdateClass
 from control_plane.merge_train_dependency_updates import classify_dependency_update
 from control_plane.source_control_change import change_fingerprint
@@ -938,23 +939,26 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 provider_checkpoint=provider_checkpoint,
                 checkpoint=checkpoint,
             )
+        guard: GuardedMergeAdmission = admission_guard
         repository_path = _repository_path(landing_plan.repository)
         expected_base_sha = landing_plan.entries[0].expected_base_sha
         expected_base_tree_sha = landing_plan.entries[0].recorded_candidate_parent_tree_sha
         landed_entries: list[MergeTrainBatchLandingEntry] = []
 
         def update_progress(
-            progress_plan: MergeTrainBatchLandingPlan,
+            checkpoint_plan: MergeTrainBatchLandingPlan,
             progress_entry: MergeTrainBatchLandingEntry,
             phase: str,
         ) -> None:
             persisted_record = (
-                checkpoint(progress_plan, progress_entry, phase) if checkpoint is not None else None
+                checkpoint(checkpoint_plan, progress_entry, phase)
+                if checkpoint is not None
+                else None
             )
             if persisted_record is not None:
-                admission_guard.update_landing_plan_record(persisted_record)
+                guard.update_landing_plan_record(persisted_record)
             else:
-                admission_guard.update_landing_plan(progress_plan)
+                guard.update_landing_plan(checkpoint_plan)
 
         for entry_index, entry in enumerate(landing_plan.entries):
             current_base_sha, current_base_tree_sha = _base_branch_identity(
@@ -1329,20 +1333,25 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         self, *, repository: str, pull_request_number: int, body_contains: str
     ) -> str:
         repository_path = _repository_path(repository)
-        payload = self.transport.request(
-            method="GET",
-            path=f"/repos/{repository_path}/issues/{pull_request_number}/comments",
-        )
-        if not isinstance(payload, list):
-            raise MergeTrainGitHubError("GitHub issue comments response must be a JSON list.")
         needle = _required_value(body_contains, "GitHub comment match text is required.")
-        for item in payload:
-            if not isinstance(item, dict):
-                continue
-            body = str(item.get("body") or "")
-            if needle in body:
-                return str(item.get("html_url") or "").strip()
-        return ""
+        page = 1
+        while True:
+            path = f"/repos/{repository_path}/issues/{pull_request_number}/comments"
+            # Keep the first page's default size; subsequent pages use that same size.
+            if page > 1:
+                path += f"?per_page=30&page={page}"
+            payload = self.transport.request(method="GET", path=path)
+            if not isinstance(payload, list):
+                raise MergeTrainGitHubError("GitHub issue comments response must be a JSON list.")
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                body = str(item.get("body") or "")
+                if needle in body:
+                    return str(item.get("html_url") or "").strip()
+            if len(payload) < 30:
+                return ""
+            page += 1
 
     def pull_request_is_merged(
         self, *, repository: str, pull_request_number: int, expected_head_sha: str
@@ -1377,7 +1386,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         payload = _json_object(
             self.transport.request(
                 method="GET",
-                path=(f"/repos/{repository_path}/compare/{normalized_commit_sha}...{branch_name}"),
+                path=f"/repos/{repository_path}/compare/{normalized_commit_sha}...{branch_name}",
             ),
             "GitHub compare response",
         )
@@ -1686,6 +1695,36 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
     ) -> None:
         repository_path = _repository_path(repository)
         normalized_label = _required_value(label, "GitHub label is required.")
+        label_path = f"/repos/{repository_path}/labels/{quote(normalized_label, safe='')}"
+        try:
+            self.transport.request(
+                method="POST",
+                path=f"/repos/{repository_path}/issues/{pull_request_number}/labels",
+                body={"labels": [normalized_label]},
+            )
+            return
+        except MergeTrainGitHubError as error:
+            if error.status_code != 422:
+                raise
+            # A validation refusal can mean the policy's label has not been created.
+            try:
+                self.transport.request(method="GET", path=label_path)
+            except MergeTrainGitHubError as lookup_error:
+                if lookup_error.status_code != 404:
+                    raise
+            else:
+                raise error
+        try:
+            self.transport.request(
+                method="POST",
+                path=f"/repos/{repository_path}/labels",
+                body={"name": normalized_label, "color": "b60205"},
+            )
+        except MergeTrainGitHubError as error:
+            if error.status_code != 422:
+                raise
+            # Another controller may have created the label on a different base lane.
+            self.transport.request(method="GET", path=label_path)
         self.transport.request(
             method="POST",
             path=f"/repos/{repository_path}/issues/{pull_request_number}/labels",
@@ -1706,7 +1745,8 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 )
             },
         )
-        if self._branch_refresh_recorder is None:
+        recorder = self._branch_refresh_recorder
+        if recorder is None:
             return
         try:
             result = self._read_branch_refresh_result(
@@ -1721,7 +1761,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 )
                 return
             result_head_sha, merged_base_sha = result
-            self._branch_refresh_recorder(
+            recorder(
                 repository=repository,
                 pull_request_number=pull_request_number,
                 expected_head_sha=expected_head_sha,
@@ -2217,6 +2257,12 @@ class GitHubMergeTrainSnapshotReader:
                 )
                 for pull_request in relevant_pull_requests
             ),
+        )
+        pull_requests = individual_landing_snapshots(
+            transport=self.transport,
+            repository_path=repository_path,
+            base_sha=base_sha,
+            pull_requests=pull_requests,
         )
         return MergeTrainDryRunSnapshot(
             repository=repository,
@@ -3655,7 +3701,7 @@ def _required_branch_checks(
         required_checks[key]
         for key in sorted(
             required_checks,
-            key=lambda item: (item[0], item[1] if item[1] is not None else -1),
+            key=lambda binding: (binding[0], binding[1] if binding[1] is not None else -1),
         )
     )
 
@@ -3774,7 +3820,7 @@ def _list_check_runs(
         payload = _json_object(
             transport.request(
                 method="GET",
-                path=(f"/repos/{repository_path}/commits/{encoded_head_sha}/check-runs?{query}"),
+                path=f"/repos/{repository_path}/commits/{encoded_head_sha}/check-runs?{query}",
             ),
             "GitHub check runs response",
         )
@@ -3875,6 +3921,8 @@ def _github_request_route_template(path: str) -> str:
         "/repos/{owner}/{repo}/pulls/{number}/commits",
         "/repos/{owner}/{repo}/issues/{number}/comments",
         "/repos/{owner}/{repo}/issues/{number}/labels",
+        "/repos/{owner}/{repo}/labels",
+        "/repos/{owner}/{repo}/labels/{label}",
         "/repos/{owner}/{repo}/issues/{number}/timeline",
         "/repos/{owner}/{repo}/issues/{number}/events",
         "/repos/{owner}/{repo}/branches/{branch}",
@@ -3891,7 +3939,7 @@ def _github_request_route_template(path: str) -> str:
         "/repos/{owner}/{repo}/merges",
     )
     for template in templates:
-        pattern = re.sub(r"\{[^}]+\}", "[^/]+", template)
+        pattern = re.sub(r"\{[^}]+}", "[^/]+", template)
         if template.endswith("/{reference}"):
             pattern = pattern.rsplit("[^/]+", 1)[0] + ".+"
         if re.fullmatch(pattern, route):

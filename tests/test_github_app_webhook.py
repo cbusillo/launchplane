@@ -4,7 +4,9 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+from pydantic import JsonValue
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_reconcile import ProductReconcileTarget
@@ -17,6 +19,7 @@ from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import (
     LaunchplaneProductReconcileRequestRow,
+    LaunchplaneGitHubAppWebhookDeliveryRow,
     PostgresRecordStore,
 )
 from tests.support.auth import StubVerifier, identity
@@ -294,6 +297,258 @@ class GitHubAppWebhookTests(unittest.TestCase):
         status, body = self.deliver(_pull_request("opened"), event="pull_request")
 
         self.assertEqual(body["result"]["status"], "recorded")  # type: ignore[index]
+
+    def test_request_error_preserves_preview_and_bad_signature_never_selects_scan(self) -> None:
+        payload = {
+            "repository": {"id": _REPOSITORY_ID},
+            "action": "synchronize",
+            "number": 7,
+            "pull_request": {"base": {"ref": "main"}, "head": {"sha": "b" * 40}},
+        }
+        body = json.dumps(payload).encode()
+        select_scan = Mock(side_effect=ValueError("private request error"))
+        dependencies = GitHubAppWebhookDependencies(
+            webhook_secret=lambda: self.secret, config_authority=select_scan
+        )
+        status, _ = handle_github_app_webhook_request(
+            body,
+            "pull_request",
+            "config-2",
+            "bad",
+            self.store,
+            Path("."),
+            "trace",
+            dependencies=dependencies,
+        )
+        self.assertEqual(status, 401)
+        select_scan.assert_not_called()
+        status, _ = handle_github_app_webhook_request(
+            body,
+            "pull_request",
+            "config-2",
+            _signature(body),
+            self.store,
+            Path("."),
+            "trace",
+            dependencies=dependencies,
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(
+            self.store.read_product_reconcile_request("site:preview:7").state, "pending"
+        )
+        delivery = self.store.read_github_app_webhook_delivery("config-2")
+        self.assertEqual(delivery.config_authority_state, "pending")
+        self.assertEqual(delivery.config_authority["request_error"], "source_request_unavailable")
+        self.assertNotIn("private request error", delivery.model_dump_json())
+
+    def test_pending_scan_is_durable_replayed_and_worker_refuses_unavailable_source(self) -> None:
+        from control_plane.product_config_authority_events import run_product_config_authority_once
+
+        body = json.dumps(
+            {"repository": {"id": _REPOSITORY_ID}, "before": "a" * 40, "after": "b" * 40}
+        ).encode()
+        dependencies = GitHubAppWebhookDependencies(
+            webhook_secret=lambda: self.secret,
+            config_authority=lambda *_args: {
+                "status": "pending",
+                "request": {"before": "a" * 40, "after": "b" * 40},
+            },
+        )
+        for _ in range(2):
+            status, _response = handle_github_app_webhook_request(
+                body,
+                "push",
+                "scan-durable",
+                _signature(body),
+                self.store,
+                Path("."),
+                "trace",
+                dependencies=dependencies,
+            )
+            self.assertEqual(status, 202)
+        pending = self.store.read_github_app_webhook_delivery("scan-durable")
+        self.assertEqual(pending.config_authority_state, "pending")
+        self.assertEqual(pending.config_authority_attempt, 0)
+        scan = Mock(side_effect=OSError("private provider error"))
+        pending_states: list[JsonValue] = []
+
+        def publish(
+            _inventory: RepositoryInventoryRecord, evidence: dict[str, JsonValue], _root: Path
+        ) -> dict[str, JsonValue]:
+            pending_states.append(evidence["retry_pending"])
+            self.assertEqual(evidence["head_sha"], "b" * 40)
+            return {"status": "projected"}
+
+        completed = run_product_config_authority_once(
+            self.store, "worker", scan=scan, publish=publish
+        )
+        assert completed is not None
+        self.assertEqual(completed.config_authority_state, "pending")
+        self.assertEqual(completed.config_authority["status"], "unavailable")
+        self.assertNotIn("private provider error", completed.model_dump_json())
+        self.assertIsNone(run_product_config_authority_once(self.store, "worker", scan=scan))
+        for _ in range(2):
+            with self.store._session_factory() as session:
+                row = session.get(LaunchplaneGitHubAppWebhookDeliveryRow, "scan-durable")
+                assert row is not None
+                row.payload = {**row.payload, "config_authority_next_attempt_at": ""}
+                session.commit()
+            completed = run_product_config_authority_once(
+                self.store, "worker", scan=scan, publish=publish
+            )
+        assert completed is not None
+        self.assertEqual(completed.config_authority_state, "failed")
+        self.assertEqual(pending_states, [True, True, False])
+        self.assertIsNone(run_product_config_authority_once(self.store, "worker", scan=scan))
+        # Native signed redelivery resets only the failed unavailable scan, preserving deploy dedupe.
+        status, _ = handle_github_app_webhook_request(
+            body,
+            "push",
+            "scan-durable",
+            _signature(body),
+            self.store,
+            Path("."),
+            "trace",
+            dependencies=dependencies,
+        )
+        self.assertEqual(status, 202)
+        publication_failed = run_product_config_authority_once(
+            self.store,
+            "worker",
+            scan=lambda *_args: {"status": "pass", "head_sha": "b" * 40},
+            publish=Mock(side_effect=OSError("private publish failure")),
+        )
+        assert publication_failed is not None
+        self.assertEqual(publication_failed.config_authority_state, "pending")
+        self.assertEqual(publication_failed.config_authority["scan_status"], "pass")
+        self.assertEqual(publication_failed.config_authority["projection_status"], "unavailable")
+        self.assertIs(publication_failed.config_authority["retry_pending"], True)
+        self.assertNotIn("private publish failure", publication_failed.model_dump_json())
+        with self.store._session_factory() as session:
+            row = session.get(LaunchplaneGitHubAppWebhookDeliveryRow, "scan-durable")
+            assert row is not None
+            row.payload = {**row.payload, "config_authority_next_attempt_at": ""}
+            session.commit()
+        repaired = run_product_config_authority_once(
+            self.store,
+            "worker",
+            scan=lambda *_args: {"status": "pass", "head_sha": "b" * 40},
+            publish=lambda *_args: {"status": "projected"},
+        )
+        assert repaired is not None
+        self.assertEqual(repaired.config_authority_state, "done")
+        self.assertEqual(repaired.config_authority["status"], "pass")
+        self.assert_nothing_recorded()
+
+    def test_deploy_only_inventory_error_preserves_webhook_unavailable_contract(self) -> None:
+        body = json.dumps(_workflow_run(trigger="push")).encode()
+        with patch.object(
+            self.store,
+            "list_repository_inventory_records",
+            side_effect=OSError("private storage detail"),
+        ):
+            code, response = handle_github_app_webhook_request(
+                body,
+                "workflow_run",
+                "inventory-failed",
+                _signature(body),
+                self.store,
+                Path("."),
+                "trace",
+                dependencies=GitHubAppWebhookDependencies(webhook_secret=lambda: self.secret),
+            )
+        self.assertEqual(code, 503)
+        self.assertNotIn("private storage detail", json.dumps(response))
+        self.assertIn("github_app_webhook_unavailable", json.dumps(response))
+
+    def test_retired_repository_is_neither_scanned_nor_published(self) -> None:
+        from control_plane.contracts.product_reconcile import GitHubAppWebhookDeliveryRecord
+        from control_plane.product_config_authority_events import run_product_config_authority_once
+
+        delivery = GitHubAppWebhookDeliveryRecord(
+            delivery_id="untracked-source",
+            event="push",
+            repository_id=str(_REPOSITORY_ID),
+            received_at=self.clock,
+            config_authority_state="pending",
+            config_authority_request={"before": "a" * 40, "after": "b" * 40, "base_branch": "main"},
+        )
+        self.store.record_github_app_webhook_delivery(delivery, (), self.clock)
+        self.store.write_repository_inventory_record(
+            _inventory(inventory_state="retired", inventory_revision=2)
+        )
+        scan, publish = Mock(), Mock()
+        result = run_product_config_authority_once(self.store, "worker", scan=scan, publish=publish)
+        assert result is not None
+        self.assertEqual(result.config_authority["status"], "unavailable")
+        scan.assert_not_called()
+        publish.assert_not_called()
+
+    def test_busy_repository_backlog_does_not_starve_another_repository(self) -> None:
+        from control_plane.contracts.product_reconcile import GitHubAppWebhookDeliveryRecord
+
+        busy = GitHubAppWebhookDeliveryRecord(
+            delivery_id="busy-00",
+            event="push",
+            repository_id=str(_REPOSITORY_ID),
+            received_at=self.clock,
+            config_authority_state="pending",
+        )
+        for index in range(25):
+            delivery = busy.model_copy(update={"delivery_id": f"busy-{index:02}"})
+            self.store.record_github_app_webhook_delivery(delivery, (), self.clock)
+        self.assertIsNotNone(self.store.claim_next_config_authority_delivery("busy", 600))
+        other = busy.model_copy(update={"delivery_id": "other", "repository_id": "99999"})
+        self.store.record_github_app_webhook_delivery(other, (), self.clock)
+        claim = self.store.claim_next_config_authority_delivery("free", 600)
+        assert claim is not None
+        self.assertEqual(claim.delivery_id, "other")
+
+    def test_config_scan_lease_recovery_fences_old_attempt_even_with_same_worker(self) -> None:
+        from control_plane.contracts.product_reconcile import (
+            GitHubAppWebhookDeliveryRecord,
+            ProductReconcileLeaseLostError,
+        )
+
+        delivery = GitHubAppWebhookDeliveryRecord(
+            delivery_id="scan-leased",
+            event="push",
+            repository_id=str(_REPOSITORY_ID),
+            received_at=self.clock,
+            config_authority_state="pending",
+            config_authority_request={"before": "a" * 40, "after": "b" * 40},
+        )
+        self.store.record_github_app_webhook_delivery(delivery, (), self.clock)
+        followup = delivery.model_copy(update={"delivery_id": "scan-leased-second"})
+        self.store.record_github_app_webhook_delivery(followup, (), self.clock)
+        old = self.store.claim_next_config_authority_delivery("same-worker", 60)
+        assert old is not None
+        self.assertIsNone(self.store.claim_next_config_authority_delivery("other", 60))
+        # Expire the actual persisted lease instead of sleeping or assuming clock offsets.
+        with self.store._session_factory() as session:
+            row = session.get(LaunchplaneGitHubAppWebhookDeliveryRow, delivery.delivery_id)
+            assert row is not None
+            row.payload = {
+                **row.payload,
+                "config_authority_lease_expires_at": "2000-01-01T00:00:00Z",
+            }
+            session.commit()
+        recovered = self.store.claim_next_config_authority_delivery("same-worker", 60)
+        assert recovered is not None
+        publisher = Mock()
+        with self.assertRaises(ProductReconcileLeaseLostError):
+            self.store.complete_config_authority_delivery(
+                old, {"status": "pass"}, publish=publisher
+            )
+        publisher.assert_not_called()
+        completed = self.store.complete_config_authority_delivery(recovered, {"status": "fail"})
+        self.assertEqual(completed.config_authority_state, "failed")
+        self.assertEqual(
+            self.store.read_github_app_webhook_delivery(delivery.delivery_id), completed
+        )
+        next_claim = self.store.claim_next_config_authority_delivery("other", 60)
+        assert next_claim is not None
+        self.assertEqual(next_claim.delivery_id, followup.delivery_id)
 
 
 class ProductReconcileFoldingTests(unittest.TestCase):
