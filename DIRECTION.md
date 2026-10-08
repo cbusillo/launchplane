@@ -60,11 +60,10 @@ acceptance. Admin is a permission, not a role; the Director normally holds it.
 
 An agent asks the Director before:
 
-- deploying to, promoting, or changing a real live site, except a release
-  the product's Client accepted, which Launchplane promotes itself through
-  the gated path
-- restoring or deleting data, or weakening a backup gate
-- creating credentials, granting access, or changing who can merge
+- changing a real live site outside the Client's accepted release; a deploy
+  or promotion there comes only from that accepted release, on the gated path
+- restoring or deleting a live site's data, or weakening its backup gate
+- creating a live site's credentials, granting access, or changing who can merge
 - spending money or creating paid resources
 - anything a Client should weigh in on; that question goes to the Client
 
