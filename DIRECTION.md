@@ -90,8 +90,8 @@ blocks that run is the next piece of work.
   records, `owner-acceptance` grants and exact bindings, shadow mode, and the
   manager, delegate, and waiver roles
 - a GitHub approval standing in for a Client's decision in Launchplane
-- Every Code; Codex Lab runs agent work, and old identifiers stay only until
-  their readers move
+- Every Code and Codex Lab; old identifiers stay only until their readers
+  move
 - hardware-key authorization recovery, disposable canaries, and the dev lane
 - billing and collections, and general planning or work graphs inside
   Launchplane
