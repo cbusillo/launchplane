@@ -53,10 +53,13 @@ def publish_owner_feedback(
     decision: ProductReviewDecisionRecord,
     review_url: str,
     token: str,
-    actor_id: int,
+    actor_id: int = 0,
+    app_id: int = 0,
     api_request: Callable[..., object],
 ) -> str:
     """Reconcile one comment while the caller holds the stored PR's review lock."""
+    if app_id < 1 and actor_id < 1:
+        raise ValueError("Client feedback requires a delivery identity.")
     body = owner_feedback_comment(decision, review_url=review_url)
     marker = body.splitlines()[0]
     path = f"/repos/{quote(decision.repository)}/issues/{decision.pull_request_number}/comments"
@@ -72,7 +75,13 @@ def publish_owner_feedback(
             if not isinstance(text, str) or not text.startswith(marker + "\n"):
                 continue
             author = comment.get("user")
-            if not isinstance(author, dict) or author.get("id") != actor_id:
+            app = comment.get("performed_via_github_app")
+            matches_actor = (
+                isinstance(app, dict) and app.get("id") == app_id
+                if app_id
+                else isinstance(author, dict) and author.get("id") == actor_id
+            )
+            if not matches_actor:
                 # A copied marker from another author is not our delivery receipt.
                 continue
             matches.append(comment)

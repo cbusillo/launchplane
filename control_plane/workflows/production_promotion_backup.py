@@ -9,6 +9,7 @@ import logging
 from typing import Protocol, cast
 
 import click
+from control_plane.lane_movement import LaneMovementRefused
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.production_backup_authority import (
@@ -30,9 +31,18 @@ GENERIC_WEB_PROMOTION_BACKUP_ACTION = "generic_web_prod_promotion.execute"
 class ProductionPromotionBackupGuard:
     checkpoint: Callable[[str], None]
     evidence: dict[str, str]
+    mark_effect_started: Callable[[], None] = lambda: None
 
     def __call__(self, phase: str) -> None:
+        self.before_provider_effect(phase)
+
+    def before_provider_effect(
+        self, phase: str, worker_checkpoint: Callable[[str], None] | None = None
+    ) -> None:
         self.checkpoint(phase)
+        if worker_checkpoint is not None:
+            worker_checkpoint(phase)
+        self.mark_effect_started()
 
 
 class ProductionPromotionBackupStore(Protocol):
@@ -158,6 +168,15 @@ def require_production_promotion_backup(
     for promotion in store.list_promotion_records(context_name=context, to_instance_name=instance):
         if promotion.record_id == active_promotion_record_id:
             continue
+        if (
+            promotion.deploy.status == "fail"
+            and promotion.failure is not None
+            and promotion.failure.code == "lane_movement.source_order_unavailable"
+            and promotion.backup_gate.evidence.get("provider_effects_status") == "not_started"
+        ):
+            # The guard recorded a temporary read refusal before its first
+            # provider checkpoint. This capture has protected no write yet.
+            continue
         if backup_record_id in (
             promotion.backup_gate.evidence.get("backup_record_id"),
             promotion.backup_gate.evidence.get("infrastructure_backup_record_id"),
@@ -242,11 +261,13 @@ def production_promotion_backup_guard(
             )
 
         def checkpoint(_phase: str) -> None:
-            nonlocal effects_started
             require_lock()
             if not effects_started:
                 require_evidence(active_promotion_record_id=pending_promotion.record_id)
-                effects_started = True
+
+        def mark_effect_started() -> None:
+            nonlocal effects_started
+            effects_started = True
 
         require_lock()
         require_evidence()
@@ -255,14 +276,22 @@ def production_promotion_backup_guard(
         # durable pending record, so the next attempt must take a fresh backup.
         record_store.write_promotion_record(pending_promotion)
         try:
-            yield ProductionPromotionBackupGuard(checkpoint, protection_evidence)
+            yield ProductionPromotionBackupGuard(
+                checkpoint, protection_evidence, mark_effect_started
+            )
             require_lock()
-        except Exception:
+        except Exception as error:
             protection_evidence["provider_effects_status"] = (
                 "unknown_after_failure" if effects_started else "not_started"
             )
             failed = pending_promotion.model_copy(deep=True)
             failed.deploy.status = "fail"
+            if (
+                isinstance(error, LaneMovementRefused)
+                and error.code == "source_order_unavailable"
+                and not effects_started
+            ):
+                failed.failure = error.record_failure()
             failed.backup_gate.evidence.update(protection_evidence)
             record_store.write_promotion_record(failed)
             raise

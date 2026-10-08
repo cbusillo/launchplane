@@ -173,7 +173,9 @@ uv run launchplane service audit-config-authority \
 
 The gate prints the same redacted audit report as the full scanner, adds a JSON
 `gate` summary when enforcement is enabled, then exits non-zero for new findings
-that still need classification. In changed-file mode, findings that already
+that still need classification or
+[incomplete Python coverage](config-boundary.md#inspection). The same section
+owns supported-interpreter selection and coverage-failure handling. In changed-file mode, findings that already
 existed at the explicit base commit stay visible in the report with
 `preexisting_changed_file_finding`, but they do not block unrelated edits to the
 same file. Supply the pull request base and head SHAs and fetch both commits.
@@ -382,6 +384,11 @@ It blocks the patterns that previously caused ownership drift:
 - repo-local derivation of Launchplane-owned preview URLs, target IDs, release
   tuple IDs, deployment IDs, promotion IDs, or backup-gate IDs outside approved
   thin workflow response handling
+
+The shared/prod mutation rule ignores full-line comments whose `#` is followed
+by whitespace or end-of-line, including descriptions of non-production
+restores. Commands with trailing comments or quoted `#` characters, shebangs,
+and JavaScript private members remain subject to the rule.
 
 When a product repo genuinely needs new source-adjacent facts, add a typed
 Launchplane driver input or shared connector path before expanding the allowlist.

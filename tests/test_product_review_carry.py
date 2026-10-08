@@ -20,6 +20,7 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.profiles import product_profile_payload
 from tests.support.stores import sqlite_database_url
+from tests.test_product_review_status import _app_token
 
 _REPOSITORY = "every/example-site"
 _PULL_REQUEST = 92
@@ -60,6 +61,7 @@ class _GitHub:
             for head in (_ACCEPTED_HEAD, _REFRESHED_HEAD, _OTHER_MERGE_HEAD)
         }
         self.statuses: list[dict[str, object]] = []
+        self.check_runs: list[dict[str, object]] = []
 
     def __call__(
         self,
@@ -80,12 +82,39 @@ class _GitHub:
             assert token and body is not None
             self.statuses.insert(0, dict(body))
             return body
+        if path == "/installation/token" and method == "DELETE":
+            return None
+        if "/check-runs?" in path:
+            return {"check_runs": list(self.check_runs)}
+        if path == f"{repository_path}/check-runs" and method == "POST":
+            assert body is not None
+            run = {"id": len(self.check_runs) + 1, "app": {"id": 77}, **body}
+            self.check_runs.insert(0, run)
+            self._record_check(run)
+            return run
+        if path.startswith(f"{repository_path}/check-runs/") and method == "PATCH":
+            assert body is not None
+            run = next(run for run in self.check_runs if run["id"] == int(path.rsplit("/", 1)[1]))
+            run.update(body)
+            self._record_check(run)
+            return run
         if path.startswith(f"{repository_path}/compare/"):
             base, head = path.rsplit("/", 1)[1].split("...")
             if head == self.base_branch:
                 return {"status": "ahead" if base in self.on_base else "diverged"}
             return {"status": "diverged", "files": self.changes[(base, head)]}
         raise AssertionError(f"Unexpected GitHub request: {method} {path}")
+
+    def _record_check(self, run: dict[str, object]) -> None:
+        output = run["output"]
+        assert isinstance(output, dict)
+        self.statuses.insert(
+            0,
+            {
+                "state": "pending" if run["status"] == "in_progress" else run["conclusion"],
+                "description": output["title"],
+            },
+        )
 
 
 class CarryOwnerAcceptanceTests(unittest.TestCase):
@@ -142,6 +171,7 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
             public_origin="https://launchplane.example.invalid",
             github_token=lambda **_: "feedback-token",
             api_request=self.github,
+            github_app_token=_app_token,
         ).publish(
             store=require_product_review_store(self.store),
             profile=self.profile,

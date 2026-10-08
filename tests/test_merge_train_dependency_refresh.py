@@ -61,6 +61,12 @@ def _refresh_commit(**updates: object) -> dict[str, object]:
 
 
 class DependencyRefreshTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # This provider fixture has no CODEOWNERS; routing is exercised separately.
+        fixture = patch("control_plane.merge_train_codeowners._read_patterns", return_value=())
+        fixture.start()
+        self.addCleanup(fixture.stop)
+
     def _classify(
         self,
         *,

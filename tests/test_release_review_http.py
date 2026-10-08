@@ -8,6 +8,7 @@ from control_plane.contracts.artifact_identity import ArtifactAddonSource
 
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.release_review import build_release_review
+from control_plane.release_review_record import publish_release_decision
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -23,6 +24,75 @@ from tests.test_release_review import github_read, profile, seed
 
 
 class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_client_accepts_covered_shared_release_and_incomplete_or_stale_refuses(
+        self,
+    ) -> None:
+        from tests.test_release_review import BASE, HEAD
+        from tests.test_release_review_shared import SharedGitHub
+
+        github = SharedGitHub()
+        for instance, sha in (("prod", BASE), ("testing", HEAD)):
+            artifact = self.store.read_artifact_manifest(f"artifact-{instance}")
+            self.store.write_artifact_manifest(
+                artifact.model_copy(
+                    update={
+                        "addon_sources": (
+                            ArtifactAddonSource(repository="example/shared-addons", ref=sha),
+                            ArtifactAddonSource(repository="example/disable-online", ref=sha),
+                        )
+                    }
+                )
+            )
+        with patch("tests.test_release_review_http.github_read", side_effect=github.read):
+            accepted = await self.post()
+            self.assertEqual(accepted.status_code, 200, accepted.text)
+            self.assertTrue(accepted.json()["review"]["approved"])
+            digest = accepted.json()["review"]["checklist_digest"]
+            github.notes = "Check the new shared sign-in behavior."
+            stale = await self.post(digest=digest)
+            self.assertEqual(stale.status_code, 409)
+            for notes, uncovered in (
+                ("", False),
+                ("#52 has no Client test notes.", False),
+                (github.notes, True),
+            ):
+                github.notes, github.uncovered = notes, uncovered
+                refused = await self.post()
+                self.assertEqual(refused.status_code, 409, refused.text)
+                self.assertIn("release_checklist_incomplete", refused.text)
+
+    async def test_accept_publishes_saved_decision_through_storage_lock(self) -> None:
+        from tests.test_release_review_record import FakeReleaseIssues
+
+        github = FakeReleaseIssues()
+        with (
+            patch(
+                "control_plane.http_app.publish_release_decision", wraps=publish_release_decision
+            ),
+            patch(
+                "control_plane.release_review_record.resolve_launchplane_github_token",
+                return_value="test-token",
+            ),
+            patch(
+                "control_plane.release_review_record.github_api_request", side_effect=github.request
+            ),
+            patch.object(
+                self.store,
+                "release_review_publication_lock",
+                wraps=self.store.release_review_publication_lock,
+            ) as publication_lock,
+        ):
+            response = await self.post()
+        self.assertEqual(response.status_code, 200, response.text)
+        saved = self.store.list_release_review_decision_records(product="example-site")[0]
+        publication_lock.assert_called_once_with(record_id=saved.record_id)
+        self.assertEqual(len(github.issues), 1)
+        self.assertEqual(
+            response.json()["review"]["latest_decision"]["release_issue_url"],
+            saved.release_issue_url,
+        )
+        self.assertTrue(response.json()["review"]["approved"])
+
     async def test_client_can_accept_again_after_a_stopped_release(self) -> None:
         from control_plane.client_release import ClientReleaseRunView
 

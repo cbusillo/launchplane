@@ -1217,8 +1217,10 @@ name = "{repository_policy.merge_identity.name}"
 action = "{repository_policy.service_authz.action}"
 product = "{repository_policy.service_authz.product}"
 context = "{repository_policy.service_authz.context}"
-[policies.github_token]
-runtime_context = "{repository_policy.github_token.runtime_context}"
+[policies.github_token.github_app]
+app_id = 42
+repository_id = 123
+private_key_context = "example_context"
 """
         )
     policy_file.write_text("\n\n".join(("schema_version = 1", *tables)), encoding="utf-8")

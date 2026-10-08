@@ -10,6 +10,7 @@ from control_plane.contracts.advisory_check_projection import (
     AdvisoryCheckProjection,
     AdvisoryCheckProjectionResult,
     AdvisoryCheckProjectionStatus,
+    GitHubCheckProjection,
 )
 from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.github_payload import json_object, required_positive_int, required_string_text
@@ -27,6 +28,19 @@ class AdvisoryCheckProjectionError(ValueError):
 def write_advisory_check_projection(
     *,
     projection: AdvisoryCheckProjection,
+    installation_token: GitHubAppInstallationToken,
+    api_request: GitHubApiRequest = github_api_request,
+) -> AdvisoryCheckProjectionResult:
+    return write_github_check_projection(
+        projection=projection,
+        installation_token=installation_token,
+        api_request=api_request,
+    )
+
+
+def write_github_check_projection(
+    *,
+    projection: GitHubCheckProjection,
     installation_token: GitHubAppInstallationToken,
     api_request: GitHubApiRequest = github_api_request,
 ) -> AdvisoryCheckProjectionResult:
@@ -78,9 +92,20 @@ def write_advisory_check_projection(
         and item["head_sha"].lower() == projection.head_sha
         and _app_id(item.get("app")) == installation_token.app_id
     )
-    exact_match = next(
-        (check_run for check_run in matching_runs if _matches_projection(check_run, projection)),
-        None,
+    pending = next((run for run in matching_runs if run.get("status") == "in_progress"), None)
+    # A completed historical match must not strand a newer pending projection.
+    completing_pending = projection.check_status == "completed" and pending is not None
+    exact_match = (
+        None
+        if completing_pending
+        else next(
+            (
+                check_run
+                for check_run in matching_runs
+                if _matches_projection(check_run, projection)
+            ),
+            None,
+        )
     )
     if exact_match is not None:
         return _result(
@@ -89,7 +114,7 @@ def write_advisory_check_projection(
             installation_token=installation_token,
             check_run=exact_match,
         )
-    current = matching_runs[0] if matching_runs else None
+    current = pending if completing_pending else (matching_runs[0] if matching_runs else None)
     body: dict[str, object] = {
         "name": projection.name,
         "status": projection.check_status,
@@ -153,7 +178,7 @@ def write_advisory_check_projection(
     )
 
 
-def _matches_projection(check_run: dict[str, object], projection: AdvisoryCheckProjection) -> bool:
+def _matches_projection(check_run: dict[str, object], projection: GitHubCheckProjection) -> bool:
     output = check_run.get("output")
     return (
         check_run.get("status") == projection.check_status
@@ -169,7 +194,7 @@ def _matches_projection(check_run: dict[str, object], projection: AdvisoryCheckP
 def _result(
     *,
     status: AdvisoryCheckProjectionStatus,
-    projection: AdvisoryCheckProjection,
+    projection: GitHubCheckProjection,
     installation_token: GitHubAppInstallationToken,
     check_run: dict[str, object],
 ) -> AdvisoryCheckProjectionResult:
@@ -221,7 +246,7 @@ def _result(
     )
 
 
-def _conclusion_matches(check_run: dict[str, object], projection: AdvisoryCheckProjection) -> bool:
+def _conclusion_matches(check_run: dict[str, object], projection: GitHubCheckProjection) -> bool:
     if projection.conclusion is None:
         return check_run.get("conclusion") is None
     return check_run.get("conclusion") == projection.conclusion

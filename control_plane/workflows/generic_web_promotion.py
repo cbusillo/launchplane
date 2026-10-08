@@ -686,6 +686,7 @@ def _roll_back_production(
                 f"{provider_operation_title} rollback" if provider_operation_title else ""
             ),
             deployment_record_id=f"{deployment_record_id}-rollback",
+            rollback=True,
             provider_effect_checkpoint=_rollback_phase_checkpoint(provider_effect_checkpoint),
         )
     except Exception as error:  # noqa: BLE001 - recorded on the promotion, then re-raised.
@@ -1148,6 +1149,8 @@ def _create_or_verify_github_release(
     token = resolve_launchplane_github_token(
         control_plane_root=control_plane_root,
         context_name=context,
+        repository=profile.repository,
+        purpose="release_publish",
     )
     if not token:
         raise click.ClickException(
@@ -1208,6 +1211,8 @@ def _preflight_github_release(
     token = resolve_launchplane_github_token(
         control_plane_root=control_plane_root,
         context_name=context,
+        repository=profile.repository,
+        purpose="repository_read",
     )
     if not token:
         raise click.ClickException(

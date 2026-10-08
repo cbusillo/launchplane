@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from uuid import uuid4
 
 from collections.abc import Callable, Iterator, Sequence
@@ -23,7 +25,8 @@ from typing import (
     overload,
 )
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, JsonValue, TypeAdapter
+from control_plane.lane_movement import source_read_retry_ready
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -49,7 +52,7 @@ from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, aliased, mapped_column, sessionmaker
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
@@ -443,7 +446,10 @@ from control_plane.contracts.production_backup_authority import (
     ProductionBackupPolicyRecord,
     ProductionBackupTargetRecord,
 )
-from control_plane.contracts.product_retirement import ProductRetirementRecord
+from control_plane.contracts.product_retirement import (
+    ProductRetirementRecord,
+    product_retirement_secret_authority,
+)
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.product_reconcile import (
     PRODUCT_RECONCILE_REQUEST_STATES,
@@ -3483,6 +3489,13 @@ class LaunchplaneGitHubAppWebhookDeliveryRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
+CONFIG_AUTHORITY_QUEUE_INDEX = Index(
+    "launchplane_github_app_webhook_deliveries_config_scan_idx",
+    LaunchplaneGitHubAppWebhookDeliveryRow.payload["config_authority_state"].as_string(),
+    LaunchplaneGitHubAppWebhookDeliveryRow.received_at,
+).ddl_if(dialect="postgresql")
+
+
 class LaunchplanePreviewPrFeedbackRemediationRow(Base):
     __tablename__ = "launchplane_preview_pr_feedback_remediations"
     __table_args__ = (
@@ -6179,6 +6192,30 @@ class PostgresRecordStore(HumanSessionStore):
                     or SecretBinding.model_validate(binding_row.payload) != expected_source.binding
                 ):
                     raise SecretCopySourceConflictError("Secret copy source changed before commit.")
+            for expected_secret in bundle.expected_secret_records:
+                current_secret = session.scalar(
+                    select(LaunchplaneSecretRow)
+                    .where(LaunchplaneSecretRow.secret_id == expected_secret.secret_id)
+                    .with_for_update()
+                )
+                if (
+                    current_secret is None
+                    or SecretRecord.model_validate(current_secret.payload) != expected_secret
+                ):
+                    raise SecretRecordConflictError(
+                        "Managed secret metadata changed before commit."
+                    )
+            for expectation in bundle.runtime_environment_read_sets:
+                current_runtime = tuple(
+                    RuntimeEnvironmentRecord.model_validate(row.payload)
+                    for row in session.scalars(
+                        select(LaunchplaneRuntimeEnvironmentRow).with_for_update()
+                    ).all()
+                )
+                if not expectation.matches(current_runtime):
+                    raise RuntimeEnvironmentConflictError(
+                        "Runtime selectors changed before commit."
+                    )
             for secret_id in bundle.absent_secret_ids:
                 if (
                     session.scalar(
@@ -6191,6 +6228,21 @@ class PostgresRecordStore(HumanSessionStore):
                     raise SecretRecordConflictError(
                         "A secret adopted from the provider was recorded before commit."
                     )
+            for binding_expectation in bundle.secret_binding_sets:
+                current_bindings = tuple(
+                    SecretBinding.model_validate(row.payload)
+                    for row in session.scalars(
+                        select(LaunchplaneSecretBindingRow)
+                        .where(
+                            LaunchplaneSecretBindingRow.secret_id == binding_expectation.secret_id
+                        )
+                        .with_for_update()
+                    ).all()
+                )
+                if sorted(current_bindings, key=lambda item: item.binding_id) != sorted(
+                    binding_expectation.bindings, key=lambda item: item.binding_id
+                ):
+                    raise SecretCopySourceConflictError("Secret consumers changed before commit.")
             for delete_item in bundle.delete_runtime_environments:
                 row = session.scalar(
                     self._runtime_environment_statement(
@@ -9558,6 +9610,8 @@ class PostgresRecordStore(HumanSessionStore):
                     model_type=OdooStableTargetReplacementOperationRecord,
                     payload=row.payload,
                 )
+                if not source_read_retry_ready(record, claimed_at):
+                    continue
                 if not self.database_url.startswith("sqlite"):
                     self._lock_odoo_stable_lane(
                         session,
@@ -10430,6 +10484,8 @@ class PostgresRecordStore(HumanSessionStore):
                 self._lock_odoo_stable_lane(session, product="", context="", instance="")
             for row in cast(list[Any], session.scalars(statement).all()):
                 record = self._read_payload(model_type=model_type, payload=row.payload)
+                if not source_read_retry_ready(record, claimed_at):
+                    continue
                 if not self.database_url.startswith("sqlite"):
                     self._lock_odoo_stable_lane(
                         session,
@@ -10452,7 +10508,17 @@ class PostgresRecordStore(HumanSessionStore):
                     update={
                         "status": "running",
                         "phase": "running",
-                        "checkpoints": (),
+                        "checkpoints": (
+                            (
+                                *record.checkpoints,
+                                type(record.checkpoints[0])(
+                                    phase="running",
+                                    recorded_at=claimed_at,
+                                ),
+                            )
+                            if record.checkpoints
+                            else ()
+                        ),
                         "started_at": record.started_at or claimed_at,
                         "updated_at": claimed_at,
                         "lease_owner": normalized_lease_owner,
@@ -10546,10 +10612,18 @@ class PostgresRecordStore(HumanSessionStore):
             return checkpointed_record
 
     def _complete_release_operation(
-        self, record: Any, *, row_type: Any, model_type: Any, lease_owner: str
+        self, record: Any, *, row_type: Any, model_type: Any, lease_owner: str, recovery: Any = None
     ) -> bool:
         with self._session_factory() as session:
-            self._begin_serialized_write(session)
+            if recovery is not None:
+                self._lock_odoo_stable_lane(
+                    session,
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                )
+            else:
+                self._begin_serialized_write(session)
             row = self._locked_release_operation_row(session, row_type, record.operation_id)
             current_record = self._read_payload(model_type=model_type, payload=row.payload)
             if not self._release_operation_lease_is_current(
@@ -10557,6 +10631,10 @@ class PostgresRecordStore(HumanSessionStore):
             ):
                 return False
             self._sync_release_operation_row(row, record)
+            if recovery is not None:
+                session.add(
+                    self._release_operation_row(LaunchplaneOdooProdRollbackOperationRow, recovery)
+                )
             session.commit()
             return True
 
@@ -10595,7 +10673,11 @@ class PostgresRecordStore(HumanSessionStore):
                             **released_lease,
                             "status": "pending",
                             "phase": "created",
-                            "checkpoints": (),
+                            "checkpoints": tuple(
+                                checkpoint
+                                for checkpoint in record.checkpoints
+                                if checkpoint.phase == "created"
+                            ),
                             "started_at": "",
                             "updated_at": now,
                         }
@@ -10791,11 +10873,37 @@ class PostgresRecordStore(HumanSessionStore):
     def complete_odoo_prod_promotion_operation_record(
         self, *, record: OdooProdPromotionOperationRecord, lease_owner: str
     ) -> bool:
+        from control_plane.odoo_release_recovery import (
+            build_odoo_release_recovery,
+            odoo_release_wrote_production,
+        )
+
+        recovery = build_odoo_release_recovery(self, record)
+        if (
+            record.status == "fail"
+            and record.authorization.grant == "client_release_acceptance"
+            and odoo_release_wrote_production(record)
+            and recovery is None
+        ):
+            record = record.model_copy(
+                update={
+                    "status": "reconciliation_required",
+                    "phase": record.checkpoints[-1].phase,
+                    "finished_at": "",
+                    "lease_owner": "",
+                    "lease_expires_at": "",
+                    "heartbeat_at": "",
+                    "result": None,
+                    "error_code": "operation_reconciliation_required",
+                    "error_message": "The failed Odoo release lacks verified recovery provenance; reconcile production before releasing the lane.",
+                }
+            )
         return self._complete_release_operation(
             record,
             row_type=LaunchplaneOdooProdPromotionOperationRow,
             model_type=OdooProdPromotionOperationRecord,
             lease_owner=lease_owner,
+            recovery=recovery,
         )
 
     def recover_expired_odoo_prod_promotion_operation_records(
@@ -19717,6 +19825,22 @@ class PostgresRecordStore(HumanSessionStore):
             session.refresh(row)
             return ReleaseReviewDecisionRecord.model_validate(row.payload)
 
+    @contextmanager
+    def release_review_publication_lock(self, *, record_id: str) -> Iterator[None]:
+        if self.database_dialect_name == "sqlite":
+            database = self._engine.url.database
+            if not database or database == ":memory:":
+                raise ValueError("Release publication requires file-backed SQLite or PostgreSQL.")
+            database_path = Path(database).resolve()
+            with FilesystemRecordStore(database_path.parent).release_review_publication_lock(
+                record_id=f"{database_path}:{record_id}"
+            ):
+                yield
+            return
+        with self._session_factory() as session, session.begin():
+            self._lock_landing_authority(session, f"release-review-publication:{record_id}")
+            yield
+
     def record_release_review_decision_publication(
         self, *, record_id: str, release_issue_url: str
     ) -> ReleaseReviewDecisionRecord:
@@ -19840,8 +19964,30 @@ class PostgresRecordStore(HumanSessionStore):
                 f"launchplane:github-app-webhook-delivery:{delivery.delivery_id}",
                 *(f"launchplane:product-reconcile:{target.target_key}" for target in targets),
             )
-            if session.get(LaunchplaneGitHubAppWebhookDeliveryRow, delivery.delivery_id):
-                session.rollback()
+            existing_row = session.get(LaunchplaneGitHubAppWebhookDeliveryRow, delivery.delivery_id)
+            if existing_row is not None:
+                existing = self._read_payload(
+                    model_type=GitHubAppWebhookDeliveryRecord, payload=existing_row.payload
+                )
+                if (
+                    existing.config_authority_state == "failed"
+                    and existing.config_authority.get("status") == "unavailable"
+                    and existing.repository_id == delivery.repository_id
+                    and existing.event == delivery.event
+                    and existing.config_authority_request == delivery.config_authority_request
+                ):
+                    # Verified redelivery retries the original request, never its deploy targets.
+                    retried = existing.model_copy(
+                        update={
+                            "config_authority_state": "pending",
+                            "config_authority_next_attempt_at": "",
+                            "config_authority_attempt": 0,
+                        }
+                    )
+                    existing_row.payload = self._payload_dict(retried)
+                    session.commit()
+                else:
+                    session.rollback()
                 return "duplicate"
             session.add(
                 LaunchplaneGitHubAppWebhookDeliveryRow(
@@ -19861,6 +20007,157 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             session.commit()
             return "recorded"
+
+    def claim_next_config_authority_delivery(
+        self,
+        lease_owner: str,
+        lease_seconds: int,
+    ) -> GitHubAppWebhookDeliveryRecord | None:
+        if not lease_owner.strip():
+            raise ValueError("Config-authority claim requires a lease owner.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            now = self._database_mutation_timestamp(session)
+            row_model = LaunchplaneGitHubAppWebhookDeliveryRow
+            active_row = aliased(row_model)
+            statement = (
+                select(row_model)
+                .where(
+                    ~select(active_row.delivery_id)
+                    .where(
+                        active_row.repository_id == row_model.repository_id,
+                        active_row.payload["config_authority_state"].as_string() == "running",
+                        active_row.payload["config_authority_lease_expires_at"].as_string() >= now,
+                    )
+                    .exists(),
+                    or_(
+                        and_(
+                            row_model.payload["config_authority_state"].as_string() == "pending",
+                            or_(
+                                row_model.payload["config_authority_next_attempt_at"]
+                                .as_string()
+                                .is_(None),
+                                row_model.payload["config_authority_next_attempt_at"].as_string()
+                                <= now,
+                            ),
+                        ),
+                        and_(
+                            row_model.payload["config_authority_state"].as_string() == "running",
+                            row_model.payload["config_authority_lease_expires_at"].as_string()
+                            < now,
+                        ),
+                    ),
+                )
+                .order_by(row_model.received_at, row_model.delivery_id)
+                .limit(20)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update(skip_locked=True)
+            for row in session.scalars(statement).all():
+                if not self._try_lock_landing_authority(
+                    session, f"launchplane:config-authority-repository:{row.repository_id}"
+                ):
+                    continue
+                active = session.scalar(
+                    select(row_model.delivery_id)
+                    .where(
+                        row_model.repository_id == row.repository_id,
+                        row_model.payload["config_authority_state"].as_string() == "running",
+                        row_model.payload["config_authority_lease_expires_at"].as_string() >= now,
+                    )
+                    .limit(1)
+                )
+                if active is not None:
+                    continue
+                if not self._try_lock_landing_authority(
+                    session, f"launchplane:github-app-webhook-delivery:{row.delivery_id}"
+                ):
+                    continue
+                record = self._read_payload(
+                    model_type=GitHubAppWebhookDeliveryRecord, payload=row.payload
+                )
+                claimed = record.model_copy(
+                    update={
+                        "config_authority_state": "running",
+                        "config_authority_lease_owner": lease_owner.strip(),
+                        "config_authority_lease_expires_at": self._mutation_lease_expiry(
+                            observed_at=now,
+                            lease_seconds=lease_seconds,
+                        ),
+                        "config_authority_attempt": record.config_authority_attempt + 1,
+                    }
+                )
+                row.payload = self._payload_dict(claimed)
+                session.commit()
+                return claimed
+            session.rollback()
+            return None
+
+    def complete_config_authority_delivery(
+        self,
+        claimed: GitHubAppWebhookDeliveryRecord,
+        evidence: dict[str, JsonValue],
+        publish: Callable[[], None] | None = None,
+    ) -> GitHubAppWebhookDeliveryRecord:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_landing_authority(
+                session,
+                f"launchplane:config-authority-repository:{claimed.repository_id}",
+                f"launchplane:github-app-webhook-delivery:{claimed.delivery_id}",
+            )
+            statement = select(LaunchplaneGitHubAppWebhookDeliveryRow).where(
+                LaunchplaneGitHubAppWebhookDeliveryRow.delivery_id == claimed.delivery_id
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(claimed.delivery_id)
+            current = self._read_payload(
+                model_type=GitHubAppWebhookDeliveryRecord, payload=row.payload
+            )
+            if (
+                current.config_authority_state != "running"
+                or current.config_authority_lease_owner != claimed.config_authority_lease_owner
+                or current.config_authority_attempt != claimed.config_authority_attempt
+                or current.config_authority_lease_expires_at
+                <= self._database_mutation_timestamp(session)
+            ):
+                raise ProductReconcileLeaseLostError("Config-authority delivery lease was lost.")
+            if publish is not None:
+                publish()
+            retry = evidence.get("status") == "unavailable" and current.config_authority_attempt < 3
+            completed = current.model_copy(
+                update={
+                    "config_authority_state": "pending"
+                    if retry
+                    else "failed"
+                    if evidence.get("status") in {"unavailable", "fail"}
+                    else "done",
+                    "config_authority": evidence,
+                    "config_authority_next_attempt_at": self._mutation_lease_expiry(
+                        observed_at=self._database_mutation_timestamp(session),
+                        lease_seconds=30 * 2 ** (current.config_authority_attempt - 1),
+                    )
+                    if retry
+                    else "",
+                    "config_authority_lease_owner": "",
+                    "config_authority_lease_expires_at": "",
+                }
+            )
+            row.payload = self._payload_dict(completed)
+            session.commit()
+            return completed
+
+    def read_github_app_webhook_delivery(self, delivery_id: str) -> GitHubAppWebhookDeliveryRecord:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneGitHubAppWebhookDeliveryRow, delivery_id)
+            if row is None:
+                raise FileNotFoundError(delivery_id)
+            return self._read_payload(
+                model_type=GitHubAppWebhookDeliveryRecord, payload=row.payload
+            )
 
     def request_product_reconcile(
         self, target: ProductReconcileTarget, requested_at: str
@@ -20086,7 +20383,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def list_product_reconcile_requests(
-        self, *, state: str = "", product: str = "", limit: int = 100
+        self, *, state: str = "", product: str = "", limit: int | None = 100
     ) -> tuple[ProductReconcileRequestRecord, ...]:
         filters: list[object] = []
         if product:
@@ -37083,7 +37380,7 @@ class PostgresRecordStore(HumanSessionStore):
             return "deleted"
 
     def write_runtime_environment_record(self, record: RuntimeEnvironmentRecord) -> None:
-        self._write_row(self._runtime_environment_row(record))
+        self._write_bundled_metadata_row(self._runtime_environment_row(record))
 
     def delete_runtime_environment_record_with_event(
         self,
@@ -37421,7 +37718,47 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_secret_record(self, record: SecretRecord) -> None:
+        # Existing records are row-guarded; concurrent direct creates arbitrate by uniqueness.
         self._write_row(self._secret_row(record))
+
+    def disable_product_retirement_secret(
+        self, *, expected_record: SecretRecord, updated_at: str, updated_by: str
+    ) -> bool:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = session.scalar(
+                select(LaunchplaneSecretRow)
+                .where(LaunchplaneSecretRow.secret_id == expected_record.secret_id)
+                .with_for_update()
+            )
+            if row is None:
+                return False
+            current = SecretRecord.model_validate(row.payload)
+            if product_retirement_secret_authority(current) != product_retirement_secret_authority(
+                expected_record
+            ):
+                return False
+            if current.status != "disabled":
+                session.merge(
+                    self._secret_row(
+                        current.model_copy(
+                            update={
+                                "status": "disabled",
+                                "updated_at": updated_at,
+                                "updated_by": updated_by,
+                            }
+                        )
+                    )
+                )
+                session.commit()
+            return True
+
+    def _write_bundled_metadata_row(self, row: Base) -> None:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            session.merge(row)
+            session.commit()
 
     def read_secret_record(self, secret_id: str) -> SecretRecord:
         return self._read_model(
@@ -37505,7 +37842,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_secret_binding(self, binding: SecretBinding) -> None:
-        self._write_row(self._secret_binding_row(binding))
+        self._write_bundled_metadata_row(self._secret_binding_row(binding))
 
     def list_secret_bindings(
         self,
@@ -37614,7 +37951,11 @@ class PostgresRecordStore(HumanSessionStore):
                     raise FileNotFoundError(
                         f"No Launchplane secret record found for {rotation.record.secret_id!r}"
                     )
-                if current_row.current_version_id != rotation.expected_current_version_id:
+                if (
+                    current_row.current_version_id != rotation.expected_current_version_id
+                    or SecretRecord.model_validate(current_row.payload).status
+                    != rotation.record.status
+                ):
                     raise ValueError("Managed secret changed after rotation preflight.")
             for rotation in ordered_rotations:
                 version = rotation.version

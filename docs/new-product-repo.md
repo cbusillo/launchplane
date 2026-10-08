@@ -129,14 +129,11 @@ OIDC request, grant, secret, or build setting. Launchplane hears the build and
 pull request events itself, verifies the build, and deploys previews and the
 `testing` lane; see [event-driven-deploys.md](event-driven-deploys.md).
 
-Transitional: the caller workflows, reusable workflows, actions and preview
-authz rules described in the rest of this section and in
-[Launchplane Records](#launchplane-records) are the old call-in path. Existing
-products still use them until they move to event-driven deploys (#2740) and
-#2606 deletes the path, and `Product Onboarding` still plans the preview authz
-rules. A new product repository does not add these caller workflows.
+The remaining caller-workflow reference in this section describes the retired
+call-in path. [DIRECTION.md](../DIRECTION.md) owns its status; current product
+setup follows [event-driven-deploys.md](event-driven-deploys.md).
 
-For a conventional generic-web product, use the thin preview facade documented
+In that historical path, a conventional generic-web product used the thin preview facade documented
 in [product-repo-contract.md](product-repo-contract.md). One same-repository
 `pull_request` caller delegates image publication, preview refresh,
 product-owned verification, evidence, and feedback to

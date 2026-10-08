@@ -307,10 +307,16 @@ def _racing_admission(fixture: _HistoricalCompletionFixture) -> MergeAdmissionRe
 
 def _changed_policy_record(fixture: _HistoricalCompletionFixture) -> MergeTrainPolicyRecord:
     repository_policy = fixture.policy_record.policy.policies[0]
+    app = repository_policy.github_token.github_app
+    assert app is not None
     changed_repository_policy = repository_policy.model_copy(
         update={
             "github_token": repository_policy.github_token.model_copy(
-                update={"runtime_context": "replacement_context"}
+                update={
+                    "github_app": app.model_copy(
+                        update={"private_key_context": "replacement_context"}
+                    )
+                }
             )
         }
     )

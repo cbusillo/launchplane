@@ -152,3 +152,27 @@ def build_generic_web_deploy_recovery_digest(payload: dict[str, object]) -> str:
     digest = hashlib.sha256()
     digest.update(canonical.encode())
     return digest.hexdigest()
+
+
+class GenericWebDeployRecoveryReferenceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    product: str = Field(min_length=1)
+    instance: Literal["testing"] = "testing"
+    recovery_reference: str = Field(pattern=r"^event-deploy-[0-9a-f]{64}$")
+    reason: str = Field(min_length=1, max_length=1000, pattern=r"\S")
+
+
+class GenericWebDeployRecoveryReferenceApplyRequest(GenericWebDeployRecoveryReferenceRequest):
+    expected_recovery_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class GenericWebDeployRecoveryReferenceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    product: str
+    context: str
+    instance: Literal["testing"] = "testing"
+    recovery_reference: str
+    reservation_state: Literal["running", "reconcile_required"]
+    reservation_attempt: int

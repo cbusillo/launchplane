@@ -32,6 +32,7 @@ from control_plane.workflows.generic_web_promotion import (
     execute_generic_web_prod_promotion,
 )
 from control_plane.workflows.odoo_prod_promotion import (
+    _checkpoint_chain,
     OdooProdPromotionRequest,
     execute_odoo_prod_promotion,
 )
@@ -524,6 +525,55 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(click.ClickException, "already used"):
                     self.require(store)
+
+    def test_worker_refusal_before_provider_write_records_no_effect(self) -> None:
+        store = self.capture()
+        pending = self.pending(store)
+        provider_write = Mock()
+        worker_checkpoint = Mock(side_effect=RuntimeError("Worker lost its lease before writing."))
+        with self.assertRaisesRegex(RuntimeError, "lost its lease"):
+            with production_promotion_backup_guard(
+                record_store=store,
+                product="example-product",
+                context="example-product",
+                instance="prod",
+                promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
+                backup_record_id="backup-example",
+                pending_promotion=pending,
+            ) as guard:
+                _checkpoint_chain(worker_checkpoint, guard)("target_update")
+                provider_write()
+        provider_write.assert_not_called()
+        worker_checkpoint.assert_called_once()
+        recorded = store.read_promotion_record(pending.record_id)
+        self.assertEqual(recorded.deploy.status, "fail")
+        self.assertEqual(recorded.backup_gate.evidence["provider_effects_status"], "not_started")
+
+    def test_only_a_source_read_refusal_before_effects_leaves_backup_available(self) -> None:
+        from control_plane.lane_movement import LaneMovementRefused
+
+        for effects_started in (False, True):
+            with self.subTest(effects_started=effects_started):
+                store = self.capture()
+                pending = self.pending(store)
+                with self.assertRaises(LaneMovementRefused):
+                    with production_promotion_backup_guard(
+                        record_store=store,
+                        product="example-product",
+                        context="example-product",
+                        instance="prod",
+                        promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
+                        backup_record_id="backup-example",
+                        pending_promotion=pending,
+                    ) as guard:
+                        if effects_started:
+                            guard("target_update")
+                        raise LaneMovementRefused("source_order_unavailable")
+                if effects_started:
+                    with self.assertRaisesRegex(click.ClickException, "already used"):
+                        self.require(store)
+                else:
+                    self.assertEqual(self.require(store).status, "pass")
 
     def test_generic_web_cannot_opt_out(self) -> None:
         with self.assertRaises(ValidationError):

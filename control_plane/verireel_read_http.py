@@ -48,6 +48,13 @@ from control_plane.workflows.evidence_ingestion import (
     apply_deployment_evidence,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.lane_movement import (
+    LaneBuild,
+    LaneMovementRefused,
+    record_preview_refusal,
+    require_forward_preview_build,
+)
+from control_plane.workflows.launchplane import PreviewMutationRecordStore, find_preview_record
 from control_plane.workflows.verireel_environment import (
     VeriReelStableEnvironmentRequest,
     resolve_verireel_stable_environment,
@@ -386,6 +393,60 @@ def apply_verireel_preview_refresh_result(
         anchor_pr_number=request.refresh.anchor_pr_number,
     )
     with _preview_refresh_serialization(record_store=record_store, preview_id=preview_id):
+        existing = find_preview_record(
+            record_store=cast(PreviewMutationRecordStore, record_store),
+            context_name=request.refresh.context,
+            anchor_repo=request.refresh.anchor_repo,
+            anchor_pr_number=request.refresh.anchor_pr_number,
+        )
+        if existing is not None and existing.state != "destroyed":
+            profile = None
+            desired = LaneBuild(
+                request.refresh.image_reference,
+                request.refresh.anchor_head_sha,
+                request.refresh.image_reference,
+            )
+            try:
+                try:
+                    resolved = resolve_verireel_driver_context(
+                        record_store=record_store, product=request.product, require_profile=True
+                    )
+                except (VeriReelRouteDependencyError, VeriReelProductMismatchError) as error:
+                    raise LaneMovementRefused("source_authority_unavailable") from error
+                profile = resolved.profile
+                if (
+                    profile is None
+                    or profile.preview.context != request.refresh.context
+                    or profile.repository.partition("/")[2] != request.refresh.anchor_repo
+                ):
+                    raise LaneMovementRefused("source_authority_unavailable")
+                require_forward_preview_build(
+                    record_store=record_store,
+                    profile=profile,
+                    preview_slug=request.refresh.preview_slug,
+                    desired=desired,
+                    pull_request_number=request.refresh.anchor_pr_number,
+                )
+            except LaneMovementRefused as error:
+                record_preview_refusal(
+                    record_store=record_store,
+                    profile=profile,
+                    preview_context=request.refresh.context,
+                    preview_slug=request.refresh.preview_slug,
+                    desired=desired,
+                    error=error,
+                    target_type="application",
+                )
+                now = utc_now_timestamp()
+                return {}, {
+                    "refresh_status": "blocked",
+                    "refresh_started_at": now,
+                    "refresh_finished_at": now,
+                    "application_name": "",
+                    "application_id": "",
+                    "preview_url": request.refresh.preview_url,
+                    "error_message": f"lane_movement.{error.code}: {error.record_failure().description}",
+                }
         generation_identity = resolve_next_launchplane_preview_generation_identity(
             record_store=cast(LaunchplaneMutationStore, record_store),
             context=request.refresh.context,
@@ -504,6 +565,10 @@ def verireel_preview_verification_response_records(
 
 
 def should_store_verireel_result_idempotency(result: dict[str, object]) -> bool:
+    if str(result.get("error_message", "")).startswith("lane_movement."):
+        return not str(result.get("error_message", "")).startswith(
+            "lane_movement.source_order_unavailable:"
+        )
     return not _result_contains_status(result, "blocked") and not _result_contains_status(
         result, "fail"
     )

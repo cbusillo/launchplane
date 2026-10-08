@@ -331,6 +331,11 @@ class MergeTrainRepositoryPolicy(BaseModel):
     enqueue: MergeTrainEnqueuePolicy
     merge_identity: MergeTrainIdentity
     service_authz: MergeTrainServiceAuthz = Field(default_factory=MergeTrainServiceAuthz)
+    config_authority_events_enabled: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     github_token: MergeTrainGitHubTokenSource = Field(default_factory=MergeTrainGitHubTokenSource)
     scheduler: MergeTrainSchedulerPolicy = Field(default_factory=MergeTrainSchedulerPolicy)
     provider_delivery_protection_expectation: ProviderDeliveryProtectionExpectationV1 | None = (
@@ -404,9 +409,10 @@ class MergeTrainPolicy(BaseModel):
 
     def require_supported_token_sources(self) -> None:
         if any(policy.github_token.env_var for policy in self.policies):
-            raise ValueError(
-                "Merge train env_var token source is retired; use github_app or runtime_context"
-            )
+            raise ValueError("Merge train env_var token source is retired; use github_app")
+
+        if any(policy.github_token.runtime_context for policy in self.policies):
+            raise ValueError("Merge train runtime_context token source is retired; use github_app")
 
     @property
     def policy_sha256(self) -> str:

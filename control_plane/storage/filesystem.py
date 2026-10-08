@@ -180,7 +180,10 @@ from control_plane.contracts.production_backup_authority import (
 from control_plane.contracts.detached_application_retirement import (
     DetachedApplicationRetirementRecord,
 )
-from control_plane.contracts.product_retirement import ProductRetirementRecord
+from control_plane.contracts.product_retirement import (
+    ProductRetirementRecord,
+    product_retirement_secret_authority,
+)
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.contracts.public_ingress_monitoring import (
@@ -355,7 +358,7 @@ class FilesystemRecordStore:
         record_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_path = tempfile.mkstemp(
             dir=record_path.parent,
-            prefix=f".{record_path.name}.",
+            prefix=".record.",
             suffix=".tmp",
         )
         try:
@@ -394,18 +397,13 @@ class FilesystemRecordStore:
         self, record_type: str, record_id: str, model: BaseModel
     ) -> bool:
         record_path = self._record_path(record_type, record_id)
-        record_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with record_path.open("x", encoding="utf-8") as record_file:
-                record_file.write(
-                    json.dumps(
-                        model.model_dump(mode="json", exclude_none=True),
-                        indent=2,
-                        sort_keys=True,
-                    )
-                )
-        except FileExistsError:
+            record_path.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
             return False
+        self._write_model_locked(record_type, record_id, model)
         return True
 
     def _read_model(
@@ -521,6 +519,34 @@ class FilesystemRecordStore:
                 raise SecretRecordConflictError(
                     "A secret adopted from the provider was recorded before commit."
                 )
+            for expectation in bundle.runtime_environment_read_sets:
+                current_runtime = self._list_models_locked(
+                    RuntimeEnvironmentRecord, "launchplane_runtime_environments"
+                )
+                if not expectation.matches(current_runtime):
+                    raise RuntimeEnvironmentConflictError(
+                        "Runtime selectors changed before commit."
+                    )
+            for expected_secret in bundle.expected_secret_records:
+                current_secret = self._read_model_locked(
+                    SecretRecord, "launchplane_secrets", expected_secret.secret_id
+                )
+                if current_secret != expected_secret:
+                    raise SecretRecordConflictError(
+                        "Managed secret metadata changed before commit."
+                    )
+            for binding_expectation in bundle.secret_binding_sets:
+                current_bindings = tuple(
+                    binding
+                    for binding in self._list_models_locked(
+                        SecretBinding, "launchplane_secret_bindings"
+                    )
+                    if binding.secret_id == binding_expectation.secret_id
+                )
+                if sorted(current_bindings, key=lambda item: item.binding_id) != sorted(
+                    binding_expectation.bindings, key=lambda item: item.binding_id
+                ):
+                    raise SecretCopySourceConflictError("Secret consumers changed before commit.")
             stage_id = f"{_utc_now_timestamp().replace(':', '').replace('-', '')}-{time.time_ns()}"
             stage_dir = self._product_authority_bundle_stage_root() / stage_id
             records_dir = stage_dir / "records"
@@ -3740,6 +3766,34 @@ class FilesystemRecordStore:
     def write_secret_record(self, record: SecretRecord) -> Path:
         return self._write_model("launchplane_secrets", record.secret_id, record)
 
+    def disable_product_retirement_secret(
+        self, *, expected_record: SecretRecord, updated_at: str, updated_by: str
+    ) -> bool:
+        with self._product_authority_bundle_lock():
+            try:
+                current = self._read_model_locked(
+                    SecretRecord, "launchplane_secrets", expected_record.secret_id
+                )
+            except FileNotFoundError:
+                return False
+            if product_retirement_secret_authority(current) != product_retirement_secret_authority(
+                expected_record
+            ):
+                return False
+            if current.status != "disabled":
+                self._write_model_locked(
+                    "launchplane_secrets",
+                    current.secret_id,
+                    current.model_copy(
+                        update={
+                            "status": "disabled",
+                            "updated_at": updated_at,
+                            "updated_by": updated_by,
+                        }
+                    ),
+                )
+            return True
+
     def read_secret_record(self, secret_id: str) -> SecretRecord:
         return self._read_model(SecretRecord, "launchplane_secrets", secret_id)
 
@@ -3855,14 +3909,20 @@ class FilesystemRecordStore:
         idempotency_record: LaunchplaneIdempotencyRecord | None = None,
     ) -> None:
         ordered_rotations = tuple(sorted(rotations, key=lambda item: item.record.secret_id))
+        expected_records: list[SecretRecord] = []
         for rotation in ordered_rotations:
             current_record = self.read_secret_record(rotation.record.secret_id)
-            if current_record.current_version_id != rotation.expected_current_version_id:
+            if (
+                current_record.current_version_id != rotation.expected_current_version_id
+                or current_record.status != rotation.record.status
+            ):
                 raise ValueError("Managed secret changed after rotation preflight.")
+            expected_records.append(current_record)
         self.write_product_authority_bundle(
             ProductAuthorityBundle(
                 secret_versions=tuple(rotation.version for rotation in ordered_rotations),
                 secret_records=tuple(rotation.record for rotation in ordered_rotations),
+                expected_secret_records=tuple(expected_records),
                 secret_audit_events=tuple(rotation.audit_event for rotation in ordered_rotations),
                 idempotency_record=idempotency_record,
             )
@@ -5308,7 +5368,11 @@ class FilesystemRecordStore:
                     current_record = self.read_odoo_stable_target_replacement_operation_record(
                         record.operation_id
                     )
-                    if current_record.status != "pending":
+                    from control_plane.lane_movement import source_read_retry_ready
+
+                    if current_record.status != "pending" or not source_read_retry_ready(
+                        current_record, claimed_at
+                    ):
                         continue
                     claimed_record = current_record.model_copy(
                         update={
@@ -6972,6 +7036,11 @@ class FilesystemRecordStore:
             return self._read_model_locked(
                 ReleaseReviewDecisionRecord, record_type, record.record_id
             )
+
+    @contextmanager
+    def release_review_publication_lock(self, *, record_id: str) -> Iterator[None]:
+        with self._exclusive_record_lock("release-review-publication", record_id):
+            yield
 
     def record_release_review_decision_publication(
         self, *, record_id: str, release_issue_url: str

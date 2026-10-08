@@ -14,7 +14,9 @@ events for the product's repository, verifies the build, and deploys it.
 Launchplane receives the webhook of the GitHub App its merge train already
 uses (the App is installed on every product repository). One receiver,
 `POST /v1/github/app-webhook`, takes `workflow_run` and `pull_request`
-deliveries. Everything else is acknowledged and ignored.
+deliveries for deploy reconciliation. Opted-in source checks also consume
+`push` and `merge_group` deliveries as described below. Other events are
+acknowledged and ignored.
 
 Events carry no instructions. An event only says which target to look at
 again:
@@ -69,6 +71,10 @@ reservation. The webhook request never waits on a deploy.
   branch's first-parent history that has a verified release build. A late
   build of an older commit is never desired while a newer one exists, so it
   cannot replace a newer deploy.
+  - Selection refuses an incomplete read: the run list must include the running
+    commit and its recorded build run, and first-parent history must reach the
+    running commit. The saved plan includes run and history counts and rejected
+    builds. Missing evidence leaves the lane unchanged with a recorded reason.
   - If testing already runs the desired artifact, stop.
   - Otherwise, `record_verified_build_artifact` and queue the stable target
     replacement for the testing lane. Its idempotency key is the lane plus
@@ -229,8 +235,10 @@ needs no workflow to report previews or testing deploys.
 - **Preview:** one comment on the PR, marked `<!-- launchplane-reconcile-preview -->`
   and edited in place: waiting for a verified build of the head commit, ready
   (with the preview URL), retired, or failed with a short, redacted reason
-  (`cleanup_failed` when a destroy failed). A plan that changes nothing, is
-  deferred, or is held for another driver says nothing.
+  (`cleanup_failed` when a destroy failed). Closing a PR before its preview
+  build arrives removes its pending comment and records terminal cleared feedback;
+  a closed PR without feedback history posts nothing. Other plans that change
+  nothing, are deferred, or are held for another driver say nothing.
 - **Testing:** one comment on the PR GitHub merged as the desired commit
   (`merge_commit_sha` equals it), marked `<!-- launchplane-reconcile-testing -->`:
   the deploy is queued, the testing lane runs it, it is waiting because the
@@ -274,6 +282,68 @@ needs no workflow to report previews or testing deploys.
 - **Missing preview settings:** a preview refused because its runtime
   environment is incomplete names the missing keys (names only, never values)
   on the plan as `missing_keys`, in the request's error, and in the PR comment.
+
+## Forward build changes
+
+Testing and preview selection, stable deploys (including Client promotions,
+native VeriReel deploys and generic-web recovery retries), the ship executor,
+and preview applies check the requested build against the lane's current
+recorded build before provider effects. A different commit must be a proven
+descendant, or diverged history with verified provenance proving a newer
+artifact. This permits an explicit deploy after a history rewrite and a
+preview following a rebased PR head.
+An ancestor is always refused. Changing an image at the same commit requires
+newer build provenance; legacy preview records can use a verified build that
+started after the serving generation was requested. Historical preview build
+verification must match the exact recorded image; desired preview builds
+still have to match the current PR head. Missing ordering evidence is a refusal, not permission
+to replace the lane. Existing explicit rollback operations, including pinned
+failed-release recovery and the release drill, retain their rollback authority.
+Requests cannot supply a rollback exception to a deploy or preview apply.
+
+The supported forward path is a verified descendant build, or a same-commit
+or diverged-history build whose provenance proves it is newer. Generic-web
+requests must bind their source to the verified uploaded image. A provider
+tag must be the full source-SHA tag or a tag declared in that build's manifest;
+the immutable image digest remains the artifact identity. An intentional backward change
+uses the existing rollback operation and its own authority. Refusals remain in
+the reconcile plan or failed deployment/operation record. Stable-lane profile
+repair edits routing metadata and does not deploy an image.
+
+Generic-web deploy records retain verified build provenance with the exact
+image/source pair, so later promotion or a release drill does not depend on
+the uploaded manifest still being available on GitHub. Rollbacks carry that
+proof forward. For older builds without provenance, the earliest successful
+deployment of the same image/source is the observation bound; a rollback's
+new timestamp does not make that old artifact younger. A legacy lane with no
+usable bound still requires a newly built verified artifact. Native VeriReel
+preview refreshes, including the driver extension, enforce the preview guard
+inside refresh serialization. Existing previews need their configured product
+profile to resolve source authority; product onboarding/profile records supply
+that supported configuration path.
+
+Testing searches up to 20 pages of successful build runs and first-parent
+history to find its running build. An omitted running run or commit still
+holds selection with the observed counts. If the running build is beyond
+those bounds, or its history was rewritten, the supported service
+deploy/target-replacement operation can request an exact verified newer build;
+it still checks source and artifact order before
+effects. A source read outage before effects retains refusal evidence and
+allows another attempt, without consuming the testing failure budget or
+stopping an accepted Client release. Odoo operations wait before retrying,
+with exponential delays from 30 seconds to 30 minutes, so a source outage
+does not starve work on other lanes, including their rollbacks. Operations on
+the same lane remain serialized; an authorized pending-operation cancellation
+is the existing way to free that lane. Missing configured read authority
+is a terminal refusal. Direct preview source-read failures can retry with the
+same idempotency key; each refusal still gets a failed deployment record.
+Preview refusals retain the serving generation and remain visible in the
+operation response or reconcile plan. Generic-web preview checks include a
+failed active generation because it may already have changed a provider app.
+
+This guards code order, not database reversibility. An Odoo rollback preserves
+the existing database and runs post-deploy module work; it does not undo schema
+or data migrations. Backup, restore and release gates retain their own rules.
 
 ## Staff-testing hold
 
@@ -345,6 +415,26 @@ requests per product, with the build-provenance token). A missed event is
 corrected within one sweep. Reconciling is idempotent, so the sweep runs the same code as
 the events, and a missed or out-of-order event is corrected within one sweep.
 
+For PRs with no live preview, the sweep also revisits recorded pending feedback
+and failed cleared-feedback delivery. It reads the PR through the normal reconcile
+path before clearing anything; a refused read never proves the PR is closed.
+Unresolved reads or terminal clear deliveries stop automatic recovery at
+`PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS` in
+[`product_reconcile.py`](../control_plane/product_reconcile.py), recorded as `feedback_recovery_failed_attempts` and
+`feedback_recovery_stop_reason` on the plan; supported reconciliation or remediation
+is required after exhaustion.
+The first successfully observed close gets a fresh cleanup budget, so read failures
+while open do not consume it. Further read failures retain that budget until the
+feedback is delivered or the PR is observed open again. An unreadable history skips
+only that product's supplemental recovery, leaving other sweep targets eligible.
+Successful delivery leaves the recovery set; a new event can retry an exhausted
+target with a fresh budget bound to its persisted delivery ID; duplicate deliveries
+do not refill it. Open PRs waiting for a build retain normal sweep coverage. Failed feedback
+and legacy entries without a status remain visible for supported observation rather
+than being assumed pending. Destroyed and teardown-pending preview records do not
+hide stale pending feedback; their reconciliation remains a no-op. Previews still
+requiring lifecycle work retain their existing sweep coverage and retry rules.
+
 ## Director steps
 
 Once the receiver is deployed: set the App's webhook URL to the receiver,
@@ -366,3 +456,84 @@ For SellYourOutboard and VeriReel (#2740): each repository's
 own `.github/workflows/build.yml`, then its `preview` label. Product-run preview
 verification went with `launchplane-preview.yml`; Launchplane's own health check
 of the expected build is what marks the preview ready, as for Odoo.
+
+## Product configuration authority from source events
+
+Source implementation: #3021. Runtime activation and required-check policy are
+separate Director decisions; consumer workflows remain until coverage is verified.
+An enrolled base branch's DB-backed merge-train policy can opt in with
+`config_authority_events_enabled`. Its default is false, and omitting it
+preserves historical policy digests. No checked-in product catalog or service
+environment variable activates it.
+
+For an opted-in, tracked inventory repository, the signed App receiver records
+an independent scan request for PR opened/reopened/synchronize/edited, push, or
+merge-group checks-requested events for that enrolled base branch, even without
+a deploy profile or build.
+It acknowledges after the transaction, without waiting for GitHub file reads.
+Redelivery preserves the original request and deploy-target deduplication.
+Pushes are scanned only for enrolled base branches with an explicit nonzero
+before/head pair. Creation, deletion, tag and unrelated feature/train-candidate
+pushes request no scan; PR and merge-group events provide their comparisons.
+
+The existing operation worker leases each delivery and rereads repository
+identity. PRs use the API's current explicit base/head pair; push and merge-group
+use the signed event's explicit pair, confirmed as commits through the API.
+Two complete immutable Git trees supply the changed paths, rather than GitHub
+compare's merge-base diff. Verified blob bytes feed the same scanner and
+`product-repo` gate as the CLI. Inherited findings, file classifications,
+symlink handling, and reported coverage gaps retain that scanner's behavior.
+Dirty checkouts, workflow instructions, and product executables are never inputs.
+A source read, identity mismatch, corrupt blob, truncated tree, or exceeded scan
+budget refuses verification. Scans have a four-minute read budget under a
+ten-minute lease; an expired lease is recovered and its older attempt cannot
+publish a check or stored result. Publication holds the database delivery fence
+through the provider write and completion; different deliveries for one
+repository are serialized. A separate scan thread is admitted after deploy and
+reconcile polling; a slow source read does not hold up newly queued operations.
+With no branch opted in, idle polling skips the scan table. The source migration
+adds a PostgreSQL index on scan state and receipt time for enabled queue reads.
+
+Completed results are projected through the existing checks-only App as
+`launchplane/config-authority/<event>/<encoded-base-branch>`, with event
+`pull-request`, `push`, or `merge-group` and a URL-encoded branch name.
+Separate event and branch names prevent a narrower comparison from overwriting a PR's
+result on the same head. A failed gate produces failure. An unavailable scan
+projects in-progress while a retry is pending, then failure on exhaustion;
+these checks are not excluded from normal check readiness as advisory governance
+projections are. A missing projection credential/permission or failed projection
+is stored as unavailable, with the scan outcome preserved separately. No token
+fallback or access grant is created. Source reads use the repository's existing
+train App with a contents/pull-requests read token (a subset of the train's
+existing permissions); projection uses the existing
+checks-only identity. Both installations and managed-key bindings need to be
+verified before activation. Requiring these check names is an Director decision.
+
+An authorized inventory reader can retrieve a delivery's request, queue/lease
+state, commit pair, redacted gate findings, coverage gaps, hashes and projection
+receipt through `GET /v1/repository-inventory?repository_id=<id>&delivery_id=<id>`.
+The delivery must belong to that repository. Literal configuration values and
+file contents are absent. A rejected gate stays failed. Unavailable source or
+projection evidence makes up to three attempts with backoff (30 then 60 seconds); native
+signed redelivery can retry an exhausted unavailable scan without repeating its
+deploy targets. Summaries stay within the check API's size limit, with full
+evidence in the reader and its delivery ID in the summary. Interrupted workers recover through their expired lease.
+
+Before removing the RepairShopr, VeriReel or SellYourOutboard workflow, verify
+runtime activation, event subscriptions, source reads and check projection for
+that product, and account for any required-check change. Source fixture parity
+and read-only scans of their commits demonstrate scanner coverage; they do not
+prove deployed activation or authorize any live change.
+
+The queue itself does not create a GitHub check: a delivery awaiting a worker
+has no source result yet. Existing checks alone therefore cannot prove that this
+scan finished before merge. Before consumer removal, the Director's required-check
+handling must account for a missing/queued source check and for irrelevant old
+branch contexts after a PR retarget. Source implementation does not change that
+live policy. Runtime proof must include a delayed scan, not only a completed pass.
+
+Source reads share the train App installation's rate budget. The four-minute
+budget limits source reads, and the blob cache avoids repeats within an attempt.
+Repeated large change sets or retries can still consume that shared allowance. Rate admission,
+large-change coverage and interrupted-process resource behavior need operational
+qualification before broad activation; this source proof does not establish them.

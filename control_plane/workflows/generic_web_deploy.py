@@ -6,6 +6,14 @@ from pathlib import Path
 from typing import Callable, Literal, Protocol, cast
 
 import click
+from control_plane.lane_movement import (
+    LaneBuild,
+    LaneMovementRefused,
+    require_forward_lane_build,
+    _proved_generic_build,
+    _recorded_generic_build,
+    lane_build_proof,
+)
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.deploy_target import DeployTargetCategory
@@ -453,6 +461,7 @@ def execute_generic_web_deploy(
     deployment_record_id: str = "",
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     recorded_artifact: bool = False,
+    rollback: bool = False,
 ) -> GenericWebDeployResult:
     """Deploy ``request``; ``recorded_artifact`` marks its artifact as Launchplane's own record."""
     normalized_provider_operation_title = provider_operation_title.strip()
@@ -534,12 +543,42 @@ def execute_generic_web_deploy(
     provider_deployment_observation: GenericWebProviderDeploymentObservation | None = None
     post_deploy_update = PostDeployUpdateEvidence()
     key_readback: IntegrationKeyReadbackEvidence | None = None
+    verified_build_evidence: dict[str, str] = {}
 
     def mark_provider_effect_started() -> None:
         nonlocal provider_effect_attempted
         provider_effect_attempted = True
 
     try:
+        desired_build = LaneBuild(
+            request.artifact_id,
+            request.source_git_ref,
+            request.artifact_id,
+            deploy_reference=request.deploy_reference,
+        )
+        if not rollback:
+            desired_build = require_forward_lane_build(
+                record_store=record_store,
+                profile=resolved_profile,
+                context=resolved_lane.context,
+                instance=resolved_lane.instance,
+                desired=desired_build,
+            )
+            if desired_build.source_build is None:
+                # Initial creation or a retry of the identical build requires no
+                # movement proof. Retain provenance when it can be verified.
+                try:
+                    desired_build = _proved_generic_build(
+                        record_store, resolved_profile, desired_build, None
+                    )
+                except LaneMovementRefused:
+                    pass
+        else:
+            desired_build = (
+                _recorded_generic_build(record_store, resolved_profile, desired_build)
+                or desired_build
+            )
+        verified_build_evidence = lane_build_proof(desired_build)
         untitled_deployment_observation = resolved_deploy_provider.execute_artifact_deploy(
             control_plane_root=control_plane_root,
             resolved_deploy_target=prepared_deploy_target,
@@ -654,8 +693,15 @@ def execute_generic_web_deploy(
             delegated_executor=resolved_deploy_provider.delegated_executor,
             post_deploy_update=post_deploy_update,
             runtime_identity=runtime_identity,
+            runtime_source=verified_build_evidence,
         ).model_copy(update={"integration_key_readback": key_readback})
+        if isinstance(exc, LaneMovementRefused):
+            deployment_record = deployment_record.model_copy(
+                update={"failure": exc.record_failure()}
+            )
         record_store.write_deployment_record(deployment_record)
+        if isinstance(exc, LaneMovementRefused) and exc.code == "source_order_unavailable":
+            raise
         if deploy_completed:
             record_store.write_environment_inventory(
                 build_environment_inventory(
@@ -716,6 +762,7 @@ def execute_generic_web_deploy(
             deployment_record_id=record_id,
             deployed_at=recorded_finished_at,
         ),
+        runtime_source=verified_build_evidence,
     ).model_copy(update={"integration_key_readback": key_readback})
     record_store.write_deployment_record(deployment_record)
     record_store.write_environment_inventory(

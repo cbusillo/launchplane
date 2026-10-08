@@ -8,6 +8,64 @@ testing site and the **`Client test notes`** from every merged pull request in t
 commit range at `/ui/owner-review?product=<product>`. No GitHub interaction is
 required to read the checklist, accept it, or request changes.
 
+When the checklist is complete and only the Client's approval remains, the
+stable worker posts a release-review request mentioning the recorded Client,
+through the existing Launchplane Delivery App's release-record access. It links
+the Client review page and explains whether Accept starts the gated production
+release or records approval while releases are held. Incomplete or unavailable
+checklists, prelaunch/retired products, standing Director acceptance and candidates
+with a recorded decision receive no request. Missing access is reported; no grant
+or credential is created. The worker uses Launchplane's own bootstrap
+`LAUNCHPLANE_PUBLIC_URL` for the review link and checks at most every five minutes
+per unchanged profile and lane versions until delivery. After a confirmed receipt,
+the worker remembers delivery in memory and does no GitHub reads for that candidate;
+a replica restart reads the durable receipt again. Settled versions also need no
+GitHub read. This cache never supplies acceptance or bypasses release checks.
+
+The product repository keeps one issue for these requests. Launchplane finds it
+by a standalone `release_request_issue_marker(product)` line in the issue body;
+without one, it creates a "Release review requests" issue. To use an existing
+go-live or release issue, append that marker to its body before deploying this
+publisher. Lookup stops at the first page containing a marked issue, newest
+updated first; keep one marked issue per product. Multiple matches on that page
+or incomplete reads refuse publication. Discovery is bounded to 1,000 entries
+(including PRs); for a larger repository, mark its destination before enabling
+the publisher so it appears at the front of the updated-issue list. A closed
+marked issue is intentionally reused; its mentions still notify the Client.
+Comment lookup is also bounded to 1,000 entries; keep the requests issue unlocked
+and preserve its receipts. The Client must already be able to read the product
+repository for the mention to notify them; missing access is a reported prerequisite,
+not a reason to grant access automatically.
+The marker functions live in `control_plane/release_invitation.py`; there is no
+checked-in destination catalog.
+
+Each comment includes `release_invitation_marker(product, candidate)`, derived
+from the candidate's artifact, commit and shared-input identity. The worker
+serializes publication across replicas using the existing release-publication
+lock and checks for that receipt before posting. A retry after a lost response
+adopts the existing comment; edits to checklist notes do not notify again.
+A different candidate gets a new request on the same issue. Markers are delivery
+receipts only and never supply release acceptance. Preserve them during edits;
+deleting a receipt permits another notification.
+
+For a candidate already requested manually, append its candidate marker on its
+own line, without indentation or trailing spaces, to the existing request comment
+and the issue marker to that issue's body before the
+new publisher starts. Preserve the existing wording and mention. Read the exact
+candidate from the supported release-review endpoint and pass its `ReleaseVersion`
+to the marker command below; do not infer it from a shortened commit or from the newest
+testing build after it has changed. This imports delivery evidence without sending
+another request or submitting a decision.
+
+Save the endpoint's exact `checklist.candidate` object as a private JSON file
+and use the supported read-only marker command:
+
+```sh
+uv run python -m control_plane.release_invitation --product example-site --candidate-file /path/to/candidate.json
+```
+
+It prints the issue and comment markers and makes no service or GitHub request.
+
 The review leads with the product, the viewer's Client or admin role, the
 testing-site link, and **What to test**. Pull requests with identical
 `Client test notes` appear as one check listing each change it covers, and a change missing
@@ -57,11 +115,22 @@ visible checklist blockers. `Nothing for the Client to test` is valid test notes
 Pull requests written before the role words changed say `Owner test notes` and
 `Nothing for the owner to test`; Launchplane and the CI action read both.
 Previous preview acceptance is an annotation, never release approval.
-Changes to shared Odoo addon sources or selections are also bound into the
-checklist and shown as an explicit blocker. They cannot be represented as an
-empty, acceptable website checklist. Until their test instructions are supported
-across repositories, an admin must review them and record a release-scoped
-override; ordinary Client acceptance cannot waive the coverage gap.
+Changes to existing shared Odoo addon sources appear in separate Client checklist
+sections, with each repository's exact production-to-testing SHA range, merged
+pull requests and Client test notes. The same commit coverage and missing-note
+checks apply to product and shared repositories. Added or removed sources,
+unexplained selection changes, and ambiguous or inconsistent source evidence
+remain blockers. A failed shared-repository read or a non-forward SHA range stays an explicit
+coverage blocker, preserving the existing release-scoped admin review path.
+Launchplane uses that repository's existing scoped Delivery App access and never
+adds a grant. The complete shared evidence is saved in the release decision and
+published in its release record. Ordinary Client acceptance cannot waive missing
+coverage.
+
+The server reports checklist completeness for the Client button, including
+missing notes inside merge-train batches. Historical shared-input overrides
+remain readable, but replacing the blanket blocker with detailed shared coverage
+changes the checklist digest and requires a new decision.
 
 The decision stores the complete checklist and its digest. The digest includes
 the production and candidate artifact and commit, repository, Client identity,
@@ -81,6 +150,13 @@ same decision ID, including recovery when GitHub accepted a write whose response
 was lost. Repeating the product's newest published decision records nothing new,
 so a second Accept never replaces the acceptance a running release depends on. GitHub issue contents and membership never decide release contents or
 approval; the saved Launchplane decision remains authoritative.
+Publishers of the same saved decision serialize lookup, issue creation and the
+stored URL acknowledgement with a per-decision storage lock. After waiting, a
+publisher reads the saved decision again and reuses its authoritative URL. The
+PostgreSQL transaction lock and local file lock release when their worker exits;
+an interrupted acknowledgement recovers the existing issue by its marker before
+any new creation. Local SQLite publication requires a file-backed database so
+separate processes share the file lock.
 The complete record uses one issue body. If GitHub rejects publication, the
 decision remains saved and promotion stays blocked; records are not split into
 comments. Retry recovery finds the earlier issue by the marker on its first
@@ -268,8 +344,8 @@ decision. Before a step is queued, the worker checks all of the following:
 - the recompiled checklist digest still equals the decision's, and it is
   approved.
 
-The worker repeats the decision, Client and hold checks before every provider
-effect. The promotion still checks release approval for the exact candidate and
+The worker repeats the decision, Client and hold checks before forward provider
+effects. The promotion still checks release approval for the exact candidate and
 the verified backup. Once generic-web production has changed, automatic rollback
 remains allowed to restore the admitted previous deployment even if acceptance
 is withdrawn. A crash or uncertain provider outcome keeps the provider operation
@@ -277,10 +353,45 @@ fenced for reconciliation rather than repeating the release.
 
 A changed candidate, a newer decision, or a hold therefore stops the release
 before its next step and never falls back to a newer testing build. A failed or
-cancelled step stops the release, and nothing more runs until the Client
-accepts again. An admin override never starts a release; it stays a hand
+cancelled step stops forward progress; the successful rollback drill never runs
+for a failed promotion. An admin override never starts a release; it stays a hand
 promotion from the Release panel. No automated identity gains a promote right,
 and an automation token still cannot submit a decision.
+
+For Odoo, promotion admission pins the checklist's production artifact and its
+passing deployment in the operation's initial checkpoint. The worker verifies
+that binding again before the first production write and records that write's
+boundary durably. A determinate deployment or post-deploy/health failure commits
+the failed promotion and queues its recovery rollback in one lane-locked
+transaction. Recovery explicitly names that failed promotion and redeploys only
+the pinned artifact with existing data; it does not restore a database or reuse
+a backup for another forward promotion. It verifies post-deploy, health,
+canonical URL, logos and runtime identity through the existing replacement path,
+and writes the recovered deployment, inventory, release tuple and rollback
+outcome. The release stays failed, with a separate `recovery` step in its
+readback, labeled automatic recovery rather than a rollback drill. Failure on
+the second promotion has its own recovery operation. A missing passing baseline
+prevents the first backup from being queued and appears as `blocked_reason` in
+the release run.
+
+Recovery uses the original admitted acceptance, even if releases become held,
+the Client changes, a newer decision replaces acceptance or testing moves after
+the first write. Its worker checks the exact source operation, original
+published decision, failed promotion and pinned passing deployment; it supplies
+no caller promotion or manual rollback permission. Missing recovery provenance
+holds the lane for reconciliation. Pre-write failures queue no recovery. A lost
+response, unobserved deployment, post-deploy timeout, interrupted recovery or
+expired lease after effects remains `reconciliation_required`; the worker does
+not replay an uncertain write or report it passed. A determinate failed recovery
+is recorded as failed and is not automatically retried. Admin reconciliation is
+still required for uncertainty; deployed-path qualification is separate from
+these deterministic provider tests.
+
+Queued Odoo administrator promotions and rollbacks also hold uncertain effects
+for reconciliation. Synchronous non-worker callers retain their existing result
+handling. Client promotions queued by an older worker without a recovery pin
+are refused before writing; requalify pending release operations when deploying
+this worker, and record fresh acceptance if such a release was stopped.
 
 The review page says before the Accept button whether accepting puts the
 version on the live site, naming it, or whether releases are held. After

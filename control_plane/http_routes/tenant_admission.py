@@ -284,6 +284,8 @@ def register_tenant_admission_read_routes(
             token = dependencies.github_token(
                 control_plane_root=dependencies.control_plane_root,
                 context_name=candidate.context,
+                repository=candidate.repository,
+                purpose="admission_read",
             ).strip()
         except click.ClickException as error:
             raise common.http_error(
@@ -595,6 +597,8 @@ def register_tenant_admission_write_routes(
         token = dependencies.github_token(
             control_plane_root=dependencies.control_plane_root,
             context_name=candidate.context,
+            repository=candidate.repository,
+            purpose="admission_merge",
         ).strip()
         if not token:
             raise dependencies.http_error(
@@ -696,6 +700,8 @@ def register_tenant_admission_write_routes(
         token = dependencies.github_token(
             control_plane_root=dependencies.control_plane_root,
             context_name=candidate.context,
+            repository=candidate.repository,
+            purpose="admission_status",
         ).strip()
         if not token:
             raise dependencies.http_error(

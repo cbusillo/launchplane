@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from typing import Final, Literal
-from urllib.parse import urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 ENGINEERING_REVIEW_CHECK_NAME: Final = "launchplane/engineering-review"
+OWNER_REVIEW_CHECK_NAME: Final = "launchplane/owner-review"
 OWNER_ACCEPTANCE_CHECK_NAME: Final = "launchplane/owner-acceptance"
 LEGACY_ENGINEERING_REVIEW_STATUS_CONTEXT: Final = "launchplane/engineering-review-shadow"
 
@@ -14,6 +15,7 @@ LAUNCHPLANE_PROJECTED_CHECK_NAMES = frozenset(
     {
         ENGINEERING_REVIEW_CHECK_NAME.casefold(),
         OWNER_ACCEPTANCE_CHECK_NAME.casefold(),
+        OWNER_REVIEW_CHECK_NAME.casefold(),
         LEGACY_ENGINEERING_REVIEW_STATUS_CONTEXT.casefold(),
     }
 )
@@ -23,7 +25,7 @@ AdvisoryCheckRunStatus = Literal["in_progress", "completed"]
 AdvisoryCheckConclusion = Literal["neutral", "success", "failure", "action_required"]
 
 
-class AdvisoryCheckProjection(BaseModel):
+class GitHubCheckProjection(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: int = Field(default=1, ge=1)
@@ -39,14 +41,9 @@ class AdvisoryCheckProjection(BaseModel):
     conclusion: AdvisoryCheckConclusion | None = "neutral"
 
     @model_validator(mode="after")
-    def _validate_projection(self) -> "AdvisoryCheckProjection":
+    def _validate_projection(self) -> "GitHubCheckProjection":
         if self.schema_version != 1:
             raise ValueError("Unsupported advisory check projection schema version.")
-        if self.name not in {
-            ENGINEERING_REVIEW_CHECK_NAME,
-            OWNER_ACCEPTANCE_CHECK_NAME,
-        }:
-            raise ValueError("Advisory check projection uses an unreserved check name.")
         if self.repository.strip() != self.repository or self.repository.count("/") != 1:
             raise ValueError("Advisory check projection repository must use owner/name.")
         if not all(part.strip() for part in self.repository.split("/", 1)):
@@ -74,6 +71,36 @@ class AdvisoryCheckProjection(BaseModel):
             raise ValueError("Completed advisory checks require a conclusion.")
         if self.check_status == "in_progress" and self.conclusion is not None:
             raise ValueError("In-progress advisory checks cannot have a conclusion.")
+        return self
+
+
+class AdvisoryCheckProjection(GitHubCheckProjection):
+    @model_validator(mode="after")
+    def _validate_advisory_name(self) -> "AdvisoryCheckProjection":
+        if self.name not in {
+            ENGINEERING_REVIEW_CHECK_NAME,
+            OWNER_ACCEPTANCE_CHECK_NAME,
+            OWNER_REVIEW_CHECK_NAME,
+        }:
+            raise ValueError("Advisory check projection uses an unreserved check name.")
+        return self
+
+
+CONFIG_AUTHORITY_CHECK_NAME: Final = "launchplane/config-authority"
+
+
+class ConfigAuthorityCheckProjection(GitHubCheckProjection):
+    @model_validator(mode="after")
+    def _validate_source_name(self) -> "ConfigAuthorityCheckProjection":
+        parts = self.name.split("/")
+        if (
+            len(parts) != 4
+            or "/".join(parts[:2]) != CONFIG_AUTHORITY_CHECK_NAME
+            or parts[2] not in {"pull-request", "push", "merge-group"}
+            or not parts[3]
+            or quote(unquote(parts[3]), safe="") != parts[3]
+        ):
+            raise ValueError("Config-authority check uses an unreserved source name.")
         return self
 
 

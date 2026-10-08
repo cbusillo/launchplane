@@ -810,7 +810,7 @@ class FastApiPreviewPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(payload["result"]["delivery_status"], "skipped")
         self.assertIn("Launchplane preview is ready", payload["result"]["comment_markdown"])
-        self.assertIn("GITHUB_TOKEN", feedback_records[0].error_message)
+        self.assertIn("Delivery App", feedback_records[0].error_message)
 
     async def test_preview_pr_feedback_derives_context_from_product_profile(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

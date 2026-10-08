@@ -37,6 +37,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentReminderStateRecord,
 )
 from control_plane.contracts.public_ingress_monitoring import (
+    PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS,
     build_public_ingress_incident_event_id,
     build_public_ingress_material_fingerprint,
     public_ingress_material_fingerprint_sha256,
@@ -1457,6 +1458,13 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             record_store=store, product=profile.product, action_allowed=lambda *_: False
         )
         prod = next(lane for lane in overview.environments if lane.environment == "prod")
+        self.assertEqual(detail.target.expected_runtime_identity, identity)
+        self.assertEqual(detail.target.observed_runtime_identity, identity)
+        self.assertEqual(detail.target.runtime_identity_status, "match")
+        self.assertEqual(
+            detail.target.runtime_identity_detail,
+            detail.topology.observed.placement.runtime_identity_detail,
+        )
         for projected in (detail, prod):
             self.assertEqual(projected.provenance.freshness_status, "verified")
             self.assertEqual(projected.provenance.refreshed_at, observation.observed_at)
@@ -1464,6 +1472,45 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             self.assertEqual(projected.topology.observed.placement.trust_state, "verified")
         assert store.summary.inventory is not None
         self.assertEqual(store.summary.inventory.updated_at, recorded_at)
+        wrong_identity = identity.model_copy(update={"artifact_id": "wrong-artifact"})
+        mismatch = observation.model_copy(
+            update={
+                "status": "fail",
+                "targets": (
+                    observation.targets[0].model_copy(
+                        update={
+                            "status": "fail",
+                            "runtime_identity_status": "mismatch",
+                            "observed_runtime_identity": wrong_identity,
+                            "runtime_identity_detail": "Artifact does not match.",
+                        }
+                    ),
+                ),
+            }
+        )
+        stale = observation.model_copy(
+            update={
+                "observed_at": (
+                    checked - timedelta(seconds=PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS + 1)
+                ).isoformat()
+            }
+        )
+        for probe, status, observed in (
+            (mismatch, "mismatch", wrong_identity),
+            (stale, "match", identity),
+        ):
+            with self.subTest(probe_status=status, observed_at=probe.observed_at):
+                store._observations = (probe,)
+                projected = build_product_environment_detail(
+                    record_store=store,
+                    product=profile.product,
+                    environment="prod",
+                    action_allowed=lambda *_: False,
+                )
+                self.assertEqual(projected.target.runtime_identity_status, status)
+                self.assertEqual(projected.target.observed_runtime_identity, observed)
+                self.assertNotEqual(projected.provenance.freshness_status, "verified")
+                self.assertNotEqual(projected.trust_state, "verified")
         store._observations = ()
         store.summary = summary.model_copy(
             update={
@@ -1492,6 +1539,8 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertNotEqual(detail.provenance.freshness_status, "verified")
         self.assertEqual(detail.provenance.source_record_id, identity.deployment_record_id)
         self.assertEqual(detail.topology.observed.placement.runtime_identity_status, "mismatch")
+        self.assertEqual(detail.target.runtime_identity_status, "mismatch")
+        self.assertEqual(detail.target.observed_runtime_identity, wrong_identity)
 
     def test_private_monitoring_read_model_ignores_reconciliation_as_probe_evidence(
         self,
@@ -1718,6 +1767,69 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertEqual(dependency_provenance.uv_locks[1].scope, "tenant")
         self.assertIn("odoo-devkit", detail.model_dump_json())
         self.assertIn("simple-zpl2", detail.model_dump_json())
+
+    def test_private_service_target_does_not_require_public_route_authority(self) -> None:
+        for target_present in (True, False):
+            with self.subTest(target_present=target_present), TemporaryDirectory() as directory:
+                store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{directory}/state.db")
+                store.ensure_schema()
+                payload = _site_profile_payload(preview_enabled=False, preview_context="")
+                lanes = cast(tuple[dict[str, object], ...], payload["lanes"])
+                lanes[1]["base_url"] = ""
+                lanes[1]["health_url"] = ""
+                lanes[1]["health_monitoring"] = {
+                    "monitoring_intent": "private",
+                    "checks": [
+                        {
+                            "name": "private-runtime",
+                            "kind": "private_http",
+                            "private_endpoint_key": "example-service-prod-runtime",
+                        }
+                    ],
+                }
+                profile = LaunchplaneProductProfileRecord.model_validate(payload)
+                store.write_product_profile_record(profile)
+                target = ProviderTargetRecord(
+                    context="example-site-prod",
+                    instance="prod",
+                    provider_id="dokploy",
+                    target_category="application",
+                    target_id="private-target-id",
+                    display_name="example-service-prod",
+                    provider_target_type="application",
+                    provider_evidence={"host_id": "private-host-id"},
+                    updated_at="2026-05-02T22:32:00Z",
+                    source_label="test",
+                )
+                if target_present:
+                    store.write_provider_target_record(target)
+                detail = build_product_environment_detail(
+                    record_store=store,
+                    product=profile.product,
+                    environment="prod",
+                    action_allowed=lambda *_: False,
+                )
+                store.close()
+
+                self.assertEqual(
+                    detail.target.provider, target.provider_id if target_present else ""
+                )
+                self.assertEqual(
+                    detail.target.target_name, target.display_name if target_present else ""
+                )
+                self.assertEqual(detail.target.target_id_recorded, target_present)
+                self.assertEqual(
+                    detail.target.trust_state, "recorded" if target_present else "missing"
+                )
+                self.assertEqual(detail.target.runtime_identity_status, "unchecked")
+                self.assertIsNone(detail.target.observed_runtime_identity)
+                self.assertEqual(detail.public_ingress.status, "not_expected")
+                self.assertEqual(detail.topology.provider_recorded.authority_status, "missing")
+                self.assertEqual(detail.topology.provider_recorded.domains, ())
+                self.assertEqual(detail.topology.provider_recorded.ingress.trust_state, "missing")
+                self.assertEqual(detail.topology.provider_recorded.tls.trust_state, "missing")
+                self.assertNotIn(target.target_id, detail.model_dump_json())
+                self.assertNotIn("private-host-id", detail.model_dump_json())
 
     def test_product_environment_detail_exposes_physical_provider_target(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

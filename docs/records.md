@@ -335,6 +335,19 @@ leaves the stage for admin inspection rather than guessing at authority.
 Ordinary filesystem reads, writes, creates, deletes, and composite promotion
 evidence rollback hold the same bundle lock through their live-file access.
 
+Insert-if-absent creation checks the final path under that lock and uses the
+shared atomic model writer: it serializes into a unique temporary file in the
+record directory, flushes and fsyncs the file, then renames it into place.
+Write failures or process termination before publication leave the final record
+absent; after publication it is complete. Retry preserves an existing record,
+including malformed files or dangling symlinks, rather than repairing it.
+Other errors checking the final path abort creation.
+Abandoned `.tmp` files are ignored by record listing and do not block creation.
+This is process-interruption recovery, not qualified power-loss durability:
+the writer does not fsync the parent directory after rename, and no real
+power-loss test has established whether the published name survives a host or
+storage failure.
+
 Provider-backed routes must durably reserve first, bind their stable provider
 operation or reconciliation key before invoking the provider, and complete only
 after durable local evidence is ready. A crash or timeout after key binding is
@@ -908,6 +921,10 @@ older pass. Evidence expires within the shared monitor cadence
 (`PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS`, currently 30 minutes); public HTTP
 topology and health-check summaries use that same expiry. Observations refresh
 the read model without rewriting deployment history or inventory timestamps.
+The environment detail's target identity fields use the same observed placement
+projection as its topology, including current monitor evidence and historical
+fallback when current monitor proof is absent. Target provider trust still
+describes recorded placement; it does not grant whole-lane verification.
 The lane indicator is green only for this current verification, retains
 topology warnings, and is red for a failing effective check or its open incident, including
 `wrong_runtime_identity`.

@@ -1,4 +1,41 @@
 import { expect, test } from "@playwright/test";
+import type { ClientReleaseRunView } from "../../src/generated/openapi.ts";
+
+test("Failed releases distinguish automatic recovery from the rollback drill", async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=products");
+  await expect(page.getByRole("heading", { name: "Review this release" })).toBeVisible();
+  const response = await page.evaluate(async () => {
+    const modulePath = "/ui/src/dev-fixtures.ts";
+    const fixtures = await import(modulePath);
+    return fixtures.releaseDecisionForFixture(fixtures.releaseReviewForFixture("products"), "accepted", "");
+  });
+  const run: ClientReleaseRunView = {
+    decision_record_id: "fixture-release-decision", rollback_drill: true, state: "stopped",
+    blocked_reason: "",
+    steps: [
+      { step: "promote-1", kind: "promote", status: "fail", operation_id: "failed-promotion" },
+      { step: "failure-recovery-1", kind: "recovery", status: "pass", operation_id: "verified-recovery" },
+      { step: "rollback-drill", kind: "rollback", status: "not_started", operation_id: "" },
+    ],
+  };
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: { ...response, release_run: run } }));
+  await page.goto("/ui/owner-review?product=example-site");
+  const progress = page.getByRole("region", { name: "Release progress" });
+  await expect(progress.getByRole("heading")).toHaveText("Release progress: Stopped");
+  await expect(progress).toContainText("Put this version live: Failed");
+  await expect(progress).toContainText("Automatic recovery: restore the previous passing version: Done");
+  await expect(progress).toContainText("Rollback drill: return to the current version: Not started");
+  await page.screenshot({ path: testInfo.outputPath("release-recovered.png"), fullPage: true });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+  run.state = "waiting";
+  run.steps = [];
+  run.blocked_reason = "Launchplane needs a verified previous passing version before this release can start.";
+  await page.reload();
+  await expect(progress.getByRole("status")).toHaveText(run.blocked_reason);
+  await page.screenshot({ path: testInfo.outputPath("release-no-baseline.png"), fullPage: true });
+});
 
 test("Owner cannot accept undisclosed shared component changes", async ({ page }) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=missing");
@@ -24,10 +61,15 @@ test("Owner reviews the complete release and can request changes after accepting
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
   await expect(page.getByRole("heading", { name: "Review this release" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Open the testing site" })).toHaveAttribute("href", "https://testing.example.invalid/");
-  const checks = page.locator(".release-review-checklist > li");
+  const checks = page.locator(".release-review-checklist").first().locator(":scope > li");
   await expect(checks).toHaveCount(1);
   await expect(checks.getByText("On a phone, confirm the booking button is visible.", { exact: false })).toBeVisible();
   await expect(checks.locator(".release-review-changes > li")).toHaveCount(2);
+  for (const repository of ["example/shared-addons", "example/disable-online"]) {
+    const shared = page.getByRole("region", { name: `Shared website components from ${repository}`, exact: true });
+    await expect(shared).toContainText("Sign in as a staff user and confirm your usual pages open.");
+    await expect(shared).toContainText("Preserve staff sign-in");
+  }
   const untested = page.locator(".release-review-untested");
   await expect(untested.getByText("2 changes need nothing from you")).toBeVisible();
   await expect(untested.getByText("Speed up CI")).toBeHidden();
@@ -46,11 +88,27 @@ test("Owner reviews the complete release and can request changes after accepting
   await page.getByRole("button", { name: "Request changes" }).click();
   await expect(page.getByRole("region", { name: "Latest release decision" }).getByRole("blockquote")).toHaveText(feedback);
   await versions.getByText("Technical details", { exact: true }).click();
-  await expect(versions.locator("code")).toHaveText(["a".repeat(40), "b".repeat(40)]);
+  await expect(versions).toContainText("Shared components from example/shared-addons");
+  await expect(versions).toContainText("Shared components from example/disable-online");
+  const sharedSources = await page.evaluate(async () => {
+    const modulePath = "/ui/src/dev-fixtures.ts";
+    const fixtures = await import(modulePath);
+    return fixtures.releaseReviewForFixture("products").review.checklist?.shared_sources ?? [];
+  });
+  for (const source of sharedSources) {
+    const range = versions.locator("dl > div").filter({ has: page.getByText(`Shared components from ${source.repository}`, { exact: true }) });
+    await expect(range.locator("code")).toHaveText([source.production_commit, source.candidate_commit]);
+  }
   await page.screenshot({ path: testInfo.outputPath("owner-changes-requested.png"), fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   expect(mutations).toEqual([]);
   expect(errors).toEqual([]);
+});
+
+test("Missing shared PR instructions disable Client acceptance", async ({ page }) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=denied");
+  await expect(page.getByRole("region", { name: "Shared website components from example/shared-addons", exact: true })).toContainText("#52 has no Client test notes.");
+  await expect(page.getByRole("button", { name: "Accept release", exact: true })).toBeDisabled();
 });
 
 test("Operator records a separate reasoned override without Owner controls", async ({ page }, testInfo) => {

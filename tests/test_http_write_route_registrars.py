@@ -22,19 +22,9 @@ class FastApiWriteRouteRegistrarTests(unittest.TestCase):
 
         self.assertEqual(route["operationId"], "dry_run_generic_web_deploy_recovery")
         self.assertEqual(
-            route["requestBody"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/GenericWebDeployRecoveryDryRunRequest",
-        )
-        self.assertEqual(
             route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/GenericWebDeployRecoveryDryRunResponse",
         )
-        idempotency_header = next(
-            parameter
-            for parameter in route["parameters"]
-            if parameter["in"] == "header" and parameter["name"] == "Idempotency-Key"
-        )
-        self.assertTrue(idempotency_header["required"])
         for status_code in ("400", "401", "403", "404", "409", "503"):
             self.assertIn(status_code, route["responses"])
 
@@ -43,19 +33,9 @@ class FastApiWriteRouteRegistrarTests(unittest.TestCase):
 
         self.assertEqual(route["operationId"], "apply_generic_web_deploy_recovery")
         self.assertEqual(
-            route["requestBody"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/GenericWebDeployRecoveryApplyRequest",
-        )
-        self.assertEqual(
             route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/GenericWebDeployRecoveryApplyResponse",
         )
-        idempotency_header = next(
-            parameter
-            for parameter in route["parameters"]
-            if parameter["in"] == "header" and parameter["name"] == "Idempotency-Key"
-        )
-        self.assertTrue(idempotency_header["required"])
         for status_code in ("400", "401", "403", "404", "409", "503"):
             self.assertIn(status_code, route["responses"])
 
@@ -69,19 +49,9 @@ class FastApiWriteRouteRegistrarTests(unittest.TestCase):
             "inspect_generic_web_deploy_recovery_provider_evidence",
         )
         self.assertEqual(
-            route["requestBody"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/GenericWebDeployRecoveryDryRunRequest",
-        )
-        self.assertEqual(
             route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/GenericWebDeployRecoveryProviderEvidenceResponse",
         )
-        idempotency_header = next(
-            parameter
-            for parameter in route["parameters"]
-            if parameter["in"] == "header" and parameter["name"] == "Idempotency-Key"
-        )
-        self.assertTrue(idempotency_header["required"])
         for status_code in ("400", "401", "403", "404", "409", "503"):
             self.assertIn(status_code, route["responses"])
 

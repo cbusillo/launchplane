@@ -37,7 +37,12 @@ from control_plane.preview_pr_feedback_notifications import (
 )
 from control_plane.product_review_status import OwnerReviewStatus, owner_review_reference_url
 from control_plane.testing_lane_hold import STAFF_TESTING_HOLD_REASON
-from control_plane.workflows.launchplane import github_api_request, upsert_github_issue_comment
+from control_plane.workflows.launchplane import (
+    delete_github_issue_comment,
+    find_github_issue_comment_by_marker,
+    github_api_request,
+    upsert_github_issue_comment,
+)
 from control_plane.workflows.preview_pr_feedback import render_preview_pr_feedback_markdown
 
 PREVIEW_FEEDBACK_MARKER = "<!-- launchplane-reconcile-preview -->"
@@ -88,6 +93,7 @@ def post_reconcile_feedback(
     """
     previous = request.last_plan.get(PR_FEEDBACK_PLAN_KEY)
     previous_entry = cast(dict[str, object], previous) if isinstance(previous, dict) else None
+    feedback: _Feedback | None = None
     try:
         profile = cast(ReconcileFeedbackStore, record_store).read_product_profile_record(
             request.product
@@ -127,10 +133,15 @@ def post_reconcile_feedback(
         _LOGGER.warning(
             "Reconcile PR feedback for %s failed: %s", request.target_key, feedback_error
         )
-        return {
+        failed_entry: dict[str, object] = {
             "delivery_status": "failed",
             "error": f"Unexpected {type(feedback_error).__name__} while posting PR feedback.",
         }
+        if feedback is not None:
+            failed_entry["status"] = feedback.status
+        elif previous_entry is not None and "status" in previous_entry:
+            failed_entry["status"] = previous_entry["status"]
+        return failed_entry
 
 
 def _decide_feedback(
@@ -193,6 +204,14 @@ def _preview_feedback(
         status, preview_url = "ready", _text(plan.get("current_preview_url"))
     elif action == "destroy" and plan.get("preview_result_status") == "pass":
         status, revision = "destroyed", ""
+    elif (
+        action == "none"
+        and plan.get("reason") == "pull_request_not_open"
+        and not error
+        and isinstance(previous := request.last_plan.get(PR_FEEDBACK_PLAN_KEY), dict)
+        and previous.get("status") in {"pending", "cleared"}
+    ):
+        status, revision = "cleared", ""
     else:
         return None
     assert request.pull_request_number is not None
@@ -394,6 +413,30 @@ def _post(
             )
             if not pull_request_number:
                 return _Delivery(pull_request_number=0, action="no_merged_pull_request")
+        if feedback.status == "cleared":
+            existing = find_github_issue_comment_by_marker(
+                owner=owner,
+                repo=repo,
+                issue_number=pull_request_number,
+                token=token,
+                marker=feedback.marker,
+            )
+            if existing is None:
+                return _Delivery(
+                    pull_request_number=pull_request_number,
+                    status="delivered",
+                    action="no_existing_comment",
+                )
+            comment_id = existing.get("id")
+            if not isinstance(comment_id, int):
+                raise click.ClickException("Existing preview feedback comment has no numeric id.")
+            delete_github_issue_comment(owner=owner, repo=repo, comment_id=comment_id, token=token)
+            return _Delivery(
+                pull_request_number=pull_request_number,
+                status="delivered",
+                action="deleted_comment",
+                comment_id=comment_id,
+            )
         comment = upsert_github_issue_comment(
             owner=owner,
             repo=repo,

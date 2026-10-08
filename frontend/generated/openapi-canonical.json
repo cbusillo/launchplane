@@ -1152,6 +1152,7 @@
         "properties": {
           "candidate_id": {
             "enum": [
+              "agent-policy-proposer",
               "ordinary-agent-delivery-administration",
               "administrator-product-evidence-read",
               "ordinary-agent-enrollment-requester",
@@ -3423,6 +3424,11 @@
         "additionalProperties": false,
         "description": "What a Client's accepted release has done so far, derived from its operations.",
         "properties": {
+          "blocked_reason": {
+            "default": "",
+            "title": "Blocked Reason",
+            "type": "string"
+          },
           "decision_record_id": {
             "title": "Decision Record Id",
             "type": "string"
@@ -3465,7 +3471,8 @@
             "enum": [
               "backup",
               "promote",
-              "rollback"
+              "rollback",
+              "recovery"
             ],
             "title": "Kind",
             "type": "string"
@@ -3556,6 +3563,114 @@
           "freshness_status"
         ],
         "title": "DataProvenance",
+        "type": "object"
+      },
+      "DeliveryGitHubAppConfigurationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "app_id": {
+            "exclusiveMinimum": 0.0,
+            "title": "App Id",
+            "type": "integer"
+          },
+          "expected_plan_digest": {
+            "default": "",
+            "title": "Expected Plan Digest",
+            "type": "string"
+          },
+          "integration": {
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,127}$",
+            "title": "Integration",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "app_id",
+          "integration",
+          "reason"
+        ],
+        "title": "DeliveryGitHubAppConfigurationRequest",
+        "type": "object"
+      },
+      "DeliveryGitHubAppConfigurationResponse": {
+        "properties": {
+          "actor": {
+            "title": "Actor",
+            "type": "string"
+          },
+          "app_id": {
+            "title": "App Id",
+            "type": "integer"
+          },
+          "integration": {
+            "title": "Integration",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "plan_digest": {
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "runtime_environment": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runtime Environment"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "actor",
+          "reason",
+          "mode",
+          "app_id",
+          "integration",
+          "plan_digest",
+          "trace_id",
+          "runtime_environment"
+        ],
+        "title": "DeliveryGitHubAppConfigurationResponse",
         "type": "object"
       },
       "DeployTargetContractReference": {
@@ -8203,6 +8318,34 @@
         "title": "EveryCodeWorkRequestSummary",
         "type": "object"
       },
+      "ExistingDeliveryKey": {
+        "properties": {
+          "binding_id": {
+            "title": "Binding Id",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "integration": {
+            "title": "Integration",
+            "type": "string"
+          },
+          "secret_id": {
+            "title": "Secret Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "integration",
+          "secret_id",
+          "binding_id",
+          "context"
+        ],
+        "title": "ExistingDeliveryKey",
+        "type": "object"
+      },
       "ExternalRouteBindingReconcileEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -8704,6 +8847,126 @@
           "provider_evidence"
         ],
         "title": "GenericWebDeployRecoveryProviderEvidenceResponse",
+        "type": "object"
+      },
+      "GenericWebDeployRecoveryReferenceApplyRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_recovery_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Expected Recovery Digest",
+            "type": "string"
+          },
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
+            "type": "string"
+          },
+          "product": {
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "pattern": "\\S",
+            "title": "Reason",
+            "type": "string"
+          },
+          "recovery_reference": {
+            "pattern": "^event-deploy-[0-9a-f]{64}$",
+            "title": "Recovery Reference",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "recovery_reference",
+          "reason",
+          "expected_recovery_digest"
+        ],
+        "title": "GenericWebDeployRecoveryReferenceApplyRequest",
+        "type": "object"
+      },
+      "GenericWebDeployRecoveryReferenceRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
+            "type": "string"
+          },
+          "product": {
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "pattern": "\\S",
+            "title": "Reason",
+            "type": "string"
+          },
+          "recovery_reference": {
+            "pattern": "^event-deploy-[0-9a-f]{64}$",
+            "title": "Recovery Reference",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "recovery_reference",
+          "reason"
+        ],
+        "title": "GenericWebDeployRecoveryReferenceRequest",
+        "type": "object"
+      },
+      "GenericWebDeployRecoveryReferenceResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "recovery_reference": {
+            "title": "Recovery Reference",
+            "type": "string"
+          },
+          "reservation_attempt": {
+            "title": "Reservation Attempt",
+            "type": "integer"
+          },
+          "reservation_state": {
+            "enum": [
+              "running",
+              "reconcile_required"
+            ],
+            "title": "Reservation State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "recovery_reference",
+          "reservation_state",
+          "reservation_attempt"
+        ],
+        "title": "GenericWebDeployRecoveryReferenceResponse",
         "type": "object"
       },
       "GenericWebDeployRequest": {
@@ -10260,6 +10523,100 @@
           "repository"
         ],
         "title": "GitHubActionsPolicyRule",
+        "type": "object"
+      },
+      "GitHubAppWebhookDeliveryRecord": {
+        "additionalProperties": false,
+        "description": "A processed GitHub App delivery, kept so a redelivery is recognized.",
+        "properties": {
+          "action": {
+            "default": "",
+            "title": "Action",
+            "type": "string"
+          },
+          "config_authority": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Config Authority",
+            "type": "object"
+          },
+          "config_authority_attempt": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Config Authority Attempt",
+            "type": "integer"
+          },
+          "config_authority_lease_expires_at": {
+            "default": "",
+            "title": "Config Authority Lease Expires At",
+            "type": "string"
+          },
+          "config_authority_lease_owner": {
+            "default": "",
+            "title": "Config Authority Lease Owner",
+            "type": "string"
+          },
+          "config_authority_next_attempt_at": {
+            "default": "",
+            "title": "Config Authority Next Attempt At",
+            "type": "string"
+          },
+          "config_authority_request": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Config Authority Request",
+            "type": "object"
+          },
+          "config_authority_state": {
+            "default": "",
+            "enum": [
+              "",
+              "pending",
+              "running",
+              "done",
+              "failed"
+            ],
+            "title": "Config Authority State",
+            "type": "string"
+          },
+          "delivery_id": {
+            "minLength": 1,
+            "title": "Delivery Id",
+            "type": "string"
+          },
+          "event": {
+            "minLength": 1,
+            "title": "Event",
+            "type": "string"
+          },
+          "received_at": {
+            "minLength": 1,
+            "title": "Received At",
+            "type": "string"
+          },
+          "repository_id": {
+            "pattern": "^[1-9][0-9]*$",
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "target_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Target Keys",
+            "type": "array"
+          }
+        },
+        "required": [
+          "delivery_id",
+          "event",
+          "repository_id",
+          "received_at"
+        ],
+        "title": "GitHubAppWebhookDeliveryRecord",
         "type": "object"
       },
       "GitHubHumanAccessPrincipal": {
@@ -17285,6 +17642,12 @@
             "title": "Blocked Label",
             "type": "string"
           },
+          "config_authority_events_enabled": {
+            "default": false,
+            "title": "Config Authority Events Enabled",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
+          },
           "engineering_review_mode": {
             "default": "advisory",
             "enum": [
@@ -17374,6 +17737,12 @@
           "blocked_label": {
             "title": "Blocked Label",
             "type": "string"
+          },
+          "config_authority_events_enabled": {
+            "default": false,
+            "title": "Config Authority Events Enabled",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           },
           "engineering_review_mode": {
             "default": "advisory",
@@ -18131,6 +18500,50 @@
           "forward_host"
         ],
         "title": "NpmplusLocationPayload",
+        "type": "object"
+      },
+      "ObsoleteServiceToken": {
+        "properties": {
+          "binding_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Binding Ids",
+            "type": "array"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "global",
+              "context"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "secret_id": {
+            "title": "Secret Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "configured",
+              "disabled"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "secret_id",
+          "scope",
+          "context",
+          "status",
+          "binding_ids"
+        ],
+        "title": "ObsoleteServiceToken",
         "type": "object"
       },
       "OdooAddonSettingOverride": {
@@ -25671,6 +26084,9 @@
               },
               {
                 "$ref": "#/components/schemas/PrivilegedOperationAgentActor"
+              },
+              {
+                "$ref": "#/components/schemas/PrivilegedOperationLocalOperatorActor"
               }
             ],
             "title": "Actor"
@@ -25880,6 +26296,32 @@
         "title": "PrivilegedOperationListResponse",
         "type": "object"
       },
+      "PrivilegedOperationLocalOperatorActor": {
+        "additionalProperties": false,
+        "properties": {
+          "identity_type": {
+            "const": "local_operator",
+            "default": "local_operator",
+            "title": "Identity Type",
+            "type": "string"
+          },
+          "login": {
+            "const": "local-operator",
+            "default": "local-operator",
+            "title": "Login",
+            "type": "string"
+          },
+          "principal_sha256": {
+            "title": "Principal Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "principal_sha256"
+        ],
+        "title": "PrivilegedOperationLocalOperatorActor",
+        "type": "object"
+      },
       "PrivilegedOperationPlanEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -26068,6 +26510,9 @@
               },
               {
                 "$ref": "#/components/schemas/PrivilegedOperationAgentActor"
+              },
+              {
+                "$ref": "#/components/schemas/PrivilegedOperationLocalOperatorActor"
               }
             ],
             "title": "Requested By"
@@ -26253,7 +26698,8 @@
           "requested_by_kind": {
             "enum": [
               "github_human",
-              "terminal_agent"
+              "terminal_agent",
+              "local_operator"
             ],
             "title": "Requested By Kind",
             "type": "string"
@@ -26335,6 +26781,7 @@
             "enum": [
               "github_human",
               "terminal_agent",
+              "local_operator",
               "system"
             ],
             "title": "Actor Type",
@@ -36183,6 +36630,15 @@
             "title": "Repository",
             "type": "string"
           },
+          "shared_sources": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/SharedSourceReview"
+            },
+            "title": "Shared Sources",
+            "type": "array",
+            "x-launchplane-optional-response": true
+          },
           "testing_url": {
             "title": "Testing Url",
             "type": "string"
@@ -36476,6 +36932,18 @@
                 "type": "null"
               }
             ]
+          },
+          "checklist_complete": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checklist Complete",
+            "x-launchplane-optional-response": true
           },
           "checklist_digest": {
             "default": "",
@@ -36966,6 +37434,17 @@
       "RepositoryInventoryReadResponse": {
         "additionalProperties": false,
         "properties": {
+          "config_authority_delivery": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GitHubAppWebhookDeliveryRecord"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "read_model": {
             "$ref": "#/components/schemas/RepositoryInventoryReadModel"
           },
@@ -40867,6 +41346,232 @@
           "secret"
         ],
         "title": "SecretStatusResponse",
+        "type": "object"
+      },
+      "ServiceGitHubDeliveryStatus": {
+        "properties": {
+          "advisory_app_id": {
+            "title": "Advisory App Id",
+            "type": "string"
+          },
+          "app_id": {
+            "title": "App Id",
+            "type": "string"
+          },
+          "existing_keys": {
+            "items": {
+              "$ref": "#/components/schemas/ExistingDeliveryKey"
+            },
+            "title": "Existing Keys",
+            "type": "array"
+          },
+          "integration": {
+            "title": "Integration",
+            "type": "string"
+          },
+          "obsolete_tokens": {
+            "items": {
+              "$ref": "#/components/schemas/ObsoleteServiceToken"
+            },
+            "title": "Obsolete Tokens",
+            "type": "array"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "app_id",
+          "integration",
+          "advisory_app_id",
+          "existing_keys",
+          "obsolete_tokens"
+        ],
+        "title": "ServiceGitHubDeliveryStatus",
+        "type": "object"
+      },
+      "ServiceTokenRetirementRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "advisory_check_url": {
+            "maxLength": 1000,
+            "pattern": "^https://github\\.com/[^/]+/[^/]+/.*",
+            "title": "Advisory Check Url",
+            "type": "string"
+          },
+          "consumer_check_evidence": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Consumer Check Evidence",
+            "type": "string"
+          },
+          "delivery_comment_url": {
+            "maxLength": 1000,
+            "pattern": "^https://github\\.com/[^/]+/[^/]+/(pull|issues)/[0-9]+#issuecomment-[0-9]+$",
+            "title": "Delivery Comment Url",
+            "type": "string"
+          },
+          "delivery_release_issue_url": {
+            "maxLength": 1000,
+            "pattern": "^https://github\\.com/[^/]+/[^/]+/issues/[0-9]+$",
+            "title": "Delivery Release Issue Url",
+            "type": "string"
+          },
+          "director_confirmed": {
+            "default": false,
+            "title": "Director Confirmed",
+            "type": "boolean"
+          },
+          "expected_plan_digest": {
+            "default": "",
+            "title": "Expected Plan Digest",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "secret_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Secret Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "secret_ids",
+          "reason",
+          "advisory_check_url",
+          "delivery_comment_url",
+          "delivery_release_issue_url",
+          "consumer_check_evidence"
+        ],
+        "title": "ServiceTokenRetirementRequest",
+        "type": "object"
+      },
+      "ServiceTokenRetirementResponse": {
+        "properties": {
+          "actor": {
+            "title": "Actor",
+            "type": "string"
+          },
+          "advisory_app_id": {
+            "title": "Advisory App Id",
+            "type": "string"
+          },
+          "app_id": {
+            "title": "App Id",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "plan_digest": {
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "tokens": {
+            "items": {
+              "$ref": "#/components/schemas/ObsoleteServiceToken"
+            },
+            "title": "Tokens",
+            "type": "array"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "mode",
+          "plan_digest",
+          "tokens",
+          "app_id",
+          "advisory_app_id",
+          "actor",
+          "reason"
+        ],
+        "title": "ServiceTokenRetirementResponse",
+        "type": "object"
+      },
+      "SharedSourceReview": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_commit": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Candidate Commit",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ReleaseReviewItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "production_commit": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Production Commit",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "untracked_commits": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Untracked Commits",
+            "type": "array"
+          }
+        },
+        "required": [
+          "repository",
+          "production_commit",
+          "candidate_commit",
+          "items"
+        ],
+        "title": "SharedSourceReview",
         "type": "object"
       },
       "SoloAdministrationConfirmationResponse": {
@@ -45119,8 +45824,9 @@
           {
             "in": "header",
             "name": "Idempotency-Key",
-            "required": true,
+            "required": false,
             "schema": {
+              "default": "",
               "title": "Idempotency-Key",
               "type": "string"
             }
@@ -45140,7 +45846,15 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWebDeployRecoveryApplyRequest"
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/GenericWebDeployRecoveryApplyRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/GenericWebDeployRecoveryReferenceApplyRequest"
+                  }
+                ],
+                "title": "Recovery Request"
               }
             }
           },
@@ -45228,8 +45942,9 @@
           {
             "in": "header",
             "name": "Idempotency-Key",
-            "required": true,
+            "required": false,
             "schema": {
+              "default": "",
               "title": "Idempotency-Key",
               "type": "string"
             }
@@ -45249,7 +45964,15 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWebDeployRecoveryDryRunRequest"
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/GenericWebDeployRecoveryDryRunRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/GenericWebDeployRecoveryReferenceRequest"
+                  }
+                ],
+                "title": "Recovery Request"
               }
             }
           },
@@ -45337,8 +46060,9 @@
           {
             "in": "header",
             "name": "Idempotency-Key",
-            "required": true,
+            "required": false,
             "schema": {
+              "default": "",
               "title": "Idempotency-Key",
               "type": "string"
             }
@@ -45358,7 +46082,15 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWebDeployRecoveryDryRunRequest"
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/GenericWebDeployRecoveryDryRunRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/GenericWebDeployRecoveryReferenceRequest"
+                  }
+                ],
+                "title": "Recovery Request"
               }
             }
           },
@@ -45437,6 +46169,105 @@
           }
         },
         "summary": "Inspect exact provider evidence for a generic web deploy reservation"
+      }
+    },
+    "/v1/admin/generic-web/deploy-recovery/{product}/testing": {
+      "get": {
+        "operationId": "read_event_deploy_recovery_reference",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericWebDeployRecoveryReferenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read Event Deploy Recovery Reference"
       }
     },
     "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}": {
@@ -70269,6 +71100,12 @@
                         "title": "Blocked Label",
                         "type": "string"
                       },
+                      "config_authority_events_enabled": {
+                        "default": false,
+                        "title": "Config Authority Events Enabled",
+                        "type": "boolean",
+                        "x-launchplane-optional-response": true
+                      },
                       "engineering_review_mode": {
                         "default": "advisory",
                         "enum": [
@@ -84294,6 +85131,16 @@
             }
           },
           {
+            "in": "query",
+            "name": "delivery_id",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Delivery Id",
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "Authorization",
             "required": false,
@@ -84354,6 +85201,16 @@
               }
             },
             "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "409": {
             "content": {
@@ -85489,6 +86346,226 @@
           }
         },
         "summary": "Read Launchplane managed secret status"
+      }
+    },
+    "/v1/service/github-delivery": {
+      "get": {
+        "operationId": "read_service_github_delivery_controls",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceGitHubDeliveryStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read service GitHub delivery selectors and managed binding metadata"
+      }
+    },
+    "/v1/service/github-delivery/configuration": {
+      "post": {
+        "operationId": "configure_launchplane_github_delivery",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeliveryGitHubAppConfigurationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliveryGitHubAppConfigurationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Configure the existing service Delivery App"
+      }
+    },
+    "/v1/service/github-delivery/token-retirement": {
+      "post": {
+        "operationId": "retire_service_github_tokens",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServiceTokenRetirementRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceTokenRetirementResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Disable individually selected obsolete service GITHUB_TOKEN records"
       }
     },
     "/v1/service/odoo-workers/reconcile": {
@@ -88688,6 +89765,7 @@
     "/v1/products/{product}/environments/{environment}/public-ingress/incidents/{incident_id}": "read_product_environment_public_ingress_incident",
     "/v1/release-review": "read_release_review",
     "/v1/repo-product-mapping": "read_repo_product_mapping",
+    "/v1/service/github-delivery": "read_service_github_delivery_controls",
     "/v1/work-graph/github/issues": "read_work_graph_issue_inbox",
     "/v1/work-graph/merge-train/controller/status": "read_merge_train_controller_status",
     "/v1/work-graph/merge-train/policy-targets": "read_merge_train_policy_targets",
@@ -88718,6 +89796,8 @@
     "/v1/products/{product}/environments/{environment}/promotion/dry-run": "dry_run_product_promotion",
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch": "dispatch_product_promotion_workflow",
     "/v1/release-review/decisions": "write_release_review_decision",
+    "/v1/service/github-delivery/configuration": "configure_launchplane_github_delivery",
+    "/v1/service/github-delivery/token-retirement": "retire_service_github_tokens",
     "/v1/work-graph/rank": "rank_work_graph_snapshot"
   }
 }

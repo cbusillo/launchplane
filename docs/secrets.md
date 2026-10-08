@@ -164,10 +164,10 @@ not part of this input flow.
   `launchplane_worker` integration, stored for exactly that lane. They are not
   part of the lane's runtime environment, so no deploy or sync can deliver them
   to an app. Store new worker credentials there with `context_instance` scope.
-- Launchplane's own service credentials, its `GITHUB_TOKEN` for PR comments
-  and release review and the advisory GitHub App private key, live in the
-  `launchplane_service` integration at global or context scope. A context copy
-  wins over the global one. No app environment resolves this integration.
+- Launchplane's own service credentials live in the `launchplane_service`
+  integration; no app environment resolves it. GitHub credential selection and
+  obsolete service-token retirement follow the single
+  [GitHub delivery identity contract](operations.md#github-delivery-identity).
 - The GitHub App webhook secret that verifies `POST /v1/github/app-webhook`
   deliveries lives in the `github_app_webhook` integration, context
   `launchplane`, binding key `webhook_secret`: exactly one configured,
@@ -404,7 +404,7 @@ decryption key state denies the reveal or resolution.
   `testing` or `dev` lane, because the lane cannot tell a production key from a
   test key. A binding whose key names an integration needs a policy rule or a
   declared `secret_class` there, even when it is stored for exactly that lane.
-  Code recognizes store, payment, outgoing-mail, printing and common
+  Code recognizes store, payment, outgoing-mail, printing, map, media, web-push and
   business-system connector names (`DEFAULT_INTEGRATION_KEY_MARKERS` in
   `control_plane/runtime_key_safety.py`), matched on whole underscore-separated
   key parts. The active policy record's `integration_key_markers` add

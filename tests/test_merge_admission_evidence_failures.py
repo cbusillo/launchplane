@@ -160,7 +160,7 @@ class MergeAdmissionEvidenceFailureHttpTests(unittest.IsolatedAsyncioTestCase):
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch(
-                "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                "control_plane.http_app.resolve_merge_train_github_token",
                 return_value="test-token",
             ),
         ):
@@ -239,7 +239,7 @@ class MergeAdmissionEvidenceFailureHttpTests(unittest.IsolatedAsyncioTestCase):
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch(
-                "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                "control_plane.http_app.resolve_merge_train_github_token",
                 return_value="test-token",
             ),
         ):
@@ -294,7 +294,7 @@ class MergeAdmissionEvidenceFailureHttpTests(unittest.IsolatedAsyncioTestCase):
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch(
-                "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                "control_plane.http_app.resolve_merge_train_github_token",
                 return_value="policy-token",
             ),
         ):

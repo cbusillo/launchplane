@@ -1,4 +1,6 @@
 import unittest
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.github_app_identity import ADVISORY_GITHUB_APP_ID_ENV_KEY
 from types import SimpleNamespace
 from typing import Any, cast
 from email.message import Message
@@ -120,19 +122,22 @@ class _PermissiveMergeAdmissionGuard:
     def record_landed(self, **kwargs: object) -> None:
         self.landed_calls.append(kwargs)
 
-    def record_provider_failure(self, **_: object) -> None:
+    @staticmethod
+    def record_provider_failure(**_: object) -> None:
         return None
 
     def record_reconcile_required(self, **kwargs: object) -> None:
         self.reconcile_required_calls.append(kwargs)
 
-    def reconcile_existing_landed(self, **_: object) -> None:
+    @staticmethod
+    def reconcile_existing_landed(**_: object) -> None:
         return None
 
     def reconcile_existing_no_effect(self, **_: object) -> None:
         self.no_effect_reconciliations += 1
 
-    def update_landing_plan(self, _: MergeTrainBatchLandingPlan) -> None:
+    @staticmethod
+    def update_landing_plan(_: MergeTrainBatchLandingPlan) -> None:
         return None
 
 
@@ -356,6 +361,35 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         )
 
         self.assertEqual(comment_url, "https://github.com/example/repo/pull/11#issuecomment-2")
+
+    def test_find_pull_request_comment_url_reads_later_pages(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                [{"body": "old discussion", "html_url": "https://example.test/old"}] * 30,
+                [{"body": "restored annotation", "html_url": "https://example.test/restored"}],
+            )
+        )
+        client = GitHubMergeTrainClient(transport=transport)
+        self.assertEqual(
+            client.find_pull_request_comment_url(
+                repository="example/repo",
+                pull_request_number=11,
+                body_contains="restored annotation",
+            ),
+            "https://example.test/restored",
+        )
+        self.assertIn("page=2", transport.requests[-1].path)
+
+    def test_find_pull_request_comment_url_fails_on_unreadable_later_page(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=([{"body": "old discussion"}] * 30, {"message": "unavailable"})
+        )
+        with self.assertRaises(MergeTrainGitHubError):
+            GitHubMergeTrainClient(transport=transport).find_pull_request_comment_url(
+                repository="example/repo",
+                pull_request_number=11,
+                body_contains="restored annotation",
+            )
 
     def test_pull_request_has_label_reads_pr_labels(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
@@ -2882,45 +2916,35 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
 
 class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
-    def test_client_review_waits_for_current_head_status_before_checks_can_admit(self) -> None:
-        from types import SimpleNamespace
+    def setUp(self) -> None:
+        # These adapter fixtures have no CODEOWNERS. Owned-file routing has its
+        # own provider-backed tests in test_merge_train_codeowners.
+        fixture = patch("control_plane.merge_train_codeowners._read_patterns", return_value=())
+        fixture.start()
+        self.addCleanup(fixture.stop)
 
+    def test_client_review_requires_the_current_head_advisory_check_without_status_fallback(
+        self,
+    ) -> None:
         cases: tuple[tuple[str, tuple[dict[str, object], ...], str], ...] = (
             ("owner-review", (), "pending"),
-            ("owner-review", ({"context": "other", "state": "success"},), "pending"),
+            ("owner-review", (_owner_review_check("pending"),), "pending"),
+            ("owner-review", (_owner_review_check("failure"),), "fail"),
+            ("owner-review", (_owner_review_check("success"),), "pass"),
             (
                 "owner-review",
-                ({"context": "launchplane/owner-review", "state": "pending"},),
+                (_owner_review_check("pending"), _owner_review_check("success")),
                 "pending",
             ),
-            (
-                "owner-review",
-                ({"context": "launchplane/owner-review", "state": "failure"},),
-                "fail",
-            ),
-            (
-                "owner-review",
-                ({"context": "launchplane/owner-review", "state": "success"},),
-                "pass",
-            ),
-            (
-                "owner-review",
-                (
-                    {"context": "launchplane/owner-review", "state": "pending"},
-                    {"context": "launchplane/owner-review", "state": "success"},
-                ),
-                "pending",
-            ),
-            (
-                "owner-review",
-                ({"context": "launchplane/owner-review", "state": "unknown"},),
-                "pending",
-            ),
+            ("owner-review", (_owner_review_check("neutral"),), "pending"),
+            ("owner-review", (_owner_review_check("success", app_id=88),), "pending"),
+            ("owner-review", (_owner_review_check("success", head_sha="older-head"),), "pending"),
+            ("missing-app", (_owner_review_check("success"),), "pending"),
             ("client-check", (), "pending"),
-            ("unrelated", (), "pass"),
+            ("unrelated", (_owner_review_check("failure"),), "pass"),
         )
-        for label, statuses, expected in cases:
-            with self.subTest(label=label, statuses=statuses):
+        for label, checks, expected in cases:
+            with self.subTest(label=label, checks=checks):
                 pull = _github_pull_request(42)
                 pull["labels"] = [{"name": "ready-to-merge"}, {"name": label}]
                 transport = RecordingMergeTrainGitHubTransport(
@@ -2930,10 +2954,12 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                         pull,
                         {"permission": "admin"},
                         _label_events(),
-                        _combined_status(statuses=statuses),
-                        {"check_runs": [_check_run("completed", "success")]},
+                        _combined_status(
+                            statuses=({"context": "launchplane/owner-review", "state": "failure"},)
+                        ),
+                        {"check_runs": [_check_run("completed", "success"), *checks]},
                         _conversation_rule(),
-                        [],  # no active branch rules
+                        [],
                     )
                 )
                 profile = SimpleNamespace(
@@ -2943,16 +2969,16 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                         review_label=label if label != "unrelated" else "client-check"
                     ),
                 )
-                store = SimpleNamespace(list_product_profile_records=lambda: (profile,))
+                store = SimpleNamespace(
+                    list_product_profile_records=lambda: (profile,),
+                    list_runtime_environment_records=_advisory_runtime_records
+                    if label != "missing-app"
+                    else lambda **_: (),
+                )
                 snapshot = GitHubMergeTrainSnapshotReader(
                     transport=transport, branch_refresh_store=cast(Any, store)
                 ).read_merge_train_snapshot(repository=profile.repository, base_branch="main")
                 self.assertEqual(snapshot.pull_requests[0].required_checks_status, expected)
-                status_paths = [
-                    request.path for request in transport.requests if "/status?" in request.path
-                ]
-                self.assertTrue(status_paths)
-                self.assertTrue(all("/commits/head-42/" in path for path in status_paths))
 
     def test_review_label_without_matching_active_profile_creates_no_wait(self) -> None:
         for profiles in (
@@ -3902,3 +3928,26 @@ def _candidate_ref_path(landing_plan: MergeTrainBatchLandingPlan) -> str:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _advisory_runtime_records(**_: object) -> tuple[RuntimeEnvironmentRecord, ...]:
+    return (
+        RuntimeEnvironmentRecord(
+            scope="context",
+            context="launchplane",
+            env={ADVISORY_GITHUB_APP_ID_ENV_KEY: "77"},
+            updated_at="2026-10-05T14:00:00Z",
+        ),
+    )
+
+
+def _owner_review_check(
+    state: str, *, head_sha: str = "head-42", app_id: int = 77
+) -> dict[str, object]:
+    return {
+        "name": "launchplane/owner-review",
+        "app": {"id": app_id},
+        "head_sha": head_sha,
+        "status": "in_progress" if state == "pending" else "completed",
+        "conclusion": None if state == "pending" else state,
+    }

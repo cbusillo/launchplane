@@ -8,6 +8,26 @@ eligible entry, and applies at most one worker transition per service call. The
 controller runs the batch-validating train and is the preferred entrypoint; see
 `POST /v1/work-graph/merge-train/controller/run-once` below.
 
+Changes owned by the base revision's CODEOWNERS land individually on their
+original pull request. Queue planning stops the current batch before an owned
+change; when that change is first, it selects only that PR. GitHub checks its
+existing code-owner approval and protected requirements on the original PR.
+When the base CODEOWNERS file includes assignments, changes to that file also land
+individually. The GitHub adapter reads the
+base revision's ownership file in GitHub's directory precedence, including
+rename origins in the changed-file evidence and confirming the original head
+again after reading its files. Unreadable ownership stops planning; incomplete
+file evidence routes only that PR individually. Provider request failures stop
+the read without changing the planned candidate. Admission checks this same
+batch boundary, including for plans created before this routing was deployed. Matching is conservative: unusual patterns and overridden
+ownership may cause extra individual landings, never approval transfer to a
+generated batch. No assigned identities or owned paths are copied into train
+policy.
+Stacks containing an owned change are not collapsed: the root lands first,
+leaving its children open. After a child's base dependency lands, its original
+PR must target the train's base branch before it can enter that queue; an agent
+can retarget that original PR after its dependency lands.
+
 The merge train is provider-neutral and batch-validating. Source-control-specific
 reads and effects belong behind an adapter; the steps below describe the current
 GitHub adapter:
@@ -95,13 +115,7 @@ policy. These inputs identify an existing managed binding; the workflow does
 not create a key, credential, or access grant. Full-policy revisions can also
 use the service's managed-policy import path.
 
-Supported sources are:
-- `github_token.runtime_context` resolves `LAUNCHPLANE_GITHUB_TOKEN` through the
-  named DB-backed runtime context, including global shared values and global
-  secret bindings that the runtime-context contract intentionally includes.
-  Selecting a context selects its resolved credential for GitHub operations;
-  this is a credential-authority decision for the policy reviewer. It does not
-  create a credential or expand its provider permissions.
+The supported source is:
 - `github_token.github_app` names an `app_id`, immutable `repository_id`, and
   `private_key_context`. The key comes from the managed secret integration
   `merge_train_github_app`, binding key `private_key`, in that exact context.
@@ -127,11 +141,12 @@ Supported sources are:
   installation approval with this service capability: an older service with an
   installation permission ceiling will refuse a broader shared installation.
 
+Legacy `env_var` and `runtime_context` payload fields remain readable for stored
+policy history and digest verification, but cannot be imported or executed.
 The sources cannot be combined. If all are empty, the target remains
 unconfigured. If the selected source cannot resolve a token, the service
 refuses the operation; it never tries a service-host bootstrap token, a different
-context, or an agent's local credential. Configured global runtime values are
-part of the selected context, not an alternate source. Controller, phase-specific operations, historical proof and
+context, or an agent's local credential. Controller, phase-specific operations, historical proof and
 current governance readiness use the same resolver. The controller's landing
 admission reads pull-request evidence with that same policy credential, so
 enrolling a repository never also requires the service-wide
@@ -298,7 +313,9 @@ is empty, so existing owner/admin-only policies remain fail-closed and unchanged
 Logins are diagnostic labels, not policy identity, because logins can be renamed.
 
 PRs labelled for Client review require the newest `launchplane/owner-review`
-commit status on their current head. Missing status is pending, even if check
+check from the service's configured Advisory App on their current head.
+Missing App configuration or check is pending; only a completed successful check
+passes, and another App or a legacy commit status cannot satisfy Client review, even if technical check
 runs already passed; pending or failed review cannot admit the PR. Only active
 product profiles' configured review labels mark this boundary; an unrelated
 label on a repository without such a profile creates no review requirement.
@@ -369,12 +386,31 @@ the blocking pull request with `blocked_label` before stopping.
 higher throughput over strict ordering. A worker must still mark the failed pull
 request with `blocked_label` before considering later entries.
 
+These ordering rules apply to the single-transition worker. The service batch
+controller holds a failing queue PR independently, as described below.
+
+The service controller applies a queue block as one leased transition in mutate
+mode and reports `block_result`, including the selected PR and permission to
+continue the service train past that held PR (`train_should_continue=true`)
+under either failure policy. The driver continues for other PRs but still fails
+its own blocked PR. Dry-run reports the intent without applying it.
+For service batches, a PR carrying `blocked_label` is excluded from subsequent
+queue selection,
+including label-free dependency updates, so the next controller pass can select
+other eligible work. Remove the block label after resolving the failure to admit
+that PR again. Applied-block PR feedback explains the failure and how to rejoin.
+The GitHub adapter creates a missing policy label when label
+application is refused because it does not exist; other provider errors remain
+fail-closed.
+
 For the reconciled pilot, ordinary missing acceptance or check evidence holds the
 affected change rather than pausing unrelated eligible work. A broader pause is
 valid only for a proven dependency edge, a shared-state/integration fence, or an
-unknown effect that makes later mutation unsafe. Existing active policies retain
-their current behavior until a reviewed DB-backed policy replacement is
-activated; this target paragraph does not change live scheduling.
+unknown effect that makes later mutation unsafe. The single-transition worker
+retains the selected policy's ordering behavior.
+The service batch controller applies independent queue holds without changing
+policy records. A policy replacement still requires its reviewed DB-backed
+activation.
 
 ## Batch Train Target
 
@@ -727,7 +763,7 @@ allowed_actor_roles = ["repo_owner", "repo_admin"]
 trusted_automation_github_user_ids = []
 
 [policies.merge_identity]
-kind = "github_actions_oidc"
+kind = "github_app"
 name = "launchplane-merge-train"
 
 [policies.service_authz]
@@ -735,8 +771,10 @@ action = "merge_train.run_once"
 product = "launchplane"
 context = "launchplane"
 
-[policies.github_token]
-runtime_context = "example_context"
+[policies.github_token.github_app]
+app_id = 123
+repository_id = 456
+private_key_context = "example_context"
 
 [policies.scheduler]
 enabled = true
@@ -758,7 +796,7 @@ allowed_actor_roles = ["repo_owner", "repo_admin"]
 trusted_automation_github_user_ids = [123456789]
 
 [policies.merge_identity]
-kind = "github_actions_oidc"
+kind = "github_app"
 name = "launchplane-merge-train"
 
 [policies.service_authz]
@@ -766,8 +804,10 @@ action = "merge_train.run_once"
 product = "launchplane"
 context = "launchplane"
 
-[policies.github_token]
-runtime_context = "example_context"
+[policies.github_token.github_app]
+app_id = 123
+repository_id = 456
+private_key_context = "example_context"
 ```
 
 ## Admin Changes
@@ -910,8 +950,7 @@ GH_TOKEN=... uv run launchplane work-graph merge-train-run-once \
 
 This local rehearsal command reads its explicit `--github-token-env` option
 (default `GH_TOKEN`) independently of the policy's managed credential source.
-The deployed merge train resolves the policy's `github_app` or
-`runtime_context` source instead. The work-graph read credential remains a
+The deployed merge train resolves the policy's `github_app` source instead. The work-graph read credential remains a
 separate consumer of `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN`.
 
 Passing `--mutate` applies exactly one ordered-queue worker transition from that
@@ -924,8 +963,8 @@ excludes draft, closed, unlabeled, or unauthorized entries and fails closed when
 the snapshot repository/base branch has no explicit policy.
 
 When the selected pull request is blocked by failed checks or conflicts, the
-first live mutation is idempotent application of `blocked_label`. Repositories
-using `pause_train` stop after that label action; repositories using
+first live mutation is idempotent application of `blocked_label`. Single-transition workers
+using `pause_train` stop after that label action; workers using
 `continue_after_blocking_pr` may continue to the next eligible pull request once
 the blocked pull request has been labeled.
 

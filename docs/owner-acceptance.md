@@ -80,7 +80,7 @@ also stops applying if the pull request is later retargeted to another base, eve
 without a new commit. The carry is saved
 as a new decision record with `carried_from` naming the decision and head it came
 from, the reason, and the train's refresh records, so it reads as carried, not
-re-decided. The `launchplane/owner-review` status on the new head says
+re-decided. The `launchplane/owner-review` check on the new head says
 "Accepted by @client (carried from `<short head>` after a base-only refresh)",
 the review page shows which version it was carried from, and the ready preview
 comment says the change is accepted rather than asking the Client again. The

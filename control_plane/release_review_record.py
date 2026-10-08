@@ -7,6 +7,7 @@ from urllib.parse import quote
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
+from control_plane.release_review import ReleaseReviewStore
 from control_plane.workflows.launchplane import github_api_request, resolve_launchplane_github_token
 
 
@@ -58,7 +59,38 @@ def release_decision_issue_body(decision: ReleaseReviewDecisionRecord) -> str:
             ]
         )
     if not checklist.items:
-        lines.append("No merged pull request changes between these versions.")
+        lines.append(
+            "No product-repository pull request changes. Shared changes are listed below."
+            if checklist.shared_sources
+            else "No merged pull request changes between these versions."
+        )
+    for source in checklist.shared_sources:
+        lines.extend(
+            [
+                "## Shared website components",
+                _literal(
+                    f"Repository: {source.repository}\n"
+                    f"Production: {source.production_commit}\n"
+                    f"Testing: {source.candidate_commit}"
+                ),
+            ]
+        )
+        for item in source.items:
+            lines.extend(
+                [
+                    f"### Pull request {source.repository}#{item.pull_request_number}",
+                    _literal(item.title),
+                    item.url,
+                    _literal(item.owner_test_notes or "Client test notes are missing."),
+                ]
+            )
+        if source.untracked_commits:
+            lines.extend(
+                [
+                    "### Commits without pull request coverage",
+                    _literal("\n".join(source.untracked_commits)),
+                ]
+            )
     if checklist.untracked_commits:
         lines.extend(
             [
@@ -75,18 +107,54 @@ def release_decision_issue_body(decision: ReleaseReviewDecisionRecord) -> str:
 
 def publish_release_decision(
     *,
+    store: ReleaseReviewStore,
     control_plane_root: Path,
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
 ) -> str:
-    """Return the issue URL; recover a successful but unacknowledged prior write."""
-    if profile.product != decision.product or profile.repository != decision.checklist.repository:
-        raise ValueError("The release record must belong to the product repository.")
+    """Serialize lookup, creation and acknowledgement of a saved decision."""
+    with store.release_review_publication_lock(record_id=decision.record_id):
+        stored = next(
+            (
+                record
+                for record in store.list_release_review_decision_records(product=decision.product)
+                if record.record_id == decision.record_id
+            ),
+            None,
+        )
+        if stored is None:
+            raise FileNotFoundError(decision.record_id)
+        if stored.model_copy(update={"release_issue_url": ""}) != decision.model_copy(
+            update={"release_issue_url": ""}
+        ):
+            raise ValueError("The saved release decision has changed.")
+        if profile.product != stored.product or profile.repository != stored.checklist.repository:
+            raise ValueError("The release record must belong to the product repository.")
+        if stored.release_issue_url:
+            return stored.release_issue_url
+        issue_url = _publish_release_decision_issue(
+            control_plane_root=control_plane_root, profile=profile, decision=stored
+        )
+        published = store.record_release_review_decision_publication(
+            record_id=stored.record_id, release_issue_url=issue_url
+        )
+        return published.release_issue_url
+
+
+def _publish_release_decision_issue(
+    *,
+    control_plane_root: Path,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+) -> str:
     body = release_decision_issue_body(decision)
     marker = release_decision_marker(decision.record_id)
     lane = next(lane for lane in profile.lanes if lane.instance == "testing")
     token = resolve_launchplane_github_token(
-        control_plane_root=control_plane_root, context_name=lane.context
+        control_plane_root=control_plane_root,
+        context_name=lane.context,
+        repository=profile.repository,
+        purpose="release_record",
     )
     if not token:
         raise ValueError("Release record source-control access is unavailable.")
