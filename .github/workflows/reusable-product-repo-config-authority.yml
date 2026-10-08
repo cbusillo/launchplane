@@ -91,13 +91,15 @@ jobs:
             pull_request|merge_group|push) ;;
             *) echo "No explicit commit-pair mapping for ${EVENT_NAME}; use the CLI with an explicit pair or full-audit." >&2; exit 1 ;;
           esac
-          if [[ "$EVENT_NAME" = push && "$BASE_SHA" = 0000000000000000000000000000000000000000 ]]; then
+          if [[ "$EVENT_NAME" = push ]]; then
             default_branch="${DEFAULT_BRANCH:-}"
             event_ref="${EVENT_REF:-}"
             repository="$(printf '%s' "${GITHUB_REPOSITORY:-}" | tr '[:upper:]' '[:lower:]')"
             train_prefix="refs/heads/launchplane/train/${repository}/${default_branch//\//-}/"
+          fi
+          if [[ "$EVENT_NAME" = push && ( "$BASE_SHA" = 0000000000000000000000000000000000000000 || "$event_ref" = refs/heads/launchplane/train/* ) ]]; then
             if [[ -z "$default_branch" || -z "$repository" || "$event_ref" != "$train_prefix"* || "$event_ref" = "$train_prefix" || ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ || "$HEAD_SHA" =~ ^0+$ ]]; then
-              echo "New-ref comparison requires a default-branch train candidate and a nonzero head SHA." >&2
+              echo "Train comparison requires a default-branch train candidate and a nonzero head SHA." >&2
               exit 1
             fi
             if ! git -C ../product-repo cat-file -e "${HEAD_SHA}^{commit}"; then
@@ -113,6 +115,8 @@ jobs:
             # Intersect first-parent histories, preserving candidate order. A
             # normal merge-base can select a PR head after another landing;
             # HEAD^1 would omit earlier entries in a multi-PR candidate.
+            # Updates must also recover the original base: the previous
+            # candidate can have the same tree as its reconstructed successor.
             git -C ../product-repo rev-list --first-parent "refs/remotes/origin/${default_branch}" > "$comparison_dir/base"
             git -C ../product-repo rev-list --first-parent "$HEAD_SHA" > "$comparison_dir/head"
             BASE_SHA="$(awk 'NR == FNR { base[$0] = 1; next } ($0 in base) && !found { print; found = 1 }' "$comparison_dir/base" "$comparison_dir/head")"
