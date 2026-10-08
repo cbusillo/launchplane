@@ -49,8 +49,10 @@ def _observed_at(store: PostgresRecordStore) -> datetime:
         return datetime.fromisoformat(store._database_mutation_timestamp(session))
 
 
-def _seed_policy(store: PostgresRecordStore) -> LaunchplaneAuthzPolicyRecord:
-    baseline = _policy_admin_record(administrator_quorum=1).policy
+def _seed_policy(
+    store: PostgresRecordStore, *, baseline: LaunchplaneAuthzPolicy | None = None
+) -> LaunchplaneAuthzPolicyRecord:
+    baseline = baseline or _policy_admin_record(administrator_quorum=1).policy
     administration = GitHubHumanPolicyRule(
         managed_set_id=ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
         managed_rule_id=ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID,
@@ -267,3 +269,90 @@ class DeliveryAdministrationRetirementTests(unittest.TestCase):
             self.assertEqual(store.list_authz_policy_records(status="active"), (policy,))
             review = privileged_operation_semantic_review(record=result, generated_at=store.clock)
             self.assertIn("authz_policy_delivery_activation_active", review.blockers.codes)
+
+
+class DeliveryAdministrationRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_late_activation_refusal_preserves_database_and_runtime_policy(self) -> None:
+        from control_plane.authz_grant_service import AuthzManagedPolicyReconcileEnvelope
+        from control_plane.http_app import (
+            LaunchplaneAuthzPolicyRuntime,
+            create_launchplane_fastapi_app,
+        )
+        from control_plane.http_routes.mutation_support import idempotency_scope
+        from tests.support.auth import _StubVerifier
+        from tests.support.http import lifespan_client
+        from tests.test_authz_empty_set_contraction import _policy as _contraction_policy
+        from tests.test_authz_grant_service import _identity
+
+        with (
+            TemporaryDirectory() as directory,
+            closing(
+                _ClockStore(database_url=_sqlite_database_url(Path(directory) / "state.sqlite3"))
+            ) as store,
+        ):
+            store.ensure_schema()
+            active = _seed_policy(store, baseline=_contraction_policy())
+            runtime = LaunchplaneAuthzPolicyRuntime(
+                active.policy,
+                policy_sha256=active.policy_sha256,
+                source="db",
+                record_id=active.record_id,
+                revision=active.revision,
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=active.policy,
+                authz_policy_runtime=runtime,
+                record_store_factory=lambda: store,
+            )
+            request = AuthzManagedPolicyReconcileEnvelope(
+                product="launchplane",
+                managed_set_id=ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
+                desired_policy=LaunchplaneAuthzPolicy(schema_version=3),
+                reason="Retire the approved administration rule.",
+            )
+            route = "/v1/authz-policies/managed-rule-sets/reconcile"
+            compare_and_write = store.compare_and_write_authz_policy_record
+
+            def install_before_write(**kwargs: Any) -> Any:
+                _history(store, expires_at=store.clock + timedelta(hours=1))
+                return compare_and_write(**kwargs)
+
+            async with lifespan_client(app) as client:
+                dry_run = await client.post(
+                    route,
+                    headers={"Authorization": "Bearer valid-token"},
+                    json=request.model_dump(mode="json"),
+                )
+                self.assertEqual(dry_run.status_code, 202, dry_run.text)
+                apply = request.model_copy(
+                    update={
+                        "mode": "apply",
+                        "reviewed_plan_sha256": dry_run.json()["result"]["diff"]["plan_sha256"],
+                    }
+                )
+                with patch.object(
+                    store, "compare_and_write_authz_policy_record", side_effect=install_before_write
+                ):
+                    response = await client.post(
+                        route,
+                        headers={
+                            "Authorization": "Bearer valid-token",
+                            "Idempotency-Key": "activation-raced-removal",
+                        },
+                        json=apply.model_dump(mode="json"),
+                    )
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(
+                response.json()["error"]["code"], "authz_policy_delivery_activation_active"
+            )
+            self.assertEqual(runtime.policy_sha256, active.policy_sha256)
+            self.assertEqual(runtime.policy, active.policy)
+            self.assertEqual(store.list_authz_policy_records(status="active"), (active,))
+            self.assertIsNone(
+                store.read_idempotency_record(
+                    scope=idempotency_scope(_identity()),
+                    route_path=route,
+                    idempotency_key="activation-raced-removal",
+                )
+            )

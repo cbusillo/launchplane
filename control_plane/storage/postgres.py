@@ -35022,12 +35022,12 @@ class PostgresRecordStore(HumanSessionStore):
             idempotency_record=stored_completion,
         )
 
-    def _has_unexpired_delivery_activation(self, session: Any) -> bool:
+    def _has_unexpired_delivery_activation(self, session: Any, *, lock_rows: bool = True) -> bool:
         statement = select(LaunchplaneOrdinaryAgentDeliveryActivationRow).where(
             LaunchplaneOrdinaryAgentDeliveryActivationRow.revoked_at.is_(None),
             LaunchplaneOrdinaryAgentDeliveryActivationRow.superseded_at.is_(None),
         )
-        if not self.database_url.startswith("sqlite"):
+        if lock_rows and not self.database_url.startswith("sqlite"):
             statement = statement.with_for_update()
         rows = tuple(session.scalars(statement).all())
         observed_at = datetime.fromisoformat(self._database_mutation_timestamp(session))
@@ -35042,7 +35042,7 @@ class PostgresRecordStore(HumanSessionStore):
     def has_unexpired_delivery_activation(self) -> bool:
         """Read the retirement prerequisite using the same DB clock as the locked write."""
         with self._session_factory() as session:
-            return self._has_unexpired_delivery_activation(session)
+            return self._has_unexpired_delivery_activation(session, lock_rows=False)
 
     def list_authz_policy_records(
         self,
