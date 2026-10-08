@@ -434,6 +434,9 @@ def _release_step_failure(
         if isinstance(outcome, dict):
             record_id = str(outcome.get("deployment_record_id") or record_id)
             message = message or str(outcome.get("error_message", ""))
+            code = code or str(outcome.get("error_code", ""))
+            if not message and code == "promotion_not_ready":
+                message = "The release stopped before deployment because its readiness or acceptance checks no longer passed."
             failure = outcome.get("failure", {})
             if isinstance(failure, dict):
                 code = code or str(failure.get("code", ""))

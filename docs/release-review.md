@@ -397,7 +397,8 @@ The review page says before the Accept button whether accepting puts the
 version on the live site, naming it, or whether releases are held. After
 acceptance it shows each step's status. A stopped step also shows its bounded,
 redacted recorded reason and code. Expand **Failure details** for the failure
-record, operation and original trace IDs. A missing saved trace says **Not
+record, operation and recorded trace IDs. Cancellation can replace an operation's
+saved trace with the cancellation request's trace. A missing saved trace says **Not
 recorded**: this includes older queued operations and generic-web reservations
 stopped before a response was saved. New queued backup and Odoo release
 operations persist a trace; generic-web reservations expose their saved response
