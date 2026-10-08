@@ -53,6 +53,8 @@ from control_plane.contracts.public_ingress_monitoring import (
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.promotion_record import PromotionRecord
+from control_plane.client_release_diagnostics import client_release_failure
+from control_plane.contracts.record_failures import RecordedFailureView, release_failure_reason
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
 from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretClass
@@ -589,6 +591,7 @@ class ProductActivityEvent(BaseModel):
     occurred_at: str
     title: str
     summary: str = ""
+    failure: RecordedFailureView | None = None
     records: tuple[ProductActivityRecordLink, ...] = ()
     trust_state: FreshnessStatus = "recorded"
 
@@ -1071,6 +1074,7 @@ def build_product_activity_read_model(
             source_limit=source_limit,
         )
     )
+    events.extend(_client_release_failure_events(record_store, profile, source_limit))
     events.sort(key=lambda event: (event.occurred_at, event.event_id), reverse=True)
     return ProductActivityReadModel(
         product=profile.product,
@@ -1079,6 +1083,57 @@ def build_product_activity_read_model(
         driver_id=profile.driver_id,
         events=tuple(events[:limit]),
     )
+
+
+def _client_release_failure_events(
+    store: object, profile: LaunchplaneProductProfileRecord, limit: int
+) -> tuple[ProductActivityEvent, ...]:
+    events = []
+    for kind, method in (
+        ("backup", "list_verireel_prod_backup_gate_operation_records"),
+        ("promote", "list_odoo_prod_promotion_operation_records"),
+        ("rollback", "list_odoo_prod_rollback_operation_records"),
+    ):
+        for operation in _optional_records(store, method, product=profile.product, limit=limit):
+            authorization = getattr(operation, "authorization", None)
+            if getattr(
+                authorization, "grant", ""
+            ) != "client_release_acceptance" or operation.status not in {
+                "fail",
+                "cancelled",
+                "reconciliation_required",
+            }:
+                continue
+            failure = client_release_failure(store, operation, kind)
+            summary = f"{failure.code}: {failure.description} Record ID: {failure.record_id}."
+            summary += f" Trace ID: {failure.trace_id or 'unavailable on this older record'}."
+            events.append(
+                ProductActivityEvent(
+                    event_id=f"client_release:{operation.operation_id}",
+                    event_type="client_release",
+                    product=profile.product,
+                    context=operation.context,
+                    environment=operation.instance,
+                    driver_id=profile.driver_id,
+                    action_id=f"client_release_{kind}",
+                    status=operation.status,
+                    occurred_at=operation.finished_at or operation.updated_at,
+                    title=f"{profile.display_name} release {kind} {operation.status}",
+                    summary=summary,
+                    failure=failure,
+                    records=(
+                        _record_link("operation", operation.operation_id),
+                        _record_link("release_review", authorization.release_decision_record_id),
+                        _record_link(
+                            "deployment"
+                            if failure.record_id != operation.operation_id
+                            else "operation",
+                            failure.record_id,
+                        ),
+                    ),
+                )
+            )
+    return tuple(events)
 
 
 def _read_profile_descriptor(
@@ -1218,7 +1273,21 @@ def _deployment_activity_events(
                 status=str(deploy.status),
                 occurred_at=occurred_at,
                 title=f"{profile.display_name} {lane.instance} deployment",
-                summary=f"Deployment {deploy.status} for {lane.context}/{lane.instance}.",
+                summary=(
+                    f"Deployment {deploy.status} for {lane.context}/{lane.instance}."
+                    + (
+                        " "
+                        + release_failure_reason(
+                            code="post_deploy_failed",
+                            detail=str(
+                                getattr(getattr(record, "post_deploy_update", None), "detail", "")
+                            ),
+                        ).description
+                        if getattr(getattr(record, "post_deploy_update", None), "status", "")
+                        == "fail"
+                        else ""
+                    )
+                ),
                 records=(_record_link("deployment", str(getattr(record, "record_id"))),),
             )
         )
@@ -1271,6 +1340,14 @@ def _promotion_activity_events(
                 summary=(
                     f"{getattr(record, 'from_instance')} to "
                     f"{getattr(record, 'to_instance')} {status}."
+                    + (
+                        " "
+                        + release_failure_reason(
+                            code="rollback_fail", detail=rollback.detail
+                        ).description
+                        if rollback_attempted and status == "fail"
+                        else ""
+                    )
                 ),
                 records=tuple(record_links),
             )

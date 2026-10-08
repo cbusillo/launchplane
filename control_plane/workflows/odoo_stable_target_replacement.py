@@ -23,6 +23,7 @@ from control_plane.contracts.artifact_identity import (
 from control_plane.runtime_platform_credentials import PlatformCredentialRefusedError
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import RecordFailure
+from control_plane.contracts.record_failures import release_failure_reason
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -2346,6 +2347,9 @@ def execute_odoo_stable_target_replacement_apply(
             runtime_identity=runtime_identity,
             post_deploy_update=post_deploy_evidence,
             destination_health=HealthcheckEvidence(status="skipped"),
+            failure=release_failure_reason(
+                code="post_deploy_failed", detail=post_deploy_result.error_message
+            ),
         )
         return base_result.result(
             deploy_status="fail",

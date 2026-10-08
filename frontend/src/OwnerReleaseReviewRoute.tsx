@@ -31,7 +31,12 @@ function ReleaseRunProgress({ run }: { run: ClientReleaseRunView }) {
   return <section className="owner-review-latest" aria-label="Release progress">
     <h3>Release progress: {RELEASE_RUN_STATE[run.state]}</h3>
     {run.blocked_reason ? <p role="status">{run.blocked_reason}</p> : null}
-    <ol>{run.steps.map(step => <li key={step.step}>{RELEASE_STEP_LABELS[step.kind]}: {RELEASE_STEP_STATUS[step.status]}</li>)}</ol>
+    <ol>{run.steps.map(step => <li key={step.step}>{RELEASE_STEP_LABELS[step.kind]}: {RELEASE_STEP_STATUS[step.status]}
+      {step.failure ? <div role="status">
+        <p>{step.failure.description}</p>
+        <p>Reason code <code>{step.failure.code}</code> · Record ID <code>{step.failure.record_id}</code> · Operation ID <code>{step.operation_id}</code> · Trace ID <code>{step.failure.trace_id || "Unavailable on this older record"}</code></p>
+      </div> : null}
+    </li>)}</ol>
   </section>;
 }
 

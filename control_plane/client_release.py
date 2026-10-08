@@ -27,11 +27,14 @@ from pathlib import Path
 from threading import Event
 from time import monotonic
 from typing import Literal, cast
+from uuid import uuid4
 
 import click
 from pydantic import BaseModel, ConfigDict
 
 from control_plane.contracts.deployment_record import deployment_record_passed
+from control_plane.client_release_diagnostics import client_release_failure
+from control_plane.contracts.record_failures import RecordedFailureView
 from control_plane.contracts.idempotency_record import build_launchplane_mutation_reservation_id
 from control_plane.contracts.durable_operation_authorization import (
     DurableOperationAuthorization,
@@ -141,6 +144,7 @@ class ClientReleaseStepView(BaseModel):
     kind: ClientReleaseStepKind
     status: ClientReleaseStepStatus
     operation_id: str
+    failure: RecordedFailureView | None = None
 
 
 class ClientReleaseRunView(BaseModel):
@@ -399,6 +403,11 @@ def read_client_release_run(
                 step=step.name,
                 kind=step.kind,
                 status=status,
+                failure=(
+                    client_release_failure(store, operation, step.kind)
+                    if status in _STOPPED_STATUSES and operation is not None
+                    else None
+                ),
                 operation_id=client_release_step_operation_id(
                     profile=profile, decision=decision, step=step
                 ),
@@ -413,6 +422,11 @@ def read_client_release_run(
                         kind="recovery",
                         status=recovery.status,
                         operation_id=recovery.operation_id,
+                        failure=(
+                            client_release_failure(store, recovery, "rollback")
+                            if recovery.status in _STOPPED_STATUSES
+                            else None
+                        ),
                     )
                 )
     statuses = [view.status for view in views]
@@ -863,6 +877,7 @@ def _queue_promotion(
             ),
         ),
         request=request,
+        runner_trace_id=f"launchplane_req_{uuid4().hex}",
         authorization=client_release_grant(
             decision=decision,
             action=ODOO_PROD_PROMOTION_RUN_ACTION,
@@ -934,6 +949,7 @@ def _queue_rollback(
             product=profile.product, request=request
         ),
         request=request,
+        runner_trace_id=f"launchplane_req_{uuid4().hex}",
         target=OdooProdRollbackTarget(
             artifact_id=target_artifact_id, deployment_record_id=deployment.record_id
         ),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from uuid import uuid4
 import json
 from pathlib import Path
 from typing import Callable
@@ -111,6 +112,7 @@ def enqueue_production_backup_gate(
         context=request.context,
         instance=request.instance,
         backup_record_id=request.backup_record_id,
+        runner_trace_id=f"launchplane_req_{uuid4().hex}",
         request_fingerprint=fingerprint,
         request=request,
         binding=binding,

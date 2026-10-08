@@ -37,3 +37,42 @@ def record_failure(code: str) -> RecordFailure:
 def record_failure_summary(code: str) -> str:
     failure = record_failure(code)
     return f"{failure.code}: {failure.description}"
+
+
+class RecordedFailureView(RecordFailure):
+    """Safe failure reason and the stored evidence that identifies it."""
+
+    record_id: str = ""
+    trace_id: str = ""
+
+
+COMPANY_SENDER_READBACK_FAILURE = (
+    "Odoo post-deploy did not prove the requested website company sender was saved."
+)
+
+
+def release_failure_reason(*, code: str, detail: str = "") -> RecordFailure:
+    # Recognize this fixed Launchplane message on older records too. Never
+    # project arbitrary exception, provider or script text into a Client view.
+    if detail == COMPANY_SENDER_READBACK_FAILURE:
+        return RecordFailure(
+            code="website_company_sender_unverified",
+            description=COMPANY_SENDER_READBACK_FAILURE,
+        )
+    descriptions = {
+        **RECORD_FAILURE_DESCRIPTIONS,
+        "rollback_fail": "The rollback did not complete.",
+        "promotion_fail": "The production promotion did not complete.",
+        "post_deploy_failed": "The post-deploy update did not complete.",
+        "deployment_failed": "The deployment did not complete.",
+        "backup_failed": "The verified backup did not complete.",
+        "authorization_denied": "Launchplane refused authorization for this release step.",
+        "operation_reconciliation_required": "The provider outcome requires an admin to reconcile it before retrying.",
+        "cancelled": "This release step was cancelled.",
+    }
+    return RecordFailure(
+        code=code if code in descriptions else "release_step_failed",
+        description=descriptions.get(
+            code, "The release step failed; inspect its stored operation record."
+        ),
+    )
