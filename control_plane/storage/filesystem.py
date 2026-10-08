@@ -180,7 +180,10 @@ from control_plane.contracts.production_backup_authority import (
 from control_plane.contracts.detached_application_retirement import (
     DetachedApplicationRetirementRecord,
 )
-from control_plane.contracts.product_retirement import ProductRetirementRecord
+from control_plane.contracts.product_retirement import (
+    ProductRetirementRecord,
+    product_retirement_secret_authority,
+)
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.contracts.public_ingress_monitoring import (
@@ -3762,6 +3765,34 @@ class FilesystemRecordStore:
 
     def write_secret_record(self, record: SecretRecord) -> Path:
         return self._write_model("launchplane_secrets", record.secret_id, record)
+
+    def disable_product_retirement_secret(
+        self, *, expected_record: SecretRecord, updated_at: str, updated_by: str
+    ) -> bool:
+        with self._product_authority_bundle_lock():
+            try:
+                current = self._read_model_locked(
+                    SecretRecord, "launchplane_secrets", expected_record.secret_id
+                )
+            except FileNotFoundError:
+                return False
+            if product_retirement_secret_authority(current) != product_retirement_secret_authority(
+                expected_record
+            ):
+                return False
+            if current.status != "disabled":
+                self._write_model_locked(
+                    "launchplane_secrets",
+                    current.secret_id,
+                    current.model_copy(
+                        update={
+                            "status": "disabled",
+                            "updated_at": updated_at,
+                            "updated_by": updated_by,
+                        }
+                    ),
+                )
+            return True
 
     def read_secret_record(self, secret_id: str) -> SecretRecord:
         return self._read_model(SecretRecord, "launchplane_secrets", secret_id)

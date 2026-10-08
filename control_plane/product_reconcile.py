@@ -20,7 +20,7 @@ from control_plane.lane_movement import (
     require_forward_build,
 )
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -213,6 +213,7 @@ GENERIC_WEB_PREVIEW_TIMEOUT_SECONDS = 300
 TESTING_BUILD_RUN_PAGE_SIZE = 50
 TESTING_VERIFY_LIMIT = 3
 _ENDED_PREVIEW_STATES = frozenset({"destroyed", "teardown_pending"})
+PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS = 3
 OPEN_PULL_REQUEST_SWEEP_PAGES = 5
 _LEASE_LOST = "This worker no longer holds the reconcile request's lease; nothing more was changed."
 _LOGGER = logging.getLogger(__name__)
@@ -227,6 +228,10 @@ class ProductReconcileError(Exception):
 
 
 class ProductReconcileStore(Protocol):
+    def list_product_reconcile_requests(
+        self, *, state: str = "", product: str = "", limit: int | None = 100
+    ) -> tuple[ProductReconcileRequestRecord, ...]: ...
+
     def read_idempotency_record(
         self, *, scope: str, route_path: str, idempotency_key: str
     ) -> LaunchplaneIdempotencyRecord | None: ...
@@ -2030,6 +2035,33 @@ def run_product_reconcile_once(
     )
     if feedback is not None:
         plan[PR_FEEDBACK_PLAN_KEY] = feedback
+    if request.target_kind == "preview" and _needs_absent_preview_feedback_recovery(plan):
+        # Only unresolved reads or terminal clear delivery consume this budget. Open
+        # PRs waiting for builds retain their ordinary event/sweep coverage.
+        if outcome.error or plan.get("reason") == "pull_request_not_open":
+            closed = not outcome.error and plan.get("reason") == "pull_request_not_open"
+            previously_closed = request.last_plan.get("feedback_recovery_closed_observed") is True
+            attempts = _feedback_recovery_failed_attempts(request.last_plan)
+            new_delivery = bool(request.last_delivery_id) and request.last_delivery_id != (
+                request.last_plan.get("feedback_recovery_delivery_id")
+            )
+            if new_delivery or (closed and not previously_closed):
+                # Reads failing while open must not spend the later close's cleanup
+                # budget. Once closed is observed, read failures keep that same budget.
+                attempts = 0
+            plan["feedback_recovery_delivery_id"] = request.last_delivery_id
+            if closed or previously_closed:
+                plan["feedback_recovery_closed_observed"] = True
+            plan["feedback_recovery_failed_attempts"] = attempts + 1
+            if (
+                _feedback_recovery_failed_attempts(plan)
+                >= PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS
+            ):
+                plan["feedback_recovery_stop_reason"] = (
+                    "Supplemental preview feedback recovery exhausted; open-PR sweeps and new "
+                    "events remain eligible. A closed target requires supported reconciliation "
+                    "or remediation; the failed read or delivery remains unresolved."
+                )
     if outcome.deferred:
         # Folding a request into our running one returns it to pending on completion.
         record_store.request_product_reconcile(
@@ -2167,9 +2199,10 @@ def request_product_reconcile_sweep(
                     product=profile.product, target_kind="preview", pull_request_number=number
                 )
             )
-        for preview in record_store.list_preview_records(
+        previews = record_store.list_preview_records(
             context_name=preview_context, anchor_repo=_preview_anchor_repo(profile)
-        ):
+        )
+        for preview in previews:
             if preview.state not in _ENDED_PREVIEW_STATES:
                 targets.append(
                     ProductReconcileTarget(
@@ -2178,10 +2211,54 @@ def request_product_reconcile_sweep(
                         pull_request_number=preview.anchor_pr_number,
                     )
                 )
+        preview_numbers = {
+            preview.anchor_pr_number
+            for preview in previews
+            if preview.state not in _ENDED_PREVIEW_STATES
+        }
+        if profile.preview.enabled:
+            try:
+                requests = record_store.list_product_reconcile_requests(
+                    product=profile.product, limit=None
+                )
+            except (OSError, ValueError, SQLAlchemyError) as error:
+                _LOGGER.warning(
+                    "Sweep could not read %s's preview feedback history: %s", profile.product, error
+                )
+                continue
+            for request in requests:
+                if (
+                    request.target_kind == "preview"
+                    and request.state in {"done", "failed"}
+                    and request.pull_request_number not in preview_numbers
+                    and _needs_absent_preview_feedback_recovery(request.last_plan)
+                    and _feedback_recovery_failed_attempts(request.last_plan)
+                    < PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS
+                ):
+                    targets.append(
+                        ProductReconcileTarget(
+                            product=profile.product,
+                            target_kind="preview",
+                            pull_request_number=request.pull_request_number,
+                        )
+                    )
     unique_targets = {target.target_key: target for target in targets}
     for target in unique_targets.values():
         record_store.request_product_reconcile(target, now)
     return tuple(unique_targets)
+
+
+def _feedback_recovery_failed_attempts(plan: Mapping[str, object]) -> int:
+    count = plan.get("feedback_recovery_failed_attempts", 0)
+    return max(0, count) if isinstance(count, int) and not isinstance(count, bool) else 0
+
+
+def _needs_absent_preview_feedback_recovery(plan: Mapping[str, object]) -> bool:
+    feedback = plan.get(PR_FEEDBACK_PLAN_KEY)
+    return isinstance(feedback, dict) and (
+        feedback.get("status") == "pending"
+        or (feedback.get("status") == "cleared" and feedback.get("delivery_status") != "delivered")
+    )
 
 
 def _open_pull_requests(
