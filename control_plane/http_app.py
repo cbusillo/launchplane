@@ -17355,6 +17355,13 @@ def create_launchplane_fastapi_app(
                     "The managed authz policy reconciliation requires reconciliation before retry."
                 ),
             )
+        if write_result.status == "authz_policy_delivery_activation_active":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_policy_delivery_activation_active",
+                message="An unexpired delivery activation still needs its administration and stop controls.",
+            )
         if write_result.status == "stale":
             raise _launchplane_http_error(
                 status_code=409,
@@ -17375,6 +17382,13 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="authz_policy_unavailable",
                 message="Launchplane active authz policy is unavailable.",
+            )
+        if write_result.status not in {"written", "unchanged"}:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_policy_write_conflict",
+                message="The managed authz policy write did not complete.",
             )
         resolved_authz_policy_runtime.update(
             route_result.updated_policy,
