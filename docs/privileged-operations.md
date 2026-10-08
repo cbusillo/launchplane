@@ -376,7 +376,7 @@ terminal `expired` records remain readable with their original digests; pending
 legacy records ignore the former deadline, and terminal records never reopen.
 The legacy `expires_in_seconds` planning input remains accepted and validated
 for caller compatibility but has no effect on review validity. Activation
-lifetimes, owner-control challenges and execution leases have their own deadlines
+lifetimes, control-channel challenges and execution leases have their own deadlines
 and are unaffected.
 
 Filesystem storage exists for local/test/rehearsal parity. Shared runtime truth
