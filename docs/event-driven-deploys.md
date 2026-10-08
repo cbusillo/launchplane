@@ -74,7 +74,8 @@ reservation. The webhook request never waits on a deploy.
   - Selection refuses an incomplete read: the run list must include the running
     commit and its recorded build run. A generic-web baseline deployed before
     the Build contract may instead use its recorded source and immutable image
-    digest, only when the successful Build inventory is complete with distinct
+    digest (including a digest-pinned artifact ID paired with a provider SHA
+    tag), only when the successful Build inventory is complete with distinct
     run ids and no recorded build run is missing. First-parent history must
     reach the running commit in either case. The candidate still needs verified
     Build/manifest evidence and the forward-only movement checks below. The

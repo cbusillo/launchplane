@@ -1885,6 +1885,34 @@ def execute_odoo_stable_target_replacement_apply(
             runtime_port=profile.runtime_port,
         )
         current_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+        current_identity = _runtime_identity_map(current_env_map)
+        try:
+            inventory = record_store.read_environment_inventory(
+                context_name=plan.context, instance_name=plan.instance
+            )
+        except FileNotFoundError:
+            inventory = None
+        # Provider identity is written before post-deploy succeeds. A failed
+        # forward attempt must not grant its own retry a historical exception.
+        allow_historical_sender_contract = rollback or (
+            inventory is not None
+            and inventory.deploy.status == "pass"
+            and inventory.post_deploy_update.status != "fail"
+            and inventory.artifact_identity is not None
+            and inventory.artifact_identity.artifact_id == artifact_id
+            and inventory.source_git_ref == source_git_ref
+            and all(
+                current_identity.get(key) == value
+                for key, value in {
+                    "product": profile.product,
+                    "context": plan.context,
+                    "instance": plan.instance,
+                    "artifact_id": artifact_id,
+                    "source_git_ref": source_git_ref,
+                    "image_reference": image_reference,
+                }.items()
+            )
+        )
         if (
             ODOO_VERSION_ENV_KEY in current_env_map
             and ODOO_VERSION_ENV_KEY not in retired_provider_keys
@@ -2308,6 +2336,7 @@ def execute_odoo_stable_target_replacement_apply(
                 run_destructive_restore=plan.data_source_mode == "upstream_restore",
                 provider_effect_checkpoint=provider_effect_checkpoint,
                 hold_uncertain_effects=hold_uncertain_effects,
+                allow_historical_sender_contract=allow_historical_sender_contract,
                 schedule_execution_timeout_seconds=(
                     request.timeout_seconds if plan.data_source_mode == "upstream_restore" else None
                 ),
@@ -2372,6 +2401,7 @@ def execute_odoo_stable_target_replacement_apply(
                     phase="deploy",
                 ),
                 run_destructive_restore=False,
+                allow_historical_sender_contract=allow_historical_sender_contract,
                 provider_effect_checkpoint=provider_effect_checkpoint,
             )
         post_deploy_evidence = PostDeployUpdateEvidence(

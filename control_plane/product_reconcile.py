@@ -2484,8 +2484,10 @@ def _current_testing_release(
     identity = inventory.runtime_identity
     if identity is None:
         return "", ""
-    digest = _image_reference_digest(identity.image_reference) or _artifact_digest(
-        record_store, identity.artifact_id
+    digest = (
+        _image_reference_digest(identity.image_reference)
+        or _image_reference_digest(identity.artifact_id)
+        or _artifact_digest(record_store, identity.artifact_id)
     )
     return identity.artifact_id, digest.lower()
 

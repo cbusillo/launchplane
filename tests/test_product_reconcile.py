@@ -1375,14 +1375,18 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         )
         self.testing_hooks = TestingProviderHooks(generic_web_deploy_provider=lambda: self.deploys)
 
-    def record_legacy_baseline(self, commit: str = OLDER) -> None:
+    def record_legacy_baseline(self, commit: str = OLDER, *, sha_tagged: bool = False) -> None:
         identity = RuntimeIdentity(
             context="cm",
             instance="testing",
             deployment_record_id="deployment-legacy",
-            artifact_id=f"sha-{commit}",
+            artifact_id=f"{IMAGE_REPOSITORY}@{_digest(commit)}" if sha_tagged else f"sha-{commit}",
             source_git_ref=commit,
-            image_reference=f"{IMAGE_REPOSITORY}@{_digest(commit)}",
+            image_reference=(
+                f"{IMAGE_REPOSITORY}:sha-{commit}"
+                if sha_tagged
+                else f"{IMAGE_REPOSITORY}@{_digest(commit)}"
+            ),
         )
         self.store.write_environment_inventory(
             EnvironmentInventory(
@@ -1406,7 +1410,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         baseline = "206aff0581fa6fc817a30666094af4c738881a01"
         candidate = "50e779ca85ab6812a82dcd476fbb02cfccca9ec1"
         self.github.first_parents = {candidate: baseline, baseline: ""}
-        self.record_legacy_baseline(baseline)
+        self.record_legacy_baseline(baseline, sha_tagged=True)
         self.github.add_run(37825455941, candidate)
         self.github.runs[37825455941]["run_started_at"] = "2026-10-08T18:35:20Z"
         self.request()
