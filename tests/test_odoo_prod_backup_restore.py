@@ -411,7 +411,8 @@ class OdooProdBackupRestorePlanTests(unittest.TestCase):
 
 
 class OdooProdBackupRestoreApplyTests(unittest.TestCase):
-    def _historical_sender_evidence(self, allowed: bool) -> dict[str, str]:
+    @staticmethod
+    def _historical_sender_evidence(allowed: bool) -> dict[str, str]:
         evidence = {
             "log_available": "true",
             **dict.fromkeys(

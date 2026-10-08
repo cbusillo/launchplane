@@ -370,7 +370,7 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
             updated_at="2026-10-08T12:00:00Z",
             source_label="test",
         )
-        environment = build_post_deploy_environment(override, workflow_intent="deploy")
+        environment = build_post_deploy_environment(override)
         cases = (
             ("false", None, True, True, "pass"),  # Pre-marker rollback / re-deploy.
             ("false", None, True, False, "fail"),  # Forward deploy stays strict.
@@ -409,7 +409,6 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                                     DokployTargetDefinition(
                                         context="cm_website",
                                         instance="prod",
-                                        target_type="compose",
                                         target_id="cm-compose",
                                         target_name="cm-prod",
                                     ),

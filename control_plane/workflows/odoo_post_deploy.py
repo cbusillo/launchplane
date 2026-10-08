@@ -269,7 +269,7 @@ def execute_odoo_post_deploy(
         if (
             override_payload
             and override_payload.website_bootstrap
-            and (override_payload.website_bootstrap.company_email)
+            and override_payload.website_bootstrap.company_email
         ):
             dokploy_post_deploy.require_odoo_company_email_readback_evidence(
                 post_deploy_readback_markers,
@@ -333,7 +333,6 @@ def execute_odoo_post_deploy(
 
     override_status: OdooOverrideApplyStatus = "skipped"
     applied_at = ""
-    detail = "No Odoo instance override record matched this post-deploy request."
     if odoo_override_record is not None:
         if override_should_apply and (
             workflow_environment_overrides or required_workflow_environment_keys

@@ -1738,7 +1738,6 @@ def execute_odoo_stable_target_replacement_apply(
         image_reference=image_reference,
     )
     runtime_source: dict[str, str] = {}
-    allow_historical_sender_contract = rollback
     odoo_override_record = _read_odoo_instance_override_record(
         record_store=record_store,
         context=plan.context,
