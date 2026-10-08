@@ -4678,6 +4678,14 @@
             "title": "Project Name",
             "type": "string"
           },
+          "public_hosts": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Public Hosts",
+            "type": "array"
+          },
           "require_prod_gate": {
             "default": false,
             "title": "Require Prod Gate",
@@ -27655,6 +27663,17 @@
             "title": "Provider Key Adoption",
             "type": "array"
           },
+          "public_hosts": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductConfigPublicHostsResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "reason": {
             "default": "",
             "title": "Reason",
@@ -27973,6 +27992,106 @@
           "disposition"
         ],
         "title": "ProductConfigProviderKeyAdoptionResult",
+        "type": "object"
+      },
+      "ProductConfigPublicHostsResult": {
+        "additionalProperties": false,
+        "properties": {
+          "added": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Added",
+            "type": "array"
+          },
+          "after": {
+            "items": {
+              "type": "string"
+            },
+            "title": "After",
+            "type": "array"
+          },
+          "before": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Before",
+            "type": "array"
+          },
+          "certificate_type": {
+            "const": "none",
+            "default": "none",
+            "title": "Certificate Type",
+            "type": "string"
+          },
+          "https": {
+            "const": true,
+            "default": true,
+            "title": "Https",
+            "type": "boolean"
+          },
+          "plan_digest": {
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "read_back_hosts": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Read Back Hosts",
+            "type": "array"
+          },
+          "removed": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Removed",
+            "type": "array"
+          },
+          "runtime_port": {
+            "maximum": 65535.0,
+            "minimum": 1.0,
+            "title": "Runtime Port",
+            "type": "integer"
+          },
+          "service_name": {
+            "const": "web",
+            "default": "web",
+            "title": "Service Name",
+            "type": "string"
+          },
+          "unchanged": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unchanged",
+            "type": "array"
+          },
+          "updated": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Updated",
+            "type": "array"
+          },
+          "verified": {
+            "title": "Verified",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "before",
+          "plan_digest",
+          "after",
+          "added",
+          "updated",
+          "removed",
+          "unchanged",
+          "runtime_port",
+          "verified",
+          "read_back_hosts"
+        ],
+        "title": "ProductConfigPublicHostsResult",
         "type": "object"
       },
       "ProductConfigRuntimeEnvironmentRecordSummary": {
@@ -76375,6 +76494,20 @@
                   "product": {
                     "title": "Product",
                     "type": "string"
+                  },
+                  "public_hosts": {
+                    "anyOf": [
+                      {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Public Hosts"
                   },
                   "reason": {
                     "default": "",

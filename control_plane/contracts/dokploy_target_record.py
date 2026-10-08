@@ -2,6 +2,7 @@ import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from control_plane.contracts.public_hosts import normalize_public_hosts
 
 DokployTargetType = Literal["compose", "application"]
 DEFAULT_DOKPLOY_HEALTHCHECK_PATH = "/web/health"
@@ -133,9 +134,15 @@ class DokployTargetRecord(BaseModel):
     healthcheck_timeout_seconds: int | None = Field(default=None, ge=1)
     env: dict[str, str] = Field(default_factory=dict)
     domains: tuple[str, ...] = ()
+    public_hosts: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     policies: DokployTargetPolicies = Field(default_factory=DokployTargetPolicies)
     updated_at: str
     source_label: str = ""
+
+    @field_validator("public_hosts", mode="before")
+    @classmethod
+    def _validate_public_hosts(cls, value: object) -> tuple[str, ...]:
+        return normalize_public_hosts(value)
 
     @field_validator("context", "instance", "updated_at", mode="after")
     @classmethod

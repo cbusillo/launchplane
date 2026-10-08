@@ -6135,6 +6135,65 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None:
+        self._write_product_authority_bundle(bundle)
+
+    def write_product_public_hosts_bundle(
+        self,
+        bundle: ProductAuthorityBundle,
+        *,
+        expected_target: DokployTargetRecord,
+        expected_target_id: DokployTargetIdRecord,
+        expected_provider_target: ProviderTargetRecord,
+        apply_provider: Callable[[], None],
+    ) -> None:
+        """Check ownership/binding before effects; commit only after provider read-back."""
+
+        def guard(session: Any) -> None:
+            for orm_type, model_type, expected in (
+                (LaunchplaneDokployTargetRow, DokployTargetRecord, expected_target),
+                (LaunchplaneDokployTargetIdRow, DokployTargetIdRecord, expected_target_id),
+                (LaunchplaneProviderTargetRow, ProviderTargetRecord, expected_provider_target),
+            ):
+                row = session.scalar(
+                    select(orm_type)
+                    .where(
+                        orm_type.context == expected_target.context,
+                        orm_type.instance == expected_target.instance,
+                    )
+                    .with_for_update()
+                )
+                if row is None or model_type.model_validate(row.payload) != expected:
+                    raise DokployTargetRecordChanged("Public-host target binding changed.")
+            for row in session.scalars(select(LaunchplaneDokployTargetIdRow)).all():
+                if row.target_id == expected_target_id.target_id and (
+                    row.context,
+                    row.instance,
+                ) != (expected_target.context, expected_target.instance):
+                    raise DokployTargetRecordChanged(
+                        "Public-host target is shared with another lane."
+                    )
+            for row in session.scalars(select(LaunchplaneProviderTargetRow)).all():
+                if (
+                    row.provider_id == "dokploy"
+                    and row.target_id == expected_target_id.target_id
+                    and (row.context, row.instance)
+                    != (expected_target.context, expected_target.instance)
+                ):
+                    raise DokployTargetRecordChanged(
+                        "Public-host target is shared with another lane."
+                    )
+
+        self._write_product_authority_bundle(
+            bundle, guard_provider=guard, apply_provider=apply_provider
+        )
+
+    def _write_product_authority_bundle(
+        self,
+        bundle: ProductAuthorityBundle,
+        *,
+        guard_provider: Callable[[Any], None] | None = None,
+        apply_provider: Callable[[], None] | None = None,
+    ) -> None:
         if not bundle.requires_write():
             return
         with self._session_factory() as session:
@@ -6172,6 +6231,8 @@ class PostgresRecordStore(HumanSessionStore):
                     raise ProductProfileConflictError(
                         "Product profile changed during bundle write."
                     )
+            if guard_provider is not None:
+                guard_provider(session)
             for expected_source in bundle.secret_copy_sources:
                 source_row = session.scalar(
                     select(LaunchplaneSecretRow)
@@ -6397,6 +6458,11 @@ class PostgresRecordStore(HumanSessionStore):
                     self._idempotency_row(bundle.idempotency_record),
                     step_name="write_idempotency",
                 )
+            # All database preconditions (including runtime/secret writes) have
+            # passed. Provider failure rolls the whole bundle and success receipt back.
+            if apply_provider is not None:
+                session.flush()
+                apply_provider()
             session.commit()
 
     def _write_runtime_environment_with_expectation(

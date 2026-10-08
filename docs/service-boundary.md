@@ -2140,6 +2140,37 @@ changing the reviewed runtime or secret content. Idempotency replay is checked
 before the matching-dry-run marker so an already completed apply remains
 replayable.
 
+### Public hostnames on the prod compose target
+
+The generic product-config request also accepts `public_hosts`, a complete list
+of public DNS hostnames for an exact owned `prod` compose lane. For example,
+`{"mode":"dry-run","product":"example-site","context":"example-site",
+"instance":"prod","public_hosts":["example.com","www.example.com"]}`.
+Omitting the field preserves it; `[]` removes only names previously managed by
+this field. The tracked target's `public_hosts` is the single configuration
+source; its `domains` also retains the internal and other unmanaged names.
+Existing internal domains cannot be adopted into the managed public set.
+
+Use the supported `product-config-dry-run` and `product-config-apply` write-action
+helper commands with a private payload file. Apply needs a stable idempotency key
+and a matching dry-run of the current target binding and provider routes. The
+result's `public_hosts` reports `added`, `updated`, `removed`, `unchanged`, and
+`plan_digest`; stale plans require a fresh dry-run. Launchplane reads the port
+from the existing unambiguous HTTPS `web` origin route and reconciles the public
+routes internally under product-config authority, with no caller target-setup
+grant and no Client release. Routes use HTTPS and `certificateType: none`, as
+the existing origin does; this does not provision public TLS or change DNS,
+the Client's proxy, or the Odoo base URL.
+
+Apply reads back the provider routes before committing the target configuration
+and idempotent success receipt. `verified: true` and `read_back_hosts` prove
+provider Host-route configuration for the reported web port, not an HTTP probe
+or public reachability. Partial provider failure returns
+`public_hosts_provider_outcome_unknown` and commits no successful config receipt;
+inspect with a new dry-run before retrying. Provider operations are idempotent,
+and internal/unmanaged routes are checked for preservation. The local file CLI
+refuses this field; use the service path for dry-run and apply.
+
 The signed-in browser uses the narrower product-owned operation
 `POST /v1/products/{product}/environments/{environment}/config/apply`, which is
 the only product-config operation in the generated UI write allowlist. It
