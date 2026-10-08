@@ -171,6 +171,8 @@ def execute_odoo_post_deploy_result(
         control_plane_root=control_plane_root,
         record_store=record_store,
         request=request.post_deploy,
+        # This command reapplies settings; it never selects a forward artifact.
+        allow_historical_sender_contract=True,
     )
     records: dict[str, object] = {
         "transition": (
