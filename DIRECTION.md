@@ -28,7 +28,7 @@ between them.
 Launchplane needs no caller grant for the work it starts from source-control
 events (verifying a build and deploying it to that site's previews and testing
 lane) or from a Client's recorded release acceptance (the gated promotion).
-Requests from people and agents still need grants. This does not replace
+Requests from people or other agents still need grants. This does not replace
 the Director's approval at a stop boundary, a Client's release acceptance, or
 a backup gate.
 
@@ -66,8 +66,7 @@ Everything else is ordinary engineering and needs no ceremony, including
 work on products that are not live. The overall direction owns the rule for
 testing and preview lanes.
 
-The overall direction owns who may read and plan, including Client agents;
-Launchplane's grants enforce that scope.
+The overall direction owns who may read and plan, including Client agents.
 
 ## Journey
 
