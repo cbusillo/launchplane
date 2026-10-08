@@ -20,8 +20,8 @@ Contradictory or incomplete evidence remains `reconcile_required` and needs
 admin investigation. Candidate-ref cleanup failures are separate from
 landing truth and may be retried without changing the outcome record.
 
-If policy changes while a fully merged landing is still awaiting controller
-reconciliation, the controller verifies each recorded PR head and merge commit
+If a policy digest changes under the same policy key while a fully merged legacy
+landing is still awaiting controller reconciliation, the controller verifies each recorded PR head and merge commit
 against the provider and confirms containment in the target branch. It then
 clears the completed fence with `reason_code=completed_landing_policy_changed`,
 preserving the landing history and retaining the old candidate ref. This recovery
