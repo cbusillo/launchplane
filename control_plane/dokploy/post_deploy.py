@@ -2119,6 +2119,9 @@ def extract_odoo_post_deploy_readback_markers(deployment: api.JsonObject | None)
             continue
         normalized_key = key.strip()
         normalized_value = raw_value.strip().lower()
+        # Only Launchplane's contract decision may attach this reason.
+        if normalized_key == "website_bootstrap_company_email_skip_reason":
+            continue
         if not _safe_odoo_post_deploy_marker(normalized_key, normalized_value):
             continue
         markers[normalized_key] = normalized_value

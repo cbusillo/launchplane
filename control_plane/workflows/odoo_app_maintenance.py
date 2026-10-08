@@ -86,6 +86,8 @@ def execute_odoo_app_maintenance(
             instance=request.instance,
             phase=request.phase,
         ),
+        # Maintenance keeps the artifact already on this lane.
+        allow_historical_sender_contract=True,
     )
     finished_at = utc_now_timestamp()
     return OdooAppMaintenanceResult(

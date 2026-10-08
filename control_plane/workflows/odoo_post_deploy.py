@@ -346,6 +346,11 @@ def execute_odoo_post_deploy(
             detail = "No Odoo instance overrides were rendered for this post-deploy run."
         else:
             detail = f"Odoo instance override record is not configured for phase {request.phase}."
+        sender_skip_reason = post_deploy_readback_markers.get(
+            "website_bootstrap_company_email_skip_reason", ""
+        )
+        if sender_skip_reason:
+            detail += f" Website company sender was not verified: {sender_skip_reason}."
         updated_record = _write_odoo_instance_override_apply_result(
             record_store=typed_record_store,
             record=odoo_override_record,

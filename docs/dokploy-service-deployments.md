@@ -66,6 +66,10 @@ bootstrap script's contents. An exact re-deploy must match the existing runtime
 identity's product, lane, artifact, source commit and immutable image reference,
 and the passing inventory's artifact and source commit. Identity written by a
 failed forward attempt does not qualify its retry as a historical re-deploy.
+Maintenance, standalone post-deploy and backup-restore verification also support
+the existing artifact's historical contract; these calls do not select a new
+forward artifact. The override record's last-apply detail records the sender
+verification caveat, alongside deployment evidence.
 Missing capability evidence, an unreadable or unrecognized
 script, incomplete bootstrap proof, or an explicit sender mismatch never earns
 the historical exception. Other post-deploy, integration and health gates remain

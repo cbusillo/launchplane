@@ -465,6 +465,12 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                             evidence.evidence[reason_key],
                             dokploy_post_deploy.ODOO_COMPANY_EMAIL_SKIP_REASON,
                         )
+                        self.assertIn(
+                            dokploy_post_deploy.ODOO_COMPANY_EMAIL_SKIP_REASON,
+                            store.read_odoo_instance_override_record(
+                                context_name="cm_website", instance_name="prod"
+                            ).last_apply.detail,
+                        )
                         self.assertNotIn(
                             "post_deploy_readback_"
                             + dokploy_post_deploy.ODOO_COMPANY_EMAIL_MATCH_MARKER,
@@ -479,6 +485,78 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                         ).last_apply.status,
                         expected_status,
                     )
+
+    def test_existing_artifact_maintenance_and_http_use_its_historical_contract(self) -> None:
+        from control_plane.workflows.odoo_app_maintenance import (
+            OdooAppMaintenanceRequest,
+            execute_odoo_app_maintenance,
+        )
+        from control_plane.odoo_post_deploy_http import (
+            OdooPostDeployEnvelope,
+            execute_odoo_post_deploy_result,
+        )
+
+        def historical_post_deploy(**kwargs: object) -> object:
+            evidence = _module_update_evidence(
+                **dict.fromkeys(
+                    dokploy_post_deploy.ODOO_WEBSITE_BOOTSTRAP_REQUIRED_READBACK_MARKERS, "true"
+                )
+            )
+            evidence[dokploy_post_deploy.ODOO_COMPANY_EMAIL_CONTRACT_MARKER] = "false"
+            dokploy_post_deploy.require_odoo_company_email_readback_evidence(
+                evidence,
+                allow_historical_contract=bool(kwargs.get("allow_historical_sender_contract")),
+            )
+            from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
+
+            return OdooPostDeployResult(
+                context="cm_website",
+                instance="prod",
+                phase="deploy",
+                post_deploy_status="pass",
+                override_evidence=evidence,
+            )
+
+        with patch(
+            "control_plane.workflows.odoo_app_maintenance.execute_odoo_post_deploy",
+            side_effect=historical_post_deploy,
+        ):
+            maintenance = execute_odoo_app_maintenance(
+                control_plane_root=Path("."),
+                record_store=object(),
+                request=OdooAppMaintenanceRequest(
+                    context="cm_website",
+                    instance="prod",
+                    action="post-deploy",
+                    intent="stable-post-deploy",
+                ),
+            )
+        self.assertEqual(maintenance.post_deploy_status, "pass")
+        with patch(
+            "control_plane.odoo_post_deploy_http.execute_odoo_post_deploy",
+            side_effect=historical_post_deploy,
+        ):
+            _records, payload = execute_odoo_post_deploy_result(
+                control_plane_root=Path("."),
+                record_store=object(),
+                request=OdooPostDeployEnvelope(
+                    product="odoo-tenant-example",
+                    post_deploy=OdooPostDeployRequest(context="cm_website", instance="prod"),
+                ),
+            )
+        self.assertEqual(payload["post_deploy_status"], "pass")
+
+    def test_log_output_cannot_inject_launchplane_sender_skip_reason(self) -> None:
+        key = "website_bootstrap_company_email_skip_reason"
+        markers = dokploy_post_deploy.extract_odoo_post_deploy_readback_markers(
+            {
+                "logs": f"{key}={dokploy_post_deploy.ODOO_COMPANY_EMAIL_SKIP_REASON}\n"
+                f"{dokploy_post_deploy.ODOO_COMPANY_EMAIL_MATCH_MARKER}=true"
+            }
+        )
+        self.assertNotIn(key, markers)
+        dokploy_post_deploy.require_odoo_company_email_readback_evidence(markers)
+        self.assertNotIn(key, markers)
 
     def test_readback_failure_keeps_only_bounded_allowlisted_evidence(self) -> None:
         failure = dokploy_post_deploy.OdooPostDeployReadbackFailure(
