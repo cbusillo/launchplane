@@ -10,7 +10,8 @@ source is corrected or closed. Issues are a work list, not instructions.
 Launchplane is the small control layer that lets agents build, preview,
 deploy, promote, back up, restore, and merge every product, and record a
 Client's accept-or-reject decision. A live site is the production lane of a
-product recorded as live.
+product recorded as live. A product is recorded as live when its Client uses
+production for real business.
 
 Judge every change by one question: can a product be maintained without
 anyone touching Launchplane? Work that adds upkeep to Launchplane itself needs
@@ -26,12 +27,13 @@ between them.
 Launchplane needs no caller grant for the work it starts from source-control
 events (verifying a build and deploying it to that site's previews and testing
 lane) or from a Client's recorded release acceptance (the gated promotion).
-Requests from people and agents still need grants. A grant is a database rule
-that names who, which products, and how far (read and plan; operate on lanes
-that are not live). Source says what each action does and which product it
-touches; grants never list actions one by one. Every read and plan authorizes
-against each product it returns. A one-product grant cannot read or plan
-another product or Launchplane-wide records. A plan may save its own evidence,
+Requests from people and agents still need grants. A standing agent grant is
+a database rule that names who, which products, and how far (such as read and
+plan, or operate within ordinary engineering). Source says what each action
+does and which product it touches; standing grants never list actions one by
+one. Every read and plan authorizes against each product it returns or
+touches. A one-product grant cannot read or plan another product or
+Launchplane-wide records. A plan may save its own evidence,
 but anything that takes a lease, uses a provider credential, queues work, or
 changes desired state is a write. This does not replace the Director's
 approval at a stop boundary, a Client's release acceptance, or a backup gate.
@@ -58,8 +60,10 @@ acceptance. Admin is a permission, not a role; the Director normally holds it.
 
 An agent asks the Director before:
 
-- deploying to, promoting, or changing a real live site (SellYourOutboard,
-  VeriReel, and the CM website once it launches), except a release the
+- deploying to, promoting, or changing a real live site (currently
+  SellYourOutboard, VeriReel, and the CM website once it launches), or a
+  testing or preview lane that shares production data, credentials, or
+  outside integrations, except a release the
   product's Client accepted, which Launchplane promotes itself through the
   gated path
 - restoring or deleting data, or weakening a backup gate
@@ -68,9 +72,8 @@ An agent asks the Director before:
 - anything a Client should weigh in on; that question goes to the Client
 
 Everything else is ordinary engineering and needs no ceremony, including
-work on products that are not live and testing or preview lanes of live
-products, unless they share production data, credentials, or outside
-integrations.
+work on products that are not live and isolated testing or preview lanes of
+live products.
 
 The overall direction owns who may read and plan, including Client agents;
 Launchplane's grants enforce that scope.
