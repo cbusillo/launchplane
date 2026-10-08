@@ -418,6 +418,19 @@ jobs:
           response-output-file: ${{ runner.temp }}/launchplane-previous-runtime.json
           log-response-body: "false"
 
+      - name: Resolve Launchplane deploy wait timeout
+        id: deploy_wait_timeout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          wait_timeout_seconds="$(uv run --extra dev python scripts/deploy/resolve-wait-timeout.py)"
+          {
+            echo "timeout_seconds=$wait_timeout_seconds"
+            echo "timeout_ms=$((wait_timeout_seconds * 1000))"
+            echo "deadline_epoch=$(($(date +%s) + wait_timeout_seconds))"
+          } >>"$GITHUB_OUTPUT"
+
       - name: Render Launchplane self deploy request
         id: self_deploy
         shell: bash
@@ -769,18 +782,18 @@ jobs:
             exit 1
           fi
 
-      - name: Resolve Launchplane deploy wait timeout
-        id: deploy_wait_timeout
+      - name: Resolve deploy_runtime_wait remaining wait
+        id: deploy_runtime_wait
         shell: bash
+        env:
+          WAIT_DEADLINE_EPOCH: ${{ steps.deploy_wait_timeout.outputs.deadline_epoch }}
         run: |
           set -euo pipefail
-
-          wait_timeout_seconds="$(uv run --extra dev python scripts/deploy/resolve-wait-timeout.py)"
-          {
-            echo "timeout_seconds=$wait_timeout_seconds"
-            echo "timeout_ms=$((wait_timeout_seconds * 1000))"
-            echo "deadline_epoch=$(($(date +%s) + wait_timeout_seconds))"
-          } >>"$GITHUB_OUTPUT"
+          remaining_timeout_ms=$(( (${WAIT_DEADLINE_EPOCH:?} - $(date +%s)) * 1000 ))
+          if [ "$remaining_timeout_ms" -lt 1 ]; then
+            remaining_timeout_ms=1
+          fi
+          echo "timeout_ms=$remaining_timeout_ms" >>"$GITHUB_OUTPUT"
 
       - name: Wait for deployed Launchplane runtime image
         uses: cbusillo/launchplane/.github/actions/launchplane-request@052db9d452f05381a3b43a82dfddfeefb34a8b72 # launchplane-request
@@ -796,9 +809,23 @@ jobs:
           poll-retry-on-request-error: "true"
           poll-retry-on-unexpected-status: "true"
           poll-interval-ms: "5000"
-          poll-timeout-ms: ${{ steps.deploy_wait_timeout.outputs.timeout_ms }}
+          poll-timeout-ms: ${{ steps.deploy_runtime_wait.outputs.timeout_ms }}
           response-output-file: ${{ runner.temp }}/launchplane-deployed-runtime-wait.json
           log-response-body: "false"
+
+      - name: Resolve deploy_marker_wait remaining wait
+        if: steps.prep.outputs.bootstrap_secret_operation != 'preserve'
+        id: deploy_marker_wait
+        shell: bash
+        env:
+          WAIT_DEADLINE_EPOCH: ${{ steps.deploy_wait_timeout.outputs.deadline_epoch }}
+        run: |
+          set -euo pipefail
+          remaining_timeout_ms=$(( (${WAIT_DEADLINE_EPOCH:?} - $(date +%s)) * 1000 ))
+          if [ "$remaining_timeout_ms" -lt 1 ]; then
+            remaining_timeout_ms=1
+          fi
+          echo "timeout_ms=$remaining_timeout_ms" >>"$GITHUB_OUTPUT"
 
       - name: Wait for deployed Launchplane runtime marker
         if: steps.prep.outputs.bootstrap_secret_operation != 'preserve'
@@ -815,7 +842,7 @@ jobs:
           poll-retry-on-request-error: "true"
           poll-retry-on-unexpected-status: "true"
           poll-interval-ms: "5000"
-          poll-timeout-ms: ${{ steps.deploy_wait_timeout.outputs.timeout_ms }}
+          poll-timeout-ms: ${{ steps.deploy_marker_wait.outputs.timeout_ms }}
           response-output-file: ${{ runner.temp }}/launchplane-deployed-marker-wait.json
           log-response-body: "false"
 
@@ -1120,10 +1147,12 @@ jobs:
           && steps.rollback_request_action.outcome == 'success'
         id: rollback_wait_timeout
         shell: bash
+        env:
+          WAIT_TIMEOUT_SECONDS: ${{ steps.deploy_wait_timeout.outputs.timeout_seconds }}
         run: |
           set -euo pipefail
 
-          wait_timeout_seconds="$(uv run --extra dev python scripts/deploy/resolve-wait-timeout.py)"
+          wait_timeout_seconds="${WAIT_TIMEOUT_SECONDS:?}"
           {
             echo "timeout_seconds=$wait_timeout_seconds"
             echo "timeout_ms=$((wait_timeout_seconds * 1000))"
@@ -1156,6 +1185,20 @@ jobs:
           response-output-file: ${{ runner.temp }}/launchplane-rollback-marker-wait.json
           log-response-body: "false"
 
+      - name: Resolve rollback_runtime_wait remaining wait
+        if: failure() && steps.rollback_request.outputs.payload_file != '' && steps.rollback_request.outputs.previous_image_reference != '' && steps.rollback_request_action.outcome == 'success'
+        id: rollback_runtime_wait
+        shell: bash
+        env:
+          WAIT_DEADLINE_EPOCH: ${{ steps.rollback_wait_timeout.outputs.deadline_epoch }}
+        run: |
+          set -euo pipefail
+          remaining_timeout_ms=$(( (${WAIT_DEADLINE_EPOCH:?} - $(date +%s)) * 1000 ))
+          if [ "$remaining_timeout_ms" -lt 1 ]; then
+            remaining_timeout_ms=1
+          fi
+          echo "timeout_ms=$remaining_timeout_ms" >>"$GITHUB_OUTPUT"
+
       - name: Wait for Launchplane rollback runtime image
         if: >-
           failure()
@@ -1177,7 +1220,7 @@ jobs:
           poll-retry-on-request-error: "true"
           poll-retry-on-unexpected-status: "true"
           poll-interval-ms: "5000"
-          poll-timeout-ms: ${{ steps.rollback_wait_timeout.outputs.timeout_ms }}
+          poll-timeout-ms: ${{ steps.rollback_runtime_wait.outputs.timeout_ms }}
           response-output-file: ${{ runner.temp }}/launchplane-rollback-runtime-wait.json
           log-response-body: "false"
 

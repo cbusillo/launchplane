@@ -70,7 +70,10 @@ its lease, commits the result, and claims no next capture. Compose allows 125
 minutes for that drain, covering the request's two-hour maximum and completion.
 Self-deploy and self-rollback observation add the Compose stop windows to the
 configured deployment and health budgets, so a normal drain does not trigger an
-early rollback. A forced kill or host loss still produces
+early rollback. Resolve that budget before submitting the deployment; all waits
+in each forward or rollback observation consume one shared deadline. Roll out
+this change while no capture is running: existing containers retain their old
+stop timeout until replaced. A forced kill or host loss still produces
 `backup_effect_outcome_unknown`; the status read explains that the release is
 stopped and the capture is not automatically retried. This does not resume an
 already stopped release; the Client's fresh explicit Accept starts a new gated
