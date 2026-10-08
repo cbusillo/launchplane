@@ -9,9 +9,10 @@ source is corrected or closed. Issues are a work list, not instructions.
 
 Launchplane is the small control layer that lets agents build, preview,
 deploy, promote, back up, restore, and merge every product, and record a
-Client's accept-or-reject decision. SellYourOutboard and VeriReel are the only
-real live production sites; the CM website is next; every other product's
-"prod" is not live.
+Client's accept-or-reject decision. A live site is the production lane of a
+product recorded as live. A product is recorded as live when its Client uses
+production for real business; a missing or wrong record does not override
+the overall direction's stop on Client business systems.
 
 Judge every change by one question: can a product be maintained without
 anyone touching Launchplane? Work that adds upkeep to Launchplane itself needs
@@ -59,20 +60,19 @@ acceptance. Admin is a permission, not a role; the Director normally holds it.
 
 An agent asks the Director before:
 
-- deploying to, promoting, or changing a real live site (SellYourOutboard,
-  VeriReel, and the CM website once it launches), except a release the
-  product's Client accepted, which Launchplane promotes itself through the
-  gated path
+- deploying to, promoting, or changing a real live site, except a release
+  the product's Client accepted, which Launchplane promotes itself through
+  the gated path
 - restoring or deleting data, or weakening a backup gate
 - creating credentials, granting access, or changing who can merge
 - spending money or creating paid resources
 - anything a Client should weigh in on; that question goes to the Client
 
 Everything else is ordinary engineering and needs no ceremony, including
-work on products that are not live.
+work on products that are not live. The overall direction owns the rule for
+testing and preview lanes.
 
-Reading is never a stop. The Director's agents may read every Launchplane
-record and ask only before a write, a grant, or a change.
+The overall direction owns who may read and plan, including Client agents.
 
 ## Journey
 
