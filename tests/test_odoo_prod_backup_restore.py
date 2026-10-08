@@ -411,6 +411,23 @@ class OdooProdBackupRestorePlanTests(unittest.TestCase):
 
 
 class OdooProdBackupRestoreApplyTests(unittest.TestCase):
+    @staticmethod
+    def _historical_sender_evidence(allowed: bool) -> dict[str, str]:
+        evidence = {
+            "log_available": "true",
+            **dict.fromkeys(
+                dokploy_post_deploy.ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS, "true"
+            ),
+            **dict.fromkeys(
+                dokploy_post_deploy.ODOO_WEBSITE_BOOTSTRAP_REQUIRED_READBACK_MARKERS, "true"
+            ),
+            dokploy_post_deploy.ODOO_COMPANY_EMAIL_CONTRACT_MARKER: "false",
+        }
+        dokploy_post_deploy.require_odoo_company_email_readback_evidence(
+            evidence, allow_historical_contract=allowed
+        )
+        return evidence
+
     def test_apply_runs_durable_phases_and_switches_only_database_volume(self) -> None:
         store = _Store()
         live_env = _live_env()
@@ -468,6 +485,9 @@ class OdooProdBackupRestoreApplyTests(unittest.TestCase):
         )
 
         def post_deploy(*, request, provider_effect_checkpoint, **_: object):  # type: ignore[no-untyped-def]
+            evidence = self._historical_sender_evidence(
+                bool(_.get("allow_historical_sender_contract"))
+            )
             self.assertEqual(request.phase, "deploy")
             provider_effect_checkpoint("post_deploy_schedule_upsert")
             provider_effect_checkpoint("post_deploy_schedule_trigger")
@@ -476,6 +496,7 @@ class OdooProdBackupRestoreApplyTests(unittest.TestCase):
                 instance="prod",
                 phase="deploy",
                 post_deploy_status="pass",
+                override_evidence=evidence,
             )
 
         verification = OdooVerificationResult(
@@ -648,6 +669,9 @@ class OdooProdBackupRestoreApplyTests(unittest.TestCase):
         first_phase_checkpoints: list[tuple[str, dict[str, str]]] = []
 
         def post_deploy(*, request, provider_effect_checkpoint, **_: object):  # type: ignore[no-untyped-def]
+            evidence = self._historical_sender_evidence(
+                bool(_.get("allow_historical_sender_contract"))
+            )
             self.assertEqual(request.phase, "deploy")
             provider_effect_checkpoint("post_deploy_schedule_upsert")
             provider_effect_checkpoint("post_deploy_schedule_trigger")
@@ -656,7 +680,7 @@ class OdooProdBackupRestoreApplyTests(unittest.TestCase):
                 instance="prod",
                 phase="deploy",
                 post_deploy_status="pass",
-                override_evidence={"website_bootstrap_included": "true"},
+                override_evidence={"website_bootstrap_included": "true", **evidence},
             )
 
         canonical_failure = OdooVerificationResult(
