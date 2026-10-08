@@ -2916,6 +2916,13 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
 
 class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # These adapter fixtures have no CODEOWNERS. Owned-file routing has its
+        # own provider-backed tests in test_merge_train_codeowners.
+        fixture = patch("control_plane.merge_train_codeowners._read_patterns", return_value=())
+        fixture.start()
+        self.addCleanup(fixture.stop)
+
     def test_client_review_requires_the_current_head_advisory_check_without_status_fallback(
         self,
     ) -> None:

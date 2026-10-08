@@ -921,6 +921,10 @@ older pass. Evidence expires within the shared monitor cadence
 (`PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS`, currently 30 minutes); public HTTP
 topology and health-check summaries use that same expiry. Observations refresh
 the read model without rewriting deployment history or inventory timestamps.
+The environment detail's target identity fields use the same observed placement
+projection as its topology, including current monitor evidence and historical
+fallback when current monitor proof is absent. Target provider trust still
+describes recorded placement; it does not grant whole-lane verification.
 The lane indicator is green only for this current verification, retains
 topology warnings, and is red for a failing effective check or its open incident, including
 `wrong_runtime_identity`.

@@ -25,6 +25,12 @@ verifies which repository and commit an artifact came from, and deploys it
 with the site's runtime settings and secrets. The artifact is the only handoff
 between them.
 
+Launchplane should not depend on GitHub. GitHub is the git host we use
+today; others may follow, including one we run ourselves. New code talks to
+GitHub through Launchplane's own names for things (a change, a comment, a
+check result, a merge); old code moves over only when other work touches it.
+Adding another host is its own milestone, when the Director chooses it.
+
 Launchplane needs no caller grant for the work it starts from source-control
 events (verifying a build and deploying it to that site's previews and testing
 lane) or from a Client's recorded release acceptance (the gated promotion).
@@ -84,8 +90,8 @@ blocks that run is the next piece of work.
   records, `owner-acceptance` grants and exact bindings, shadow mode, and the
   manager, delegate, and waiver roles
 - a GitHub approval standing in for a Client's decision in Launchplane
-- Every Code; Codex Lab runs agent work, and old identifiers stay only until
-  their readers move
+- Every Code and Codex Lab; old identifiers stay only until their readers
+  move
 - hardware-key authorization recovery, disposable canaries, and the dev lane
 - billing and collections, and general planning or work graphs inside
   Launchplane

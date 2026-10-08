@@ -942,6 +942,12 @@ def _owner_acceptance_system_event(
 
 
 class RealPostgresTrackedRetirementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_approved_rotation_survives_stale_retirement(self) -> None:
+        from tests.test_retirement_approved_rotation import RetirementApprovedRotationTests
+
+        with _head_postgres_database() as url:
+            await RetirementApprovedRotationTests().assert_approved_rotation_survives(url)
+
     async def test_checkpoint_insert_race_recovers_through_http(self) -> None:
         for profile_failure, secret_drift in ((True, False), (False, False), (False, True)):
             with (
