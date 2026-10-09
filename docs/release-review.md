@@ -59,7 +59,8 @@ Before the Client accepts or requests changes, newer candidates update the same
 request comment's review link, change list, candidate identity and marker, without
 another mention or comment. The request also carries a `release-request` marker
 bound to the product, repository, Client identity and latest Client decision.
-A new candidate after a decision opens a new request and mentions the Client.
+A new candidate after the Client accepts or requests changes opens a new
+request and mentions the Client.
 The worker adopts the newest legacy candidate-marked request created after that
 decision (or the newest one if there has been no decision); older receipts are
 left in place. Missing timestamps or ambiguous request markers refuse publication.

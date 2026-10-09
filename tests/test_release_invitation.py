@@ -159,7 +159,6 @@ class ReleaseInvitationTests(unittest.TestCase):
             release_invitation_marker(self.profile.product, self.review.checklist.candidate),
             self.comments[0]["body"],
         )
-        self.assertIn(self.review.checklist.candidate.source_commit, self.comments[0]["body"])
         self.assertIn(self.review.checklist.items[0].title, self.comments[0]["body"])
         self.assertEqual(len(self.issues), 1)
 
@@ -194,6 +193,9 @@ class ReleaseInvitationTests(unittest.TestCase):
     def test_returning_to_earlier_candidate_updates_cached_open_request(self) -> None:
         assert self.review.checklist is not None
         original = self.review.checklist.candidate.source_commit
+        original_marker = release_invitation_marker(
+            self.profile.product, self.review.checklist.candidate
+        )
         backoff = ReleaseInvitationBackoff()
         self.publish(backoff)
         self.change_candidate(source_commit="e" * 40)
@@ -202,7 +204,33 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.publish(backoff)
         self.assertEqual(len(self.comments), 1)
         self.assertEqual(len(self.edits), 2)
-        self.assertIn(original, self.comments[0]["body"])
+        self.assertIn(original_marker, self.comments[0]["body"])
+
+    def test_change_titles_cannot_break_links_or_add_client_mentions(self) -> None:
+        self.publish()
+        self.change_candidate(source_commit="e" * 40)
+        assert self.review.checklist is not None
+        checklist = self.review.checklist
+        item = checklist.items[0].model_copy(update={"title": "Fix ] checkout for @site-owner"})
+        self.review = self.review.model_copy(
+            update={"checklist": checklist.model_copy(update={"items": (item,)})}
+        )
+        self.publish()
+        body = self.comments[0]["body"]
+        self.assertIn(f"[#{item.pull_request_number}]({item.url})", body)
+        self.assertIn("Fix ] checkout", body)
+        self.assertNotIn("@site-owner", body)
+        self.assertEqual(len(self.comments), 1)
+
+    def test_admin_override_keeps_client_request_open_without_a_new_mention(self) -> None:
+        self.publish()
+        self.store.write_release_review_decision_record(
+            decision(self.store, outcome="overridden", date=self.now.isoformat())
+        )
+        self.change_candidate(source_commit="e" * 40)
+        self.publish()
+        self.assertEqual(len(self.comments), 1)
+        self.assertNotIn("@site-owner", self.edits[0]["body"])
 
     def test_decision_during_lookup_does_not_update_or_remind(self) -> None:
         self.publish()

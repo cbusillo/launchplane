@@ -13,6 +13,7 @@ from urllib.parse import quote
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.release_review import (
     ReleaseReviewDecisionRecord,
+    ReleaseReviewItem,
     ReleaseReviewStatus,
     ReleaseVersion,
 )
@@ -62,6 +63,12 @@ def _timestamp(value: object) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError("Release invitation timestamp needs a timezone.")
     return parsed.astimezone(UTC)
+
+
+def _change_link(item: ReleaseReviewItem) -> str:
+    # Titles are display text, never link syntax or a source of human mentions.
+    title = item.title.replace("@", "@\u200b")
+    return f"- [#{item.pull_request_number}]({item.url}): {title}"
 
 
 def _last_client_decision(
@@ -333,17 +340,17 @@ def publish_release_invitation(
                     raise ValueError("Release invitation reminder was not confirmed.")
                 _remember_delivery(backoff, receipt, due, True)
                 return
-            changes = [f"- [{item.title}]({item.url})" for item in review.checklist.items]
+            changes = [_change_link(item) for item in review.checklist.items]
             for shared in review.checklist.shared_sources:
-                changes.extend(f"- [{item.title}]({item.url})" for item in shared.items)
-            changes.extend(f"- {change}" for change in review.checklist.additional_changes)
+                changes.extend(_change_link(item) for item in shared.items)
+            changes.extend(
+                f"- {change}".replace("@", "@\u200b")
+                for change in review.checklist.additional_changes
+            )
             client = profile.owner.github_login if request else f"@{profile.owner.github_login}"
             body = (
                 f"{request_marker}\n{marker}\n\n{client} this release is ready for you to review:\n\n"
-                f"{review_link}\n\nWhat changed:\n"
-                + "\n".join(changes)
-                + f"\n\nCandidate: `{review.checklist.candidate.source_commit}` "
-                f"(artifact `{review.checklist.candidate.artifact_id}`).\n\n{effect}"
+                f"{review_link}\n\nWhat changed:\n" + "\n".join(changes) + f"\n\n{effect}"
             )
             destination = comments_path
             method = "POST"
