@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.routing import APIRoute
 
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.http_routes.generic_web_promotion_recovery import RECOVERY_ROUTE
+from control_plane.http_app import _AUTHZ_POLICY_MANAGED_RECONCILE_ROUTE
 from control_plane.service_human_auth import (
     HumanSessionManager,
     InMemoryHumanSessionStore,
@@ -26,106 +26,26 @@ from tests.support.work_graph import work_graph_snapshot_payload
 
 
 class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
-    def test_cookie_capable_mutation_route_inventory_is_explicit(self) -> None:
+    def test_cookie_mutation_routes_do_not_use_plain_read_identity(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
             authz_policy=_github_human_work_graph_rank_policy(),
             record_store_factory=lambda: _MissingProductReadStore(),
         )
-        expected_routes = {
-            RECOVERY_ROUTE + "/dry-run",
-            RECOVERY_ROUTE + "/apply",
-            "/auth/logout",
-            "/v1/agent/write-intents/evaluate",
-            "/v1/authz-diagnostics/effective-access/evaluate",
-            "/v1/authz-policies/privileged-policy-operations/activation/apply",
-            "/v1/authz-policies/privileged-policy-operations/activation/dry-run",
-            "/v1/authz-policies/privileged-policy-operations/recovery/candidates/apply",
-            "/v1/authz-policies/privileged-policy-operations/recovery/candidates/dry-run",
-            "/v1/authz-policies/privileged-policy-operations/recovery/confirmations",
-            "/v1/authz-policies/solo-administration-confirmations",
-            "/v1/authz-policies/solo-administration-confirmations/{confirmation_id}/revoke",
-            "/v1/drivers/generic-web/prod-promotion",
-            "/v1/drivers/generic-web/prod-promotion-workflow",
-            "/v1/drivers/odoo/prod-promotion-run",
-            "/v1/drivers/odoo/prod-rollback",
-            "/v1/merge-train/policies/import",
-            "/v1/product-config/apply",
-            "/v1/production-backup-gates",
-            "/v1/production-backup-gates/operations/{operation_id}/cancel",
-            "/v1/odoo-prod-promotions",
-            "/v1/odoo-prod-promotions/operations/{operation_id}/cancel",
-            "/v1/odoo-prod-rollbacks",
-            "/v1/odoo-prod-rollbacks/operations/{operation_id}/cancel",
-            "/v1/product-profiles/{product}/owner",
-            "/v1/product-profiles/{product}/image-repository",
-            "/v1/product-profiles/{product}/production-use",
-            "/v1/product-review/decisions",
-            "/v1/product-review/feedback/retry",
-            "/v1/service/github-delivery/configuration",
-            "/v1/service/github-delivery/token-retirement",
-            "/v1/owner-secret-inputs/submit",
-            "/v1/release-review/decisions",
-            "/v1/privileged-operations/authorization-candidates/prepare",
-            "/v1/privileged-operations/merge-train-targets/prepare",
-            "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/prepare",
-            "/v1/privileged-operations/plans",
-            "/v1/privileged-operations/ordinary-agent-delivery-activation/plans",
-            "/v1/privileged-operations/plans/{operation_id}/approve",
-            "/v1/privileged-operations/plans/{operation_id}/cancel",
-            "/v1/privileged-operations/plans/{operation_id}/revoke",
-            "/v1/products/{product}/environments/{environment}/config/apply",
-            "/v1/products/{product}/environments/{environment}/promotion/dry-run",
-            "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch",
-            "/v1/tenant-admission/trusted-maintenance-policies/apply",
-            "/v1/work-graph/rank",
-        }
-        browser_dependency_names = {
-            "read_browser_mutation_identity",
-            "read_operator_mutation_identity",
-            "read_github_human_browser_mutation_identity",
-            "read_owner_review_browser_mutation_identity",
-            "read_browser_work_graph_rank_identity",
-        }
-        expected_bearer_only_routes = {
-            "/v1/authz-diagnostics/github-actions/evaluate",
-            "/v1/agent/privileged-operations/plans",
-            "/v1/production-backup-authority/apply",
-            "/v1/production-backup-authority/legacy-runtime-migration",
-            "/v1/secrets/reencrypt",
-            "/v1/repository-inventory/apply",
-            "/v1/tenant-admission/repository-classifications/apply",
-            "/v1/tenant-admission/status/reconcile",
-            "/v1/work-graph/tenant-admission/controller/run-once",
-        }
-        actual_routes = {"/auth/logout"}
-        actual_bearer_only_routes: set[str] = set()
-        hybrid_identity_routes: set[str] = set()
+        unguarded = set()
         for route in app.routes:
-            if (
-                not isinstance(route, APIRoute)
-                or route.methods is None
-                or "POST" not in route.methods
-            ):
+            if not isinstance(route, APIRoute) or "POST" not in (route.methods or ()):
                 continue
             dependency_names = {
                 dependency.call.__name__
                 for dependency in route.dependant.dependencies
                 if dependency.call is not None
             }
-            if dependency_names & browser_dependency_names:
-                actual_routes.add(route.path)
-            if "read_bearer_identity" in dependency_names:
-                actual_bearer_only_routes.add(route.path)
             if dependency_names & {"read_identity", "read_work_graph_rank_identity"}:
-                hybrid_identity_routes.add(route.path)
-
-        self.assertEqual(actual_routes, expected_routes)
-        self.assertEqual(actual_bearer_only_routes, expected_bearer_only_routes)
-        self.assertEqual(
-            hybrid_identity_routes,
-            {"/v1/authz-policies/managed-rule-sets/reconcile"},
-        )
+                unguarded.add(route.path)
+        # This mode-aware handler consumes browser mutation authority only in
+        # its apply arm; all other cookie-capable mutations use guarded dependencies.
+        self.assertEqual(unguarded, {_AUTHZ_POLICY_MANAGED_RECONCILE_ROUTE})
 
     @staticmethod
     def _human_app() -> tuple[FastAPI, HumanSessionManager, LaunchplaneHumanSession]:

@@ -138,7 +138,12 @@ class OdooInstanceOverrideStore(Protocol):
         self, *, context_name: str, instance_name: str
     ) -> OdooInstanceOverrideRecord: ...
 
-    def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> object: ...
+    def write_odoo_instance_override_record(
+        self,
+        record: OdooInstanceOverrideRecord,
+        *,
+        expected_record: OdooInstanceOverrideRecord | None = None,
+    ) -> object: ...
 
 
 def resolve_odoo_post_deploy_product_route(
@@ -257,7 +262,7 @@ def write_odoo_config_parameter_override_record(
         updated_at=_utc_now_timestamp(),
         source_label=request.source_label,
     )
-    record_store.write_odoo_instance_override_record(record)
+    record_store.write_odoo_instance_override_record(record, expected_record=existing_record)
     return record
 
 
@@ -291,7 +296,7 @@ def write_odoo_website_bootstrap_override_record(
         updated_at=_utc_now_timestamp(),
         source_label=request.source_label,
     )
-    record_store.write_odoo_instance_override_record(record)
+    record_store.write_odoo_instance_override_record(record, expected_record=existing_record)
     return record
 
 

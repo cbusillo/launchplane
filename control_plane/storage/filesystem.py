@@ -89,7 +89,10 @@ from control_plane.contracts.merge_train_policy import (
 from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackRecord,
 )
-from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_instance_override_record import (
+    OdooInstanceOverrideRecord,
+    OdooOverrideApplyResult,
+)
 from control_plane.contracts.odoo_prod_backup_restore_operation import (
     ODOO_PROD_BACKUP_RESTORE_OPERATION_PHASE_SEQUENCE,
     OdooProdBackupRestoreCheckpoint,
@@ -249,8 +252,10 @@ from control_plane.storage.product_authority_bundle import (
     SecretRecordConflictError,
     require_bundle_context_owner,
     ProductAuthorityBundle,
+    ProductProfileConflictError,
     ProviderTargetWrite,
     RuntimeEnvironmentConflictError,
+    OdooInstanceOverrideConflictError,
     RuntimeEnvironmentDelete,
     RuntimeEnvironmentWrite,
     runtime_environment_records_match,
@@ -486,7 +491,12 @@ class FilesystemRecordStore:
         if not bundle.requires_write():
             return
         with self._product_authority_bundle_lock():
-            require_bundle_context_owner(bundle, self._list_product_profile_records_locked())
+            profiles = self._list_product_profile_records_locked()
+            require_bundle_context_owner(bundle, profiles)
+            current_profiles = {profile.product: profile for profile in profiles}
+            for expected_profile in bundle.expected_product_profiles:
+                if current_profiles.get(expected_profile.product) != expected_profile:
+                    raise ProductProfileConflictError("Product profile changed before commit.")
             for expected_source in bundle.secret_copy_sources:
                 try:
                     current_record = self._read_model_locked(
@@ -591,6 +601,21 @@ class FilesystemRecordStore:
         stage_dir: Path,
         entries: list[_AuthorityBundleStageEntry],
     ) -> None:
+        for write in bundle.odoo_instance_override_writes:
+            record_id = f"{write.record.context}-{write.record.instance}"
+            current = self._read_model_locked(
+                OdooInstanceOverrideRecord, "odoo_instance_overrides", record_id
+            )
+            if current != write.expected_record:
+                raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type="odoo_instance_overrides",
+                record_id=record_id,
+                model=write.record,
+                step_name="write_odoo_instance_override",
+            )
         for delete_item in bundle.delete_runtime_environments:
             self._stage_product_authority_bundle_delete(
                 entries=entries,
@@ -6763,8 +6788,17 @@ class FilesystemRecordStore:
         *,
         required_context_owner: tuple[str, str] | None = None,
         required_product_config_target: tuple[str, str, str] | None = None,
+        expected_record: OdooInstanceOverrideRecord | None = None,
     ) -> Path:
         with self._product_authority_bundle_lock():
+            if expected_record is not None:
+                current = self._read_model_locked(
+                    OdooInstanceOverrideRecord,
+                    "odoo_instance_overrides",
+                    f"{record.context}-{record.instance}",
+                )
+                if current != expected_record:
+                    raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
             if required_context_owner is not None or required_product_config_target is not None:
                 require_bundle_context_owner(
                     ProductAuthorityBundle(
@@ -6776,6 +6810,30 @@ class FilesystemRecordStore:
             return self._write_model_locked(
                 "odoo_instance_overrides", f"{record.context}-{record.instance}", record
             )
+
+    def update_odoo_instance_override_apply_result(
+        self,
+        *,
+        context_name: str,
+        instance_name: str,
+        last_apply: OdooOverrideApplyResult,
+        updated_at: str,
+        source_label: str,
+    ) -> OdooInstanceOverrideRecord:
+        with self._product_authority_bundle_lock():
+            record_id = f"{context_name}-{instance_name}"
+            current = self._read_model_locked(
+                OdooInstanceOverrideRecord, "odoo_instance_overrides", record_id
+            )
+            updated = current.model_copy(
+                update={
+                    "last_apply": last_apply,
+                    "updated_at": updated_at,
+                    "source_label": source_label,
+                }
+            )
+            self._write_model_locked("odoo_instance_overrides", record_id, updated)
+            return updated
 
     def read_odoo_instance_override_record(
         self, *, context_name: str, instance_name: str

@@ -16693,7 +16693,8 @@
           "source": {
             "enum": [
               "literal",
-              "secret_binding"
+              "secret_binding",
+              "runtime_environment"
             ],
             "title": "Source",
             "type": "string"

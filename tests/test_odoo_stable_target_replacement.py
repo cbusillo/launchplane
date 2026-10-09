@@ -243,7 +243,12 @@ class _Store:
     def write_environment_inventory(self, record: EnvironmentInventory) -> None:
         self.environment_inventories.append(record)
 
-    def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> None:
+    def write_odoo_instance_override_record(
+        self,
+        record: OdooInstanceOverrideRecord,
+        *,
+        expected_record: OdooInstanceOverrideRecord | None = None,
+    ) -> None:
         self.odoo_instance_override_record = record
 
     def write_release_tuple_record(self, record: object) -> None:

@@ -2275,6 +2275,12 @@ run` is the foreground loop intended for an external process supervisor, and
   `ENV_OVERRIDE_*` names as the durable contract.
 - `config_parameters` stores explicit `ir.config_parameter` writes such as
   `web.base.url`.
+- Supported non-secret import parameters can instead store
+  `value: {"source": "runtime_environment"}`. This removes their duplicated
+  literal and resolves the value from the site's shared settings and exact lane,
+  respecting retirement and refusing secret bindings. The v1 post-deploy payload
+  remains unchanged: its literal is rendered anew from that authority. See
+  [the reconciliation API](operations.md) for supported keys and review/apply.
 - `addon_settings` stores addon-shaped intent such as Authentik SSO or Shopify
   settings without coupling Launchplane records to environment variable names.
 - Shopify addon settings are written through

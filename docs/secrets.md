@@ -700,8 +700,8 @@ rotation requires reading metadata and reviewing a fresh request. Dry runs
 resolve metadata without decrypting. Apply decrypts inside the service and
 writes a separately encrypted destination secret atomically, leaving the source
 unchanged. Product ownership and source record/binding changes before commit
-abort the copy. The database-backed service also aborts if the product profile changes;
-filesystem rehearsal bundles do not fence other profile-field changes. The
+abort the copy. Both database-backed and filesystem bundles also abort if the
+reviewed product profile changes before commit. The
 audit records the source secret and version IDs.
 Completed retries replay before resolving or decrypting the source. Request,
 response and audit metadata contain no secret value; subsequent live runtime

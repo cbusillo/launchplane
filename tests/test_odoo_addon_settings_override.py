@@ -2,6 +2,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from click import ClickException
 
@@ -19,6 +20,7 @@ from control_plane.contracts.odoo_instance_override_record import (
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord, SecretStatus
+from control_plane.storage.product_authority_bundle import OdooInstanceOverrideConflictError
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.odoo_addon_settings_override import (
     ODOO_ADDON_SETTINGS_APPLY_ROUTE,
@@ -646,6 +648,25 @@ class OdooAddonSettingsRouteTests(unittest.IsolatedAsyncioTestCase):
             response.json()["error"]["code"],
             "authorization_denied",
         )
+
+    async def test_concurrent_override_write_returns_stale_conflict(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._store(root)
+            app = self._app(store, root, "product_config.plan", "product_config.apply")
+            plan = (await self._post(app, _request_payload())).json()["result"]
+            with patch.object(
+                store,
+                "write_odoo_instance_override_record",
+                side_effect=OdooInstanceOverrideConflictError("changed during write"),
+            ):
+                response = await self._post(
+                    app,
+                    _request_payload(mode="apply", reviewed_plan_sha256=plan["plan_sha256"]),
+                    idempotency_key="fixture-concurrent-override",
+                )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], "stale")
 
     async def test_apply_requires_product_config_apply(self) -> None:
         with TemporaryDirectory() as directory:

@@ -2638,6 +2638,47 @@ context only, and `context_instance` has both context and instance.
   Service-written `web.base.url` records are always marked for `deploy` and
   `promotion` application so Odoo post-deploy and stable-bootstrap drivers can
   apply the canonical URL before verification.
+- To reconcile duplicated non-secret Odoo import overrides on a testing lane,
+  use GET and POST on
+  `/v1/products/{product}/environments/{environment}/odoo-import-overrides/reconcile`.
+  GET reviews all supported entries present in the lane record. POST with
+  `{"mode":"dry-run","keys":["cm_data.db.user","repairshopr.sync_db.user","repairshopr.sync_db.host"]}`
+  reviews exactly those entries. Both return only parameter/runtime key names,
+  stale-literal flags and a `review_digest`; neither writes records or calls a
+  provider. The values must already exist in the lane's runtime authority;
+  missing, retired, secret-bound or credential-looking settings are refused.
+  Apply is a separate POST with the same keys, `mode: "apply"`, the current
+  digest and `confirmation: "APPLY {product}/{environment}"`. It checks fresh
+  `product_config.apply` authority for the exact lane and commits the override
+  replacement under the existing authority-bundle transaction. `local_operator`
+  applies follow the existing [context ownership boundary](authorization-authority.md).
+  Changed runtime,
+  profile or override evidence requires another review. Reads use
+  `product_environment.read`; dry runs use `product_config.plan`.
+  The record stores `source: "runtime_environment"` without duplicating a value;
+  post-deploy renders the current runtime value into the existing v1 payload.
+  Apply changes only selected override sources, preserving unrelated settings,
+  secret references, application phases, source choice and allowances. It does
+  not synchronize the target or apply database parameters: the response says
+  `live_sync_required`. If all selected entries are already referenced, apply
+  writes nothing and returns `applied: false` and `live_sync_required: false`.
+  These flags describe this request's record changes, not current Odoo or
+  provider state. Runtime sync and post-deploy verification remain separate;
+  a no-op response does not prove delivery or clear an outstanding sync.
+  Production is outside this capability. Client-system
+  approval and activation follow [DIRECTION.md](../DIRECTION.md) and the
+  [overall stop boundaries](https://github.com/cbusillo/direction/blob/main/DIRECTION.md).
+  Deployed review/apply must wait until both the API and workers support
+  runtime references. Once a record uses that source, older Launchplane builds
+  cannot read it; qualify a compatible rollback build before any Client-system
+  apply. A compatible rollback or reviewed forward fix keeps runtime authority
+  intact. The existing `web.base.url` writer cannot convert these import keys
+  back to literals. Late post-deploy completions update only apply metadata;
+  automatic canonical-URL and service setting writes refuse stale record
+  snapshots instead of restoring old import literals. Conflicting tracked-target
+  env overlays refuse planning and later rendering, so the runtime record remains
+  the single source for reconciled import values. Changed records identify the
+  reconciliation writer; stale setting writes return HTTP 409 for a fresh review.
 - For shared/live Shopify addon settings, use
   `POST /v1/product-config/odoo-addon-settings/apply` (contract operation
   `apply_odoo_addon_settings`) through the Launchplane helper or service API.

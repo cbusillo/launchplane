@@ -12,6 +12,7 @@ from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployRende
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployWorkflowIntent
 from control_plane.contracts.runtime_environment_record import ScalarValue
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
+from control_plane.odoo_import_overrides import import_runtime_value, runtime_values_for_override
 
 ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY = "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"
 LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY = "LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED"
@@ -206,6 +207,8 @@ def _payload_override_value(
 ) -> OdooPostDeployRenderedValue:
     if value.source == "literal":
         return OdooPostDeployRenderedValue(source=value.source, value=value.value)
+    if value.source == "runtime_environment":
+        raise click.ClickException("Runtime references require config-parameter lane authority")
     if not environment_key:
         raise click.ClickException(
             "Secret-backed Odoo overrides require a runtime environment key."
@@ -223,16 +226,34 @@ def render_post_deploy_payload(
     workflow_intent: PostDeployWorkflowIntent = "deploy",
     protected_shopify_store_keys: tuple[str, ...] = (),
     clear_undeclared_shopify: bool = True,
+    record_store: object | None = None,
 ) -> OdooPostDeployPayload:
+    try:
+        runtime_values = runtime_values_for_override(record, record_store)
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
     config_parameters: list[OdooPostDeployConfigParameter] = []
     for config_parameter_override in record.config_parameters:
         environment_key = config_parameter_secret_env_key(config_parameter_override.key)
+        try:
+            value = (
+                OdooPostDeployRenderedValue(
+                    source="literal",
+                    value=import_runtime_value(
+                        key=config_parameter_override.key, values=runtime_values
+                    ),
+                )
+                if config_parameter_override.value.source == "runtime_environment"
+                else _payload_override_value(
+                    value=config_parameter_override.value, environment_key=environment_key
+                )
+            )
+        except ValueError as error:
+            raise click.ClickException(str(error)) from error
         config_parameters.append(
             OdooPostDeployConfigParameter(
                 key=config_parameter_override.key,
-                value=_payload_override_value(
-                    value=config_parameter_override.value, environment_key=environment_key
-                ),
+                value=value,
             )
         )
     addon_settings: list[OdooPostDeployAddonSetting] = []
@@ -306,12 +327,14 @@ def build_post_deploy_environment(
     workflow_intent: PostDeployWorkflowIntent = "deploy",
     protected_shopify_store_keys: tuple[str, ...] = (),
     clear_undeclared_shopify: bool = True,
+    record_store: object | None = None,
 ) -> PostDeployOverrideEnvironment:
     payload = render_post_deploy_payload(
         record,
         workflow_intent=workflow_intent,
         protected_shopify_store_keys=protected_shopify_store_keys,
         clear_undeclared_shopify=clear_undeclared_shopify,
+        record_store=record_store,
     )
     inline_environment: dict[str, str] = {
         ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: _encode_post_deploy_payload(payload),
@@ -356,9 +379,11 @@ def render_post_deploy_environment(
     *,
     workflow_intent: PostDeployWorkflowIntent = "deploy",
     protected_shopify_store_keys: tuple[str, ...] = (),
+    record_store: object | None = None,
 ) -> dict[str, str]:
     return build_post_deploy_environment(
         record,
         workflow_intent=workflow_intent,
         protected_shopify_store_keys=protected_shopify_store_keys,
+        record_store=record_store,
     ).inline_environment
