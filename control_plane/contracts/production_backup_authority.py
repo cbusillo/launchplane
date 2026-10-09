@@ -154,6 +154,7 @@ class ProductionIndependentBackupPolicy(BaseModel):
     source_target_id: str
     destination_target_id: str
     max_evidence_age_seconds: int = Field(ge=1, le=604_800)
+    pbs_change_detection_mode: Literal["metadata"] | None = None
 
     @model_validator(mode="after")
     def _validate_policy(self) -> ProductionIndependentBackupPolicy:
@@ -369,7 +370,7 @@ def production_backup_policy_digest(record: ProductionBackupPolicyRecord) -> str
         "promotion_action": record.promotion_action,
         "policy_revision": record.policy_revision,
         "fast_snapshot": record.fast_snapshot.model_dump(mode="json"),
-        "independent_backup": record.independent_backup.model_dump(mode="json"),
+        "independent_backup": record.independent_backup.model_dump(mode="json", exclude_none=True),
         "effective_at": record.effective_at,
         "review_after": record.review_after,
         "source": record.source,

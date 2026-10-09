@@ -66,6 +66,11 @@ class ProductionBackupGateWorkerRequest(BaseModel):
             raise ValueError("Production backup source must be a Proxmox guest.")
         if not isinstance(destination, ProxmoxStorageBackupDestinationReference):
             raise ValueError("Production backup destination must be Proxmox storage.")
+        if (
+            policy.independent_backup.pbs_change_detection_mode is not None
+            and source.guest_kind != "lxc"
+        ):
+            raise ValueError("PBS change detection mode requires an LXC backup source.")
         if (source.host, source.username) != (destination.host, destination.username):
             raise ValueError("Production backup targets must use the same provider endpoint.")
         return self

@@ -35650,6 +35650,18 @@
             "title": "Operation",
             "type": "string"
           },
+          "pbs_change_detection_mode": {
+            "anyOf": [
+              {
+                "const": "metadata",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pbs Change Detection Mode"
+          },
           "source_target_id": {
             "title": "Source Target Id",
             "type": "string"

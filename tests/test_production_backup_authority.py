@@ -1,6 +1,8 @@
+import hashlib
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
+from typing import Literal, cast
 import unittest
 
 from pydantic import ValidationError
@@ -27,6 +29,7 @@ from control_plane.production_backup_authority import (
     lane_bound_target_revision_refusal,
     plan_production_backup_authority_write,
     resolve_production_backup_authority,
+    validate_production_backup_policy_binding,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
@@ -85,6 +88,7 @@ def _policy(
     status: str = "active",
     supersedes_record_id: str | None = None,
     review_after: str = "2027-09-03T00:00:00Z",
+    pbs_change_detection_mode: Literal["metadata"] | None = None,
 ) -> ProductionBackupPolicyRecord:
     return ProductionBackupPolicyRecord.model_validate(
         {
@@ -104,6 +108,7 @@ def _policy(
                 "source_target_id": "example-prod-guest",
                 "destination_target_id": "example-independent-backup",
                 "max_evidence_age_seconds": 86400,
+                "pbs_change_detection_mode": pbs_change_detection_mode,
             },
             "effective_at": f"2026-09-0{revision}T00:00:00Z",
             "review_after": review_after,
@@ -147,6 +152,75 @@ def _profile() -> LaunchplaneProductProfileRecord:
 
 
 class ProductionBackupAuthorityContractTests(unittest.TestCase):
+    def test_metadata_policy_round_trip_binds_mode_without_changing_old_digests(self) -> None:
+        original = _policy()
+        historical_payload = original.model_dump(mode="json", exclude={"status", "policy_digest"})
+        historical_payload["independent_backup"].pop("pbs_change_detection_mode")
+        historical_digest = hashlib.sha256(
+            json.dumps(historical_payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        self.assertEqual(original.policy_digest, historical_digest)
+        old_record = {**historical_payload, "policy_digest": historical_digest}
+        self.assertEqual(ProductionBackupPolicyRecord.model_validate(old_record), original)
+        metadata = _policy(pbs_change_detection_mode="metadata")
+        self.assertNotEqual(metadata.policy_digest, original.policy_digest)
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_production_backup_target_record(_source_target())
+            store.write_production_backup_target_record(_destination_target())
+            store.write_production_backup_policy_record(metadata)
+            restored = store.read_production_backup_policy_record(metadata.record_id)
+            self.assertEqual(restored, metadata)
+        with self.assertRaises(ValidationError):
+            ProductionBackupPolicyRecord.model_validate(
+                {**old_record, "independent_backup": metadata.independent_backup.model_dump()}
+            )
+        for mode in ("data", "legacy", "Metadata", "metadata --crypt-mode none"):
+            with self.subTest(mode=mode), self.assertRaises(ValidationError):
+                payload = metadata.model_dump(mode="json")
+                payload["policy_digest"] = ""
+                payload["independent_backup"]["pbs_change_detection_mode"] = mode
+                ProductionBackupPolicyRecord.model_validate(payload)
+
+    def test_metadata_authority_rejects_qemu_source(self) -> None:
+        payload = _source_target().model_dump(mode="json")
+        payload["target_digest"] = ""
+        payload["destination"]["guest_kind"] = "qemu"
+        source = ProductionBackupTargetRecord.model_validate(payload)
+        policy = _policy(pbs_change_detection_mode="metadata")
+        with self.assertRaisesRegex(ProductionBackupAuthorityConflictError, "LXC"):
+            validate_production_backup_policy_binding(
+                policy=policy, target_records=(source, _destination_target())
+            )
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            original = _source_target()
+            store.write_production_backup_target_record(original)
+            store.write_production_backup_target_record(_destination_target())
+            store.write_production_backup_policy_record(policy)
+            payload = source.model_dump(mode="json")
+            payload.update(
+                record_id="",
+                target_digest="",
+                target_revision=2,
+                supersedes_record_id=original.record_id,
+            )
+            store.write_production_backup_target_record(
+                ProductionBackupTargetRecord.model_validate(payload)
+            )
+            authority = resolve_production_backup_authority(
+                record_store=store,
+                product=policy.product,
+                context=policy.context,
+                instance=policy.instance,
+                promotion_action=policy.promotion_action,
+                generated_at="2026-09-03T00:00:00Z",
+            )
+        self.assertFalse(authority.ready)
+        self.assertEqual(
+            authority.reason_codes, ("production_backup_change_detection_source_invalid",)
+        )
+
     def test_unusable_snapshot_prefix_is_not_reported_ready(self) -> None:
         for prefix in ("2026-predeploy", "example.prod", "a" * 18):
             with self.subTest(prefix=prefix), TemporaryDirectory() as directory:

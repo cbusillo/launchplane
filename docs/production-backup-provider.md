@@ -7,6 +7,22 @@ backup from an exact production backup policy. Host, guest, storage, snapshot
 prefix and retention come from revisioned Launchplane target/policy records.
 Requests cannot override topology or skip either operation.
 
+An LXC policy can set `independent_backup.pbs_change_detection_mode` to
+`metadata`. The bound worker request retains that choice and the provider runs
+`vzdump <guest-id> --mode snapshot --storage <storage-id> --pbs-change-detection-mode metadata`.
+The host filter permits exactly this additional LXC command form. Other values,
+extra options, destination/scope changes and QEMU use of this option are refused.
+The existing snapshot capture, PBS destination, storage encryption settings and
+archive readback remain in force. See [Proxmox's CT change detection documentation](https://github.com/proxmox/pve-docs/blob/master/vzdump.adoc#ct-change-detection-mode).
+
+The choice is optional for existing policies: absent/null means no explicit
+override, preserves their digest, and supplies no claim about the host's effective
+default. Selecting Metadata requires a new policy revision; its digest binds the
+choice. Capture progress and status evidence expose `pbs_change_detection_mode`
+when the explicit option is submitted; successful capture retains it alongside
+the verified archive identity. This records the invoked option and successful
+result, not independent inspection of the host's client log.
+
 ## Service contract
 
 `POST /v1/production-backup-gates` accepts product, context, instance, promotion
@@ -154,6 +170,15 @@ reconciliation; recovery does not automatically authorize a promotion.
 Deploying this code does not install host filters, grant access, create secret
 bindings, or activate a backup policy. Each product's activation and live proof
 remain separate rollout steps. Product repositories pass no provider topology.
+
+Before selecting Metadata in a live LXC policy, the Director must separately
+install the updated filter on its bound Proxmox host and confirm that its PVE
+version supports the option. An older filter refuses the new command; there is
+no fallback to the implicit host default. Activate a new policy revision through
+the supported service API/UI only after that host prerequisite. The first
+split-format capture may establish a new baseline. Measure the second unchanged
+capture and a restore exercise before claiming improved release timing or restore
+proof. Source tests and a merge alone do not establish either outcome.
 
 ## Promotion enforcement
 

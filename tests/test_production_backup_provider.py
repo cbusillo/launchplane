@@ -4,9 +4,11 @@ import os
 from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Literal
 import unittest
 from unittest.mock import patch
+
+from pydantic import ValidationError
 
 from control_plane.contracts.production_backup_gate import (
     ProductionBackupGateRequest,
@@ -20,7 +22,9 @@ from control_plane.workflows.production_backup_provider import (
 from tests.test_production_backup_authority import _destination_target, _policy, _source_target
 
 
-def _binding() -> ProductionBackupGateWorkerRequest:
+def _binding(
+    *, pbs_change_detection_mode: Literal["metadata"] | None = None
+) -> ProductionBackupGateWorkerRequest:
     return ProductionBackupGateWorkerRequest(
         request=ProductionBackupGateRequest(
             product="example-product",
@@ -29,7 +33,7 @@ def _binding() -> ProductionBackupGateWorkerRequest:
             promotion_action="verireel_prod_promotion.execute",
             backup_record_id="backup-example",
         ),
-        policy=_policy(),
+        policy=_policy(pbs_change_detection_mode=pbs_change_detection_mode),
         source_target=_source_target(),
         destination_target=_destination_target(),
     )
@@ -57,12 +61,20 @@ def setup_memory_files(test_case: unittest.TestCase) -> None:
 
 
 class BackupHost:
-    def __init__(self, *, after_snapshot: Callable[[], None] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        after_snapshot: Callable[[], None] | None = None,
+        pbs_change_detection_mode: Literal["metadata"] | None = None,
+    ) -> None:
         self.commands: list[list[str]] = []
         self.snapshot = ""
         self.old_snapshots: list[str] = []
         self.after_snapshot = after_snapshot
         self.fail_retention = False
+        self.backup_command = ["vzdump", "101", "--mode", "snapshot", "--storage", "pbs-production"]
+        if pbs_change_detection_mode is not None:
+            self.backup_command.extend(["--pbs-change-detection-mode", pbs_change_detection_mode])
 
     def run(self, command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         args = command[command.index("--") + 2 :]
@@ -89,7 +101,7 @@ class BackupHost:
             output = "\n".join(
                 f"`-> {name} 2026-09-26" for name in [self.snapshot, *self.old_snapshots]
             )
-        elif args == ["vzdump", "101", "--mode", "snapshot", "--storage", "pbs-production"]:
+        elif args == self.backup_command:
             output = "INFO: creating Proxmox Backup Server archive 'ct/101/2026-09-26T10:00:00Z'"
         elif args == ["pvesm", "list", "pbs-production", "--vmid", "101", "--content", "backup"]:
             output = "pbs-production:backup/ct/101/2026-09-26T10:00:00Z pbs backup 1000 101"
@@ -106,6 +118,36 @@ class BackupHost:
 class ProductionBackupProviderTests(unittest.TestCase):
     def setUp(self) -> None:
         setup_memory_files(self)
+
+    def test_metadata_binding_round_trip_and_capture_evidence(self) -> None:
+        binding = _binding(pbs_change_detection_mode="metadata")
+        restored = ProductionBackupGateWorkerRequest.model_validate_json(binding.model_dump_json())
+        self.assertEqual(restored, binding)
+        host = BackupHost(pbs_change_detection_mode="metadata")
+        progress: list[dict[str, str]] = []
+        with patch(
+            "control_plane.workflows.production_backup_provider.subprocess.run",
+            side_effect=host.run,
+        ):
+            result = execute_production_backup_provider(
+                restored,
+                ssh_private_key="private-material",
+                ssh_known_hosts="host-material",
+                record_progress=progress.append,
+            )
+        self.assertEqual(result.status, "pass", result.error_code)
+        self.assertIn(host.backup_command, host.commands)
+        self.assertEqual(result.evidence["pbs_change_detection_mode"], "metadata")
+        self.assertEqual(result.evidence["capture_status"], "verified")
+        self.assertEqual(result.evidence["independent_backup_id"], "ct/101/2026-09-26T10:00:00Z")
+        self.assertTrue(
+            any(item.get("pbs_change_detection_mode") == "metadata" for item in progress)
+        )
+        payload = binding.model_dump(mode="json")
+        payload["source_target"]["target_digest"] = ""
+        payload["source_target"]["destination"]["guest_kind"] = "qemu"
+        with self.assertRaisesRegex(ValidationError, "LXC"):
+            ProductionBackupGateWorkerRequest.model_validate(payload)
 
     @unittest.skipUnless(
         hasattr(os, "memfd_create"), "Linux memfd proof runs on production-compatible workers"
@@ -272,6 +314,7 @@ class ProductionBackupProviderTests(unittest.TestCase):
         self.assertEqual(result.evidence["snapshot_name"], snapshot)
         self.assertEqual(result.evidence["independent_backup_id"], "ct/101/2026-09-26T10:00:00Z")
         self.assertEqual(result.evidence["policy_digest"], _policy().policy_digest)
+        self.assertNotIn("pbs_change_detection_mode", result.evidence)
         self.assertEqual(result.evidence["source_target_record_id"], _source_target().record_id)
         self.assertEqual(
             result.evidence["destination_target_record_id"], _destination_target().record_id

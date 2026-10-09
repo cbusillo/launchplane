@@ -127,4 +127,9 @@ if [[ -n "${ALLOWED_STORAGE}" && ${#args[@]} -eq 6 && "${args[0]}" == "vzdump" &
 	exec /usr/bin/vzdump "${ALLOWED_CTID}" --mode snapshot --storage "${ALLOWED_STORAGE}"
 fi
 
+# LXC metadata capture uses the same exact guest, snapshot mode and PBS destination.
+if [[ "${GUEST_KIND}" == "lxc" && -n "${ALLOWED_STORAGE}" && ${#args[@]} -eq 8 && "${args[0]}" == "vzdump" && "${args[1]}" == "${ALLOWED_CTID}" && "${args[2]}" == "--mode" && "${args[3]}" == "snapshot" && "${args[4]}" == "--storage" && "${args[5]}" == "${ALLOWED_STORAGE}" && "${args[6]}" == "--pbs-change-detection-mode" && "${args[7]}" == "metadata" ]]; then
+	exec /usr/bin/vzdump "${ALLOWED_CTID}" --mode snapshot --storage "${ALLOWED_STORAGE}" --pbs-change-detection-mode metadata
+fi
+
 forbidden

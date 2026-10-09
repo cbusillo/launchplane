@@ -14,6 +14,7 @@ from control_plane.contracts.production_backup_authority import (
     ProductionBackupPolicySummary,
     ProductionBackupTargetRecord,
     ProductionBackupTargetSummary,
+    ProxmoxGuestBackupDestinationReference,
     production_backup_snapshot_prefix_valid,
 )
 
@@ -625,6 +626,17 @@ def resolve_production_backup_authority(
     source_destination = source_target.destination
     backup_destination = destination_target.destination
     if (
+        current_policy.independent_backup.pbs_change_detection_mode is not None
+        and isinstance(source_destination, ProxmoxGuestBackupDestinationReference)
+        and source_destination.guest_kind != "lxc"
+    ):
+        return _invalid_target_binding(
+            current_policy=current_policy,
+            targets=target_records,
+            generated_at=generated_at,
+            reason_code="production_backup_change_detection_source_invalid",
+        )
+    if (
         source_destination.host != backup_destination.host
         or source_destination.username != backup_destination.username
     ):
@@ -680,6 +692,14 @@ def validate_production_backup_policy_binding(
         )
     source_destination = source_target.destination
     backup_destination = destination_target.destination
+    if (
+        policy.independent_backup.pbs_change_detection_mode is not None
+        and isinstance(source_destination, ProxmoxGuestBackupDestinationReference)
+        and source_destination.guest_kind != "lxc"
+    ):
+        raise ProductionBackupAuthorityConflictError(
+            "PBS change detection mode requires an LXC backup source."
+        )
     if (
         source_destination.host != backup_destination.host
         or source_destination.username != backup_destination.username

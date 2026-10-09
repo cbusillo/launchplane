@@ -34,7 +34,7 @@ from tests.support.durable_operations import (
     durable_operation_policy_record,
 )
 from tests.test_production_backup_provider import BackupHost, _binding, setup_memory_files
-from tests.test_production_backup_authority import _source_target
+from tests.test_production_backup_authority import _policy, _source_target
 from tests.test_postgres_integration import _store_for_fresh_head_database
 
 
@@ -62,6 +62,54 @@ class ProductionBackupGateTests(unittest.TestCase):
         )
         self.authorization = DurableOperationAuthorization.model_validate(payload)
         self.store.seed_authz_policy_if_absent(durable_operation_policy_record(payload))
+
+    def test_metadata_policy_survives_enqueue_worker_and_status_read(self) -> None:
+        policy = _policy(
+            revision=2,
+            supersedes_record_id=self.binding.policy.record_id,
+            pbs_change_detection_mode="metadata",
+        )
+        self.store.write_production_backup_policy_record(policy)
+        operation = enqueue_production_backup_gate(
+            record_store=self.store,
+            request=self.binding.request,
+            authorization=self.authorization,
+            operation_key="caller|metadata",
+        )
+        persisted = self.store.read_verireel_prod_backup_gate_operation_record(
+            operation.operation_id
+        )
+        assert persisted.binding is not None
+        self.assertEqual(persisted.binding.policy, policy)
+        host = BackupHost(pbs_change_detection_mode="metadata")
+        with (
+            patch(
+                "control_plane.workflows.production_backup_gate.control_plane_secrets.resolve_lane_worker_secret_values",
+                return_value={
+                    "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "private",
+                    "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": "hosts",
+                },
+            ),
+            patch(
+                "control_plane.workflows.production_backup_provider.subprocess.run",
+                side_effect=host.run,
+            ),
+        ):
+            result = run_verireel_prod_backup_gate_operation_worker_once(
+                record_store=self.store,
+                control_plane_root_path=self.root,
+                lease_owner="test-worker",
+            )
+        self.assertTrue(result.terminal_write_committed)
+        persisted = self.store.read_verireel_prod_backup_gate_operation_record(
+            operation.operation_id
+        )
+        self.assertEqual(persisted.status, "pass", persisted.error_code)
+        self.assertIn(host.backup_command, host.commands)
+        backup = self.store.read_backup_gate_record(operation.backup_record_id)
+        self.assertEqual(backup.evidence["pbs_change_detection_mode"], "metadata")
+        response = _response(persisted, "test-trace")
+        self.assertEqual(response.evidence["pbs_change_detection_mode"], "metadata")
 
     def test_replay_and_conflicting_request_do_not_duplicate_work(self) -> None:
         first = enqueue_production_backup_gate(

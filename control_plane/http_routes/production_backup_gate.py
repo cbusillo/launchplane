@@ -83,6 +83,7 @@ _BACKUP_EVIDENCE_KEYS = frozenset(
         "independent_backup_started_at",
         "independent_backup_id",
         "independent_backup_finished_at",
+        "pbs_change_detection_mode",
         "capture_status",
         "retention_status",
         "retention_error_code",

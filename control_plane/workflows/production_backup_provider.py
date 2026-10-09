@@ -209,11 +209,16 @@ def execute_production_backup_provider(
 
             stage = "independent_backup"
             evidence["independent_backup_started_at"] = utc_now_timestamp()
+            backup_command = ["vzdump", source.guest_id, "--mode", "snapshot", "--storage", storage]
+            change_detection_mode = policy.independent_backup.pbs_change_detection_mode
+            if change_detection_mode is not None:
+                backup_command.extend(["--pbs-change-detection-mode", change_detection_mode])
+                evidence["pbs_change_detection_mode"] = change_detection_mode
             save_progress()
             if checkpoint is not None:
                 checkpoint(stage)
             backup_output = run(
-                ["vzdump", source.guest_id, "--mode", "snapshot", "--storage", storage],
+                backup_command,
                 include_stderr=True,
             )
             archives = set(
