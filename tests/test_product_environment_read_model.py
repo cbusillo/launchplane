@@ -665,6 +665,40 @@ class _HistoricalActivityRecordStore(_PreviewRecordStore):
 
 
 class ProductEnvironmentReadModelTest(unittest.TestCase):
+    def test_generated_incident_without_reminder_capability_fails_closed(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(preview_enabled=False)
+        )
+        lane = profile.lanes[1]
+        incident = PublicIngressIncidentRecord(
+            incident_id="generated-fence",
+            product=profile.product,
+            context=lane.context,
+            instance=lane.instance,
+            check_name="launchplane-deploy-fence",
+            check_kind="provider",
+            status="open",
+            opened_at="2026-10-09T20:00:00Z",
+            opened_observation_id="fence-observation",
+            latest_observation_id="fence-observation",
+            latest_observed_at="2026-10-09T20:00:00Z",
+            failure_code="deploy_fence_held",
+            severity="warning",
+            summary="Held fence",
+        )
+        store = _PublicIngressReadModelStore(profile, (), (incident,))
+        with patch.object(store, "list_public_ingress_incident_reminder_state_records", None):
+            with self.assertRaisesRegex(
+                ProductEnvironmentReadModelCapabilityError,
+                "list_public_ingress_incident_reminder_state_records",
+            ):
+                build_product_environment_detail(
+                    record_store=store,
+                    product=profile.product,
+                    environment=lane.instance,
+                    action_allowed=lambda *_: False,
+                )
+
     def test_action_authz_map_matches_live_service_handlers(self) -> None:
         self.assertEqual(
             ACTION_AUTHZ_BY_ROUTE["/v1/drivers/odoo/artifact-publish"],

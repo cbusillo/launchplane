@@ -1091,6 +1091,9 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     environments = [payload["environment"]]
                 summary = next(item for item in environments if item["environment"] == "prod")
+                self.assertEqual(
+                    summary["health_monitoring"]["open_incidents"][0]["severity"], "critical"
+                )
                 projected = {
                     item["incident_id"]: item
                     for item in summary["health_monitoring"]["open_incidents"]

@@ -330,7 +330,7 @@ def build_product_environment_incident_list(
             status="resolved",
             limit=limit,
         )
-        incidents = (*_sort_open_incidents(open_incidents), *resolved_incidents)[:limit]
+        incidents = (*sort_open_incidents(open_incidents), *resolved_incidents)[:limit]
     else:
         records = record_store.list_public_ingress_incident_records(
             product=product,
@@ -339,10 +339,13 @@ def build_product_environment_incident_list(
             status=status,
             limit=None if status == "open" else limit,
         )
-        incidents = _sort_open_incidents(records)[:limit] if status == "open" else records
+        incidents = sort_open_incidents(records)[:limit] if status == "open" else records
     summaries = tuple(
         build_product_incident_summary(
-            record_store=record_store,
+            reminder_states=record_store.list_public_ingress_incident_reminder_state_records(
+                incident_id=incident.incident_id,
+                limit=100,
+            ),
             scope=incident_scope,
             incident=incident,
         )
@@ -425,7 +428,10 @@ def build_product_environment_incident_detail(
     )
     return ProductIncidentDetail(
         incident=build_product_incident_summary(
-            record_store=record_store,
+            reminder_states=record_store.list_public_ingress_incident_reminder_state_records(
+                incident_id=incident.incident_id,
+                limit=100,
+            ),
             scope=incident_scope,
             incident=incident,
         ),
@@ -549,14 +555,10 @@ def _resolve_scope(
 
 def build_product_incident_summary(
     *,
-    record_store: ProductIncidentReadStore,
+    reminder_states: tuple[PublicIngressIncidentReminderStateRecord, ...],
     scope: ProductIncidentEnvironmentScope,
     incident: PublicIngressIncidentRecord,
 ) -> ProductIncidentSummary:
-    reminder_states = record_store.list_public_ingress_incident_reminder_state_records(
-        incident_id=incident.incident_id,
-        limit=100,
-    )
     next_reminder_at = min(
         (
             state.next_reminder_at
@@ -669,7 +671,7 @@ def _material_evidence(
     )
 
 
-def _sort_open_incidents(
+def sort_open_incidents(
     incidents: tuple[PublicIngressIncidentRecord, ...],
 ) -> tuple[PublicIngressIncidentRecord, ...]:
     return tuple(

@@ -525,7 +525,7 @@ function EnvironmentOverview({
     (check) => check.probe_effective,
   );
   const openIncidents = detail.health_monitoring.open_incidents;
-  const openIncident = openIncidents.find((incident) => incident.severity === "critical") ?? openIncidents[0];
+  const openIncident = openIncidents[0];
   const openIncidentSeverity =
     openIncident?.severity;
   const currentIncidentId =
@@ -977,7 +977,8 @@ function diagnosisFor(
   warnings: WarningItem[],
 ): Diagnosis | null {
   const errorWarning = warnings.find((warning) => warning.severity === "error");
-  for (const openIncident of detail.health_monitoring.open_incidents) {
+  const openIncident = detail.health_monitoring.open_incidents[0];
+  if (openIncident) {
     return {
       title: openIncident.summary,
       detail: openIncident.failure_code
